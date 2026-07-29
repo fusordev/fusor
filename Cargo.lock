@@ -699,6 +699,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "quickjs-bytecode"
+version = "0.0.1"
+
+[[package]]
 name = "quickjs-diagnostics"
 version = "0.0.1"
 dependencies = [

@@ -22,5 +22,11 @@ The Test262 revision comes from the release `Makefile`. Conformance runs must
 also apply the release's `tests/test262.patch`, use `test262.conf`, and compare
 against `test262_errors.txt`; the revision alone is not the upstream baseline.
 
+With the release's `SHORT_OPCODES=1` configuration, `quickjs-opcode.h` defines
+244 final table entries (including byte zero's reserved `invalid` sentinel) and
+19 compiler-temporary entries. The translated metadata's canonical FNV-1a
+fingerprint is `37d5ab885a37011f`, computed over ordered
+`domain|mnemonic|size|pops|pushes|operand-format` rows.
+
 Upstream source and binaries may be used as development oracles. They are not
 vendored, linked, or required to build, test, or use the Rust implementation.

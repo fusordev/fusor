@@ -1,0 +1,11 @@
+[package]
+name = "quickjs-bytecode"
+version = "0.0.1"
+description = "Safe opcode schema for the pure-Rust QuickJS port"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true

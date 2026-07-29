@@ -61,7 +61,9 @@ A milestone is complete only when all of its checked items pass in CI.
 
 ### M2 — compiler and VM core
 
-- [ ] Checked stack-bytecode format with computed maximum stack depth.
+- [x] Port the complete final and compiler-temporary opcode schema, operand
+      widths, and fixed/dynamic stack-effect metadata from `quickjs-opcode.h`.
+- [ ] Checked owned stack-bytecode format with computed maximum stack depth.
 - [ ] Instruction/function PC-to-source tables, source-map chaining, and
       precise source lookup for diagnostics and stack frames.
 - [ ] Bindings, lexical environments, closures, calls, constructors, and
