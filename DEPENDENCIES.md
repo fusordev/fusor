@@ -38,6 +38,13 @@ analysis, scopes, symbols, and resolved/unresolved references directly. These
 are syntax-analysis inputs, not QuickJS runtime storage locations or
 declaration-instantiation semantics.
 
+`quickjs-compiler` consumes that retained semantic model directly only while
+the front-end arena is live. Its first storage-planning boundary immediately
+lowers the needed facts into compiler-owned dense IDs, copied spans, immutable
+`Arc`-backed slices, and resolved-reference-to-binding edges grouped by their
+using executable. It does not clone the Oxc semantic graph, expose Oxc
+node/scope/symbol identities, or keep any arena reference in a successful plan.
+
 The front end additionally lowers static module syntax into an
 arena-independent, QuickJS-owned record. Oxc supplies the parsed request and
 entry facts; the project-owned representation preserves source occurrence

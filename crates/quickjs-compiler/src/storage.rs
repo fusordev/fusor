@@ -1,0 +1,1787 @@
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
+    sync::Arc,
+};
+
+use oxc_ast::{
+    AstKind,
+    ast::{
+        BindingPattern, ExportDefaultDeclarationKind, FunctionType, Statement,
+        VariableDeclarationKind,
+    },
+};
+use oxc_semantic::{NodeId, ScopeId, SymbolFlags, SymbolId};
+use quickjs_frontend::{CompilationGoal, ModuleExportLocalName, ParsedUnit, Span};
+
+/// Dense plan-local compiler identity of one executable body.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ExecutableId(u32);
+
+impl ExecutableId {
+    /// Returns the dense zero-based index.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Dense plan-local compiler identity of one source binding.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct BindingId(u32);
+
+impl BindingId {
+    /// Returns the dense zero-based index.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Dense plan-local compiler identity of one unresolved global reference.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct UnresolvedGlobalId(u32);
+
+impl UnresolvedGlobalId {
+    /// Returns the dense zero-based index.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Dense plan-local compiler identity of one resolved binding reference.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ResolvedReferenceId(u32);
+
+impl ResolvedReferenceId {
+    /// Returns the dense zero-based index.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Source-unit kind accepted by this storage-planning slice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompilationUnitKind {
+    /// An ordinary host-loaded Script.
+    Script,
+    /// An ECMAScript Module.
+    Module,
+}
+
+/// Kind of executable body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutableKind {
+    /// The Script root body.
+    Script,
+    /// The Module root body.
+    Module,
+    /// A non-arrow function.
+    Function {
+        /// Whether the function is asynchronous.
+        asynchronous: bool,
+        /// Whether the function is a generator.
+        generator: bool,
+    },
+    /// An arrow function.
+    Arrow {
+        /// Whether the arrow is asynchronous.
+        asynchronous: bool,
+    },
+}
+
+/// Compiler-owned metadata for one executable body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Executable {
+    id: ExecutableId,
+    parent: Option<ExecutableId>,
+    kind: ExecutableKind,
+    span: Span,
+    name: Option<Arc<str>>,
+    name_span: Option<Span>,
+    strict: bool,
+    parameter_count: u32,
+    binding_start: u32,
+    binding_end: u32,
+    resolved_start: u32,
+    resolved_end: u32,
+    unresolved_start: u32,
+    unresolved_end: u32,
+}
+
+impl Executable {
+    /// Returns this executable's dense identity.
+    #[must_use]
+    pub const fn id(&self) -> ExecutableId {
+        self.id
+    }
+
+    /// Returns the nearest enclosing executable.
+    #[must_use]
+    pub const fn parent(&self) -> Option<ExecutableId> {
+        self.parent
+    }
+
+    /// Returns this executable's kind.
+    #[must_use]
+    pub const fn kind(&self) -> ExecutableKind {
+        self.kind
+    }
+
+    /// Returns the complete source span.
+    #[must_use]
+    pub const fn span(&self) -> Span {
+        self.span
+    }
+
+    /// Returns the source-written function name, when present.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Returns the source-written function-name span, when present.
+    #[must_use]
+    pub const fn name_span(&self) -> Option<Span> {
+        self.name_span
+    }
+
+    /// Returns whether this executable is strict code.
+    #[must_use]
+    pub const fn is_strict(&self) -> bool {
+        self.strict
+    }
+
+    /// Returns the number of source parameter positions.
+    #[must_use]
+    pub const fn parameter_count(&self) -> u32 {
+        self.parameter_count
+    }
+}
+
+/// Storage category selected for a source binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoragePlacement {
+    /// A named argument position.
+    Argument {
+        /// Zero-based source parameter position.
+        parameter_index: u32,
+    },
+    /// Executable-local storage, including nested lexical blocks.
+    Local,
+    /// A property-backed global Script declaration.
+    GlobalObject,
+    /// A global Script declarative-environment binding.
+    GlobalLexical,
+    /// A module-owned declaration cell.
+    ModuleLocal,
+    /// A named/default live import cell.
+    ModuleImport,
+}
+
+/// Source declaration category after legal redeclarations are merged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeclarationKind {
+    /// A formal parameter.
+    Parameter,
+    /// A `var` declaration.
+    Var,
+    /// A `let` declaration.
+    Let,
+    /// A `const` declaration.
+    Const,
+    /// A function declaration.
+    Function,
+    /// A named function-expression binding.
+    FunctionName,
+    /// A catch parameter.
+    Catch,
+    /// A named or default import.
+    Import,
+    /// A namespace import.
+    NamespaceImport,
+    /// `QuickJS`'s internal module `*default*` cell.
+    SyntheticDefault,
+}
+
+/// When a binding receives its initial value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InitializationPolicy {
+    /// Copied from a source argument position.
+    Argument,
+    /// Initialized to `undefined` during executable instantiation.
+    UndefinedAtInstantiation,
+    /// Initialized when its declaration executes.
+    AtDeclaration,
+    /// Initialized with a function during executable instantiation.
+    FunctionAtInstantiation,
+    /// Initialized with a function when a lexical block is entered.
+    FunctionAtScopeEntry,
+    /// Initialized when a named function object is created.
+    FunctionName,
+    /// Initialized on catch-clause entry.
+    Catch,
+    /// Connected to another module's named/default export during linking.
+    ModuleImport,
+    /// Initialized with a requested module namespace during linking.
+    ModuleNamespace,
+}
+
+/// Assignment behavior after initialization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WritePolicy {
+    /// Ordinary writes are allowed.
+    Mutable,
+    /// Every source write is rejected.
+    Immutable,
+    /// Sloppy writes are ignored and strict writes are rejected.
+    ImmutableInStrictCode,
+    /// The cell is compiler-internal and cannot be named by source code.
+    Internal,
+}
+
+/// Declaration policy required by later bytecode lowering.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeclarationPolicy {
+    kind: DeclarationKind,
+    initialization: InitializationPolicy,
+    writes: WritePolicy,
+    temporal_dead_zone: bool,
+}
+
+impl DeclarationPolicy {
+    /// Returns the effective declaration category.
+    #[must_use]
+    pub const fn kind(self) -> DeclarationKind {
+        self.kind
+    }
+
+    /// Returns when the binding receives its initial value.
+    #[must_use]
+    pub const fn initialization(self) -> InitializationPolicy {
+        self.initialization
+    }
+
+    /// Returns the binding's post-initialization write behavior.
+    #[must_use]
+    pub const fn writes(self) -> WritePolicy {
+        self.writes
+    }
+
+    /// Returns whether reads require an uninitialized-binding check.
+    #[must_use]
+    pub const fn has_temporal_dead_zone(self) -> bool {
+        self.temporal_dead_zone
+    }
+}
+
+/// One arena-independent binding-storage decision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BindingStorage {
+    id: BindingId,
+    executable: ExecutableId,
+    name: Arc<str>,
+    declaration_spans: Arc<[Span]>,
+    placement: StoragePlacement,
+    policy: DeclarationPolicy,
+}
+
+impl BindingStorage {
+    /// Returns this binding's dense identity.
+    #[must_use]
+    pub const fn id(&self) -> BindingId {
+        self.id
+    }
+
+    /// Returns the executable that owns the storage.
+    #[must_use]
+    pub const fn executable(&self) -> ExecutableId {
+        self.executable
+    }
+
+    /// Returns the exact binding name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns every source declaration span merged into this binding.
+    #[must_use]
+    pub fn declaration_spans(&self) -> &[Span] {
+        &self.declaration_spans
+    }
+
+    /// Returns the selected storage category.
+    #[must_use]
+    pub const fn placement(&self) -> StoragePlacement {
+        self.placement
+    }
+
+    /// Returns initialization, write, and TDZ policy.
+    #[must_use]
+    pub const fn policy(&self) -> DeclarationPolicy {
+        self.policy
+    }
+}
+
+/// Read/write role of an unresolved global reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReferenceAccess {
+    read: bool,
+    write: bool,
+}
+
+impl ReferenceAccess {
+    /// Returns whether the reference reads its resolved value.
+    #[must_use]
+    pub const fn reads(self) -> bool {
+        self.read
+    }
+
+    /// Returns whether the reference writes its resolved value.
+    #[must_use]
+    pub const fn writes(self) -> bool {
+        self.write
+    }
+}
+
+/// One source reference that remained unresolved after Oxc semantics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnresolvedGlobal {
+    id: UnresolvedGlobalId,
+    executable: ExecutableId,
+    name: Arc<str>,
+    span: Span,
+    access: ReferenceAccess,
+}
+
+impl UnresolvedGlobal {
+    /// Returns this reference's dense identity.
+    #[must_use]
+    pub const fn id(&self) -> UnresolvedGlobalId {
+        self.id
+    }
+
+    /// Returns the executable containing the reference.
+    #[must_use]
+    pub const fn executable(&self) -> ExecutableId {
+        self.executable
+    }
+
+    /// Returns the exact identifier text.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the exact identifier span.
+    #[must_use]
+    pub const fn span(&self) -> Span {
+        self.span
+    }
+
+    /// Returns whether the source reads and/or writes the reference.
+    #[must_use]
+    pub const fn access(&self) -> ReferenceAccess {
+        self.access
+    }
+}
+
+/// One source reference resolved to a compiler-owned binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedReference {
+    id: ResolvedReferenceId,
+    executable: ExecutableId,
+    binding: BindingId,
+    span: Span,
+    access: ReferenceAccess,
+}
+
+impl ResolvedReference {
+    /// Returns this reference's dense identity.
+    #[must_use]
+    pub const fn id(&self) -> ResolvedReferenceId {
+        self.id
+    }
+
+    /// Returns the executable containing the reference.
+    #[must_use]
+    pub const fn executable(&self) -> ExecutableId {
+        self.executable
+    }
+
+    /// Returns the compiler-owned binding targeted by this reference.
+    #[must_use]
+    pub const fn binding(&self) -> BindingId {
+        self.binding
+    }
+
+    /// Returns the exact identifier span.
+    #[must_use]
+    pub const fn span(&self) -> Span {
+        self.span
+    }
+
+    /// Returns whether the source reads and/or writes the binding.
+    #[must_use]
+    pub const fn access(&self) -> ReferenceAccess {
+        self.access
+    }
+}
+
+/// Fully owned storage metadata for one accepted source unit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoragePlan {
+    kind: CompilationUnitKind,
+    executables: Arc<[Executable]>,
+    bindings: Arc<[BindingStorage]>,
+    resolved_references: Arc<[ResolvedReference]>,
+    unresolved_globals: Arc<[UnresolvedGlobal]>,
+}
+
+impl StoragePlan {
+    /// Returns whether the root is a Script or Module.
+    #[must_use]
+    pub const fn kind(&self) -> CompilationUnitKind {
+        self.kind
+    }
+
+    /// Returns executables in stable dense preorder.
+    #[must_use]
+    pub fn executables(&self) -> &[Executable] {
+        &self.executables
+    }
+
+    /// Resolves a plan-local executable identity, returning `None` when its
+    /// dense index is out of range.
+    #[must_use]
+    pub fn executable(&self, id: ExecutableId) -> Option<&Executable> {
+        self.executables.get(id.index())
+    }
+
+    /// Returns all source bindings grouped by owning executable.
+    #[must_use]
+    pub fn bindings(&self) -> &[BindingStorage] {
+        &self.bindings
+    }
+
+    /// Resolves a plan-local binding identity, returning `None` when its dense
+    /// index is out of range.
+    #[must_use]
+    pub fn binding(&self, id: BindingId) -> Option<&BindingStorage> {
+        self.bindings.get(id.index())
+    }
+
+    /// Returns bindings owned by one executable, or `None` if its dense index
+    /// is out of range.
+    ///
+    /// Bindings are ordered by source declaration span within each executable,
+    /// with placement and name as deterministic tie-breakers.
+    #[must_use]
+    pub fn bindings_for(&self, executable: ExecutableId) -> Option<&[BindingStorage]> {
+        let executable = self.executables.get(executable.index())?;
+        self.bindings
+            .get(executable.binding_start as usize..executable.binding_end as usize)
+    }
+
+    /// Returns all resolved source references grouped by using executable.
+    #[must_use]
+    pub fn resolved_references(&self) -> &[ResolvedReference] {
+        &self.resolved_references
+    }
+
+    /// Resolves a plan-local reference identity, returning `None` when its dense
+    /// index is out of range.
+    #[must_use]
+    pub fn resolved_reference(&self, id: ResolvedReferenceId) -> Option<&ResolvedReference> {
+        self.resolved_references.get(id.index())
+    }
+
+    /// Returns resolved references used by one executable, or `None` if its
+    /// dense index is out of range.
+    ///
+    /// References are in source-span order within each executable.
+    #[must_use]
+    pub fn resolved_references_for(
+        &self,
+        executable: ExecutableId,
+    ) -> Option<&[ResolvedReference]> {
+        let executable = self.executables.get(executable.index())?;
+        self.resolved_references
+            .get(executable.resolved_start as usize..executable.resolved_end as usize)
+    }
+
+    /// Returns all unresolved global references grouped by owning executable.
+    #[must_use]
+    pub fn unresolved_globals(&self) -> &[UnresolvedGlobal] {
+        &self.unresolved_globals
+    }
+
+    /// Returns unresolved globals used by one executable, or `None` if its
+    /// dense index is out of range.
+    ///
+    /// References are in source-span order within each executable.
+    #[must_use]
+    pub fn unresolved_globals_for(&self, executable: ExecutableId) -> Option<&[UnresolvedGlobal]> {
+        let executable = self.executables.get(executable.index())?;
+        self.unresolved_globals
+            .get(executable.unresolved_start as usize..executable.unresolved_end as usize)
+    }
+}
+
+/// Semantic cases intentionally rejected by this first complete slice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnsupportedFeature {
+    /// Any eval compilation goal.
+    EvalCompilationGoal,
+    /// A dynamic Function-constructor compilation goal.
+    DynamicFunctionCompilationGoal,
+    /// A syntactic bare `eval(...)` call.
+    DirectEval,
+    /// A `with` statement.
+    WithStatement,
+    /// A parameter initializer or destructuring default.
+    ParameterExpressions,
+    /// A rest or destructured parameter.
+    NonSimpleParameters,
+    /// Duplicate sloppy-mode parameter names.
+    DuplicateParameters,
+    /// Annex B's paired block-lexical and var-like function binding.
+    AnnexBBlockFunction,
+    /// Class-created functions, private names, and synthetic slots.
+    ClassSyntheticSlots,
+    /// A reference whose binding is owned by another executable.
+    CapturePropagation,
+    /// A synthesized `arguments` binding in a function or an enclosed arrow.
+    ArgumentsBinding,
+    /// A synthesized `this`, `new.target`, or `super` binding.
+    FunctionSyntheticBinding,
+}
+
+/// Storage-planning failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompilerError {
+    /// The accepted AST requires semantics outside this total slice.
+    Unsupported {
+        /// The unsupported semantic case.
+        feature: UnsupportedFeature,
+        /// Exact source span that requires it.
+        span: Span,
+    },
+    /// Oxc's retained semantic graph violated an expected post-build invariant.
+    SemanticInvariant {
+        /// Stable invariant label.
+        invariant: &'static str,
+        /// Related source span, when available.
+        span: Option<Span>,
+    },
+    /// A dense compiler-owned domain exceeded `u32`.
+    CapacityExceeded {
+        /// Stable capacity-domain label.
+        domain: &'static str,
+    },
+}
+
+impl fmt::Display for CompilerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unsupported { feature, span } => {
+                write!(
+                    formatter,
+                    "unsupported compiler feature {feature:?} at {span:?}"
+                )
+            }
+            Self::SemanticInvariant { invariant, span } => {
+                write!(formatter, "semantic invariant `{invariant}` failed")?;
+                if let Some(span) = span {
+                    write!(formatter, " at {span:?}")?;
+                }
+                Ok(())
+            }
+            Self::CapacityExceeded { domain } => {
+                write!(formatter, "compiler capacity exceeded for {domain}")
+            }
+        }
+    }
+}
+
+impl Error for CompilerError {}
+
+/// Builds an arena-independent binding-storage plan.
+///
+/// # Errors
+///
+/// Returns a typed error for semantic cases not yet modeled by this total
+/// slice or if the retained Oxc model violates a required invariant.
+pub fn build_storage_plan(unit: &ParsedUnit<'_, '_>) -> Result<StoragePlan, CompilerError> {
+    Planner::new(unit)?.build()
+}
+
+#[derive(Clone, Copy)]
+struct ParameterStorage {
+    executable: ExecutableId,
+    parameter_index: u32,
+}
+
+struct ExecutableDraft {
+    executable: Executable,
+    node_id: NodeId,
+}
+
+struct BindingDraft {
+    symbol_id: Option<SymbolId>,
+    executable: ExecutableId,
+    name: Arc<str>,
+    declaration_spans: Arc<[Span]>,
+    placement: StoragePlacement,
+    policy: DeclarationPolicy,
+}
+
+struct ResolvedDraft {
+    executable: ExecutableId,
+    binding: BindingId,
+    span: Span,
+    access: ReferenceAccess,
+}
+
+struct UnresolvedDraft {
+    executable: ExecutableId,
+    name: Arc<str>,
+    span: Span,
+    access: ReferenceAccess,
+}
+
+#[derive(Default)]
+struct DeclarationFacts {
+    bits: u16,
+    function_scope_entry: bool,
+}
+
+impl DeclarationFacts {
+    const PARAMETER: u16 = 1 << 0;
+    const VAR: u16 = 1 << 1;
+    const LET: u16 = 1 << 2;
+    const CONST: u16 = 1 << 3;
+    const FUNCTION: u16 = 1 << 4;
+    const FUNCTION_NAME: u16 = 1 << 5;
+    const CATCH: u16 = 1 << 6;
+    const IMPORT: u16 = 1 << 7;
+    const NAMESPACE_IMPORT: u16 = 1 << 8;
+
+    fn insert(&mut self, fact: u16) {
+        self.bits |= fact;
+    }
+
+    const fn contains(&self, fact: u16) -> bool {
+        self.bits & fact != 0
+    }
+
+    fn effective_kind(&self) -> Option<DeclarationKind> {
+        if self.contains(Self::FUNCTION_NAME) {
+            Some(DeclarationKind::FunctionName)
+        } else if self.contains(Self::NAMESPACE_IMPORT) {
+            Some(DeclarationKind::NamespaceImport)
+        } else if self.contains(Self::IMPORT) {
+            Some(DeclarationKind::Import)
+        } else if self.contains(Self::CATCH) {
+            Some(DeclarationKind::Catch)
+        } else if self.contains(Self::FUNCTION) {
+            Some(DeclarationKind::Function)
+        } else if self.contains(Self::CONST) {
+            Some(DeclarationKind::Const)
+        } else if self.contains(Self::LET) {
+            Some(DeclarationKind::Let)
+        } else if self.contains(Self::PARAMETER) {
+            Some(DeclarationKind::Parameter)
+        } else if self.contains(Self::VAR) {
+            Some(DeclarationKind::Var)
+        } else {
+            None
+        }
+    }
+}
+
+struct Planner<'unit, 'arena, 'scope> {
+    unit: &'unit ParsedUnit<'arena, 'scope>,
+    kind: CompilationUnitKind,
+    root_span: Span,
+    executable_drafts: Vec<ExecutableDraft>,
+    node_executables: Vec<Option<ExecutableId>>,
+    exact_scope_executables: Vec<Option<ExecutableId>>,
+    scope_executables: Vec<Option<ExecutableId>>,
+    parameter_storage: HashMap<SymbolId, ParameterStorage>,
+}
+
+impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
+    fn new(unit: &'unit ParsedUnit<'arena, 'scope>) -> Result<Self, CompilerError> {
+        let root_span = unit.program().span;
+        let kind = match unit.goal() {
+            CompilationGoal::GlobalScript(_) => CompilationUnitKind::Script,
+            CompilationGoal::Module => CompilationUnitKind::Module,
+            CompilationGoal::IndirectEval(_) | CompilationGoal::DirectEval(_) => {
+                return Err(CompilerError::Unsupported {
+                    feature: UnsupportedFeature::EvalCompilationGoal,
+                    span: root_span,
+                });
+            }
+            CompilationGoal::DynamicFunction(_) => {
+                return Err(CompilerError::Unsupported {
+                    feature: UnsupportedFeature::DynamicFunctionCompilationGoal,
+                    span: root_span,
+                });
+            }
+        };
+        let semantic = unit.semantic();
+        Ok(Self {
+            unit,
+            kind,
+            root_span,
+            executable_drafts: Vec::new(),
+            node_executables: vec![None; semantic.nodes().len()],
+            exact_scope_executables: vec![None; semantic.scoping().scopes_len()],
+            scope_executables: vec![None; semantic.scoping().scopes_len()],
+            parameter_storage: HashMap::new(),
+        })
+    }
+
+    fn build(mut self) -> Result<StoragePlan, CompilerError> {
+        self.reject_preflight_features()?;
+        self.inventory_executables()?;
+        self.assign_scope_owners()?;
+        self.reject_synthetic_binding_uses()?;
+
+        let symbol_owners = self.symbol_owners()?;
+        self.reject_capture_propagation(&symbol_owners)?;
+
+        let mut binding_drafts = self.binding_drafts()?;
+        self.add_synthetic_default_binding(&mut binding_drafts)?;
+        binding_drafts.sort_by_key(|binding| {
+            let first = binding
+                .declaration_spans
+                .first()
+                .copied()
+                .unwrap_or(Span::new(u32::MAX, u32::MAX));
+            (
+                binding.executable.index(),
+                first.start,
+                first.end,
+                placement_order(binding.placement),
+                binding.name.clone(),
+            )
+        });
+        let (bindings, symbol_bindings) =
+            freeze_bindings(binding_drafts, self.unit.semantic().scoping().symbols_len())?;
+
+        let mut resolved_drafts = self.resolved_drafts(&bindings, &symbol_bindings)?;
+        resolved_drafts.sort_by_key(|reference| {
+            (
+                reference.executable.index(),
+                reference.span.start,
+                reference.span.end,
+                reference.binding.index(),
+            )
+        });
+        let resolved_references = freeze_resolved(resolved_drafts)?;
+
+        let mut unresolved_drafts = self.unresolved_drafts()?;
+        unresolved_drafts.sort_by_key(|reference| {
+            (
+                reference.executable.index(),
+                reference.span.start,
+                reference.span.end,
+                reference.name.clone(),
+            )
+        });
+        let unresolved_globals = freeze_unresolved(unresolved_drafts)?;
+
+        let mut executables = self
+            .executable_drafts
+            .into_iter()
+            .map(|draft| draft.executable)
+            .collect::<Vec<_>>();
+        assign_ranges(
+            &mut executables,
+            &bindings,
+            &resolved_references,
+            &unresolved_globals,
+        )?;
+
+        Ok(StoragePlan {
+            kind: self.kind,
+            executables: executables.into(),
+            bindings: bindings.into(),
+            resolved_references: resolved_references.into(),
+            unresolved_globals: unresolved_globals.into(),
+        })
+    }
+
+    fn reject_preflight_features(&self) -> Result<(), CompilerError> {
+        let semantic = self.unit.semantic();
+        let nodes = semantic.nodes();
+        for (node_id, node) in nodes.iter_enumerated() {
+            match node.kind() {
+                AstKind::CallExpression(call)
+                    if !call.optional && call.callee.is_specific_id("eval") =>
+                {
+                    return unsupported(UnsupportedFeature::DirectEval, call.span);
+                }
+                AstKind::WithStatement(statement) => {
+                    return unsupported(UnsupportedFeature::WithStatement, statement.span);
+                }
+                AstKind::Class(class) => {
+                    return unsupported(UnsupportedFeature::ClassSyntheticSlots, class.span);
+                }
+                AstKind::Function(function)
+                    if function.r#type == FunctionType::FunctionDeclaration
+                        && !function.r#async
+                        && !function.generator =>
+                {
+                    let declaration_scope = node.scope_id();
+                    let flags = semantic.scoping().scope_flags(declaration_scope);
+                    let single_statement_parent =
+                        is_single_statement_parent(nodes.parent_kind(node_id));
+                    if single_statement_parent || (!flags.is_var() && !flags.is_strict_mode()) {
+                        return unsupported(UnsupportedFeature::AnnexBBlockFunction, function.span);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if semantic
+            .scoping()
+            .scope_descendants_from_root()
+            .any(|scope_id| {
+                semantic
+                    .scoping()
+                    .scope_flags(scope_id)
+                    .contains_direct_eval()
+            })
+        {
+            return unsupported(UnsupportedFeature::DirectEval, self.root_span);
+        }
+        Ok(())
+    }
+
+    fn inventory_executables(&mut self) -> Result<(), CompilerError> {
+        let semantic = self.unit.semantic();
+        let nodes = semantic.nodes();
+        for (node_id, node) in nodes.iter_enumerated() {
+            let (kind, scope_id, span, name, name_span, parameter_count) = match node.kind() {
+                AstKind::Program(program) => (
+                    match self.kind {
+                        CompilationUnitKind::Script => ExecutableKind::Script,
+                        CompilationUnitKind::Module => ExecutableKind::Module,
+                    },
+                    program.scope_id(),
+                    program.span,
+                    None,
+                    None,
+                    0,
+                ),
+                AstKind::Function(function) => {
+                    let parameter_count = self.validate_parameters(function.params.as_ref())?;
+                    (
+                        ExecutableKind::Function {
+                            asynchronous: function.r#async,
+                            generator: function.generator,
+                        },
+                        function.scope_id(),
+                        function.span,
+                        function
+                            .id
+                            .as_ref()
+                            .map(|identifier| Arc::<str>::from(identifier.name.as_str())),
+                        function.id.as_ref().map(|identifier| identifier.span),
+                        parameter_count,
+                    )
+                }
+                AstKind::ArrowFunctionExpression(arrow) => {
+                    let parameter_count = self.validate_parameters(arrow.params.as_ref())?;
+                    (
+                        ExecutableKind::Arrow {
+                            asynchronous: arrow.r#async,
+                        },
+                        arrow.scope_id(),
+                        arrow.span,
+                        None,
+                        None,
+                        parameter_count,
+                    )
+                }
+                _ => continue,
+            };
+
+            let id = executable_id(self.executable_drafts.len())?;
+            let parent = if matches!(kind, ExecutableKind::Script | ExecutableKind::Module) {
+                None
+            } else {
+                nodes
+                    .ancestor_ids(node_id)
+                    .find_map(|ancestor| self.node_executables[ancestor.index()])
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "executable parent",
+                        span: Some(span),
+                    })?
+                    .into()
+            };
+            if semantic.scoping().get_node_id(scope_id) != node_id {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "scope creator matches executable node",
+                    span: Some(span),
+                });
+            }
+            if self.exact_scope_executables[scope_id.index()].is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one executable per created scope",
+                    span: Some(span),
+                });
+            }
+
+            let strict = semantic.scoping().scope_flags(scope_id).is_strict_mode();
+            let executable = Executable {
+                id,
+                parent,
+                kind,
+                span,
+                name,
+                name_span,
+                strict,
+                parameter_count,
+                binding_start: 0,
+                binding_end: 0,
+                resolved_start: 0,
+                resolved_end: 0,
+                unresolved_start: 0,
+                unresolved_end: 0,
+            };
+            self.node_executables[node_id.index()] = Some(id);
+            self.exact_scope_executables[scope_id.index()] = Some(id);
+            self.executable_drafts.push(ExecutableDraft {
+                executable,
+                node_id,
+            });
+        }
+
+        self.validate_root_executable()
+    }
+
+    fn validate_root_executable(&self) -> Result<(), CompilerError> {
+        let Some(root) = self.executable_drafts.first() else {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "root executable exists",
+                span: Some(self.root_span),
+            });
+        };
+        if root.executable.id == ExecutableId(0)
+            && root.executable.parent.is_none()
+            && root.node_id == NodeId::ROOT
+        {
+            Ok(())
+        } else {
+            Err(CompilerError::SemanticInvariant {
+                invariant: "root executable identity",
+                span: Some(self.root_span),
+            })
+        }
+    }
+
+    fn validate_parameters(
+        &mut self,
+        parameters: &oxc_ast::ast::FormalParameters<'arena>,
+    ) -> Result<u32, CompilerError> {
+        if let Some(rest) = &parameters.rest {
+            return unsupported(UnsupportedFeature::NonSimpleParameters, rest.span);
+        }
+        let executable = executable_id(self.executable_drafts.len())?;
+        let mut names = HashSet::with_capacity(parameters.items.len());
+        for (index, parameter) in parameters.items.iter().enumerate() {
+            if parameter.initializer.is_some() {
+                return unsupported(UnsupportedFeature::ParameterExpressions, parameter.span);
+            }
+            if let Some(span) = binding_pattern_default_span(&parameter.pattern) {
+                return unsupported(UnsupportedFeature::ParameterExpressions, span);
+            }
+            let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
+                return unsupported(UnsupportedFeature::NonSimpleParameters, parameter.span);
+            };
+            if !names.insert(identifier.name.as_str()) {
+                return unsupported(UnsupportedFeature::DuplicateParameters, identifier.span);
+            }
+            let parameter_index =
+                u32::try_from(index).map_err(|_| CompilerError::CapacityExceeded {
+                    domain: "function parameters",
+                })?;
+            if self
+                .parameter_storage
+                .insert(
+                    identifier.symbol_id(),
+                    ParameterStorage {
+                        executable,
+                        parameter_index,
+                    },
+                )
+                .is_some()
+            {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one simple parameter per Oxc symbol",
+                    span: Some(identifier.span),
+                });
+            }
+        }
+        let count =
+            u32::try_from(parameters.items.len()).map_err(|_| CompilerError::CapacityExceeded {
+                domain: "function parameters",
+            })?;
+        Ok(count)
+    }
+
+    fn assign_scope_owners(&mut self) -> Result<(), CompilerError> {
+        let scoping = self.unit.semantic().scoping();
+        for scope_id in scoping.scope_descendants_from_root() {
+            let owner = scoping
+                .scope_ancestors(scope_id)
+                .find_map(|ancestor| self.exact_scope_executables[ancestor.index()])
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "scope has executable owner",
+                    span: None,
+                })?;
+            self.scope_executables[scope_id.index()] = Some(owner);
+        }
+        Ok(())
+    }
+
+    fn reject_synthetic_binding_uses(&self) -> Result<(), CompilerError> {
+        for node in self.unit.semantic().nodes().iter() {
+            let span = match node.kind() {
+                AstKind::ThisExpression(expression) => expression.span,
+                AstKind::NewTarget(expression) => expression.span,
+                AstKind::Super(expression) => expression.span,
+                _ => continue,
+            };
+            let owner = self.scope_owner(node.scope_id(), Some(span))?;
+            if owner != ExecutableId(0) {
+                return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
+            }
+        }
+        Ok(())
+    }
+
+    fn symbol_owners(&self) -> Result<Vec<ExecutableId>, CompilerError> {
+        let scoping = self.unit.semantic().scoping();
+        let mut owners = vec![ExecutableId(0); scoping.symbols_len()];
+        for symbol_id in scoping.symbol_ids() {
+            owners[symbol_id.index()] = self.scope_owner(
+                scoping.symbol_scope_id(symbol_id),
+                Some(scoping.symbol_span(symbol_id)),
+            )?;
+        }
+        Ok(owners)
+    }
+
+    fn reject_capture_propagation(
+        &self,
+        symbol_owners: &[ExecutableId],
+    ) -> Result<(), CompilerError> {
+        let semantic = self.unit.semantic();
+        let scoping = semantic.scoping();
+        for symbol_id in scoping.symbol_ids() {
+            let binding_owner = symbol_owners[symbol_id.index()];
+            for reference in scoping.get_resolved_references(symbol_id) {
+                let reference_owner = self.scope_owner(
+                    reference.scope_id(),
+                    Some(semantic.reference_span(reference)),
+                )?;
+                if reference_owner != binding_owner {
+                    return unsupported(
+                        UnsupportedFeature::CapturePropagation,
+                        semantic.reference_span(reference),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn binding_drafts(&self) -> Result<Vec<BindingDraft>, CompilerError> {
+        let semantic = self.unit.semantic();
+        let scoping = semantic.scoping();
+        let mut drafts = Vec::with_capacity(scoping.symbols_len());
+        for symbol_id in scoping.symbol_ids() {
+            let flags = scoping.symbol_flags(symbol_id);
+            if !flags.is_value() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "JavaScript semantic symbol is a value",
+                    span: Some(scoping.symbol_span(symbol_id)),
+                });
+            }
+            let facts = self.declaration_facts(symbol_id, flags)?;
+            let kind = facts
+                .effective_kind()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "known JavaScript declaration kind",
+                    span: Some(scoping.symbol_span(symbol_id)),
+                })?;
+            let owner = self.scope_owner(
+                scoping.symbol_scope_id(symbol_id),
+                Some(scoping.symbol_span(symbol_id)),
+            )?;
+            let name = scoping.symbol_name(symbol_id);
+            if name == "arguments"
+                && matches!(kind, DeclarationKind::Var | DeclarationKind::FunctionName)
+                && self.is_ordinary_function(owner, scoping.symbol_span(symbol_id))?
+            {
+                return unsupported(
+                    UnsupportedFeature::ArgumentsBinding,
+                    scoping.symbol_span(symbol_id),
+                );
+            }
+            let placement = self.placement(symbol_id, owner, kind)?;
+            let policy = self.declaration_policy(owner, kind, facts.function_scope_entry);
+            let declaration_spans = declaration_spans(scoping, symbol_id);
+            drafts.push(BindingDraft {
+                symbol_id: Some(symbol_id),
+                executable: owner,
+                name: Arc::from(name),
+                declaration_spans,
+                placement,
+                policy,
+            });
+        }
+        Ok(drafts)
+    }
+
+    fn declaration_facts(
+        &self,
+        symbol_id: SymbolId,
+        flags: SymbolFlags,
+    ) -> Result<DeclarationFacts, CompilerError> {
+        let semantic = self.unit.semantic();
+        let scoping = semantic.scoping();
+        let mut facts = DeclarationFacts::default();
+        if flags.contains(SymbolFlags::FunctionExpression) {
+            facts.insert(DeclarationFacts::FUNCTION_NAME);
+        }
+        for declaration in scoping.symbol_declarations(symbol_id) {
+            match semantic.nodes().kind(declaration) {
+                AstKind::FormalParameter(_) | AstKind::FormalParameterRest(_) => {
+                    facts.insert(DeclarationFacts::PARAMETER);
+                }
+                AstKind::VariableDeclarator(declarator) => match declarator.kind {
+                    VariableDeclarationKind::Var => facts.insert(DeclarationFacts::VAR),
+                    VariableDeclarationKind::Let => facts.insert(DeclarationFacts::LET),
+                    VariableDeclarationKind::Const => facts.insert(DeclarationFacts::CONST),
+                    VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing => {
+                        return Err(CompilerError::SemanticInvariant {
+                            invariant: "frontend rejected using declaration",
+                            span: Some(declarator.span),
+                        });
+                    }
+                },
+                AstKind::Function(_) => {
+                    facts.insert(DeclarationFacts::FUNCTION);
+                    if !facts.contains(DeclarationFacts::FUNCTION_NAME) {
+                        let declaration_scope = semantic.nodes().get_node(declaration).scope_id();
+                        facts.function_scope_entry |=
+                            !scoping.scope_flags(declaration_scope).is_var();
+                    }
+                }
+                AstKind::CatchParameter(_) => facts.insert(DeclarationFacts::CATCH),
+                AstKind::ImportSpecifier(_) | AstKind::ImportDefaultSpecifier(_) => {
+                    facts.insert(DeclarationFacts::IMPORT);
+                }
+                AstKind::ImportNamespaceSpecifier(_) => {
+                    facts.insert(DeclarationFacts::NAMESPACE_IMPORT);
+                }
+                AstKind::Class(class) => {
+                    return unsupported(UnsupportedFeature::ClassSyntheticSlots, class.span);
+                }
+                other => {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: declaration_kind_invariant(other),
+                        span: Some(scoping.symbol_span(symbol_id)),
+                    });
+                }
+            }
+        }
+        Ok(facts)
+    }
+
+    fn placement(
+        &self,
+        symbol_id: SymbolId,
+        owner: ExecutableId,
+        kind: DeclarationKind,
+    ) -> Result<StoragePlacement, CompilerError> {
+        if let Some(parameter) = self.parameter_storage.get(&symbol_id) {
+            if parameter.executable != owner {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "parameter symbol belongs to parameter executable",
+                    span: Some(self.unit.semantic().scoping().symbol_span(symbol_id)),
+                });
+            }
+            return Ok(StoragePlacement::Argument {
+                parameter_index: parameter.parameter_index,
+            });
+        }
+
+        if owner != ExecutableId(0) {
+            return Ok(StoragePlacement::Local);
+        }
+        let scoping = self.unit.semantic().scoping();
+        let root_scope = scoping.root_scope_id();
+        let symbol_scope = scoping.symbol_scope_id(symbol_id);
+        if symbol_scope != root_scope {
+            return Ok(StoragePlacement::Local);
+        }
+        match self.kind {
+            CompilationUnitKind::Script => match kind {
+                DeclarationKind::Let | DeclarationKind::Const => {
+                    Ok(StoragePlacement::GlobalLexical)
+                }
+                DeclarationKind::Var | DeclarationKind::Function => {
+                    Ok(StoragePlacement::GlobalObject)
+                }
+                DeclarationKind::FunctionName
+                | DeclarationKind::Parameter
+                | DeclarationKind::Catch
+                | DeclarationKind::Import
+                | DeclarationKind::NamespaceImport
+                | DeclarationKind::SyntheticDefault => Err(CompilerError::SemanticInvariant {
+                    invariant: "valid root Script binding category",
+                    span: Some(scoping.symbol_span(symbol_id)),
+                }),
+            },
+            CompilationUnitKind::Module => match kind {
+                DeclarationKind::Import => Ok(StoragePlacement::ModuleImport),
+                DeclarationKind::NamespaceImport
+                | DeclarationKind::Var
+                | DeclarationKind::Let
+                | DeclarationKind::Const
+                | DeclarationKind::Function => Ok(StoragePlacement::ModuleLocal),
+                DeclarationKind::FunctionName
+                | DeclarationKind::Parameter
+                | DeclarationKind::Catch
+                | DeclarationKind::SyntheticDefault => Err(CompilerError::SemanticInvariant {
+                    invariant: "valid root Module binding category",
+                    span: Some(scoping.symbol_span(symbol_id)),
+                }),
+            },
+        }
+    }
+
+    fn declaration_policy(
+        &self,
+        owner: ExecutableId,
+        kind: DeclarationKind,
+        function_scope_entry: bool,
+    ) -> DeclarationPolicy {
+        let (initialization, writes, temporal_dead_zone) = match kind {
+            DeclarationKind::Parameter => {
+                (InitializationPolicy::Argument, WritePolicy::Mutable, false)
+            }
+            DeclarationKind::Var => (
+                InitializationPolicy::UndefinedAtInstantiation,
+                WritePolicy::Mutable,
+                false,
+            ),
+            DeclarationKind::Let => (
+                InitializationPolicy::AtDeclaration,
+                WritePolicy::Mutable,
+                true,
+            ),
+            DeclarationKind::Const => (
+                InitializationPolicy::AtDeclaration,
+                WritePolicy::Immutable,
+                true,
+            ),
+            DeclarationKind::Function => (
+                if function_scope_entry {
+                    InitializationPolicy::FunctionAtScopeEntry
+                } else {
+                    InitializationPolicy::FunctionAtInstantiation
+                },
+                WritePolicy::Mutable,
+                false,
+            ),
+            DeclarationKind::FunctionName => (
+                InitializationPolicy::FunctionName,
+                if self.executable_drafts[owner.index()].executable.strict {
+                    WritePolicy::Immutable
+                } else {
+                    WritePolicy::ImmutableInStrictCode
+                },
+                false,
+            ),
+            DeclarationKind::Catch => (InitializationPolicy::Catch, WritePolicy::Mutable, false),
+            DeclarationKind::Import => (
+                InitializationPolicy::ModuleImport,
+                WritePolicy::Immutable,
+                true,
+            ),
+            DeclarationKind::NamespaceImport => (
+                InitializationPolicy::ModuleNamespace,
+                WritePolicy::Immutable,
+                true,
+            ),
+            DeclarationKind::SyntheticDefault => (
+                InitializationPolicy::AtDeclaration,
+                WritePolicy::Internal,
+                true,
+            ),
+        };
+        DeclarationPolicy {
+            kind,
+            initialization,
+            writes,
+            temporal_dead_zone,
+        }
+    }
+
+    fn add_synthetic_default_binding(
+        &self,
+        bindings: &mut Vec<BindingDraft>,
+    ) -> Result<(), CompilerError> {
+        if self.kind != CompilationUnitKind::Module {
+            return Ok(());
+        }
+        let mut synthetic_spans = self
+            .unit
+            .module_syntax()
+            .export_entries()
+            .iter()
+            .filter_map(|entry| {
+                matches!(entry.local_name(), ModuleExportLocalName::SyntheticDefault)
+                    .then_some(entry.span())
+            })
+            .collect::<Vec<_>>();
+        if synthetic_spans.is_empty() {
+            return Ok(());
+        }
+        synthetic_spans.sort_by_key(|span| (span.start, span.end));
+        synthetic_spans.dedup();
+        let policy = self.synthetic_default_policy()?;
+        bindings.push(BindingDraft {
+            symbol_id: None,
+            executable: ExecutableId(0),
+            name: Arc::from("*default*"),
+            declaration_spans: synthetic_spans.into(),
+            placement: StoragePlacement::ModuleLocal,
+            policy,
+        });
+        Ok(())
+    }
+
+    fn synthetic_default_policy(&self) -> Result<DeclarationPolicy, CompilerError> {
+        let mut declarations = self.unit.program().body.iter().filter_map(|statement| {
+            let Statement::ExportDefaultDeclaration(declaration) = statement else {
+                return None;
+            };
+            let synthetic = match &declaration.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                    function.id.is_none()
+                }
+                ExportDefaultDeclarationKind::ClassDeclaration(class) => class.id.is_none(),
+                ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => false,
+                _ => true,
+            };
+            synthetic.then_some(declaration)
+        });
+        let declaration = declarations
+            .next()
+            .ok_or(CompilerError::SemanticInvariant {
+                invariant: "synthetic default export statement exists",
+                span: Some(self.root_span),
+            })?;
+        if declarations.next().is_some() {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "one synthetic default export statement",
+                span: Some(declaration.span),
+            });
+        }
+
+        match &declaration.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                if function.id.is_some() {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "synthetic default function is anonymous",
+                        span: Some(function.span),
+                    });
+                }
+                Ok(DeclarationPolicy {
+                    kind: DeclarationKind::SyntheticDefault,
+                    initialization: InitializationPolicy::FunctionAtInstantiation,
+                    writes: WritePolicy::Internal,
+                    temporal_dead_zone: false,
+                })
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                unsupported(UnsupportedFeature::ClassSyntheticSlots, class.span)
+            }
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface) => {
+                Err(CompilerError::SemanticInvariant {
+                    invariant: "frontend rejected TypeScript default export",
+                    span: Some(interface.span),
+                })
+            }
+            _ => Ok(self.declaration_policy(
+                ExecutableId(0),
+                DeclarationKind::SyntheticDefault,
+                false,
+            )),
+        }
+    }
+
+    fn resolved_drafts(
+        &self,
+        bindings: &[BindingStorage],
+        symbol_bindings: &[Option<BindingId>],
+    ) -> Result<Vec<ResolvedDraft>, CompilerError> {
+        let semantic = self.unit.semantic();
+        let scoping = semantic.scoping();
+        let mut drafts = Vec::with_capacity(scoping.references_len());
+        for symbol_id in scoping.symbol_ids() {
+            let binding = symbol_bindings
+                .get(symbol_id.index())
+                .and_then(|binding| *binding)
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "semantic symbol has compiler binding",
+                    span: Some(scoping.symbol_span(symbol_id)),
+                })?;
+            let binding_storage =
+                bindings
+                    .get(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "resolved compiler binding exists",
+                        span: Some(scoping.symbol_span(symbol_id)),
+                    })?;
+            for reference in scoping.get_resolved_references(symbol_id) {
+                let span = semantic.reference_span(reference);
+                let executable = self.scope_owner(reference.scope_id(), Some(span))?;
+                if executable != binding_storage.executable {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "capture propagation rejected before reference freezing",
+                        span: Some(span),
+                    });
+                }
+                drafts.push(ResolvedDraft {
+                    executable,
+                    binding,
+                    span,
+                    access: ReferenceAccess {
+                        read: reference.is_read(),
+                        write: reference.is_write(),
+                    },
+                });
+            }
+        }
+        Ok(drafts)
+    }
+
+    fn unresolved_drafts(&self) -> Result<Vec<UnresolvedDraft>, CompilerError> {
+        let semantic = self.unit.semantic();
+        let scoping = semantic.scoping();
+        let mut references = scoping
+            .root_unresolved_references_ids()
+            .flatten()
+            .collect::<Vec<_>>();
+        references
+            .sort_by_key(|reference_id| scoping.get_reference(*reference_id).node_id().index());
+
+        let mut drafts = Vec::with_capacity(references.len());
+        for reference_id in references {
+            let reference = scoping.get_reference(reference_id);
+            let span = semantic.reference_span(reference);
+            let executable = self.scope_owner(reference.scope_id(), Some(span))?;
+            let name = semantic.reference_name(reference);
+            if name == "arguments" && self.has_ordinary_function_ancestor(executable, span)? {
+                return unsupported(UnsupportedFeature::ArgumentsBinding, span);
+            }
+            drafts.push(UnresolvedDraft {
+                executable,
+                name: Arc::from(name),
+                span,
+                access: ReferenceAccess {
+                    read: reference.is_read(),
+                    write: reference.is_write(),
+                },
+            });
+        }
+        Ok(drafts)
+    }
+
+    fn is_ordinary_function(
+        &self,
+        executable: ExecutableId,
+        span: Span,
+    ) -> Result<bool, CompilerError> {
+        let executable = self.executable_drafts.get(executable.index()).ok_or(
+            CompilerError::SemanticInvariant {
+                invariant: "binding executable exists",
+                span: Some(span),
+            },
+        )?;
+        Ok(matches!(
+            executable.executable.kind,
+            ExecutableKind::Function { .. }
+        ))
+    }
+
+    fn has_ordinary_function_ancestor(
+        &self,
+        executable: ExecutableId,
+        span: Span,
+    ) -> Result<bool, CompilerError> {
+        let mut current = Some(executable);
+        while let Some(id) = current {
+            let executable =
+                self.executable_drafts
+                    .get(id.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "unresolved reference executable exists",
+                        span: Some(span),
+                    })?;
+            if matches!(executable.executable.kind, ExecutableKind::Function { .. }) {
+                return Ok(true);
+            }
+            current = executable.executable.parent;
+        }
+        Ok(false)
+    }
+
+    fn scope_owner(
+        &self,
+        scope_id: ScopeId,
+        span: Option<Span>,
+    ) -> Result<ExecutableId, CompilerError> {
+        self.scope_executables
+            .get(scope_id.index())
+            .and_then(|owner| *owner)
+            .ok_or(CompilerError::SemanticInvariant {
+                invariant: "scope executable owner",
+                span,
+            })
+    }
+}
+
+fn unsupported<T>(feature: UnsupportedFeature, span: Span) -> Result<T, CompilerError> {
+    Err(CompilerError::Unsupported { feature, span })
+}
+
+fn executable_id(index: usize) -> Result<ExecutableId, CompilerError> {
+    u32::try_from(index)
+        .map(ExecutableId)
+        .map_err(|_| CompilerError::CapacityExceeded {
+            domain: "executables",
+        })
+}
+
+fn binding_pattern_default_span(pattern: &BindingPattern<'_>) -> Option<Span> {
+    match pattern {
+        BindingPattern::BindingIdentifier(_) => None,
+        BindingPattern::AssignmentPattern(pattern) => Some(pattern.span),
+        BindingPattern::ObjectPattern(pattern) => pattern
+            .properties
+            .iter()
+            .find_map(|property| binding_pattern_default_span(&property.value))
+            .or_else(|| {
+                pattern
+                    .rest
+                    .as_ref()
+                    .and_then(|rest| binding_pattern_default_span(&rest.argument))
+            }),
+        BindingPattern::ArrayPattern(pattern) => pattern
+            .elements
+            .iter()
+            .flatten()
+            .find_map(binding_pattern_default_span)
+            .or_else(|| {
+                pattern
+                    .rest
+                    .as_ref()
+                    .and_then(|rest| binding_pattern_default_span(&rest.argument))
+            }),
+    }
+}
+
+fn is_single_statement_parent(kind: AstKind<'_>) -> bool {
+    matches!(
+        kind,
+        AstKind::IfStatement(_)
+            | AstKind::LabeledStatement(_)
+            | AstKind::DoWhileStatement(_)
+            | AstKind::WhileStatement(_)
+            | AstKind::ForStatement(_)
+            | AstKind::ForInStatement(_)
+            | AstKind::ForOfStatement(_)
+            | AstKind::WithStatement(_)
+    )
+}
+
+fn declaration_spans(scoping: &oxc_semantic::Scoping, symbol_id: SymbolId) -> Arc<[Span]> {
+    let redeclarations = scoping.symbol_redeclarations(symbol_id);
+    let mut spans = if redeclarations.is_empty() {
+        vec![scoping.symbol_span(symbol_id)]
+    } else {
+        redeclarations
+            .iter()
+            .map(|declaration| declaration.span)
+            .collect::<Vec<_>>()
+    };
+    spans.sort_by_key(|span| (span.start, span.end));
+    spans.dedup();
+    spans.into()
+}
+
+fn declaration_kind_invariant(kind: AstKind<'_>) -> &'static str {
+    match kind {
+        AstKind::BindingIdentifier(_) => "symbol declaration points to declaration owner",
+        _ => "supported JavaScript symbol declaration node",
+    }
+}
+
+fn placement_order(placement: StoragePlacement) -> u8 {
+    match placement {
+        StoragePlacement::Argument { .. } => 0,
+        StoragePlacement::Local => 1,
+        StoragePlacement::GlobalObject => 2,
+        StoragePlacement::GlobalLexical => 3,
+        StoragePlacement::ModuleLocal => 4,
+        StoragePlacement::ModuleImport => 5,
+    }
+}
+
+fn freeze_bindings(
+    drafts: Vec<BindingDraft>,
+    symbol_count: usize,
+) -> Result<(Vec<BindingStorage>, Vec<Option<BindingId>>), CompilerError> {
+    let mut bindings = Vec::with_capacity(drafts.len());
+    let mut symbol_bindings = vec![None; symbol_count];
+    for (index, draft) in drafts.into_iter().enumerate() {
+        let id = u32::try_from(index)
+            .map(BindingId)
+            .map_err(|_| CompilerError::CapacityExceeded { domain: "bindings" })?;
+        if let Some(symbol_id) = draft.symbol_id {
+            let span = draft.declaration_spans.first().copied();
+            let slot = symbol_bindings.get_mut(symbol_id.index()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "semantic symbol index is in range",
+                    span,
+                },
+            )?;
+            if slot.replace(id).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one compiler binding per semantic symbol",
+                    span,
+                });
+            }
+        }
+        bindings.push(BindingStorage {
+            id,
+            executable: draft.executable,
+            name: draft.name,
+            declaration_spans: draft.declaration_spans,
+            placement: draft.placement,
+            policy: draft.policy,
+        });
+    }
+    if symbol_bindings.iter().any(Option::is_none) {
+        return Err(CompilerError::SemanticInvariant {
+            invariant: "every semantic symbol has compiler binding",
+            span: None,
+        });
+    }
+    Ok((bindings, symbol_bindings))
+}
+
+fn freeze_resolved(drafts: Vec<ResolvedDraft>) -> Result<Vec<ResolvedReference>, CompilerError> {
+    drafts
+        .into_iter()
+        .enumerate()
+        .map(|(index, draft)| {
+            let id = u32::try_from(index).map(ResolvedReferenceId).map_err(|_| {
+                CompilerError::CapacityExceeded {
+                    domain: "resolved references",
+                }
+            })?;
+            Ok(ResolvedReference {
+                id,
+                executable: draft.executable,
+                binding: draft.binding,
+                span: draft.span,
+                access: draft.access,
+            })
+        })
+        .collect()
+}
+
+fn freeze_unresolved(drafts: Vec<UnresolvedDraft>) -> Result<Vec<UnresolvedGlobal>, CompilerError> {
+    drafts
+        .into_iter()
+        .enumerate()
+        .map(|(index, draft)| {
+            let id = u32::try_from(index).map(UnresolvedGlobalId).map_err(|_| {
+                CompilerError::CapacityExceeded {
+                    domain: "unresolved globals",
+                }
+            })?;
+            Ok(UnresolvedGlobal {
+                id,
+                executable: draft.executable,
+                name: draft.name,
+                span: draft.span,
+                access: draft.access,
+            })
+        })
+        .collect()
+}
+
+fn assign_ranges(
+    executables: &mut [Executable],
+    bindings: &[BindingStorage],
+    resolved: &[ResolvedReference],
+    unresolved: &[UnresolvedGlobal],
+) -> Result<(), CompilerError> {
+    for executable in executables {
+        let binding_start = bindings.partition_point(|binding| binding.executable < executable.id);
+        let binding_end = bindings.partition_point(|binding| binding.executable <= executable.id);
+        executable.binding_start =
+            u32::try_from(binding_start).map_err(|_| CompilerError::CapacityExceeded {
+                domain: "binding ranges",
+            })?;
+        executable.binding_end =
+            u32::try_from(binding_end).map_err(|_| CompilerError::CapacityExceeded {
+                domain: "binding ranges",
+            })?;
+
+        let resolved_start =
+            resolved.partition_point(|reference| reference.executable < executable.id);
+        let resolved_end =
+            resolved.partition_point(|reference| reference.executable <= executable.id);
+        executable.resolved_start =
+            u32::try_from(resolved_start).map_err(|_| CompilerError::CapacityExceeded {
+                domain: "resolved-reference ranges",
+            })?;
+        executable.resolved_end =
+            u32::try_from(resolved_end).map_err(|_| CompilerError::CapacityExceeded {
+                domain: "resolved-reference ranges",
+            })?;
+
+        let unresolved_start =
+            unresolved.partition_point(|reference| reference.executable < executable.id);
+        let unresolved_end =
+            unresolved.partition_point(|reference| reference.executable <= executable.id);
+        executable.unresolved_start =
+            u32::try_from(unresolved_start).map_err(|_| CompilerError::CapacityExceeded {
+                domain: "unresolved-global ranges",
+            })?;
+        executable.unresolved_end =
+            u32::try_from(unresolved_end).map_err(|_| CompilerError::CapacityExceeded {
+                domain: "unresolved-global ranges",
+            })?;
+    }
+    Ok(())
+}

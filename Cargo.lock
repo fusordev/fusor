@@ -703,6 +703,15 @@ name = "quickjs-bytecode"
 version = "0.0.1"
 
 [[package]]
+name = "quickjs-compiler"
+version = "0.0.1"
+dependencies = [
+ "oxc_ast",
+ "oxc_semantic",
+ "quickjs-frontend",
+]
+
+[[package]]
 name = "quickjs-diagnostics"
 version = "0.0.1"
 dependencies = [

@@ -65,6 +65,25 @@ compilation. Static Oxc resolution is only an input: `with`, direct eval,
 Annex B bindings, and global declaration instantiation require
 QuickJS-compatible dynamic handling.
 
+The first compiler-owned lowering result is `StoragePlan`. While the
+`ParsedUnit` arena is alive, `quickjs-compiler` queries Oxc `Semantic` directly
+for scopes, symbols, declarations, and references. It then freezes only native
+dense executable/binding/reference IDs, exact copied spans, and immutable
+`Arc`-backed names and slices. Oxc node, scope, and symbol IDs never cross this
+boundary, and the Oxc semantic graph is neither cloned nor retained. Every
+resolved source reference records its native binding ID, using executable,
+copied span, and read/write access; unresolved globals remain a separate native
+reference domain. Executable preorder and per-executable source ordering are
+deterministic. This initial total slice fails with typed errors for eval,
+`with`, non-simple parameters, Annex B block functions, classes, synthetic
+function bindings (including Oxc-resolved `arguments` collisions), and
+cross-executable captures rather than emitting a partial plan. Namespace
+imports remain module-owned declaration cells, named/default imports remain
+import cells, and expression or anonymous-function default exports receive a
+distinct synthetic module-local `*default*` cell with the appropriate
+initialization policy. The asterisks are part of QuickJS's internal atom, so a
+source identifier named `_default_` cannot collide with it.
+
 Every successful unit also owns a `ModuleSyntaxRecord` for the module data that
 must survive the Oxc allocator. Static requests remain in source occurrence
 order, so repeated specifiers retain distinct typed indices, literal spans, and

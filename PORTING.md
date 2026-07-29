@@ -108,6 +108,12 @@ A milestone is complete only when all of its checked items pass in CI.
       precise source lookup for diagnostics and stack frames.
 - [ ] Bindings, lexical environments, closures, calls, constructors, and
       direct/indirect `eval`.
+  - [x] First arena-independent binding-storage plan: direct Oxc semantic
+        consumption, native dense executable/binding/reference identities,
+        resolved-reference-to-binding edges, deterministic owned `Arc` slices,
+        Script/Module/import/default-export placement, declaration
+        initialization/write/TDZ policy, and typed fail-closed rejection for
+        semantic cases not yet lowered.
 - [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
 - [ ] Deterministic debug/line tables.
 
