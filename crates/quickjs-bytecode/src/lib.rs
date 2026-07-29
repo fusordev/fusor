@@ -19,6 +19,7 @@ use std::{error::Error, fmt};
 
 mod codec;
 mod disassembly;
+mod function;
 mod verifier;
 
 pub use codec::{
@@ -28,6 +29,10 @@ pub use codec::{
 };
 pub use disassembly::{
     DisassemblyError, DisassemblyLimits, DisassemblySummary, render_disassembly,
+};
+pub use function::{
+    FunctionBitField, FunctionHeaderFlag, FunctionHeaderFlags, FunctionKind,
+    FunctionKindRequirement, FunctionMode, UnverifiedFunctionHeader, VerifiedFunctionHeader,
 };
 pub use verifier::{
     ControlFlowEdge, FunctionCountDomain, FunctionIndexDomains, FunctionPath, InstructionIndex,

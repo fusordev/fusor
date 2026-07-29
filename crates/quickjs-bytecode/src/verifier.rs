@@ -28,14 +28,19 @@
 //!
 //! This module intentionally produces [`VerifiedControlFlow`], not an
 //! execution-authorizing `VerifiedBytecode`. Atom namespaces, constant kinds,
-//! function metadata, nested functions, handlers, iterator markers, finally
-//! return addresses, and source tables still require later verification.
+//! nested functions, handlers, iterator markers, finally return addresses,
+//! debug payloads, and source tables still require later verification.
 
 use std::{collections::VecDeque, error::Error, fmt};
 
 use crate::{
     BytecodePc, DecodeError, DecodedInstruction, FinalOpcode, InstructionDecoder, OperandFormat,
     Operands, StackEffectError,
+    function::{
+        FunctionBitField, FunctionHeaderFlag, FunctionHeaderFlags, FunctionKind,
+        FunctionKindRequirement, FunctionMode, JS_MODE_MASK, SERIALIZED_FUNCTION_FLAGS_MASK,
+        UnverifiedFunctionHeader, VerifiedFunctionHeader,
+    },
 };
 
 /// Maximum argument, local, closure-reference, or stack count accepted by the
@@ -116,6 +121,7 @@ pub struct UnverifiedFunctionBody {
     bytecode: Vec<u8>,
     expected_stack_size: u32,
     domains: FunctionIndexDomains,
+    function_header: UnverifiedFunctionHeader,
 }
 
 impl UnverifiedFunctionBody {
@@ -125,11 +131,13 @@ impl UnverifiedFunctionBody {
         bytecode: Vec<u8>,
         expected_stack_size: u32,
         domains: FunctionIndexDomains,
+        function_header: UnverifiedFunctionHeader,
     ) -> Self {
         Self {
             bytecode,
             expected_stack_size,
             domains,
+            function_header,
         }
     }
 
@@ -149,6 +157,12 @@ impl UnverifiedFunctionBody {
     #[must_use]
     pub const fn domains(&self) -> FunctionIndexDomains {
         self.domains
+    }
+
+    /// Returns the raw function execution metadata.
+    #[must_use]
+    pub const fn function_header(&self) -> UnverifiedFunctionHeader {
+        self.function_header
     }
 }
 
@@ -400,8 +414,8 @@ impl VerifiedInstruction {
 /// Completely predecoded and ordinary-stack-verified control flow.
 ///
 /// This is deliberately not execution authority. It does not validate actual
-/// pool contents, atom namespaces, function metadata, nested functions,
-/// internal handler slots, or source tables.
+/// pool contents, atom namespaces, nested functions, debug payloads, internal
+/// handler slots, or source tables.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedControlFlow {
     bytecode: Vec<u8>,
@@ -409,6 +423,7 @@ pub struct VerifiedControlFlow {
     instruction_start_bitmap: Vec<u64>,
     computed_stack_size: u32,
     domains: FunctionIndexDomains,
+    function_header: VerifiedFunctionHeader,
 }
 
 impl VerifiedControlFlow {
@@ -435,6 +450,12 @@ impl VerifiedControlFlow {
     #[must_use]
     pub const fn domains(&self) -> FunctionIndexDomains {
         self.domains
+    }
+
+    /// Returns the validated function execution metadata.
+    #[must_use]
+    pub const fn function_header(&self) -> &VerifiedFunctionHeader {
+        &self.function_header
     }
 
     /// Returns whether `pc` starts an instruction.
@@ -490,6 +511,8 @@ pub enum FunctionCountDomain {
     Arguments,
     /// Function locals.
     Locals,
+    /// Function-owned variable-reference cells.
+    VariableReferences,
     /// Closure-variable descriptors.
     ClosureVariables,
     /// Serialized or compiler-declared stack size.
@@ -581,8 +604,6 @@ pub enum UnsupportedVerifierFeature {
     WithEnvironmentBranches,
     /// Typed iterator catch markers.
     IteratorMarkers,
-    /// Function-kind and suspension-point validation.
-    FunctionKindAndSuspension,
     /// Packed stack-relative property-copy offsets.
     PackedStackOffsets,
 }
@@ -616,6 +637,49 @@ pub enum VerificationErrorKind {
         value: u32,
         /// Inclusive maximum.
         maximum: u32,
+    },
+    /// A serialized function field contains disallowed bits.
+    DisallowedFunctionBits {
+        /// Rejected bit field.
+        field: FunctionBitField,
+        /// Complete rejected value.
+        value: u16,
+        /// Mask of bits allowed in this stored field.
+        allowed_mask: u16,
+        /// Rejected bits outside `allowed_mask`.
+        disallowed_bits: u16,
+    },
+    /// More source arguments were marked defined than the function owns.
+    DefinedArgumentCountOutOfRange {
+        /// Count of source-defined arguments.
+        defined: u32,
+        /// Complete function argument count.
+        argument_count: u32,
+    },
+    /// More variable-reference cells were declared than bindings can own.
+    VariableReferenceCountOutOfRange {
+        /// Declared variable-reference cell count.
+        variable_references: u32,
+        /// Function argument count.
+        argument_count: u32,
+        /// Function local count.
+        local_count: u32,
+    },
+    /// A packed flag is invalid for the decoded function kind.
+    FunctionFlagNotAllowedForKind {
+        /// Rejected packed flag.
+        flag: FunctionHeaderFlag,
+        /// Actual decoded function kind.
+        kind: FunctionKind,
+        /// Required function-kind family.
+        requirement: FunctionKindRequirement,
+    },
+    /// Two packed function flags cannot describe the same function.
+    ConflictingFunctionFlags {
+        /// First conflicting flag.
+        first: FunctionHeaderFlag,
+        /// Second conflicting flag.
+        second: FunctionHeaderFlag,
     },
     /// A configured stack limit exceeded the pinned structural maximum.
     InvalidStackLimit {
@@ -672,6 +736,13 @@ pub enum VerificationErrorKind {
     UnsupportedOpcodeSemantics {
         /// Semantic component still required.
         feature: UnsupportedVerifierFeature,
+    },
+    /// An opcode is invalid for the enclosing function kind.
+    OpcodeNotAllowedForFunctionKind {
+        /// Actual enclosing function kind.
+        kind: FunctionKind,
+        /// Function-kind family required by the opcode.
+        requirement: FunctionKindRequirement,
     },
     /// Resolving the opcode's dynamic stack effect exposed a schema error.
     StackEffect(StackEffectError),
@@ -799,6 +870,10 @@ impl Error for VerificationError {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "each structured verifier invariant has one explicit display arm"
+)]
 impl fmt::Display for VerificationErrorKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -826,6 +901,41 @@ impl fmt::Display for VerificationErrorKind {
                 formatter,
                 "{domain} count {value} exceeds structural maximum {maximum}"
             ),
+            Self::DisallowedFunctionBits {
+                field,
+                value,
+                allowed_mask,
+                disallowed_bits,
+            } => write!(
+                formatter,
+                "{field} value {value:#06x} contains disallowed bits {disallowed_bits:#06x}; allowed mask is {allowed_mask:#06x}"
+            ),
+            Self::DefinedArgumentCountOutOfRange {
+                defined,
+                argument_count,
+            } => write!(
+                formatter,
+                "defined argument count {defined} exceeds function argument count {argument_count}"
+            ),
+            Self::VariableReferenceCountOutOfRange {
+                variable_references,
+                argument_count,
+                local_count,
+            } => write!(
+                formatter,
+                "variable-reference count {variable_references} exceeds {argument_count} arguments plus {local_count} locals"
+            ),
+            Self::FunctionFlagNotAllowedForKind {
+                flag,
+                kind,
+                requirement,
+            } => write!(
+                formatter,
+                "function flag {flag} requires {requirement}, but the decoded function kind is {kind}"
+            ),
+            Self::ConflictingFunctionFlags { first, second } => {
+                write!(formatter, "function flags {first} and {second} conflict")
+            }
             Self::InvalidStackLimit { value, maximum } => write!(
                 formatter,
                 "configured stack-depth limit {value} exceeds structural maximum {maximum}"
@@ -866,6 +976,10 @@ impl fmt::Display for VerificationErrorKind {
                     "opcode requires unsupported verifier feature {feature}"
                 )
             }
+            Self::OpcodeNotAllowedForFunctionKind { kind, requirement } => write!(
+                formatter,
+                "opcode requires {requirement}, but the enclosing function kind is {kind}"
+            ),
             Self::StackEffect(source) => {
                 write!(
                     formatter,
@@ -923,6 +1037,7 @@ impl fmt::Display for FunctionCountDomain {
         formatter.write_str(match self {
             Self::Arguments => "argument",
             Self::Locals => "local",
+            Self::VariableReferences => "variable-reference",
             Self::ClosureVariables => "closure-variable",
             Self::ExpectedStackSize => "expected stack-size",
         })
@@ -991,7 +1106,6 @@ impl fmt::Display for UnsupportedVerifierFeature {
             Self::FinallyReturnAddresses => "finally-return-addresses",
             Self::WithEnvironmentBranches => "with-environment-branches",
             Self::IteratorMarkers => "iterator-markers",
-            Self::FunctionKindAndSuspension => "function-kind-and-suspension",
             Self::PackedStackOffsets => "packed-stack-offsets",
         })
     }
@@ -1039,11 +1153,13 @@ pub fn verify_control_flow(
         &mut instruction_start_bitmap,
         limits.max_instructions_per_function,
     )?;
+    let function_header = validate_function_header(body.function_header, body.domains)?;
     let mut instructions = validate_static_semantics(
         &decoded,
         &instruction_start_bitmap,
         body.bytecode.len(),
         body.domains,
+        function_header.kind(),
     )?;
     let computed_stack_size = analyze_ordinary_stack(&mut instructions, limits)?;
 
@@ -1062,6 +1178,7 @@ pub fn verify_control_flow(
         instruction_start_bitmap,
         computed_stack_size,
         domains: body.domains,
+        function_header,
     })
 }
 
@@ -1097,6 +1214,10 @@ fn validate_limits_and_counts(
     check_structural_count(FunctionCountDomain::Arguments, body.domains.argument_count)?;
     check_structural_count(FunctionCountDomain::Locals, body.domains.local_count)?;
     check_structural_count(
+        FunctionCountDomain::VariableReferences,
+        body.function_header.variable_reference_count(),
+    )?;
+    check_structural_count(
         FunctionCountDomain::ClosureVariables,
         body.domains.closure_var_count,
     )?;
@@ -1109,6 +1230,96 @@ fn validate_limits_and_counts(
         u64::from(body.expected_stack_size),
         u64::from(limits.max_stack_depth),
     )
+}
+
+fn validate_function_header(
+    header: UnverifiedFunctionHeader,
+    domains: FunctionIndexDomains,
+) -> Result<VerifiedFunctionHeader, VerificationError> {
+    let serialized_flags = header.serialized_flags();
+    let unknown_flags = serialized_flags & !SERIALIZED_FUNCTION_FLAGS_MASK;
+    if unknown_flags != 0 {
+        return Err(VerificationError::root(
+            VerificationErrorKind::DisallowedFunctionBits {
+                field: FunctionBitField::SerializedFlags,
+                value: serialized_flags,
+                allowed_mask: SERIALIZED_FUNCTION_FLAGS_MASK,
+                disallowed_bits: unknown_flags,
+            },
+        ));
+    }
+
+    let js_mode = header.js_mode();
+    let unknown_mode = js_mode & !JS_MODE_MASK;
+    if unknown_mode != 0 {
+        return Err(VerificationError::root(
+            VerificationErrorKind::DisallowedFunctionBits {
+                field: FunctionBitField::JsMode,
+                value: u16::from(js_mode),
+                allowed_mask: u16::from(JS_MODE_MASK),
+                disallowed_bits: u16::from(unknown_mode),
+            },
+        ));
+    }
+
+    let defined_argument_count = header.defined_argument_count();
+    if defined_argument_count > domains.argument_count {
+        return Err(VerificationError::root(
+            VerificationErrorKind::DefinedArgumentCountOutOfRange {
+                defined: defined_argument_count,
+                argument_count: domains.argument_count,
+            },
+        ));
+    }
+
+    let variable_reference_count = header.variable_reference_count();
+    let available_bindings = u64::from(domains.argument_count) + u64::from(domains.local_count);
+    if u64::from(variable_reference_count) > available_bindings {
+        return Err(VerificationError::root(
+            VerificationErrorKind::VariableReferenceCountOutOfRange {
+                variable_references: variable_reference_count,
+                argument_count: domains.argument_count,
+                local_count: domains.local_count,
+            },
+        ));
+    }
+
+    let flags = FunctionHeaderFlags::from_validated_bits(serialized_flags);
+    let kind = FunctionKind::from_serialized_flags(serialized_flags);
+    if flags.has_prototype() && flags.is_derived_class_constructor() {
+        return Err(VerificationError::root(
+            VerificationErrorKind::ConflictingFunctionFlags {
+                first: FunctionHeaderFlag::HasPrototype,
+                second: FunctionHeaderFlag::DerivedClassConstructor,
+            },
+        ));
+    }
+    if !matches!(kind, FunctionKind::Normal) {
+        let invalid_flag = if flags.has_prototype() {
+            Some(FunctionHeaderFlag::HasPrototype)
+        } else if flags.is_derived_class_constructor() {
+            Some(FunctionHeaderFlag::DerivedClassConstructor)
+        } else {
+            None
+        };
+        if let Some(flag) = invalid_flag {
+            return Err(VerificationError::root(
+                VerificationErrorKind::FunctionFlagNotAllowedForKind {
+                    flag,
+                    kind,
+                    requirement: FunctionKindRequirement::Normal,
+                },
+            ));
+        }
+    }
+
+    Ok(VerifiedFunctionHeader::new(
+        flags,
+        FunctionMode::from_validated_bits(js_mode),
+        kind,
+        defined_argument_count,
+        variable_reference_count,
+    ))
 }
 
 fn check_structural_count(
@@ -1206,6 +1417,7 @@ fn validate_static_semantics(
     instruction_start_bitmap: &[u64],
     bytecode_len: usize,
     domains: FunctionIndexDomains,
+    function_kind: FunctionKind,
 ) -> Result<Vec<VerifiedInstruction>, VerificationError> {
     let mut verified = Vec::new();
     verified.try_reserve_exact(decoded.len()).map_err(|_| {
@@ -1250,9 +1462,40 @@ fn validate_static_semantics(
                 VerificationErrorKind::UnsupportedOpcodeSemantics { feature },
             ));
         }
+        validate_function_kind_opcode(decoded, function_kind)?;
     }
 
     Ok(verified)
+}
+
+fn validate_function_kind_opcode(
+    decoded: DecodedInstruction,
+    function_kind: FunctionKind,
+) -> Result<(), VerificationError> {
+    let requirement = match decoded.instruction().opcode() {
+        FinalOpcode::TailCall
+        | FinalOpcode::TailCallMethod
+        | FinalOpcode::Return
+        | FinalOpcode::ReturnUndef => FunctionKindRequirement::Normal,
+        FinalOpcode::InitialYield | FinalOpcode::Yield => FunctionKindRequirement::Generator,
+        FinalOpcode::YieldStar => FunctionKindRequirement::SynchronousGenerator,
+        FinalOpcode::AsyncYieldStar => FunctionKindRequirement::AsyncGenerator,
+        FinalOpcode::Await => FunctionKindRequirement::Async,
+        FinalOpcode::ReturnAsync => FunctionKindRequirement::NonNormal,
+        _ => return Ok(()),
+    };
+
+    if !requirement.accepts(function_kind) {
+        return Err(VerificationError::at_instruction(
+            decoded,
+            VerificationErrorKind::OpcodeNotAllowedForFunctionKind {
+                kind: function_kind,
+                requirement,
+            },
+        ));
+    }
+
+    Ok(())
 }
 
 fn resolve_static_successors(
@@ -1871,6 +2114,7 @@ const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
         | FinalOpcode::TailCallMethod
         | FinalOpcode::Return
         | FinalOpcode::ReturnUndef
+        | FinalOpcode::ReturnAsync
         | FinalOpcode::Throw
         | FinalOpcode::ThrowError => OpcodeSemantics::Terminate,
 
@@ -1944,26 +2188,17 @@ const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
             SuccessorShape::Fallthrough,
         ),
 
-        FinalOpcode::ReturnAsync => OpcodeSemantics::Unsupported(
-            UnsupportedVerifierFeature::FunctionKindAndSuspension,
-            SuccessorShape::Terminate,
-        ),
-
-        FinalOpcode::InitialYield
-        | FinalOpcode::Yield
-        | FinalOpcode::YieldStar
-        | FinalOpcode::AsyncYieldStar
-        | FinalOpcode::Await => OpcodeSemantics::Unsupported(
-            UnsupportedVerifierFeature::FunctionKindAndSuspension,
-            SuccessorShape::Fallthrough,
-        ),
-
         FinalOpcode::CopyDataProperties => OpcodeSemantics::Unsupported(
             UnsupportedVerifierFeature::PackedStackOffsets,
             SuccessorShape::Fallthrough,
         ),
 
         FinalOpcode::PushI32
+        | FinalOpcode::InitialYield
+        | FinalOpcode::Yield
+        | FinalOpcode::YieldStar
+        | FinalOpcode::AsyncYieldStar
+        | FinalOpcode::Await
         | FinalOpcode::PushAtomValue
         | FinalOpcode::PrivateSymbol
         | FinalOpcode::Undefined
@@ -2387,8 +2622,8 @@ mod tests {
         }
 
         assert_eq!(invalid, 1);
-        assert_eq!(supported, 206);
-        assert_eq!(unsupported, 37);
+        assert_eq!(supported, 212);
+        assert_eq!(unsupported, 31);
         assert_eq!(invalid + supported + unsupported, ALL_FINAL_OPCODES.len());
         assert_eq!(
             opcode_semantics(FinalOpcode::Invalid),

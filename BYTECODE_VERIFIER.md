@@ -49,13 +49,16 @@ Verification has five ordered phases:
 The first implemented slice returns `VerifiedControlFlow`, not
 `VerifiedBytecode`. It completely predecodes the function, validates every
 static operand domain represented by its body-only input and every successor
-even in unreachable code, and analyzes reachable ordinary JavaScript-value
-stack heights. It rejects 37 opcodes whose correct verification needs typed
-constants, raw function slots, handler or iterator markers, finally return
-addresses, function-kind metadata, or packed stack offsets. Its opaque
-certificate has no execution API and cannot cross the VM trust boundary. The
-complete typed-stack and whole-function rules below remain mandatory before
-`VerifiedBytecode` exists.
+even in unreachable code, validates the serialized execution-header flag and
+mode domains, retains its typed function kind and counts, and analyzes
+reachable ordinary JavaScript-value stack heights. The six suspension opcodes
+are accepted only for their compatible function-kind families, while ordinary
+and tail returns are limited to normal functions. The slice still rejects 31
+opcodes whose correct verification needs typed constants, raw function slots,
+handler or iterator markers, finally return
+addresses, or packed stack offsets. Its opaque certificate has no execution
+API and cannot cross the VM trust boundary. The complete typed-stack and
+whole-function rules below remain mandatory before `VerifiedBytecode` exists.
 
 ## Complete predecode and instruction boundaries
 
@@ -144,6 +147,29 @@ formats through a serialized atom table and relocates them back while reading
 (`quickjs.c:32027-32036`, `quickjs.c:37525-37537`,
 `quickjs.c:37613-37627`, `quickjs.c:38522-38543`).
 
+The staged body certificate already owns and validates the execution-header
+subset serialized by the object writer (`quickjs.c:37715-37730`,
+`quickjs.c:38641-38658`):
+
+| Packed flag bits | Meaning |
+| --- | --- |
+| 0 | has prototype |
+| 1 | simple parameter list |
+| 2 | derived class constructor |
+| 3 | needs home object |
+| 4–5 | function kind: normal, generator, async, or async generator |
+| 6–11 | `new.target`, `super()` call, `super` property, `arguments`, debug, and eval flags |
+| 12–15 | reserved and rejected |
+
+The validated stored `js_mode` mask is `0x01`: strict only.
+`JS_MODE_ASYNC` and `JS_MODE_BACKTRACE_BARRIER` are runtime frame state;
+QuickJS synthesizes the former when creating a suspendable frame and sets the
+latter temporarily around an eval call (`quickjs.c:20785-20798`,
+`quickjs.c:37191-37205`). A future runtime frame-mode type must add them there,
+not admit them through `VerifiedFunctionHeader`. The eval header flag does not
+enable `eval` or `apply_eval`; their scope metadata remains a separate
+fail-closed capability.
+
 **Rust hardening.**
 
 - Every Rust bytecode function owns a bounded ordered atom pool. Its encoded
@@ -163,6 +189,7 @@ formats through a serialized atom table and relocates them back while reading
   smuggling a sentinel integer into `AtomPoolIndex`.
 - `vardefs.len() == arg_count + var_count`;
 - `defined_arg_count <= arg_count`;
+- `var_ref_count <= arg_count + var_count`;
 - `arg_count`, `var_count`, `var_ref_count`, and `closure_var_count` are each
   at most 65,534; all sums must fit `usize`;
 - each present metadata atom index is below that function's atom-pool length,
@@ -258,16 +285,26 @@ follows:
   (`quickjs.c:19346-19403`).
 - `define_class` permits only `HAS_HERITAGE`
   (`quickjs.c:17450-17464`, `quickjs.c:19406-19418`).
-- Serialized function flags, vardef flags, closure flags, and `js_mode` reject
-  every reserved bit. The defined `js_mode` bits are strict, async-frame, and
-  backtrace-barrier (`quickjs.c:403-405`).
-- `initial_yield`, `yield`, and `yield_star` require a generator kind;
-  `async_yield_star` requires an async generator; `await` requires an async
-  kind; and `return_async` requires a non-normal function. The upstream
+- Serialized function flags, vardef flags, closure flags, and stored `js_mode`
+  reject every disallowed bit. Stored function mode permits strict only; async
+  and backtrace-barrier bits are synthesized only in runtime frame mode
+  (`quickjs.c:403-405`, `quickjs.c:20785-20798`,
+  `quickjs.c:37191-37205`).
+- `has_prototype` and `is_derived_class_constructor` require a normal function
+  kind and are mutually exclusive (`quickjs.c:25008-25015`,
+  `quickjs.c:36513-36525`).
+- `initial_yield` and `yield` require a generator kind; `yield_star` requires
+  a synchronous generator; `async_yield_star` requires an async generator;
+  `await` requires an async kind; and `return_async` requires a non-normal
+  function. The upstream
   parser/compiler enforces async `await`, generator `yield`, initial yield only
   for generator kinds, and `return_async` for non-normal kinds
   (`quickjs.c:27559-27569`, `quickjs.c:27888-27914`,
   `quickjs.c:36759-36784`).
+- `return`, `return_undef`, `tail_call`, and `tail_call_method` require a
+  normal function. QuickJS routes them through ordinary frame cleanup, a path
+  that must never be reached by a generator frame
+  (`quickjs.c:18209-18264`, `quickjs.c:20573-20593`).
 
 ## Typed abstract stack
 

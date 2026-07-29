@@ -107,6 +107,10 @@ A milestone is complete only when all of its checked items pass in CI.
         static target/index/secondary-operand checks, ordinary reachable
         stack-height analysis, exact maximum comparison, and a deliberately
         non-executable `VerifiedControlFlow` certificate.
+  - [x] Validate serialized function execution flags, mode bits, defined
+        argument and variable-reference counts and their available-binding
+        relationship; retain a typed function kind; and enforce suspension and
+        return-opcode kind compatibility.
 - [ ] Instruction/function PC-to-source tables, source-map chaining, and
       precise source lookup for diagnostics and stack frames.
 - [ ] Bindings, lexical environments, closures, calls, constructors, and

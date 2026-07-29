@@ -1,7 +1,8 @@
 use quickjs_bytecode::{
     AtomPoolIndex, BytecodeBuilder, BytecodePc, ControlFlowEdge, DecodeError, FinalOpcode,
-    FunctionCountDomain, FunctionIndexDomains, InvalidControlFlowTargetReason, OperandIndexDomain,
-    Operands, SecondaryOperandField, UnsupportedVerifierFeature, UnverifiedFunctionBody,
+    FunctionCountDomain, FunctionIndexDomains, FunctionKind, FunctionKindRequirement,
+    InvalidControlFlowTargetReason, OperandIndexDomain, Operands, SecondaryOperandField,
+    UnsupportedVerifierFeature, UnverifiedFunctionBody, UnverifiedFunctionHeader,
     VerificationError, VerificationErrorKind, VerificationLimits, VerificationResource,
     VerifiedSuccessorKind, verify_control_flow,
 };
@@ -21,7 +22,12 @@ fn unverified(
     expected_stack_size: u32,
     domains: FunctionIndexDomains,
 ) -> UnverifiedFunctionBody {
-    UnverifiedFunctionBody::new(bytecode, expected_stack_size, domains)
+    UnverifiedFunctionBody::new(
+        bytecode,
+        expected_stack_size,
+        domains,
+        UnverifiedFunctionHeader::default(),
+    )
 }
 
 fn verify(
@@ -307,7 +313,7 @@ fn unsupported_fallthrough_shapes_are_validated_before_capability_rejection() {
 }
 
 #[test]
-fn unsupported_terminators_do_not_require_fallthrough() {
+fn return_async_requires_a_non_normal_function() {
     let error = reject(
         encode(&[(FinalOpcode::ReturnAsync, Operands::None)]),
         0,
@@ -315,8 +321,9 @@ fn unsupported_terminators_do_not_require_fallthrough() {
     );
     assert_eq!(
         error.kind(),
-        &VerificationErrorKind::UnsupportedOpcodeSemantics {
-            feature: UnsupportedVerifierFeature::FunctionKindAndSuspension,
+        &VerificationErrorKind::OpcodeNotAllowedForFunctionKind {
+            kind: FunctionKind::Normal,
+            requirement: FunctionKindRequirement::NonNormal,
         }
     );
 }
@@ -748,14 +755,6 @@ fn each_missing_semantic_capability_fails_closed_with_a_typed_reason() {
             ]),
             FunctionIndexDomains::default(),
             UnsupportedVerifierFeature::IteratorMarkers,
-        ),
-        (
-            encode(&[
-                (FinalOpcode::Await, Operands::None),
-                (FinalOpcode::ReturnUndef, Operands::None),
-            ]),
-            FunctionIndexDomains::default(),
-            UnsupportedVerifierFeature::FunctionKindAndSuspension,
         ),
         (
             encode(&[
