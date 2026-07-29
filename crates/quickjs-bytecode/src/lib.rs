@@ -1,15 +1,28 @@
-//! Safe, allocation-free opcode metadata for the pure-Rust `QuickJS` port.
+//! Safe opcode metadata and checked instruction codec for the pure-Rust
+//! `QuickJS` port.
 //!
 //! The opcode order, encoded sizes, operand formats, and base stack effects are
 //! translated from `quickjs-opcode.h` in the official 2026-06-04 release.
 //! Temporary compiler opcodes deliberately use a separate type even though
 //! their intermediate byte values overlap the final short-opcode range.
 //!
+//! The owned instruction codec uses deterministic little-endian operands.
+//! Upstream private in-memory bytecode is native-endian and its object writer
+//! has a separate versioned format, so binary compatibility is not claimed.
+//!
 //! This crate describes bytecode. It does not execute or otherwise trust it.
 
 #![forbid(unsafe_code)]
 
 use std::{error::Error, fmt};
+
+mod codec;
+
+pub use codec::{
+    BytecodeBuilder, BytecodePc, DecodeError, DecodedInstruction, EncodeError, EncodedOperands,
+    Instruction, InstructionDecoder, InstructionError, MAX_ENCODED_OPERAND_BYTES,
+    OperandDecodeError, OperandEncodeError, Operands, decode_instruction,
+};
 
 /// The official `QuickJS` release from which the opcode schema was translated.
 pub const QUICKJS_COMPATIBILITY_RELEASE: &str = "2026-06-04";

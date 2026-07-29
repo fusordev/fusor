@@ -63,13 +63,16 @@ A milestone is complete only when all of its checked items pass in CI.
 
 - [x] Port the complete final and compiler-temporary opcode schema, operand
       widths, and fixed/dynamic stack-effect metadata from `quickjs-opcode.h`.
-- [ ] Checked owned stack-bytecode format with computed maximum stack depth.
+- [x] Checked owned stack-bytecode codec with typed operands, deterministic
+      encoding, bounded transactional construction, and a total decoder.
+- [ ] Control-flow and abstract-stack verifier with computed maximum stack
+      depth.
 - [ ] Instruction/function PC-to-source tables, source-map chaining, and
       precise source lookup for diagnostics and stack frames.
 - [ ] Bindings, lexical environments, closures, calls, constructors, and
       direct/indirect `eval`.
 - [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
-- [ ] Bytecode verifier and deterministic debug/line tables.
+- [ ] Deterministic debug/line tables.
 
 ### M3 — values and object model
 
