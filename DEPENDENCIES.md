@@ -13,6 +13,7 @@ Oxc is the user-selected JavaScript parser. The workspace exactly pins its
 parser-facing crates so an upstream AST or diagnostic change cannot silently
 alter compilation:
 
+- official parser guide: <https://oxc.rs/docs/guide/usage/parser.html>;
 - `oxc_allocator`
 - `oxc_ast`
 - `oxc_diagnostics`

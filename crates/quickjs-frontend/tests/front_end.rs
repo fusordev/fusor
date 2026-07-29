@@ -348,21 +348,20 @@ fn source_byte_limits_reject_malformed_input_before_oxc_for_every_entry() {
 }
 
 #[test]
-fn dynamic_function_bodies_are_never_parsed_as_naked_programs() {
+fn ordinary_parse_never_treats_naked_source_as_a_dynamic_function() {
     for kind in [
         DynamicFunctionKind::Function,
         DynamicFunctionKind::GeneratorFunction,
         DynamicFunctionKind::AsyncFunction,
         DynamicFunctionKind::AsyncGeneratorFunction,
     ] {
-        let parameters = [SourceFragment::new("value")];
-        let dynamic_source =
-            DynamicFunctionSource::new(kind, &parameters, SourceFragment::new("function {"));
-        let error =
-            with_dynamic_function_source(dynamic_source, FrontendLimits::default(), |_, _| {
-                panic!("unsupported wrapper preparation must not invoke the callback")
-            })
-            .expect_err("constructor source requires an exact wrapper");
+        let allocator = Allocator::new();
+        let error = parse(
+            &allocator,
+            "return value;",
+            FrontendOptions::for_goal(CompilationGoal::DynamicFunction(kind)),
+        )
+        .expect_err("dynamic function fragments require the dedicated wrapper entry");
 
         assert_eq!(error.stage(), DiagnosticStage::CompilationGoal);
         assert_eq!(
@@ -378,9 +377,11 @@ fn dynamic_function_bodies_are_never_parsed_as_naked_programs() {
                 .message
                 .contains(&format!("kind={kind}"))
         );
-        assert!(error.diagnostics()[0].message.contains("not implemented"));
-        assert_eq!(dynamic_source.parameters()[0].text(), "value");
-        assert_eq!(dynamic_source.body().text(), "function {");
+        assert!(
+            error.diagnostics()[0]
+                .message
+                .contains("with_dynamic_function_source")
+        );
     }
 }
 
@@ -636,7 +637,7 @@ fn registered_diagnostics_preserve_the_structured_unsupported_goal() {
         )),
         |_| (),
     )
-    .expect_err("dynamic Function parsing is not implemented");
+    .expect_err("naked dynamic Function parsing requires the fragment adapter");
     let RegisteredFrontendError::Diagnostics(diagnostics) = error else {
         panic!("expected goal diagnostics");
     };
@@ -661,7 +662,7 @@ fn registered_diagnostics_preserve_the_structured_unsupported_goal() {
     assert!(
         diagnostics.diagnostics()[0]
             .message()
-            .contains("not implemented")
+            .contains("with_dynamic_function_source")
     );
 }
 

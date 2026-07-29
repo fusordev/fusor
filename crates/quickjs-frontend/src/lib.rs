@@ -8,15 +8,20 @@
 mod frontend;
 
 pub use frontend::{
-    Allocator, CompilationGoal, DEFAULT_MAX_SOURCE_BYTES, DiagnosticLabel, DiagnosticStage,
-    DirectEvalBinding, DirectEvalBindingKind, DirectEvalBindingLocation, DirectEvalCapabilities,
-    DirectEvalContext, DirectEvalPrivateName, DirectEvalPrivateNameKind, DirectEvalScopeFrame,
-    DirectEvalScopeKind, DirectEvalScopeSnapshot, DynamicFunctionKind, DynamicFunctionSource,
-    FrontendDiagnostic, FrontendDiagnosticCode, FrontendError, FrontendLimitError, FrontendLimits,
-    FrontendOptions, FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal, ParseMode,
-    ParsedUnit, PreparedDynamicFunctionSource, Program, RegisteredFrontendDiagnostics,
-    RegisteredFrontendError, SourceFragment, Span, UnsupportedCompilationGoal, parse,
-    with_dynamic_function_source, with_parsed_program, with_registered_program,
+    Allocator, CompilationGoal, DEFAULT_MAX_DYNAMIC_FUNCTION_FRAGMENTS,
+    DEFAULT_MAX_DYNAMIC_FUNCTION_ORIGIN_BYTES, DEFAULT_MAX_SOURCE_BYTES, DiagnosticLabel,
+    DiagnosticStage, DirectEvalBinding, DirectEvalBindingKind, DirectEvalBindingLocation,
+    DirectEvalCapabilities, DirectEvalContext, DirectEvalPrivateName, DirectEvalPrivateNameKind,
+    DirectEvalScopeFrame, DirectEvalScopeKind, DirectEvalScopeSnapshot, DynamicFunctionByteRange,
+    DynamicFunctionError, DynamicFunctionFragmentMap, DynamicFunctionFragmentRole,
+    DynamicFunctionKind, DynamicFunctionMapError, DynamicFunctionMappedSegment,
+    DynamicFunctionMappedSource, DynamicFunctionPreparationResource, DynamicFunctionSource,
+    DynamicFunctionSpanBias, DynamicFunctionSyntheticKind, FrontendDiagnostic,
+    FrontendDiagnosticCode, FrontendError, FrontendLimitError, FrontendLimits, FrontendOptions,
+    FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal, ParseMode, ParsedUnit,
+    PreparedDynamicFunctionSource, Program, RegisteredFrontendDiagnostics, RegisteredFrontendError,
+    SourceFragment, Span, UnsupportedCompilationGoal, parse, with_dynamic_function_source,
+    with_parsed_program, with_registered_program,
 };
 
 /// The official `QuickJS` release whose behavior this port targets.

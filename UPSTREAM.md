@@ -41,5 +41,16 @@ missing attributes as false and missing values as `undefined`
 (`quickjs.c:10110-10255`). Existing-property compatibility, exotic definitions,
 and getter/setter callability remain separate later algorithms.
 
+Dynamic Function source preparation follows the shared constructor in
+`quickjs.c:40937-40977`: family-specific `(function... anonymous(` prefixes,
+parameter arguments joined by a literal comma, `\n) {\n` before the body, and
+`\n})` after it. The complete wrapper is parsed as an indirect Script. The
+pinned release explicitly notes, but still permits, wrapper escape such as
+`Function("}), ({")`; compatibility therefore does not require the parsed
+Script to be exactly one function expression. The current Oxc-facing fragment
+API accepts scalar-valid UTF-8 only. A future runtime-string adapter must
+preserve raw UTF-16 lone surrogates without replacement before this path can
+claim all constructor inputs.
+
 Upstream source and binaries may be used as development oracles. They are not
 vendored, linked, or required to build, test, or use the Rust implementation.

@@ -21,7 +21,7 @@ use oxc_span::SourceType;
 pub use oxc_span::Span;
 use quickjs_diagnostics::{
     Diagnostic as SharedDiagnostic, DiagnosticCode as SharedDiagnosticCode, DiagnosticCodeError,
-    DiagnosticLabel as SharedDiagnosticLabel, DiagnosticSeverity, SourceError, SourceId, SourceMap,
+    DiagnosticLabel as SharedDiagnosticLabel, DiagnosticSeverity, SourceError, SourceId,
     SourceRegistry,
 };
 
@@ -29,6 +29,13 @@ use quickjs_diagnostics::{
 ///
 /// Hosts can select a different ceiling with [`FrontendLimits`].
 pub const DEFAULT_MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+
+/// The default maximum number of separately supplied dynamic-function
+/// fragments, including the body fragment.
+pub const DEFAULT_MAX_DYNAMIC_FUNCTION_FRAGMENTS: usize = 1_048_576;
+
+/// The default maximum UTF-8 bytes retained in dynamic-function origin labels.
+pub const DEFAULT_MAX_DYNAMIC_FUNCTION_ORIGIN_BYTES: usize = 16 * 1024 * 1024;
 
 const MAX_OXC_SOURCE_BYTES: usize = {
     let span_limit = u32::MAX as usize;
@@ -39,6 +46,9 @@ const MAX_OXC_SOURCE_BYTES: usize = {
         slice_limit
     }
 };
+
+const DYNAMIC_FUNCTION_PARAMETERS_BODY_SEPARATOR: &str = "\n) {\n";
+const DYNAMIC_FUNCTION_SUFFIX: &str = "\n})";
 
 /// Oxc's underlying ECMAScript source mode.
 ///
@@ -607,7 +617,12 @@ pub enum DynamicFunctionKind {
 ///
 /// Dynamic function constructors receive zero or more parameter fragments and
 /// one body fragment. Keeping those fragments separate is necessary for
-/// faithful wrapper construction and future source-span remapping.
+/// faithful wrapper construction and source-span remapping.
+///
+/// This UTF-8 boundary cannot represent an isolated UTF-16 surrogate. The
+/// eventual runtime `JSString` adapter must reject such input before calling
+/// this API until a lossless UTF-16-to-Oxc preprocessing layer exists. This
+/// crate never substitutes a replacement character.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceFragment<'source> {
     text: &'source str,
@@ -681,14 +696,6 @@ impl<'source> DynamicFunctionSource<'source> {
     pub const fn body(self) -> SourceFragment<'source> {
         self.body
     }
-
-    fn source_bytes(self) -> usize {
-        self.parameters
-            .iter()
-            .fold(self.body.text().len(), |total, fragment| {
-                total.saturating_add(fragment.text().len())
-            })
-    }
 }
 
 /// The engine entry point whose grammar and early errors are being parsed.
@@ -738,8 +745,9 @@ impl CompilationGoal<'_> {
     }
 }
 
-/// A compilation goal that is represented by the public API but not yet
-/// implemented faithfully by the Oxc-backed front end.
+/// A compilation goal that cannot be processed by the ordinary naked-source
+/// [`parse`] entry, either because its contextual adapter is pending or
+/// because it requires a dedicated source-preparation entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum UnsupportedCompilationGoal {
@@ -749,7 +757,8 @@ pub enum UnsupportedCompilationGoal {
     IndirectEval(IndirectEvalGoal),
     /// Direct eval requires caller grammar state and scope-chain integration.
     DirectEval(DirectEvalCapabilities),
-    /// A dynamic function requires exact wrapper construction and span mapping.
+    /// Dynamic function source was passed naked instead of as constructor
+    /// fragments to [`with_dynamic_function_source`].
     DynamicFunction(DynamicFunctionKind),
 }
 
@@ -774,7 +783,9 @@ impl UnsupportedCompilationGoal {
                 capabilities.allows_arguments()
             ),
             Self::DynamicFunction(kind) => {
-                format!("dynamic function compilation (kind={kind}) is not implemented")
+                format!(
+                    "dynamic function compilation (kind={kind}) requires exact fragment preparation through with_dynamic_function_source"
+                )
             }
         }
     }
@@ -819,30 +830,707 @@ impl fmt::Display for DynamicFunctionKind {
     }
 }
 
+impl DynamicFunctionKind {
+    const fn wrapper_prefix(self) -> &'static str {
+        match self {
+            Self::Function => "(function anonymous(",
+            Self::GeneratorFunction => "(function* anonymous(",
+            Self::AsyncFunction => "(async function anonymous(",
+            Self::AsyncGeneratorFunction => "(async function* anonymous(",
+        }
+    }
+}
+
+/// The role of one caller-supplied dynamic-function fragment.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DynamicFunctionFragmentRole {
+    /// One parameter-list argument, in constructor argument order.
+    Parameter {
+        /// Zero-based parameter-fragment index.
+        index: u32,
+    },
+    /// The constructor's final body argument.
+    Body,
+}
+
+/// A half-open UTF-8 byte range in generated or fragment source.
+///
+/// Values returned by this crate are always ordered and bounded by their
+/// owning source. The fields are private so callers cannot forge a range and
+/// mistake it for one validated by the fragment map.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DynamicFunctionByteRange {
+    start: u32,
+    end: u32,
+}
+
+impl DynamicFunctionByteRange {
+    const fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
+    }
+
+    /// Returns the inclusive start byte.
+    #[must_use]
+    pub const fn start(self) -> u32 {
+        self.start
+    }
+
+    /// Returns the exclusive end byte.
+    #[must_use]
+    pub const fn end(self) -> u32 {
+        self.end
+    }
+
+    /// Returns the byte length.
+    #[must_use]
+    pub const fn len(self) -> u32 {
+        self.end - self.start
+    }
+
+    /// Returns whether the range contains no bytes.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.start == self.end
+    }
+}
+
+/// The purpose of bytes inserted by the dynamic-function wrapper.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DynamicFunctionSyntheticKind {
+    /// The family-specific `(function ... anonymous(` prefix.
+    Prefix,
+    /// A comma between separately supplied parameter fragments.
+    ParameterSeparator,
+    /// The exact `\n) {\n` separator before the body.
+    ParametersBodySeparator,
+    /// The exact `\n})` wrapper suffix.
+    Suffix,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DynamicFunctionFragmentRecord {
+    role: DynamicFunctionFragmentRole,
+    generated_range: DynamicFunctionByteRange,
+    text: String,
+    origin: Option<String>,
+}
+
+impl DynamicFunctionFragmentRecord {
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    fn origin(&self) -> Option<&str> {
+        self.origin.as_deref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DynamicFunctionSegmentSource {
+    Synthetic(DynamicFunctionSyntheticKind),
+    Fragment(usize),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DynamicFunctionMapSegment {
+    generated_range: DynamicFunctionByteRange,
+    source: DynamicFunctionSegmentSource,
+}
+
+/// Bias used when mapping a zero-width generated span at a segment boundary.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DynamicFunctionSpanBias {
+    /// Prefer the segment immediately before the boundary.
+    Earlier,
+    /// Prefer the segment immediately after the boundary.
+    Later,
+}
+
+/// The source represented by one clipped map result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DynamicFunctionMappedSource<'map> {
+    /// Generated wrapper syntax with no caller fragment.
+    Synthetic(DynamicFunctionSyntheticKind),
+    /// A verbatim caller fragment and the corresponding original byte range.
+    Copied {
+        /// Parameter/body identity.
+        role: DynamicFunctionFragmentRole,
+        /// Original half-open byte range within `text`.
+        original_range: DynamicFunctionByteRange,
+        /// Retained caller-facing origin label.
+        origin: Option<&'map str>,
+        /// Retained complete original fragment.
+        text: &'map str,
+    },
+}
+
+/// One generated span clipped to an exact fragment-map segment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DynamicFunctionMappedSegment<'map> {
+    generated_range: DynamicFunctionByteRange,
+    source: DynamicFunctionMappedSource<'map>,
+}
+
+impl<'map> DynamicFunctionMappedSegment<'map> {
+    /// Returns the clipped generated byte range.
+    #[must_use]
+    pub const fn generated_range(self) -> DynamicFunctionByteRange {
+        self.generated_range
+    }
+
+    /// Returns the synthetic or copied source classification.
+    #[must_use]
+    pub const fn source(self) -> DynamicFunctionMappedSource<'map> {
+        self.source
+    }
+}
+
+/// A rejected query against a dynamic-function fragment map.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DynamicFunctionMapError {
+    /// The requested generated span was reversed or outside the wrapper.
+    InvalidGeneratedSpan {
+        /// Requested start byte.
+        start: u32,
+        /// Requested end byte.
+        end: u32,
+        /// Generated wrapper byte length.
+        generated_len: u32,
+    },
+    /// A requested endpoint split one UTF-8 scalar copied from a fragment.
+    InvalidUtf8Boundary {
+        /// Rejected generated byte offset.
+        offset: u32,
+    },
+    /// The result vector could not reserve memory.
+    AllocationFailed {
+        /// Number of result entries requested.
+        requested: usize,
+    },
+}
+
+impl fmt::Display for DynamicFunctionMapError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidGeneratedSpan {
+                start,
+                end,
+                generated_len,
+            } => write!(
+                formatter,
+                "generated span {start}..{end} is outside dynamic-function wrapper 0..{generated_len}"
+            ),
+            Self::InvalidUtf8Boundary { offset } => write!(
+                formatter,
+                "generated byte offset {offset} splits a UTF-8 scalar in a dynamic-function fragment"
+            ),
+            Self::AllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve {requested} dynamic-function map result entries"
+            ),
+        }
+    }
+}
+
+impl Error for DynamicFunctionMapError {}
+
+/// An owned, byte-exact map from a generated dynamic-function wrapper to the
+/// caller-supplied fragments.
+///
+/// The segment list retains both synthetic and copied ranges in construction
+/// order. Empty input fragments are preserved as zero-width copied segments.
+#[derive(Debug, Eq, PartialEq)]
+pub struct DynamicFunctionFragmentMap {
+    generated_len: u32,
+    fragments: Vec<DynamicFunctionFragmentRecord>,
+    segments: Vec<DynamicFunctionMapSegment>,
+}
+
+impl DynamicFunctionFragmentMap {
+    /// Returns the generated wrapper byte length.
+    #[must_use]
+    pub const fn generated_len(&self) -> u32 {
+        self.generated_len
+    }
+
+    /// Splits a generated span at every wrapper/fragment boundary.
+    ///
+    /// Non-empty spans return every intersected synthetic and copied segment.
+    /// A zero-width span returns one biased segment. An empty copied fragment
+    /// anchored at that byte takes precedence over adjacent synthetic syntax,
+    /// preserving diagnostics for empty constructor arguments.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error for an invalid generated span or if the
+    /// result vector cannot reserve memory.
+    pub fn map_generated_span(
+        &self,
+        span: Span,
+        zero_width_bias: DynamicFunctionSpanBias,
+    ) -> Result<Vec<DynamicFunctionMappedSegment<'_>>, DynamicFunctionMapError> {
+        if span.start > span.end || span.end > self.generated_len {
+            return Err(DynamicFunctionMapError::InvalidGeneratedSpan {
+                start: span.start,
+                end: span.end,
+                generated_len: self.generated_len,
+            });
+        }
+        for offset in [span.start, span.end] {
+            if !self.is_generated_char_boundary(offset) {
+                return Err(DynamicFunctionMapError::InvalidUtf8Boundary { offset });
+            }
+        }
+
+        if span.start == span.end {
+            let segment = self.zero_width_segment(span.start, zero_width_bias);
+            let mut mapped = Vec::new();
+            if let Some(segment) = segment {
+                mapped
+                    .try_reserve_exact(1)
+                    .map_err(|_| DynamicFunctionMapError::AllocationFailed { requested: 1 })?;
+                mapped.push(self.map_segment(segment, span.start, span.end));
+            }
+            return Ok(mapped);
+        }
+
+        let requested = self
+            .segments
+            .iter()
+            .filter(|segment| {
+                let range = segment.generated_range;
+                !range.is_empty() && range.end > span.start && range.start < span.end
+            })
+            .count();
+        let mut mapped = Vec::new();
+        mapped
+            .try_reserve_exact(requested)
+            .map_err(|_| DynamicFunctionMapError::AllocationFailed { requested })?;
+        for segment in &self.segments {
+            let range = segment.generated_range;
+            if range.is_empty() || range.end <= span.start || range.start >= span.end {
+                continue;
+            }
+            let start = range.start.max(span.start);
+            let end = range.end.min(span.end);
+            mapped.push(self.map_segment(segment, start, end));
+        }
+        Ok(mapped)
+    }
+
+    fn is_generated_char_boundary(&self, offset: u32) -> bool {
+        self.segments.iter().all(|segment| {
+            let DynamicFunctionSegmentSource::Fragment(index) = segment.source else {
+                return true;
+            };
+            let range = segment.generated_range;
+            if offset <= range.start || offset >= range.end {
+                return true;
+            }
+            usize::try_from(offset - range.start)
+                .is_ok_and(|relative| self.fragments[index].text.is_char_boundary(relative))
+        })
+    }
+
+    fn zero_width_segment(
+        &self,
+        offset: u32,
+        bias: DynamicFunctionSpanBias,
+    ) -> Option<&DynamicFunctionMapSegment> {
+        let empty_fragment = match bias {
+            DynamicFunctionSpanBias::Earlier => self.segments.iter().rev().find(|segment| {
+                segment.generated_range == DynamicFunctionByteRange::new(offset, offset)
+                    && matches!(segment.source, DynamicFunctionSegmentSource::Fragment(_))
+            }),
+            DynamicFunctionSpanBias::Later => self.segments.iter().find(|segment| {
+                segment.generated_range == DynamicFunctionByteRange::new(offset, offset)
+                    && matches!(segment.source, DynamicFunctionSegmentSource::Fragment(_))
+            }),
+        };
+        if empty_fragment.is_some() {
+            return empty_fragment;
+        }
+
+        match bias {
+            DynamicFunctionSpanBias::Earlier => self
+                .segments
+                .iter()
+                .rev()
+                .find(|segment| {
+                    !segment.generated_range.is_empty()
+                        && segment.generated_range.start < offset
+                        && offset <= segment.generated_range.end
+                })
+                .or_else(|| {
+                    self.segments.iter().find(|segment| {
+                        !segment.generated_range.is_empty()
+                            && segment.generated_range.start <= offset
+                            && offset < segment.generated_range.end
+                    })
+                }),
+            DynamicFunctionSpanBias::Later => self
+                .segments
+                .iter()
+                .find(|segment| {
+                    !segment.generated_range.is_empty()
+                        && segment.generated_range.start <= offset
+                        && offset < segment.generated_range.end
+                })
+                .or_else(|| {
+                    self.segments.iter().rev().find(|segment| {
+                        !segment.generated_range.is_empty()
+                            && segment.generated_range.start < offset
+                            && offset <= segment.generated_range.end
+                    })
+                }),
+        }
+    }
+
+    fn map_segment<'map>(
+        &'map self,
+        segment: &DynamicFunctionMapSegment,
+        start: u32,
+        end: u32,
+    ) -> DynamicFunctionMappedSegment<'map> {
+        let generated_range = DynamicFunctionByteRange::new(start, end);
+        let source = match segment.source {
+            DynamicFunctionSegmentSource::Synthetic(kind) => {
+                DynamicFunctionMappedSource::Synthetic(kind)
+            }
+            DynamicFunctionSegmentSource::Fragment(index) => {
+                let fragment = &self.fragments[index];
+                let original_start = start - segment.generated_range.start;
+                let original_end = end - segment.generated_range.start;
+                DynamicFunctionMappedSource::Copied {
+                    role: fragment.role,
+                    original_range: DynamicFunctionByteRange::new(original_start, original_end),
+                    origin: fragment.origin(),
+                    text: fragment.text(),
+                }
+            }
+        };
+        DynamicFunctionMappedSegment {
+            generated_range,
+            source,
+        }
+    }
+}
+
 /// An internally generated dynamic-function wrapper and its fragment map.
 ///
-/// Once wrapper construction is implemented, the dedicated callback entry
-/// will keep this owner alive alongside the Oxc arena. The map translates
-/// wrapper positions back to the separately supplied parameter and body
-/// fragments.
-#[derive(Clone, Debug)]
+/// The dedicated callback entry keeps this owner alive alongside the Oxc arena.
+/// The map translates wrapper positions back to separately supplied parameter
+/// and body fragments without using a lossy line/column approximation.
+#[derive(Debug, Eq, PartialEq)]
 pub struct PreparedDynamicFunctionSource {
     generated_source: String,
-    source_map: SourceMap,
+    fragment_map: DynamicFunctionFragmentMap,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DynamicFunctionPreparationPlan {
+    fragment_count: usize,
+    generated_bytes: usize,
+    generated_len: u32,
+    segment_count: usize,
 }
 
 impl PreparedDynamicFunctionSource {
+    fn prepare(
+        source: DynamicFunctionSource<'_>,
+        limits: FrontendLimits,
+    ) -> Result<Self, FrontendError> {
+        let plan = preflight_dynamic_function(source, limits)?;
+
+        let mut generated_source = String::new();
+        generated_source
+            .try_reserve_exact(plan.generated_bytes)
+            .map_err(|_| {
+                FrontendError::from_limit(FrontendLimitError::DynamicFunctionAllocationFailed {
+                    resource: DynamicFunctionPreparationResource::GeneratedBytes,
+                    requested: plan.generated_bytes,
+                })
+            })?;
+        let mut fragments = Vec::new();
+        fragments
+            .try_reserve_exact(plan.fragment_count)
+            .map_err(|_| {
+                FrontendError::from_limit(FrontendLimitError::DynamicFunctionAllocationFailed {
+                    resource: DynamicFunctionPreparationResource::FragmentRecords,
+                    requested: plan.fragment_count,
+                })
+            })?;
+        let mut segments = Vec::new();
+        segments
+            .try_reserve_exact(plan.segment_count)
+            .map_err(|_| {
+                FrontendError::from_limit(FrontendLimitError::DynamicFunctionAllocationFailed {
+                    resource: DynamicFunctionPreparationResource::MapSegments,
+                    requested: plan.segment_count,
+                })
+            })?;
+
+        let mut generated_offset = 0_u32;
+        append_synthetic_segment(
+            &mut generated_source,
+            &mut segments,
+            &mut generated_offset,
+            source.kind().wrapper_prefix(),
+            DynamicFunctionSyntheticKind::Prefix,
+        )?;
+        for (index, fragment) in source.parameters().iter().copied().enumerate() {
+            if index != 0 {
+                append_synthetic_segment(
+                    &mut generated_source,
+                    &mut segments,
+                    &mut generated_offset,
+                    ",",
+                    DynamicFunctionSyntheticKind::ParameterSeparator,
+                )?;
+            }
+            let parameter_index = u32::try_from(index).map_err(|_| {
+                FrontendError::from_limit(FrontendLimitError::DynamicFunctionSizeOverflow {
+                    resource: DynamicFunctionPreparationResource::FragmentRecords,
+                })
+            })?;
+            append_fragment_segment(
+                &mut generated_source,
+                &mut fragments,
+                &mut segments,
+                &mut generated_offset,
+                fragment,
+                DynamicFunctionFragmentRole::Parameter {
+                    index: parameter_index,
+                },
+            )?;
+        }
+        append_synthetic_segment(
+            &mut generated_source,
+            &mut segments,
+            &mut generated_offset,
+            DYNAMIC_FUNCTION_PARAMETERS_BODY_SEPARATOR,
+            DynamicFunctionSyntheticKind::ParametersBodySeparator,
+        )?;
+        append_fragment_segment(
+            &mut generated_source,
+            &mut fragments,
+            &mut segments,
+            &mut generated_offset,
+            source.body(),
+            DynamicFunctionFragmentRole::Body,
+        )?;
+        append_synthetic_segment(
+            &mut generated_source,
+            &mut segments,
+            &mut generated_offset,
+            DYNAMIC_FUNCTION_SUFFIX,
+            DynamicFunctionSyntheticKind::Suffix,
+        )?;
+
+        debug_assert_eq!(generated_source.len(), plan.generated_bytes);
+        debug_assert_eq!(generated_offset, plan.generated_len);
+        Ok(Self {
+            generated_source,
+            fragment_map: DynamicFunctionFragmentMap {
+                generated_len: plan.generated_len,
+                fragments,
+                segments,
+            },
+        })
+    }
+
     /// Returns the generated JavaScript wrapper parsed by Oxc.
     #[must_use]
     pub fn generated_source(&self) -> &str {
         &self.generated_source
     }
 
-    /// Returns the generated-wrapper to input-fragment source map.
+    /// Returns the byte-exact generated-wrapper to input-fragment map.
     #[must_use]
-    pub const fn source_map(&self) -> &SourceMap {
-        &self.source_map
+    pub const fn fragment_map(&self) -> &DynamicFunctionFragmentMap {
+        &self.fragment_map
     }
+}
+
+fn preflight_dynamic_function(
+    source: DynamicFunctionSource<'_>,
+    limits: FrontendLimits,
+) -> Result<DynamicFunctionPreparationPlan, FrontendError> {
+    let fragment_count = source.parameters().len().checked_add(1).ok_or_else(|| {
+        FrontendError::from_limit(FrontendLimitError::DynamicFunctionSizeOverflow {
+            resource: DynamicFunctionPreparationResource::FragmentRecords,
+        })
+    })?;
+    if fragment_count > limits.max_dynamic_function_fragments() {
+        return Err(FrontendError::from_limit(
+            FrontendLimitError::DynamicFunctionFragmentsExceeded {
+                actual: fragment_count,
+                limit: limits.max_dynamic_function_fragments(),
+            },
+        ));
+    }
+
+    let fragment_bytes = checked_fragment_bytes(source)?;
+    enforce_source_limit(fragment_bytes, limits)?;
+    let origin_bytes = checked_origin_bytes(source)?;
+    if origin_bytes > limits.max_dynamic_function_origin_bytes() {
+        return Err(FrontendError::from_limit(
+            FrontendLimitError::DynamicFunctionOriginBytesExceeded {
+                actual: origin_bytes,
+                limit: limits.max_dynamic_function_origin_bytes(),
+            },
+        ));
+    }
+
+    let parameter_separator_bytes = source.parameters().len().saturating_sub(1);
+    let generated_bytes = source
+        .kind()
+        .wrapper_prefix()
+        .len()
+        .checked_add(fragment_bytes)
+        .and_then(|total| total.checked_add(parameter_separator_bytes))
+        .and_then(|total| total.checked_add(DYNAMIC_FUNCTION_PARAMETERS_BODY_SEPARATOR.len()))
+        .and_then(|total| total.checked_add(DYNAMIC_FUNCTION_SUFFIX.len()))
+        .ok_or_else(|| {
+            FrontendError::from_limit(FrontendLimitError::DynamicFunctionSizeOverflow {
+                resource: DynamicFunctionPreparationResource::GeneratedBytes,
+            })
+        })?;
+    enforce_source_limit(generated_bytes, limits)?;
+    let generated_len = u32::try_from(generated_bytes).map_err(|_| {
+        FrontendError::from_limit(FrontendLimitError::DynamicFunctionSizeOverflow {
+            resource: DynamicFunctionPreparationResource::GeneratedBytes,
+        })
+    })?;
+    let segment_count = fragment_count
+        .checked_add(parameter_separator_bytes)
+        .and_then(|count| count.checked_add(3))
+        .ok_or_else(|| {
+            FrontendError::from_limit(FrontendLimitError::DynamicFunctionSizeOverflow {
+                resource: DynamicFunctionPreparationResource::MapSegments,
+            })
+        })?;
+    Ok(DynamicFunctionPreparationPlan {
+        fragment_count,
+        generated_bytes,
+        generated_len,
+        segment_count,
+    })
+}
+
+fn checked_fragment_bytes(source: DynamicFunctionSource<'_>) -> Result<usize, FrontendError> {
+    source
+        .parameters()
+        .iter()
+        .try_fold(source.body().text().len(), |total, fragment| {
+            total.checked_add(fragment.text().len())
+        })
+        .ok_or_else(|| {
+            FrontendError::from_limit(FrontendLimitError::DynamicFunctionSizeOverflow {
+                resource: DynamicFunctionPreparationResource::FragmentBytes,
+            })
+        })
+}
+
+fn checked_origin_bytes(source: DynamicFunctionSource<'_>) -> Result<usize, FrontendError> {
+    source
+        .parameters()
+        .iter()
+        .copied()
+        .chain(std::iter::once(source.body()))
+        .filter_map(SourceFragment::origin)
+        .try_fold(0_usize, |total, origin| total.checked_add(origin.len()))
+        .ok_or_else(|| {
+            FrontendError::from_limit(FrontendLimitError::DynamicFunctionSizeOverflow {
+                resource: DynamicFunctionPreparationResource::OriginBytes,
+            })
+        })
+}
+
+fn append_synthetic_segment(
+    generated_source: &mut String,
+    segments: &mut Vec<DynamicFunctionMapSegment>,
+    generated_offset: &mut u32,
+    text: &str,
+    kind: DynamicFunctionSyntheticKind,
+) -> Result<(), FrontendError> {
+    let generated_range = append_generated_text(generated_source, generated_offset, text)?;
+    segments.push(DynamicFunctionMapSegment {
+        generated_range,
+        source: DynamicFunctionSegmentSource::Synthetic(kind),
+    });
+    Ok(())
+}
+
+fn append_fragment_segment(
+    generated_source: &mut String,
+    fragments: &mut Vec<DynamicFunctionFragmentRecord>,
+    segments: &mut Vec<DynamicFunctionMapSegment>,
+    generated_offset: &mut u32,
+    fragment: SourceFragment<'_>,
+    role: DynamicFunctionFragmentRole,
+) -> Result<(), FrontendError> {
+    let generated_range =
+        append_generated_text(generated_source, generated_offset, fragment.text())?;
+    let text = try_copy_fragment_metadata(
+        fragment.text(),
+        DynamicFunctionPreparationResource::FragmentBytes,
+    )?;
+    let origin = fragment
+        .origin()
+        .map(|origin| {
+            try_copy_fragment_metadata(origin, DynamicFunctionPreparationResource::OriginBytes)
+        })
+        .transpose()?;
+    let fragment_index = fragments.len();
+    fragments.push(DynamicFunctionFragmentRecord {
+        role,
+        generated_range,
+        text,
+        origin,
+    });
+    segments.push(DynamicFunctionMapSegment {
+        generated_range,
+        source: DynamicFunctionSegmentSource::Fragment(fragment_index),
+    });
+    Ok(())
+}
+
+fn append_generated_text(
+    generated_source: &mut String,
+    generated_offset: &mut u32,
+    text: &str,
+) -> Result<DynamicFunctionByteRange, FrontendError> {
+    let text_len = u32::try_from(text.len()).map_err(|_| {
+        FrontendError::from_limit(FrontendLimitError::DynamicFunctionSizeOverflow {
+            resource: DynamicFunctionPreparationResource::GeneratedBytes,
+        })
+    })?;
+    let end = generated_offset.checked_add(text_len).ok_or_else(|| {
+        FrontendError::from_limit(FrontendLimitError::DynamicFunctionSizeOverflow {
+            resource: DynamicFunctionPreparationResource::GeneratedBytes,
+        })
+    })?;
+    let range = DynamicFunctionByteRange::new(*generated_offset, end);
+    generated_source.push_str(text);
+    *generated_offset = end;
+    Ok(range)
+}
+
+fn try_copy_fragment_metadata(
+    text: &str,
+    resource: DynamicFunctionPreparationResource,
+) -> Result<String, FrontendError> {
+    let mut owned = String::new();
+    owned.try_reserve_exact(text.len()).map_err(|_| {
+        FrontendError::from_limit(FrontendLimitError::DynamicFunctionAllocationFailed {
+            resource,
+            requested: text.len(),
+        })
+    })?;
+    owned.push_str(text);
+    Ok(owned)
 }
 
 /// Practical resource ceilings enforced by the JavaScript front end.
@@ -856,27 +1544,61 @@ impl PreparedDynamicFunctionSource {
 /// implemented.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FrontendLimits {
-    max_source_bytes: usize,
+    source_bytes: usize,
+    dynamic_function_fragments: usize,
+    dynamic_function_origin_bytes: usize,
 }
 
 impl FrontendLimits {
     /// Creates limits with a caller-selected UTF-8 source-byte ceiling.
     #[must_use]
     pub const fn new(max_source_bytes: usize) -> Self {
-        Self { max_source_bytes }
+        Self {
+            source_bytes: max_source_bytes,
+            dynamic_function_fragments: DEFAULT_MAX_DYNAMIC_FUNCTION_FRAGMENTS,
+            dynamic_function_origin_bytes: DEFAULT_MAX_DYNAMIC_FUNCTION_ORIGIN_BYTES,
+        }
     }
 
     /// Replaces the UTF-8 source-byte ceiling.
     #[must_use]
     pub const fn with_max_source_bytes(mut self, max_source_bytes: usize) -> Self {
-        self.max_source_bytes = max_source_bytes;
+        self.source_bytes = max_source_bytes;
         self
     }
 
     /// Returns the maximum UTF-8 bytes accepted by one source entry.
     #[must_use]
     pub const fn max_source_bytes(self) -> usize {
-        self.max_source_bytes
+        self.source_bytes
+    }
+
+    /// Replaces the dynamic-function parameter/body fragment-count ceiling.
+    #[must_use]
+    pub const fn with_max_dynamic_function_fragments(mut self, maximum: usize) -> Self {
+        self.dynamic_function_fragments = maximum;
+        self
+    }
+
+    /// Returns the maximum number of retained dynamic-function fragments,
+    /// including the body.
+    #[must_use]
+    pub const fn max_dynamic_function_fragments(self) -> usize {
+        self.dynamic_function_fragments
+    }
+
+    /// Replaces the aggregate UTF-8 byte ceiling for retained fragment origin
+    /// labels.
+    #[must_use]
+    pub const fn with_max_dynamic_function_origin_bytes(mut self, maximum: usize) -> Self {
+        self.dynamic_function_origin_bytes = maximum;
+        self
+    }
+
+    /// Returns the aggregate retained origin-label byte ceiling.
+    #[must_use]
+    pub const fn max_dynamic_function_origin_bytes(self) -> usize {
+        self.dynamic_function_origin_bytes
     }
 }
 
@@ -963,7 +1685,7 @@ impl Default for FrontendOptions<'_> {
 pub enum DiagnosticStage {
     /// A configured front-end resource ceiling rejected the source.
     ResourceLimit,
-    /// The requested production compilation goal is not implemented faithfully.
+    /// The requested compilation goal cannot be processed by this source entry.
     CompilationGoal,
     /// Oxc's lexer or parser emitted a diagnostic.
     Parser,
@@ -996,7 +1718,13 @@ impl fmt::Display for DiagnosticStage {
 pub enum FrontendDiagnosticCode {
     /// A source exceeded the configured UTF-8 byte ceiling.
     SourceBytesExceeded,
-    /// A represented production compilation goal is not implemented faithfully.
+    /// A dynamic function supplied too many parameter/body fragments.
+    DynamicFunctionFragmentsExceeded,
+    /// Dynamic-function origin labels exceeded their aggregate byte ceiling.
+    DynamicFunctionOriginBytesExceeded,
+    /// Dynamic-function wrapper preparation overflowed or could not allocate.
+    DynamicFunctionPreparationFailed,
+    /// The requested compilation goal cannot be processed by this source entry.
     UnsupportedCompilationGoal,
     /// An Oxc lexer or parser diagnostic.
     OxcParser,
@@ -1024,6 +1752,15 @@ impl FrontendDiagnosticCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SourceBytesExceeded => "quickjs::frontend::limit::source_bytes",
+            Self::DynamicFunctionFragmentsExceeded => {
+                "quickjs::frontend::limit::dynamic_function_fragments"
+            }
+            Self::DynamicFunctionOriginBytesExceeded => {
+                "quickjs::frontend::limit::dynamic_function_origin_bytes"
+            }
+            Self::DynamicFunctionPreparationFailed => {
+                "quickjs::frontend::limit::dynamic_function_preparation"
+            }
             Self::UnsupportedCompilationGoal => "quickjs::frontend::unsupported_compilation_goal",
             Self::OxcParser => "quickjs::frontend::oxc::parser",
             Self::OxcSemantic => "quickjs::frontend::oxc::semantic",
@@ -1044,6 +1781,9 @@ impl FrontendDiagnosticCode {
     const fn help(self) -> Option<&'static str> {
         match self {
             Self::SourceBytesExceeded
+            | Self::DynamicFunctionFragmentsExceeded
+            | Self::DynamicFunctionOriginBytesExceeded
+            | Self::DynamicFunctionPreparationFailed
             | Self::UnsupportedCompilationGoal
             | Self::OxcParser
             | Self::OxcSemantic => None,
@@ -1114,6 +1854,35 @@ impl FrontendDiagnostic {
     }
 }
 
+/// A resource whose size or allocation is checked during dynamic-function
+/// wrapper preparation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DynamicFunctionPreparationResource {
+    /// Aggregate caller-supplied parameter/body bytes.
+    FragmentBytes,
+    /// Aggregate retained origin-label bytes.
+    OriginBytes,
+    /// Complete generated wrapper bytes.
+    GeneratedBytes,
+    /// Owned fragment records.
+    FragmentRecords,
+    /// Exact generated map segments.
+    MapSegments,
+}
+
+impl fmt::Display for DynamicFunctionPreparationResource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::FragmentBytes => "fragment bytes",
+            Self::OriginBytes => "origin-label bytes",
+            Self::GeneratedBytes => "generated wrapper bytes",
+            Self::FragmentRecords => "fragment records",
+            Self::MapSegments => "fragment-map segments",
+        })
+    }
+}
+
 /// A structured front-end resource-limit rejection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -1125,6 +1894,32 @@ pub enum FrontendLimitError {
         /// Configured maximum UTF-8 source bytes.
         limit: usize,
     },
+    /// A dynamic function supplied more fragments than the host permits.
+    DynamicFunctionFragmentsExceeded {
+        /// Parameter fragments plus the body fragment.
+        actual: usize,
+        /// Configured fragment-count ceiling.
+        limit: usize,
+    },
+    /// Retained origin labels exceeded the configured aggregate byte ceiling.
+    DynamicFunctionOriginBytesExceeded {
+        /// Aggregate UTF-8 origin-label bytes.
+        actual: usize,
+        /// Configured aggregate byte ceiling.
+        limit: usize,
+    },
+    /// Checked size arithmetic overflowed before allocation.
+    DynamicFunctionSizeOverflow {
+        /// Resource whose size could not be represented.
+        resource: DynamicFunctionPreparationResource,
+    },
+    /// A fallible reservation failed before wrapper construction.
+    DynamicFunctionAllocationFailed {
+        /// Resource whose storage could not be reserved.
+        resource: DynamicFunctionPreparationResource,
+        /// Number of bytes or entries requested.
+        requested: usize,
+    },
 }
 
 impl fmt::Display for FrontendLimitError {
@@ -1133,6 +1928,25 @@ impl fmt::Display for FrontendLimitError {
             Self::SourceBytesExceeded { actual, limit } => write!(
                 formatter,
                 "JavaScript source contains {actual} UTF-8 bytes, exceeding the configured limit of {limit} bytes"
+            ),
+            Self::DynamicFunctionFragmentsExceeded { actual, limit } => write!(
+                formatter,
+                "dynamic function contains {actual} parameter/body fragments, exceeding the configured limit of {limit}"
+            ),
+            Self::DynamicFunctionOriginBytesExceeded { actual, limit } => write!(
+                formatter,
+                "dynamic-function origin labels contain {actual} UTF-8 bytes, exceeding the configured limit of {limit} bytes"
+            ),
+            Self::DynamicFunctionSizeOverflow { resource } => write!(
+                formatter,
+                "dynamic-function {resource} cannot be represented on this platform"
+            ),
+            Self::DynamicFunctionAllocationFailed {
+                resource,
+                requested,
+            } => write!(
+                formatter,
+                "could not reserve {requested} units for dynamic-function {resource}"
             ),
         }
     }
@@ -1152,11 +1966,29 @@ pub struct FrontendError {
 
 impl FrontendError {
     fn source_bytes_exceeded(actual: usize, limit: usize) -> Self {
-        let limit_error = FrontendLimitError::SourceBytesExceeded { actual, limit };
+        Self::from_limit(FrontendLimitError::SourceBytesExceeded { actual, limit })
+    }
+
+    fn from_limit(limit_error: FrontendLimitError) -> Self {
+        let code = match limit_error {
+            FrontendLimitError::SourceBytesExceeded { .. } => {
+                FrontendDiagnosticCode::SourceBytesExceeded
+            }
+            FrontendLimitError::DynamicFunctionFragmentsExceeded { .. } => {
+                FrontendDiagnosticCode::DynamicFunctionFragmentsExceeded
+            }
+            FrontendLimitError::DynamicFunctionOriginBytesExceeded { .. } => {
+                FrontendDiagnosticCode::DynamicFunctionOriginBytesExceeded
+            }
+            FrontendLimitError::DynamicFunctionSizeOverflow { .. }
+            | FrontendLimitError::DynamicFunctionAllocationFailed { .. } => {
+                FrontendDiagnosticCode::DynamicFunctionPreparationFailed
+            }
+        };
         Self {
             stage: DiagnosticStage::ResourceLimit,
             diagnostics: vec![FrontendDiagnostic {
-                code: FrontendDiagnosticCode::SourceBytesExceeded,
+                code,
                 message: limit_error.to_string(),
                 labels: Vec::new(),
             }],
@@ -1301,6 +2133,96 @@ impl Error for FrontendError {
         self.limit_error
             .as_ref()
             .map(|error| error as &(dyn Error + 'static))
+    }
+}
+
+/// A dynamic-function preparation or generated-Script parsing failure.
+///
+/// Parser, profile, and semantic failures retain the exact prepared wrapper
+/// and fragment map so generated Oxc spans remain usable after the arena is
+/// dropped. Preflight resource failures have no prepared source.
+#[derive(Debug, Eq, PartialEq)]
+pub struct DynamicFunctionError {
+    frontend: FrontendError,
+    prepared: Option<PreparedDynamicFunctionSource>,
+}
+
+impl DynamicFunctionError {
+    fn preparation(frontend: FrontendError) -> Self {
+        Self {
+            frontend,
+            prepared: None,
+        }
+    }
+
+    fn generated(frontend: FrontendError, prepared: PreparedDynamicFunctionSource) -> Self {
+        Self {
+            frontend,
+            prepared: Some(prepared),
+        }
+    }
+
+    /// Returns the underlying normalized front-end failure.
+    #[must_use]
+    pub const fn frontend_error(&self) -> &FrontendError {
+        &self.frontend
+    }
+
+    /// Returns the prepared wrapper for parser/profile/semantic failures.
+    ///
+    /// Resource failures detected before wrapper construction return `None`.
+    #[must_use]
+    pub const fn prepared_source(&self) -> Option<&PreparedDynamicFunctionSource> {
+        self.prepared.as_ref()
+    }
+
+    /// Returns the phase that rejected the dynamic function.
+    #[must_use]
+    pub const fn stage(&self) -> DiagnosticStage {
+        self.frontend.stage()
+    }
+
+    /// Returns all normalized front-end diagnostics.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[FrontendDiagnostic] {
+        self.frontend.diagnostics()
+    }
+
+    /// Returns whether Oxc stopped after an unrecoverable parser error.
+    #[must_use]
+    pub const fn parser_panicked(&self) -> bool {
+        self.frontend.parser_panicked()
+    }
+
+    /// Returns the structured unsupported goal, when applicable.
+    #[must_use]
+    pub const fn unsupported_goal(&self) -> Option<UnsupportedCompilationGoal> {
+        self.frontend.unsupported_goal()
+    }
+
+    /// Returns the structured resource failure, when applicable.
+    #[must_use]
+    pub const fn limit_error(&self) -> Option<FrontendLimitError> {
+        self.frontend.limit_error()
+    }
+
+    /// Consumes the failure into its normalized error and optional prepared
+    /// source.
+    #[must_use]
+    pub fn into_parts(self) -> (FrontendError, Option<PreparedDynamicFunctionSource>) {
+        (self.frontend, self.prepared)
+    }
+}
+
+impl fmt::Display for DynamicFunctionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.frontend.fmt(formatter)
+    }
+}
+
+impl Error for DynamicFunctionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.frontend)
     }
 }
 
@@ -1649,9 +2571,10 @@ fn enforce_source_limit(source_bytes: usize, limits: FrontendLimits) -> Result<(
 /// Returns an error if the parser emits any diagnostic (including a
 /// recoverable one), if the AST uses syntax outside the pinned `QuickJS`
 /// compatibility profile, or if deferred semantic early-error checking emits
-/// any diagnostic. Contextual goals that are represented but not yet
-/// implemented return [`FrontendDiagnosticCode::UnsupportedCompilationGoal`]
-/// before Oxc is invoked.
+/// any diagnostic. Goals that require a different contextual or
+/// fragment-preparation entry return
+/// [`FrontendDiagnosticCode::UnsupportedCompilationGoal`] before Oxc is
+/// invoked.
 pub fn parse<'arena, 'scope>(
     allocator: &'arena Allocator,
     source_text: &'arena str,
@@ -1662,6 +2585,17 @@ pub fn parse<'arena, 'scope>(
     let mode = goal
         .supported_parse_mode()
         .map_err(FrontendError::unsupported_compilation_goal)?;
+    parse_in_mode(allocator, source_text, goal, mode, options.limits)
+}
+
+fn parse_in_mode<'arena, 'scope>(
+    allocator: &'arena Allocator,
+    source_text: &'arena str,
+    goal: CompilationGoal<'scope>,
+    mode: ParseMode,
+    limits: FrontendLimits,
+) -> Result<ParsedUnit<'arena, 'scope>, FrontendError> {
+    enforce_source_limit(source_text.len(), limits)?;
     let parsed = Parser::new(allocator, source_text, mode.source_type())
         .with_options(OxcParseOptions::default())
         .parse();
@@ -1757,33 +2691,44 @@ pub fn with_registered_program<'scope, R>(
 /// Prepares and parses source fragments for a dynamic function constructor.
 ///
 /// This is deliberately separate from [`parse`]: the constructor's parameter
-/// and body fragments must first be assembled into one exact wrapper and
-/// accompanied by a generated-to-fragment source map. Once implemented, the
-/// callback will receive both the parsed unit and the owning
-/// [`PreparedDynamicFunctionSource`], keeping the generated source and map
-/// alive for the complete arena callback.
+/// and body fragments are first assembled into the exact wrapper used by
+/// `QuickJS` 2026-06-04 and accompanied by a byte-exact fragment map. Oxc then
+/// parses the complete generated source as a Script. The callback receives both
+/// the parsed unit and owning [`PreparedDynamicFunctionSource`].
 ///
-/// The configured source-byte ceiling currently applies to the sum of the
-/// caller-supplied fragment bytes. Wrapper overhead will also be checked before
-/// Oxc when wrapper construction is implemented.
+/// The complete Script is intentionally not required to contain exactly one
+/// function expression. The compatibility release allows constructor input to
+/// escape the wrapper, so enforcing an AST shape here would be observably
+/// incompatible.
 ///
 /// # Errors
 ///
-/// Returns a structured resource-limit error when the fragments exceed
-/// `limits`. Otherwise returns a structured unsupported-compilation-goal error
-/// before invoking Oxc because exact wrapper construction is not implemented.
+/// Returns a structured preflight resource error if wrapper construction
+/// exceeds `limits` or cannot reserve storage. Parser/profile/semantic errors
+/// retain the prepared source and map in [`DynamicFunctionError`].
+#[allow(
+    clippy::result_large_err,
+    reason = "the error intentionally owns the prepared wrapper without another infallible allocation"
+)]
 pub fn with_dynamic_function_source<R>(
     source: DynamicFunctionSource<'_>,
     limits: FrontendLimits,
-    _callback: impl for<'arena> FnOnce(
-        &ParsedUnit<'arena, 'static>,
-        &PreparedDynamicFunctionSource,
-    ) -> R,
-) -> Result<R, FrontendError> {
-    enforce_source_limit(source.source_bytes(), limits)?;
-    Err(FrontendError::unsupported_compilation_goal(
-        UnsupportedCompilationGoal::DynamicFunction(source.kind()),
-    ))
+    callback: impl for<'arena> FnOnce(&ParsedUnit<'arena, 'static>, &PreparedDynamicFunctionSource) -> R,
+) -> Result<R, DynamicFunctionError> {
+    let prepared = PreparedDynamicFunctionSource::prepare(source, limits)
+        .map_err(DynamicFunctionError::preparation)?;
+    let allocator = Allocator::new();
+    let goal = CompilationGoal::DynamicFunction(source.kind());
+    match parse_in_mode(
+        &allocator,
+        prepared.generated_source(),
+        goal,
+        ParseMode::Script,
+        limits,
+    ) {
+        Ok(unit) => Ok(callback(&unit, &prepared)),
+        Err(error) => Err(DynamicFunctionError::generated(error, prepared)),
+    }
 }
 
 #[cfg(test)]

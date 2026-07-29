@@ -68,6 +68,9 @@ A milestone is complete only when all of its checked items pass in CI.
       fail before Oxc without semantic downgrade.
 - [ ] Parse JavaScript scripts, modules, eval input, and Function-constructor
       bodies with explicit modes; do not enable TypeScript or JSX.
+  - [x] Parse all four dynamic Function-constructor families through the exact
+        QuickJS wrapper as a complete Oxc Script, retaining a byte-exact
+        fragment map and fail-closed preparation limits.
 - [x] Reject parser and deferred semantic diagnostics with byte-accurate source
       spans.
 - [ ] Differentially test Oxc acceptance, early errors, strict mode, Annex B,

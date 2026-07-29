@@ -58,6 +58,15 @@ No Oxc AST reference may survive compilation. Static Oxc resolution is only an
 input: `with`, direct eval, Annex B bindings, and global declaration
 instantiation require QuickJS-compatible dynamic handling.
 
+Dynamic Function constructors use a dedicated adapter rather than parsing a
+naked body. It joins separately coerced parameter fragments with the exact
+QuickJS wrapper punctuation, parses the complete generated Script with Oxc,
+and retains a byte-exact synthetic/copied fragment map on success and on any
+parser, profile, or semantic failure after preparation. Preflight resource
+failures allocate no wrapper. The compatibility release permits source to
+escape that wrapper, so the adapter deliberately does not require the Script
+AST to contain exactly one function expression.
+
 ## Bytecode
 
 The instruction set and compiler passes derive from `quickjs-opcode.h` and the
