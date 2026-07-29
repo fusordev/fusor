@@ -31,9 +31,11 @@ The runtime does not depend on Oxc or Tokio. The compiler consumes an Oxc AST
 and produces an owned verified bytecode unit. The Tokio adapter delivers owned
 host completions to the runtime owner; it never accesses the JavaScript heap.
 
-All project crates forbid `unsafe` Rust. Oxc, Tokio, and other dependencies are
-audited separately; workspace linting cannot make transitive claims about
-their internals.
+Core engine, compiler, runtime, host, and tool crates forbid `unsafe` Rust.
+The optional N-API ABI adapter is the sole planned project exception, limited
+to documented foreign-pointer operations. Oxc, Tokio, `sdd`, and other
+dependencies are audited separately; workspace linting cannot make transitive
+claims about their internals.
 
 ## Compilation boundary
 
@@ -102,6 +104,13 @@ handles or an owning reference back to the runtime.
 Public values own root slots. Dropping the last root records a deferred release
 without borrowing the heap. Runtime safe points drain those releases after
 callbacks and other borrows end.
+
+Immutable string leaves and rope nodes use `sdd::Shared`. Their destructors
+cannot run JavaScript, so delayed physical reclamation cannot determine object
+liveness, finalizer timing, weak visibility, or cycle removal. Physical
+retention can still affect limits and out-of-memory behavior: retired backing
+bytes stay charged until an allocation-ledger hook observes actual destruction,
+or until a conservatively bounded collector drain proves reclamation.
 
 ## Reference counting and cycles
 

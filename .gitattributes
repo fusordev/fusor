@@ -1,0 +1,2 @@
+# Preserve upstream vendored bytes; project-owned patch files are reviewed separately.
+/vendor/sdd-4.8.8/** -whitespace

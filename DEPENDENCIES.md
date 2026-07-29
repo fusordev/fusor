@@ -46,6 +46,36 @@ project-owned APIs. Miette output is presentation rather than a compatibility
 surface. The source-map dependency supplies the standard interchange codec; it
 does not supply JavaScript parser, compiler, VM, runtime, or RegExp semantics.
 
+### Immutable shared backing storage
+
+The runtime exactly pins `sdd` 4.8.8 (Apache-2.0), with default features
+disabled, for reference-counted immutable string leaves and rope nodes. Its
+transitive `saa` 5.6.0 dependency is also Apache-2.0. JavaScript strings have
+no observable destructor, so delayed physical reclamation cannot run user code
+or change JavaScript liveness, weak-reference, or finalizer semantics. Retained
+physical allocations can still affect resource limits and out-of-memory
+behavior.
+
+The published `sdd` crate is vendored from checksum
+`1836bad8bdc9c6d665b63202da3d9c6d60ed1e597cae63620e21ebf89a3595a9`
+(VCS revision `abfa4308c24062fa91a571658a35a6c69cc8cf7b`) because five raw
+allocation sites in 4.8.8 could write through a null allocator result. The
+local patch replaces those sites with RAII `Box<MaybeUninit<_>>` allocations,
+preserves allocation ownership if construction unwinds, and returns a
+non-null collector-arena handle. The private collector's one remaining raw
+allocation is immediately checked and retains its intentional
+panic-to-backup-bag recovery behavior. The exact delta is recorded in
+`vendor/sdd-4.8.8/QUICKJS-PATCH.md`.
+
+`sdd` is infrastructure, not the runtime's reachability algorithm. It must not
+decide JavaScript object liveness, weak-reference visibility, finalizer
+ordering, cycle removal, or ECMAScript job ordering. The object heap retains
+QuickJS-derived logical reference counts and explicit cycle deletion. Runtime
+memory accounting must keep retired backing bytes charged until a non-
+JavaScript reclamation hook observes their actual destruction, or
+conservatively bound and drain reclamation before releasing that charge. The
+last logical `Shared` release alone is not proof that memory has been reclaimed.
+
 ## Approved planned dependencies
 
 - Tokio is required for host async I/O, timers, wakeups, and event-loop

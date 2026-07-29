@@ -29,8 +29,10 @@ use std::{
     fmt,
     hash::{Hash, Hasher},
     ops::Range,
-    sync::{Arc, OnceLock},
+    sync::OnceLock,
 };
+
+use sdd::Shared;
 
 /// Maximum ECMAScript string length supported by the pinned `QuickJS` release.
 ///
@@ -89,7 +91,7 @@ const ROPE_BUCKET_LENGTHS: [u32; 44] = [
 ];
 const MAX_INITIAL_RESERVE: usize = 4_096;
 
-static EMPTY: OnceLock<Arc<Repr>> = OnceLock::new();
+static EMPTY: OnceLock<Shared<Repr>> = OnceLock::new();
 
 /// An immutable ECMAScript string.
 ///
@@ -98,7 +100,7 @@ static EMPTY: OnceLock<Arc<Repr>> = OnceLock::new();
 /// leaves and bounded ropes are representation optimizations and do not change
 /// equality, ordering, hashing, or indexing.
 #[derive(Clone)]
-pub struct JsString(Arc<Repr>);
+pub struct JsString(Shared<Repr>);
 
 enum Repr {
     Latin1(Box<[u8]>),
@@ -149,9 +151,11 @@ impl JsString {
     /// Returns the shared empty string.
     #[must_use]
     pub fn empty() -> Self {
-        Self(Arc::clone(
-            EMPTY.get_or_init(|| Arc::new(Repr::Latin1(Box::new([])))),
-        ))
+        Self(
+            EMPTY
+                .get_or_init(|| Shared::new(Repr::Latin1(Box::new([]))))
+                .clone(),
+        )
     }
 
     /// Copies Latin-1 code units into an immutable JavaScript string.
@@ -168,7 +172,7 @@ impl JsString {
         let mut owned = Vec::new();
         reserve(&mut owned, units.len())?;
         owned.extend_from_slice(units);
-        Ok(Self(Arc::new(Repr::Latin1(owned.into_boxed_slice()))))
+        Ok(Self(Shared::new(Repr::Latin1(owned.into_boxed_slice()))))
     }
 
     /// Copies UTF-16 code units, preserving lone surrogates.
@@ -218,11 +222,11 @@ impl JsString {
         }
 
         if let Some(wide) = utf16 {
-            Ok(Self(Arc::new(Repr::Utf16(wide.into_boxed_slice()))))
+            Ok(Self(Shared::new(Repr::Utf16(wide.into_boxed_slice()))))
         } else if latin1.is_empty() {
             Ok(Self::empty())
         } else {
-            Ok(Self(Arc::new(Repr::Latin1(latin1.into_boxed_slice()))))
+            Ok(Self(Shared::new(Repr::Latin1(latin1.into_boxed_slice()))))
         }
     }
 
@@ -446,7 +450,7 @@ impl JsString {
             return Self::rebalance(left, right);
         }
         let wide = left.0.is_wide() || right.0.is_wide();
-        Ok(Self(Arc::new(Repr::Rope {
+        Ok(Self(Shared::new(Repr::Rope {
             left,
             right,
             len,
@@ -527,7 +531,7 @@ impl JsString {
         let len = checked_sum(left.len(), right.len())?;
         let depth = left.0.depth().max(right.0.depth()).saturating_add(1);
         let wide = left.0.is_wide() || right.0.is_wide();
-        Ok(Self(Arc::new(Repr::Rope {
+        Ok(Self(Shared::new(Repr::Rope {
             left,
             right,
             len,
@@ -558,7 +562,7 @@ impl TryFrom<&str> for JsString {
 
 impl PartialEq for JsString {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        self.0.as_ptr() == other.0.as_ptr()
             || (self.len() == other.len() && self.code_units().eq(other.code_units()))
     }
 }
@@ -804,6 +808,17 @@ fn utf8_byte(value: u32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{JsString, ROPE_MAX_DEPTH, ROPE_SHORT_LEFT_LEN, ROPE_SHORT_LEN};
+
+    #[test]
+    fn clones_and_empty_values_share_immutable_backing_nodes() {
+        let value = JsString::from_utf8("shared").expect("string");
+        let clone = value.clone();
+        assert_eq!(value.0.as_ptr(), clone.0.as_ptr());
+
+        let first_empty = JsString::empty();
+        let second_empty = JsString::empty();
+        assert_eq!(first_empty.0.as_ptr(), second_empty.0.as_ptr());
+    }
 
     #[test]
     fn repeated_large_concatenation_never_exceeds_the_rope_depth_limit() {
