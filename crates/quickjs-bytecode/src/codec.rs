@@ -51,6 +51,68 @@ impl fmt::Display for BytecodePc {
     }
 }
 
+/// A four-byte index into the atom pool owned by one bytecode function.
+///
+/// The index is function-local serialized identity, never a runtime atom
+/// identity or pointer. This type is intentionally a structural newtype: it
+/// can represent every `u32` carried by an instruction so checked decoding is
+/// lossless. The function verifier must separately prove that an index is
+/// smaller than the enclosing function's atom-pool length before execution.
+///
+/// Consequently, moving an index between functions is not valid merely because
+/// both pools happen to have an entry at the same numeric position.
+///
+/// ```compile_fail
+/// use quickjs_bytecode::Operands;
+///
+/// // Raw integers cannot accidentally become atom operands.
+/// let _ = Operands::Atom(7_u32);
+/// ```
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(transparent)]
+pub struct AtomPoolIndex(u32);
+
+impl AtomPoolIndex {
+    /// Creates a structurally representable function-local atom-pool index.
+    ///
+    /// This does not validate the index against any particular pool.
+    #[must_use]
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// Returns the numeric function-local pool position.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// Returns the deterministic little-endian operand bytes.
+    #[must_use]
+    pub const fn to_le_bytes(self) -> [u8; 4] {
+        self.0.to_le_bytes()
+    }
+
+    /// Decodes deterministic little-endian operand bytes without pool bounds
+    /// validation.
+    #[must_use]
+    pub const fn from_le_bytes(bytes: [u8; 4]) -> Self {
+        Self(u32::from_le_bytes(bytes))
+    }
+}
+
+impl fmt::Display for AtomPoolIndex {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl fmt::LowerHex for AtomPoolIndex {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::LowerHex::fmt(&self.0, formatter)
+    }
+}
+
 /// Lossless typed operands for every [`OperandFormat`].
 ///
 /// Variants without fields still matter: their operand is encoded in the
@@ -116,25 +178,25 @@ pub enum Operands {
     /// identifiers belong to a separate typed IR and cannot be encoded here.
     Label(i32),
     /// [`OperandFormat::Atom`].
-    Atom(u32),
+    Atom(AtomPoolIndex),
     /// [`OperandFormat::AtomU8`].
     AtomU8 {
-        /// Raw atom identifier.
-        atom: u32,
+        /// Function-local atom-pool index.
+        atom: AtomPoolIndex,
         /// Trailing instruction-specific byte.
         value: u8,
     },
     /// [`OperandFormat::AtomU16`].
     AtomU16 {
-        /// Raw atom identifier.
-        atom: u32,
+        /// Function-local atom-pool index.
+        atom: AtomPoolIndex,
         /// Trailing instruction-specific word.
         value: u16,
     },
     /// [`OperandFormat::AtomLabelU8`].
     AtomLabelU8 {
-        /// Raw atom identifier.
-        atom: u32,
+        /// Function-local atom-pool index.
+        atom: AtomPoolIndex,
         /// Signed relative label displacement.
         label: i32,
         /// Trailing instruction-specific byte.
@@ -142,8 +204,8 @@ pub enum Operands {
     },
     /// [`OperandFormat::AtomLabelU16`].
     AtomLabelU16 {
-        /// Raw atom identifier.
-        atom: u32,
+        /// Function-local atom-pool index.
+        atom: AtomPoolIndex,
         /// Signed relative label displacement.
         label: i32,
         /// Trailing instruction-specific word.
@@ -208,6 +270,22 @@ impl Operands {
         }
     }
 
+    /// Returns the function-local atom-pool index carried by an atom operand.
+    ///
+    /// This accessor is structural and does not validate the index against an
+    /// enclosing function's pool.
+    #[must_use]
+    pub const fn atom_pool_index(self) -> Option<AtomPoolIndex> {
+        match self {
+            Self::Atom(index)
+            | Self::AtomU8 { atom: index, .. }
+            | Self::AtomU16 { atom: index, .. }
+            | Self::AtomLabelU8 { atom: index, .. }
+            | Self::AtomLabelU16 { atom: index, .. } => Some(index),
+            _ => None,
+        }
+    }
+
     /// Encodes these operands into a fixed-capacity owned buffer.
     ///
     /// # Errors
@@ -250,9 +328,10 @@ impl Operands {
                 output.push_bytes(format, argument_count.to_le_bytes())?;
                 output.push_bytes(format, scope_index.to_le_bytes())?;
             }
-            Self::U32(value) | Self::Const(value) | Self::Atom(value) => {
+            Self::U32(value) | Self::Const(value) => {
                 output.push_bytes(format, value.to_le_bytes())?;
             }
+            Self::Atom(index) => output.push_bytes(format, index.to_le_bytes())?,
             Self::I32(value) | Self::Label(value) => {
                 output.push_bytes(format, value.to_le_bytes())?;
             }
@@ -299,7 +378,9 @@ impl Operands {
     /// # Errors
     ///
     /// Returns [`OperandDecodeError::LengthMismatch`] when `bytes` does not
-    /// have the format's exact width.
+    /// have the format's exact width. Successful atom-operand decoding
+    /// preserves its structural [`AtomPoolIndex`], but does not prove that the
+    /// index is in bounds for an enclosing function's pool.
     #[allow(clippy::too_many_lines)]
     pub fn decode(format: OperandFormat, bytes: &[u8]) -> Result<Self, OperandDecodeError> {
         let expected = format.operand_width();
@@ -350,22 +431,22 @@ impl Operands {
             OperandFormat::I32 => Ok(Self::I32(read_i32(bytes, 0).ok_or_else(malformed)?)),
             OperandFormat::Const => Ok(Self::Const(u32_at(0)?)),
             OperandFormat::Label => Ok(Self::Label(read_i32(bytes, 0).ok_or_else(malformed)?)),
-            OperandFormat::Atom => Ok(Self::Atom(u32_at(0)?)),
+            OperandFormat::Atom => Ok(Self::Atom(AtomPoolIndex::new(u32_at(0)?))),
             OperandFormat::AtomU8 => Ok(Self::AtomU8 {
-                atom: u32_at(0)?,
+                atom: AtomPoolIndex::new(u32_at(0)?),
                 value: u8_at(4)?,
             }),
             OperandFormat::AtomU16 => Ok(Self::AtomU16 {
-                atom: u32_at(0)?,
+                atom: AtomPoolIndex::new(u32_at(0)?),
                 value: u16_at(4)?,
             }),
             OperandFormat::AtomLabelU8 => Ok(Self::AtomLabelU8 {
-                atom: u32_at(0)?,
+                atom: AtomPoolIndex::new(u32_at(0)?),
                 label: read_i32(bytes, 4).ok_or_else(malformed)?,
                 value: u8_at(8)?,
             }),
             OperandFormat::AtomLabelU16 => Ok(Self::AtomLabelU16 {
-                atom: u32_at(0)?,
+                atom: AtomPoolIndex::new(u32_at(0)?),
                 label: read_i32(bytes, 4).ok_or_else(malformed)?,
                 value: u16_at(8)?,
             }),

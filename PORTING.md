@@ -80,6 +80,9 @@ A milestone is complete only when all of its checked items pass in CI.
       widths, and fixed/dynamic stack-effect metadata from `quickjs-opcode.h`.
 - [x] Checked owned stack-bytecode codec with typed operands, deterministic
       encoding, bounded transactional construction, and a total decoder.
+- [x] Function-local `AtomPoolIndex` operands for all five atom-bearing
+      formats, with unchanged deterministic encoding and explicit deferred
+      pool-bounds validation.
 - [x] Bounded human-readable disassembly with typed operands, resolved stack
       effects, stable text, and structured malformed-input/limit failures.
 - [ ] Control-flow and abstract-stack verifier with computed maximum stack

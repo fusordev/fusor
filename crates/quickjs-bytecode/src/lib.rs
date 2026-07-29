@@ -21,8 +21,8 @@ mod codec;
 mod disassembly;
 
 pub use codec::{
-    BytecodeBuilder, BytecodePc, DecodeError, DecodedInstruction, EncodeError, EncodedOperands,
-    Instruction, InstructionDecoder, InstructionError, MAX_ENCODED_OPERAND_BYTES,
+    AtomPoolIndex, BytecodeBuilder, BytecodePc, DecodeError, DecodedInstruction, EncodeError,
+    EncodedOperands, Instruction, InstructionDecoder, InstructionError, MAX_ENCODED_OPERAND_BYTES,
     OperandDecodeError, OperandEncodeError, Operands, decode_instruction,
 };
 pub use disassembly::{
@@ -85,15 +85,19 @@ pub enum OperandFormat {
     Const,
     /// One 32-bit label index or relative displacement, depending on phase.
     Label,
-    /// One unsigned 32-bit atom.
+    /// One unsigned 32-bit function-local atom-pool index.
     Atom,
-    /// A 32-bit atom followed by an unsigned 8-bit integer.
+    /// A 32-bit function-local atom-pool index followed by an unsigned 8-bit
+    /// integer.
     AtomU8,
-    /// A 32-bit atom followed by an unsigned 16-bit integer.
+    /// A 32-bit function-local atom-pool index followed by an unsigned 16-bit
+    /// integer.
     AtomU16,
-    /// A 32-bit atom, 32-bit label, and unsigned 8-bit integer.
+    /// A 32-bit function-local atom-pool index, 32-bit label, and unsigned
+    /// 8-bit integer.
     AtomLabelU8,
-    /// A 32-bit atom, 32-bit label, and unsigned 16-bit integer.
+    /// A 32-bit function-local atom-pool index, 32-bit label, and unsigned
+    /// 16-bit integer.
     AtomLabelU16,
     /// A 32-bit label followed by an unsigned 16-bit integer.
     LabelU16,

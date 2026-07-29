@@ -125,14 +125,35 @@ closure, constant-pool, bytecode, and stack counts
 `arg_count + var_count`, but the reader accepts a separate `local_count`
 (`quickjs.c:37733-37771`, `quickjs.c:38661-38678`).
 
+QuickJS's live in-memory bytecode operands contain runtime `JSAtom`
+identities, while its object writer rewrites all five atom-bearing operand
+formats through a serialized atom table and relocates them back while reading
+(`quickjs.c:32027-32036`, `quickjs.c:37525-37537`,
+`quickjs.c:37613-37627`, `quickjs.c:38522-38543`).
+
 **Rust hardening.**
 
+- Every Rust bytecode function owns a bounded ordered atom pool. Its encoded
+  atom operands are structural `AtomPoolIndex` values into that function's
+  pool, never predefined ordinals, tagged integer atoms, runtime atom
+  identities, or pointers.
+- A serialized graph-wide string/atom dictionary may deduplicate transport
+  data, but the reader must materialize or validate each function's local pool
+  before body verification. An index has no meaning in a parent, child, or
+  sibling function merely because the numeric position exists there.
+- Atom-pool entries carry owned content plus explicit namespace/predefined
+  metadata. Loading a verified function later reinterns or creates each local
+  entry exactly once in the destination runtime. Verification itself never
+  interns into a runtime.
+- Nullable metadata atom fields use an explicit optional representation.
+  Instruction operands and required metadata fields cannot encode null by
+  smuggling a sentinel integer into `AtomPoolIndex`.
 - `vardefs.len() == arg_count + var_count`;
 - `defined_arg_count <= arg_count`;
 - `arg_count`, `var_count`, `var_ref_count`, and `closure_var_count` are each
   at most 65,534; all sums must fit `usize`;
-- each metadata atom resolves through the verified atom table, with
-  `null` accepted only for fields whose upstream semantics permit it;
+- each present metadata atom index is below that function's atom-pool length,
+  and absence is accepted only for fields whose upstream semantics permit it;
 - `scope_next` is `ARG_SCOPE_END` (-2), -1, or a local index; every chain is
   in range and acyclic;
 - each captured vardef has `var_ref_idx < var_ref_count`, captured vardefs have
@@ -150,13 +171,13 @@ closure, constant-pool, bytecode, and stack counts
 | --- | --- |
 | `const`, `const8` | index is below `cpool.len()` |
 | `fclosure`, `fclosure8` | constant exists, is a bytecode-function constant, and that child verifies |
-| atom-bearing formats | atom is a valid predefined atom, tagged integer atom, or entry in the verified atom table; per-opcode nullability is checked |
+| atom-bearing formats | `AtomPoolIndex::get()` is below the enclosing function's atom-pool length; the referenced entry's namespace is valid for the opcode |
 | `loc`, `loc8`, `none_loc` | index is below `var_count` |
 | `arg`, `none_arg` | index is below `arg_count` |
 | `var_ref`, `none_var_ref` | index is below `closure_var_count`, not `var_ref_count` |
-| `make_loc_ref` | atom is valid, local index is below `var_count`, and its vardef is captured |
-| `make_arg_ref` | atom is valid, argument index is below `arg_count`, and its vardef is captured |
-| `make_var_ref_ref` | atom is valid and index is below `closure_var_count` |
+| `make_loc_ref` | atom-pool index and namespace are valid, local index is below `var_count`, and its vardef is captured |
+| `make_arg_ref` | atom-pool index and namespace are valid, argument index is below `arg_count`, and its vardef is captured |
+| `make_var_ref_ref` | atom-pool index and namespace are valid and index is below `closure_var_count` |
 | `close_loc` | local index is below `var_count`; captured-state requirements are checked |
 | `rest` | first argument index is at most `arg_count` |
 | `eval`, `apply_eval` | decoded scope start is -2, -1, or a local index and its `scope_next` chain is valid |

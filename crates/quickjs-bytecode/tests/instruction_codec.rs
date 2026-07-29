@@ -1,6 +1,8 @@
+use std::{any::TypeId, mem::size_of};
+
 use quickjs_bytecode::{
-    ALL_FINAL_OPCODES, BytecodeBuilder, BytecodePc, DecodeError, EncodeError, FinalOpcode,
-    FinalOpcodeDecodeError, Instruction, InstructionDecoder, InstructionError,
+    ALL_FINAL_OPCODES, AtomPoolIndex, BytecodeBuilder, BytecodePc, DecodeError, EncodeError,
+    FinalOpcode, FinalOpcodeDecodeError, Instruction, InstructionDecoder, InstructionError,
     MAX_ENCODED_OPERAND_BYTES, OperandDecodeError, OperandFormat, Operands, StackEffect,
 };
 
@@ -41,24 +43,27 @@ fn every_operand_format_round_trips_with_deterministic_little_endian_bytes() {
         (Operands::I32(-2), &[0xfe, 0xff, 0xff, 0xff]),
         (Operands::Const(0x89ab_cdef), &[0xef, 0xcd, 0xab, 0x89]),
         (Operands::Label(-0x0123_4568), &[0x98, 0xba, 0xdc, 0xfe]),
-        (Operands::Atom(0x7654_3210), &[0x10, 0x32, 0x54, 0x76]),
+        (
+            Operands::Atom(AtomPoolIndex::new(0x7654_3210)),
+            &[0x10, 0x32, 0x54, 0x76],
+        ),
         (
             Operands::AtomU8 {
-                atom: 0x1234_5678,
+                atom: AtomPoolIndex::new(0x1234_5678),
                 value: 0x9a,
             },
             &[0x78, 0x56, 0x34, 0x12, 0x9a],
         ),
         (
             Operands::AtomU16 {
-                atom: 0x1234_5678,
+                atom: AtomPoolIndex::new(0x1234_5678),
                 value: 0x9abc,
             },
             &[0x78, 0x56, 0x34, 0x12, 0xbc, 0x9a],
         ),
         (
             Operands::AtomLabelU8 {
-                atom: 0x1234_5678,
+                atom: AtomPoolIndex::new(0x1234_5678),
                 label: -2,
                 value: 0x12,
             },
@@ -66,7 +71,7 @@ fn every_operand_format_round_trips_with_deterministic_little_endian_bytes() {
         ),
         (
             Operands::AtomLabelU16 {
-                atom: 0x1234_5678,
+                atom: AtomPoolIndex::new(0x1234_5678),
                 label: i32::MIN,
                 value: 0x3456,
             },
@@ -95,6 +100,60 @@ fn every_operand_format_round_trips_with_deterministic_little_endian_bytes() {
             "{operands:?}"
         );
     }
+}
+
+#[test]
+fn atom_pool_indices_are_distinct_typed_operands_with_boundary_stable_bytes() {
+    fn require_atom_pool_index(index: AtomPoolIndex) -> u32 {
+        index.get()
+    }
+
+    assert_ne!(TypeId::of::<AtomPoolIndex>(), TypeId::of::<u32>());
+    assert_eq!(size_of::<AtomPoolIndex>(), size_of::<u32>());
+    let formatted_index = AtomPoolIndex::new(18);
+    assert_eq!(formatted_index.to_string(), "18");
+    assert_eq!(format!("{formatted_index:08x}"), "00000012");
+
+    for raw in [u32::MIN, u32::MAX] {
+        let index = AtomPoolIndex::new(raw);
+        assert_eq!(require_atom_pool_index(index), raw);
+        assert_eq!(AtomPoolIndex::from_le_bytes(index.to_le_bytes()), index);
+
+        let expected = raw.to_le_bytes();
+        let cases = [
+            Operands::Atom(index),
+            Operands::AtomU8 {
+                atom: index,
+                value: u8::MAX,
+            },
+            Operands::AtomU16 {
+                atom: index,
+                value: u16::MAX,
+            },
+            Operands::AtomLabelU8 {
+                atom: index,
+                label: i32::MIN,
+                value: u8::MAX,
+            },
+            Operands::AtomLabelU16 {
+                atom: index,
+                label: i32::MAX,
+                value: u16::MAX,
+            },
+        ];
+
+        for operands in cases {
+            assert_eq!(operands.atom_pool_index(), Some(index));
+            let encoded = operands.encode().expect("atom operands must encode");
+            assert_eq!(&encoded.as_bytes()[..4], &expected);
+            assert_eq!(
+                Operands::decode(operands.format(), encoded.as_bytes()),
+                Ok(operands)
+            );
+        }
+    }
+
+    assert_eq!(Operands::U32(0).atom_pool_index(), None);
 }
 
 #[test]
@@ -239,7 +298,7 @@ fn decoder_iterator_tracks_typed_pcs_and_stops_after_an_error() {
         .push(
             FinalOpcode::ThrowError,
             Operands::AtomU8 {
-                atom: 0x1234_5678,
+                atom: AtomPoolIndex::new(0x1234_5678),
                 value: 7,
             },
         )
@@ -422,22 +481,22 @@ fn all_operand_samples() -> [Operands; 29] {
         Operands::I32(-15),
         Operands::Const(16),
         Operands::Label(17),
-        Operands::Atom(18),
+        Operands::Atom(AtomPoolIndex::new(18)),
         Operands::AtomU8 {
-            atom: 19,
+            atom: AtomPoolIndex::new(19),
             value: 20,
         },
         Operands::AtomU16 {
-            atom: 21,
+            atom: AtomPoolIndex::new(21),
             value: 22,
         },
         Operands::AtomLabelU8 {
-            atom: 23,
+            atom: AtomPoolIndex::new(23),
             label: 24,
             value: 25,
         },
         Operands::AtomLabelU16 {
-            atom: 26,
+            atom: AtomPoolIndex::new(26),
             label: 27,
             value: 28,
         },

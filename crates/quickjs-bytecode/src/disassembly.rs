@@ -204,20 +204,23 @@ impl fmt::Display for Operands {
             Self::Label(displacement) => {
                 write!(formatter, "label(displacement={displacement:+})")
             }
-            Self::Atom(id) => write!(formatter, "atom(id=0x{id:08x})"),
+            Self::Atom(index) => write!(formatter, "atom(pool_index=0x{index:08x})"),
             Self::AtomU8 { atom, value } => {
-                write!(formatter, "atom_u8(atom=0x{atom:08x}, value={value})")
+                write!(formatter, "atom_u8(pool_index=0x{atom:08x}, value={value})")
             }
             Self::AtomU16 { atom, value } => {
-                write!(formatter, "atom_u16(atom=0x{atom:08x}, value={value})")
+                write!(
+                    formatter,
+                    "atom_u16(pool_index=0x{atom:08x}, value={value})"
+                )
             }
             Self::AtomLabelU8 { atom, label, value } => write!(
                 formatter,
-                "atom_label_u8(atom=0x{atom:08x}, displacement={label:+}, value={value})"
+                "atom_label_u8(pool_index=0x{atom:08x}, displacement={label:+}, value={value})"
             ),
             Self::AtomLabelU16 { atom, label, value } => write!(
                 formatter,
-                "atom_label_u16(atom=0x{atom:08x}, displacement={label:+}, value={value})"
+                "atom_label_u16(pool_index=0x{atom:08x}, displacement={label:+}, value={value})"
             ),
             Self::LabelU16 { label, value } => write!(
                 formatter,

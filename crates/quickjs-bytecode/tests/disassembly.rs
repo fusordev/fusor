@@ -1,8 +1,8 @@
 use std::fmt;
 
 use quickjs_bytecode::{
-    BytecodeBuilder, BytecodePc, DecodeError, DisassemblyError, DisassemblyLimits, FinalOpcode,
-    FinalOpcodeDecodeError, InstructionDecoder, Operands, render_disassembly,
+    AtomPoolIndex, BytecodeBuilder, BytecodePc, DecodeError, DisassemblyError, DisassemblyLimits,
+    FinalOpcode, FinalOpcodeDecodeError, InstructionDecoder, Operands, render_disassembly,
 };
 
 const GENEROUS_LIMITS: DisassemblyLimits = DisassemblyLimits::new(1_000, 1_000_000);
@@ -23,7 +23,7 @@ fn disassembly_has_stable_exact_output_and_computed_dynamic_stack_effects() {
         .push(
             FinalOpcode::WithGetVar,
             Operands::AtomLabelU8 {
-                atom: 0x1234,
+                atom: AtomPoolIndex::new(0x1234),
                 label: 7,
                 value: 1,
             },
@@ -45,7 +45,7 @@ fn disassembly_has_stable_exact_output_and_computed_dynamic_stack_effects() {
         "pc=0x00000000 opcode=push_i32 operands=i32(-42) stack={pops=0,pushes=1}\n",
         "pc=0x00000005 opcode=call operands=npop(argument_count=2) stack={pops=3,pushes=1}\n",
         "pc=0x00000008 opcode=goto operands=label(displacement=-5) stack={pops=0,pushes=0}\n",
-        "pc=0x0000000d opcode=with_get_var operands=atom_label_u8(atom=0x00001234, displacement=+7, value=1) stack={pops=1,pushes=0}\n",
+        "pc=0x0000000d opcode=with_get_var operands=atom_label_u8(pool_index=0x00001234, displacement=+7, value=1) stack={pops=1,pushes=0}\n",
         "pc=0x00000017 opcode=call2 operands=npopx stack={pops=3,pushes=1}\n",
     );
     assert_eq!(output, expected);
@@ -88,36 +88,39 @@ fn every_operand_variant_has_an_unambiguous_stable_rendering() {
         (Operands::I32(-15), "i32(-15)"),
         (Operands::Const(16), "const(index=16)"),
         (Operands::Label(17), "label(displacement=+17)"),
-        (Operands::Atom(18), "atom(id=0x00000012)"),
+        (
+            Operands::Atom(AtomPoolIndex::new(18)),
+            "atom(pool_index=0x00000012)",
+        ),
         (
             Operands::AtomU8 {
-                atom: 19,
+                atom: AtomPoolIndex::new(19),
                 value: 20,
             },
-            "atom_u8(atom=0x00000013, value=20)",
+            "atom_u8(pool_index=0x00000013, value=20)",
         ),
         (
             Operands::AtomU16 {
-                atom: 21,
+                atom: AtomPoolIndex::new(21),
                 value: 22,
             },
-            "atom_u16(atom=0x00000015, value=22)",
+            "atom_u16(pool_index=0x00000015, value=22)",
         ),
         (
             Operands::AtomLabelU8 {
-                atom: 23,
+                atom: AtomPoolIndex::new(23),
                 label: -24,
                 value: 25,
             },
-            "atom_label_u8(atom=0x00000017, displacement=-24, value=25)",
+            "atom_label_u8(pool_index=0x00000017, displacement=-24, value=25)",
         ),
         (
             Operands::AtomLabelU16 {
-                atom: 26,
+                atom: AtomPoolIndex::new(26),
                 label: 27,
                 value: 28,
             },
-            "atom_label_u16(atom=0x0000001a, displacement=+27, value=28)",
+            "atom_label_u16(pool_index=0x0000001a, displacement=+27, value=28)",
         ),
         (
             Operands::LabelU16 {
