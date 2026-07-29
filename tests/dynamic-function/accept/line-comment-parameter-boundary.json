@@ -1,0 +1,5 @@
+{
+  "kind": "function",
+  "parameters": ["a//", "b"],
+  "body": "return a;"
+}

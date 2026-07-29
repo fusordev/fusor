@@ -1,0 +1,5 @@
+{
+  "kind": "async",
+  "parameters": ["value"],
+  "body": "await Promise.resolve(); return value;"
+}

@@ -1,0 +1,5 @@
+{
+  "kind": "async-generator",
+  "parameters": ["value"],
+  "body": "await Promise.resolve(); yield value;"
+}

@@ -1,0 +1,5 @@
+{
+  "kind": "function",
+  "parameters": ["value = 1"],
+  "body": "\"use strict\"; return value;"
+}

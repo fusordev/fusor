@@ -2,8 +2,12 @@
 
 #![forbid(unsafe_code)]
 
+mod dynamic_function_differential;
 mod parser_differential;
 
+use dynamic_function_differential::{
+    DynamicFunctionDifferentialOptions, run_dynamic_function_differential,
+};
 use parser_differential::{ParserDifferentialOptions, run_parser_differential};
 use std::env;
 use std::ffi::OsStr;
@@ -17,6 +21,7 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_CORPUS: &str = "tests/differential";
 const DEFAULT_PARSER_CORPUS: &str = "tests/parser";
+const DEFAULT_DYNAMIC_FUNCTION_CORPUS: &str = "tests/dynamic-function";
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 
 fn main() -> ExitCode {
@@ -41,6 +46,16 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Ok(Args::DynamicFunctionDifferential(options)) => {
+            match run_dynamic_function_differential(&options) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::FAILURE,
+                Err(error) => {
+                    eprintln!("xtask: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Err(error) => {
             eprintln!("xtask: {error}\n");
             print_usage();
@@ -55,12 +70,17 @@ fn print_usage() {
 Usage:
   cargo xtask differential --oracle PATH --candidate PATH [OPTIONS]
   cargo xtask parser-differential --oracle PATH [OPTIONS]
+  cargo xtask dynamic-function-differential --oracle QJSC_PATH [OPTIONS]
 
 Options:
   --corpus PATH       Corpus directory (runtime default: {DEFAULT_CORPUS};
-                      parser default: {DEFAULT_PARSER_CORPUS})
+                      parser default: {DEFAULT_PARSER_CORPUS};
+                      dynamic Function default: {DEFAULT_DYNAMIC_FUNCTION_CORPUS})
   --timeout-ms N      Per-process timeout (default: {DEFAULT_TIMEOUT_MS})
   -h, --help          Show this help
+
+Dynamic Function --oracle must be the pinned QuickJS 2026-06-04 qjsc compiler.
+It is invoked with -c only; generated code is never compiled or executed.
 "
     );
 }
@@ -70,6 +90,7 @@ enum Args {
     Help,
     Differential(DifferentialOptions),
     ParserDifferential(ParserDifferentialOptions),
+    DynamicFunctionDifferential(DynamicFunctionDifferentialOptions),
 }
 
 impl Args {
@@ -97,6 +118,10 @@ impl Args {
             }
             "parser-differential" => parse_parser_differential_options(arguments.into_iter())
                 .map(Self::ParserDifferential),
+            "dynamic-function-differential" => {
+                parse_dynamic_function_differential_options(arguments.into_iter())
+                    .map(Self::DynamicFunctionDifferential)
+            }
             unknown => Err(format!("unknown task `{unknown}`")),
         }
     }
@@ -147,6 +172,33 @@ fn parse_parser_differential_options(
     }
 
     Ok(ParserDifferentialOptions {
+        oracle: oracle.ok_or("missing required --oracle PATH")?,
+        corpus,
+        timeout,
+    })
+}
+
+fn parse_dynamic_function_differential_options(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<DynamicFunctionDifferentialOptions, String> {
+    let mut oracle = None;
+    let mut corpus = PathBuf::from(DEFAULT_DYNAMIC_FUNCTION_CORPUS);
+    let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    while let Some(option) = arguments.next() {
+        match option.to_string_lossy().as_ref() {
+            "--oracle" => oracle = Some(required_path(&mut arguments, "--oracle")?),
+            "--corpus" => corpus = required_path(&mut arguments, "--corpus")?,
+            "--timeout-ms" => timeout = required_timeout(&mut arguments)?,
+            unknown => {
+                return Err(format!(
+                    "unknown dynamic-function-differential option `{unknown}`"
+                ));
+            }
+        }
+    }
+
+    Ok(DynamicFunctionDifferentialOptions {
         oracle: oracle.ok_or("missing required --oracle PATH")?,
         corpus,
         timeout,
@@ -293,6 +345,24 @@ pub(crate) fn run_program_with_arguments(
     arguments: &[&OsStr],
     timeout: Duration,
 ) -> Result<ProgramOutput, String> {
+    run_program_with_arguments_inner(executable, arguments, timeout, None)
+}
+
+pub(crate) fn run_program_with_arguments_bounded(
+    executable: &Path,
+    arguments: &[&OsStr],
+    timeout: Duration,
+    max_stream_bytes: usize,
+) -> Result<ProgramOutput, String> {
+    run_program_with_arguments_inner(executable, arguments, timeout, Some(max_stream_bytes))
+}
+
+fn run_program_with_arguments_inner(
+    executable: &Path,
+    arguments: &[&OsStr],
+    timeout: Duration,
+    max_stream_bytes: Option<usize>,
+) -> Result<ProgramOutput, String> {
     let mut child = Command::new(executable)
         .args(arguments)
         .stdin(Stdio::null())
@@ -309,8 +379,8 @@ pub(crate) fn run_program_with_arguments(
         .stderr
         .take()
         .ok_or_else(|| "failed to capture child stderr".to_owned())?;
-    let stdout_reader = thread::spawn(move || read_all(stdout));
-    let stderr_reader = thread::spawn(move || read_all(stderr));
+    let stdout_reader = thread::spawn(move || read_all(stdout, max_stream_bytes));
+    let stderr_reader = thread::spawn(move || read_all(stderr, max_stream_bytes));
 
     let status = wait_with_timeout(&mut child, timeout)?;
     let stdout = join_reader(stdout_reader, "stdout")?;
@@ -323,9 +393,34 @@ pub(crate) fn run_program_with_arguments(
     })
 }
 
-fn read_all(mut pipe: impl Read) -> io::Result<Vec<u8>> {
+fn read_all(mut pipe: impl Read, max_bytes: Option<usize>) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    pipe.read_to_end(&mut bytes)?;
+    if let Some(max_bytes) = max_bytes {
+        let requested = max_bytes.checked_add(1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "output byte limit overflowed")
+        })?;
+        bytes.try_reserve_exact(requested).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                format!("cannot reserve {requested} bytes for child output"),
+            )
+        })?;
+        pipe.take(u64::try_from(requested).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "output byte limit does not fit u64",
+            )
+        })?)
+        .read_to_end(&mut bytes)?;
+        if bytes.len() > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("child output exceeds the {max_bytes}-byte stream limit"),
+            ));
+        }
+    } else {
+        pipe.read_to_end(&mut bytes)?;
+    }
     Ok(bytes)
 }
 
@@ -392,9 +487,13 @@ fn write_stream_difference(message: &mut String, name: &str, oracle: &[u8], cand
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, DifferentialOptions, Status, collect_javascript_files, wait_with_timeout};
+    use super::{
+        Args, DifferentialOptions, Status, collect_javascript_files, read_all, wait_with_timeout,
+    };
+    use crate::dynamic_function_differential::DynamicFunctionDifferentialOptions;
     use std::ffi::OsString;
     use std::fs;
+    use std::io::Cursor;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::time::Duration;
@@ -427,12 +526,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_dynamic_function_differential_options() {
+        let arguments = [
+            "dynamic-function-differential",
+            "--oracle",
+            "/tmp/qjsc",
+            "--corpus",
+            "fixtures",
+            "--timeout-ms",
+            "125",
+        ]
+        .into_iter()
+        .map(OsString::from);
+
+        assert_eq!(
+            Args::parse(arguments),
+            Ok(Args::DynamicFunctionDifferential(
+                DynamicFunctionDifferentialOptions {
+                    oracle: PathBuf::from("/tmp/qjsc"),
+                    corpus: PathBuf::from("fixtures"),
+                    timeout: Duration::from_millis(125),
+                }
+            ))
+        );
+    }
+
+    #[test]
     fn rejects_missing_required_options() {
         let arguments = ["differential"].into_iter().map(OsString::from);
         assert_eq!(
             Args::parse(arguments),
             Err("missing required --oracle PATH".to_owned())
         );
+    }
+
+    #[test]
+    fn bounded_child_output_rejects_the_first_excess_byte() {
+        assert_eq!(
+            read_all(Cursor::new(b"1234"), Some(4)).expect("output at limit"),
+            b"1234"
+        );
+        let error = read_all(Cursor::new(b"12345"), Some(4)).expect_err("excess output");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

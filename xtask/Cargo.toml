@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 quickjs-frontend = { path = "../crates/quickjs-frontend" }
+serde_json.workspace = true
 
 [lints]
 workspace = true

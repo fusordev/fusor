@@ -1,0 +1,5 @@
+{
+  "kind": "generator",
+  "parameters": ["value"],
+  "body": "yield value;"
+}

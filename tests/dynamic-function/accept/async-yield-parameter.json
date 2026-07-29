@@ -1,0 +1,5 @@
+{
+  "kind": "async",
+  "parameters": ["yield"],
+  "body": "return yield;"
+}

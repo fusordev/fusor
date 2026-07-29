@@ -1,0 +1,5 @@
+{
+  "kind": "function",
+  "parameters": ["value", "value"],
+  "body": "return value;"
+}

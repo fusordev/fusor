@@ -1,0 +1,5 @@
+{
+  "kind": "generator",
+  "parameters": ["await"],
+  "body": "yield await;"
+}

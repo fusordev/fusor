@@ -31,6 +31,11 @@ Every source unit is rejected if Oxc reports either a parser diagnostic or a
 deferred semantic early error. TypeScript, JSX, V8 intrinsics, and Oxc's
 unambiguous source mode are not exposed by the engine front end.
 
+The selected compatibility policy permits narrow Oxc-vs-QuickJS parser
+differences. Such differences must be recorded and covered by differential or
+expectation fixtures; they do not authorize importing behavior from another
+JavaScript runtime or changing QuickJS-derived runtime semantics.
+
 ### Diagnostics and source maps
 
 The reusable diagnostics layer exactly pins:

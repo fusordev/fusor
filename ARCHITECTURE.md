@@ -2,8 +2,9 @@
 
 This document records the implementation boundaries and invariants for the
 pure-Rust port of QuickJS 2026-06-04. Observable behavior follows the pinned
-QuickJS release. Rust-native representations and measured optimizations are
-allowed when differential tests preserve that behavior.
+QuickJS release except for explicitly documented Oxc parser differences.
+Rust-native representations and measured optimizations are allowed when
+differential tests preserve the selected compatibility behavior.
 
 ## Layering
 
@@ -57,6 +58,13 @@ The compilation pipeline is:
 No Oxc AST reference may survive compilation. Static Oxc resolution is only an
 input: `with`, direct eval, Annex B bindings, and global declaration
 instantiation require QuickJS-compatible dynamic handling.
+
+Oxc acceptance, rejection, or diagnostic wording may intentionally differ from
+the pinned QuickJS parser. Every accepted difference must be narrow,
+documented, and regression-tested; it must preserve byte-accurate source
+mapping and must not silently substitute different runtime semantics.
+TypeScript, JSX, and alternate JavaScript-runtime behavior remain outside the
+default parser profile.
 
 Dynamic Function constructors use a dedicated adapter rather than parsing a
 naked body. It joins separately coerced parameter fragments with the exact

@@ -75,7 +75,12 @@ A milestone is complete only when all of its checked items pass in CI.
       spans.
 - [ ] Differentially test Oxc acceptance, early errors, strict mode, Annex B,
       and ES2025 syntax against the pinned QuickJS release.
-- [ ] Record and close any parser compatibility gaps before claiming M1.
+  - [x] Differentially test all four dynamic Function-constructor families
+        against the pinned `qjsc -c` compiler oracle, including
+        exact-wrapper-sensitive comments, wrapper escape, strict/contextual
+        parameters, Unicode, and malformed input without executing JavaScript.
+- [ ] Record every parser compatibility gap and either close it or mark it as
+      an intentional, regression-tested Oxc difference before claiming M1.
 
 ### M2 — compiler and VM core
 

@@ -1,7 +1,10 @@
 //! Differential checks for the Oxc/QuickJS syntax boundary.
 
 use crate::{ProgramOutput, Status};
-use crate::{collect_javascript_files, run_program_with_arguments, validate_executable};
+use crate::{
+    collect_javascript_files, run_program_with_arguments, run_program_with_arguments_bounded,
+    validate_executable,
+};
 use quickjs_frontend::{Allocator, FrontendOptions, ParseMode, parse};
 use std::ffi::OsStr;
 use std::fmt;
@@ -10,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const EXPECTED_ORACLE_BANNER: &str = "QuickJS version 2026-06-04";
+const MAX_ORACLE_VERSION_STREAM_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ParserDifferentialOptions {
@@ -193,7 +197,12 @@ fn observe_oracle(
 }
 
 fn validate_oracle_release(executable: &Path, timeout: Duration) -> Result<(), String> {
-    let output = run_program_with_arguments(executable, &[OsStr::new("--help")], timeout)?;
+    let output = run_program_with_arguments_bounded(
+        executable,
+        &[OsStr::new("--help")],
+        timeout,
+        MAX_ORACLE_VERSION_STREAM_BYTES,
+    )?;
     if output.status == Status::TimedOut {
         return Err(format!(
             "parser oracle {} timed out while reporting its version",
