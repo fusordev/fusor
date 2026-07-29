@@ -109,6 +109,10 @@ cleanup and per-iteration environment semantics exist.
 
 `BytecodeAssembler` keeps symbolic label handles provenance-bound to one
 assembler through immutable `Arc` identity. Labels never enter final operands.
+The compiler wraps each handle with its owning Oxc span. Statement labels also
+declare an exact empty-stack entry requirement; after final layout and
+whole-CFG verification, every reachable statement anchor must have verified
+depth zero, while structurally valid unreachable anchors remain accepted.
 After whole-body planning, the assembler rejects foreign, duplicate, unbound,
 or end-of-stream targets, starts branches at their shortest forms, and
 monotonically widens conditionals to 8/32-bit and gotos to 8/16/32-bit
@@ -308,6 +312,12 @@ The implementation keeps distinct domains:
 JavaScript throws remain rooted JavaScript values. Compiler, verifier, host, or
 engine failures are converted to a JS error only at an explicit API boundary.
 Miette is presentation, not semantic truth.
+
+The leaf compiler maps instruction-local verifier failures back through its
+strictly ordered final-PC table with exact `BytecodePc` lookup. It never treats
+a byte offset as an instruction ordinal. Join-depth failures additionally map
+the target PC as a related span; function-level verifier failures with no PC do
+not fabricate an instruction span.
 
 ## Sources and maps
 

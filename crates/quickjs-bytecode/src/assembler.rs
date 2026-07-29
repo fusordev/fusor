@@ -304,6 +304,28 @@ impl AssemblerError {
             | Self::EncodedLengthOutOfRange { .. } => None,
         }
     }
+
+    /// Returns the stable plan-local label associated with this failure.
+    #[must_use]
+    pub const fn label_index(&self) -> Option<u32> {
+        match self {
+            Self::UnknownLabel { label_index }
+            | Self::DuplicateLabel { label_index }
+            | Self::UnboundLabel { label_index }
+            | Self::TargetAtEnd { label_index }
+            | Self::BranchDisplacementOutOfRange { label_index, .. } => Some(*label_index),
+            Self::LimitExceeded { .. }
+            | Self::TooManyLabels
+            | Self::TooManyInstructions
+            | Self::AllocationFailed { .. }
+            | Self::ForeignLabel
+            | Self::SymbolicBranchRequired { .. }
+            | Self::InvalidInstruction { .. }
+            | Self::EncodedLengthOutOfRange { .. }
+            | Self::Encoding { .. }
+            | Self::LayoutMismatch { .. } => None,
+        }
+    }
 }
 
 impl fmt::Display for AssemblerError {

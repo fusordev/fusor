@@ -15,8 +15,8 @@ use oxc_syntax::operator::{BinaryOperator, LogicalOperator, UnaryOperator};
 use quickjs_bytecode::{
     AssemblerError, AssemblerLabel, AssemblerLimits, BranchKind, BytecodeAssembler, BytecodePc,
     EncodeError, FinalOpcode, FunctionIndexDomains, Operands, UnverifiedCompilerFunctionBody,
-    UnverifiedFunctionHeader, VerificationError, VerificationLimits, VerifiedControlFlow,
-    verify_compiler_control_flow,
+    UnverifiedFunctionHeader, VerificationError, VerificationErrorKind, VerificationLimits,
+    VerifiedControlFlow, verify_compiler_control_flow,
 };
 use quickjs_frontend::{ParsedUnit, Span};
 
@@ -243,15 +243,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             locals,
             flow,
         } = validated;
-        let (bytecode, source_instructions) = flow.finish()?;
         let domains = FunctionIndexDomains::new(0, 0, argument_count, local_count, 0);
         let header =
             UnverifiedFunctionHeader::stripped_ordinary_source_function(strict, argument_count);
-        let control_flow = verify_compiler_control_flow(
-            UnverifiedCompilerFunctionBody::new(bytecode, domains, header),
-            limits,
-        )
-        .map_err(|source| LeafCompilationError::BytecodeVerification { source })?;
+        let finished = flow.finish()?;
+        let (source_instructions, control_flow) = finished.verify(domains, header, limits)?;
 
         Ok(CompiledLeafFunction {
             executable,
@@ -521,9 +517,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         flow: &mut PlannedControlFlow,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
-        let alternate = flow.new_label(statement.span)?;
         if let Some(alternate_statement) = &statement.alternate {
-            let done = flow.new_label(statement.span)?;
+            let alternate = flow.new_statement_label(alternate_statement.span())?;
+            let done = flow.new_statement_label(statement.span)?;
             work.push(StatementWork::Bind(done.clone()));
             work.push(StatementWork::Visit(alternate_statement));
             work.push(StatementWork::Bind(alternate.clone()));
@@ -533,15 +529,21 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 span: statement.span,
             });
             work.push(StatementWork::Visit(&statement.consequent));
+            work.push(StatementWork::Branch {
+                kind: BranchKind::IfFalse,
+                target: alternate,
+                span: statement.test.span(),
+            });
         } else {
-            work.push(StatementWork::Bind(alternate.clone()));
+            let done = flow.new_statement_label(statement.span)?;
+            work.push(StatementWork::Bind(done.clone()));
             work.push(StatementWork::Visit(&statement.consequent));
+            work.push(StatementWork::Branch {
+                kind: BranchKind::IfFalse,
+                target: done,
+                span: statement.test.span(),
+            });
         }
-        work.push(StatementWork::Branch {
-            kind: BranchKind::IfFalse,
-            target: alternate,
-            span: statement.test.span(),
-        });
         work.push(StatementWork::Expression(&statement.test));
         Ok(())
     }
@@ -552,8 +554,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         work: &mut Vec<StatementWork<'statement, 'arena>>,
         scope_depth: usize,
     ) -> Result<(), LeafCompilationError> {
-        let test = flow.new_label(statement.test.span())?;
-        let done = flow.new_label(statement.span)?;
+        let test = flow.new_statement_label(statement.test.span())?;
+        let done = flow.new_statement_label(statement.span)?;
         let control = LoopControl {
             break_target: done.clone(),
             continue_target: test.clone(),
@@ -584,9 +586,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         work: &mut Vec<StatementWork<'statement, 'arena>>,
         scope_depth: usize,
     ) -> Result<(), LeafCompilationError> {
-        let iteration = flow.new_label(statement.body.span())?;
-        let test = flow.new_label(statement.test.span())?;
-        let done = flow.new_label(statement.span)?;
+        let iteration = flow.new_statement_label(statement.body.span())?;
+        let test = flow.new_statement_label(statement.test.span())?;
+        let done = flow.new_statement_label(statement.span)?;
         let control = LoopControl {
             break_target: done.clone(),
             continue_target: test.clone(),
@@ -1324,15 +1326,22 @@ impl PlannedInstruction {
     }
 }
 
+#[derive(Clone)]
+struct CompilerLabel {
+    assembler: AssemblerLabel,
+    owner_span: Span,
+    expected_stack_depth: Option<u32>,
+}
+
 enum ExpressionWork<'expression, 'arena> {
     Visit(&'expression Expression<'arena>),
     Emit(PlannedInstruction),
     Branch {
         kind: BranchKind,
-        target: AssemblerLabel,
+        target: CompilerLabel,
         span: Span,
     },
-    Bind(AssemblerLabel),
+    Bind(CompilerLabel),
 }
 
 enum StatementWork<'statement, 'arena> {
@@ -1353,10 +1362,10 @@ enum StatementWork<'statement, 'arena> {
     Emit(PlannedInstruction),
     Branch {
         kind: BranchKind,
-        target: AssemblerLabel,
+        target: CompilerLabel,
         span: Span,
     },
-    Bind(AssemblerLabel),
+    Bind(CompilerLabel),
 }
 
 struct StatementPlanningState<'statement, 'arena> {
@@ -1367,8 +1376,8 @@ struct StatementPlanningState<'statement, 'arena> {
 
 #[derive(Clone)]
 struct LoopControl {
-    break_target: AssemblerLabel,
-    continue_target: AssemblerLabel,
+    break_target: CompilerLabel,
+    continue_target: CompilerLabel,
     scope_depth: usize,
 }
 
@@ -1393,7 +1402,7 @@ impl LoopJump {
         }
     }
 
-    const fn target(self, control: &LoopControl) -> &AssemblerLabel {
+    const fn target(self, control: &LoopControl) -> &CompilerLabel {
         match self {
             Self::Break => &control.break_target,
             Self::Continue => &control.continue_target,
@@ -1497,11 +1506,34 @@ struct ValidatedLeaf {
     flow: PlannedControlFlow,
 }
 
+#[derive(Clone, Copy)]
+struct StackAnchor {
+    instruction_index: usize,
+    span: Span,
+    expected_depth: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResolvedStackAnchor {
+    pc: BytecodePc,
+    span: Span,
+    expected_depth: u32,
+}
+
 struct PlannedControlFlow {
     assembler: BytecodeAssembler,
     instruction_spans: Vec<Span>,
+    label_spans: Vec<Span>,
+    stack_anchors: Vec<StackAnchor>,
     last_instruction_can_fall_through: Option<bool>,
     label_bound_after_last_instruction: bool,
+}
+
+#[derive(Debug)]
+struct FinishedControlFlow {
+    bytecode: Vec<u8>,
+    source_instructions: Vec<SourceInstruction>,
+    stack_anchors: Vec<ResolvedStackAnchor>,
 }
 
 impl PlannedControlFlow {
@@ -1514,6 +1546,8 @@ impl PlannedControlFlow {
         Self {
             assembler: BytecodeAssembler::with_limits(assembler_limits),
             instruction_spans: Vec::new(),
+            label_spans: Vec::new(),
+            stack_anchors: Vec::new(),
             last_instruction_can_fall_through: None,
             label_bound_after_last_instruction: false,
         }
@@ -1535,37 +1569,65 @@ impl PlannedControlFlow {
         Ok(())
     }
 
-    fn new_label(&mut self, span: Span) -> Result<AssemblerLabel, LeafCompilationError> {
-        self.assembler
-            .new_label()
-            .map_err(|source| LeafCompilationError::BytecodeAssembly {
-                span: Some(span),
-                source,
-            })
+    fn new_label(&mut self, span: Span) -> Result<CompilerLabel, LeafCompilationError> {
+        self.new_label_with_expected_depth(span, None)
     }
 
-    fn branch(
+    fn new_statement_label(&mut self, span: Span) -> Result<CompilerLabel, LeafCompilationError> {
+        self.new_label_with_expected_depth(span, Some(0))
+    }
+
+    fn new_label_with_expected_depth(
         &mut self,
-        kind: BranchKind,
-        target: &AssemblerLabel,
         span: Span,
-    ) -> Result<(), LeafCompilationError> {
-        self.assembler.branch(kind, target).map_err(|source| {
+        expected_stack_depth: Option<u32>,
+    ) -> Result<CompilerLabel, LeafCompilationError> {
+        let assembler = self.assembler.new_label().map_err(|source| {
             LeafCompilationError::BytecodeAssembly {
                 span: Some(span),
                 source,
             }
         })?;
+        self.label_spans.push(span);
+        Ok(CompilerLabel {
+            assembler,
+            owner_span: span,
+            expected_stack_depth,
+        })
+    }
+
+    fn branch(
+        &mut self,
+        kind: BranchKind,
+        target: &CompilerLabel,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        self.assembler
+            .branch(kind, &target.assembler)
+            .map_err(|source| LeafCompilationError::BytecodeAssembly {
+                span: Some(span),
+                source,
+            })?;
         self.instruction_spans.push(span);
         self.last_instruction_can_fall_through = Some(kind != BranchKind::Goto);
         self.label_bound_after_last_instruction = false;
         Ok(())
     }
 
-    fn bind(&mut self, label: &AssemblerLabel) -> Result<(), LeafCompilationError> {
-        self.assembler
-            .bind(label)
-            .map_err(|source| LeafCompilationError::BytecodeAssembly { span: None, source })?;
+    fn bind(&mut self, label: &CompilerLabel) -> Result<(), LeafCompilationError> {
+        self.assembler.bind(&label.assembler).map_err(|source| {
+            LeafCompilationError::BytecodeAssembly {
+                span: Some(label.owner_span),
+                source,
+            }
+        })?;
+        if let Some(expected_depth) = label.expected_stack_depth {
+            self.stack_anchors.push(StackAnchor {
+                instruction_index: self.instruction_spans.len(),
+                span: label.owner_span,
+                expected_depth,
+            });
+        }
         self.label_bound_after_last_instruction = true;
         Ok(())
     }
@@ -1583,9 +1645,16 @@ impl PlannedControlFlow {
         Ok(())
     }
 
-    fn finish(self) -> Result<(Vec<u8>, Vec<SourceInstruction>), LeafCompilationError> {
-        let spans = self.instruction_spans;
-        let assembled = match self.assembler.finish() {
+    fn finish(self) -> Result<FinishedControlFlow, LeafCompilationError> {
+        let Self {
+            assembler,
+            instruction_spans: spans,
+            label_spans,
+            stack_anchors,
+            last_instruction_can_fall_through: _,
+            label_bound_after_last_instruction: _,
+        } = self;
+        let assembled = match assembler.finish() {
             Ok(assembled) => assembled,
             Err(AssemblerError::Encoding {
                 instruction_index,
@@ -1602,7 +1671,12 @@ impl PlannedControlFlow {
             Err(source) => {
                 let span = source
                     .instruction_index()
-                    .and_then(|index| spans.get(index as usize).copied());
+                    .and_then(|index| spans.get(index as usize).copied())
+                    .or_else(|| {
+                        source
+                            .label_index()
+                            .and_then(|index| label_spans.get(index as usize).copied())
+                    });
                 return Err(LeafCompilationError::BytecodeAssembly { span, source });
             }
         };
@@ -1613,13 +1687,116 @@ impl PlannedControlFlow {
                 span: spans.last().copied(),
             });
         }
+        let mut resolved_stack_anchors = Vec::with_capacity(stack_anchors.len());
+        for anchor in stack_anchors {
+            let Some(pc) = instruction_pcs.get(anchor.instruction_index).copied() else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "statement stack anchor resolves to a final instruction",
+                    span: Some(anchor.span),
+                });
+            };
+            resolved_stack_anchors.push(ResolvedStackAnchor {
+                pc,
+                span: anchor.span,
+                expected_depth: anchor.expected_depth,
+            });
+        }
         let source_instructions = instruction_pcs
             .into_iter()
             .zip(spans)
             .map(|(pc, span)| SourceInstruction { pc, span })
             .collect();
-        Ok((bytecode, source_instructions))
+        Ok(FinishedControlFlow {
+            bytecode,
+            source_instructions,
+            stack_anchors: resolved_stack_anchors,
+        })
     }
+}
+
+impl FinishedControlFlow {
+    fn verify(
+        self,
+        domains: FunctionIndexDomains,
+        header: UnverifiedFunctionHeader,
+        limits: VerificationLimits,
+    ) -> Result<(Vec<SourceInstruction>, VerifiedControlFlow), LeafCompilationError> {
+        let Self {
+            bytecode,
+            source_instructions,
+            stack_anchors,
+        } = self;
+        let control_flow = match verify_compiler_control_flow(
+            UnverifiedCompilerFunctionBody::new(bytecode, domains, header),
+            limits,
+        ) {
+            Ok(control_flow) => control_flow,
+            Err(source) => {
+                let span = match source.pc() {
+                    Some(pc) => Some(exact_source_span(&source_instructions, pc).ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant:
+                                "verifier instruction PC resolves to an exact source instruction",
+                            span: None,
+                        },
+                    )?),
+                    None => None,
+                };
+                let related_span = match source.kind() {
+                VerificationErrorKind::InconsistentStackAtJoin { target, .. } => {
+                        Some(exact_source_span(&source_instructions, *target).ok_or(
+                            LeafCompilationError::SemanticInvariant {
+                                invariant:
+                                    "verifier join target resolves to an exact source instruction",
+                                span: None,
+                            },
+                        )?)
+                }
+                _ => None,
+            };
+                return Err(LeafCompilationError::BytecodeVerification {
+                    span,
+                    related_span,
+                    source,
+                });
+            }
+        };
+
+        for anchor in stack_anchors {
+            let Some(index) = control_flow.instruction_index_at(anchor.pc) else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "resolved statement stack anchor remains an instruction start",
+                    span: Some(anchor.span),
+                });
+            };
+            let Some(instruction) = control_flow.instruction(index) else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "resolved statement stack anchor has a verified instruction",
+                    span: Some(anchor.span),
+                });
+            };
+            let Some(actual) = instruction.entry_stack_depth() else {
+                continue;
+            };
+            if actual != anchor.expected_depth {
+                return Err(LeafCompilationError::BytecodeStackInvariant {
+                    span: anchor.span,
+                    pc: anchor.pc,
+                    expected: anchor.expected_depth,
+                    actual,
+                });
+            }
+        }
+
+        Ok((source_instructions, control_flow))
+    }
+}
+
+fn exact_source_span(source_instructions: &[SourceInstruction], pc: BytecodePc) -> Option<Span> {
+    source_instructions
+        .binary_search_by_key(&pc, |instruction| instruction.pc())
+        .ok()
+        .map(|index| source_instructions[index].span())
 }
 
 fn compact_get_argument(slot: ArgumentSlot) -> (FinalOpcode, Operands) {
@@ -1885,13 +2062,28 @@ pub enum LeafCompilationError {
     },
     /// Symbolic labels or branch relaxation could not produce final bytecode.
     BytecodeAssembly {
-        /// Related source span, when the failure belongs to one instruction.
+        /// Related instruction or compiler-owned label span, when available.
         span: Option<Span>,
         /// Exact assembler failure.
         source: AssemblerError,
     },
+    /// A reachable compiler-owned statement anchor had the wrong entry stack.
+    BytecodeStackInvariant {
+        /// Source span that owns the statement anchor.
+        span: Span,
+        /// Final relocated bytecode position of the anchor.
+        pc: BytecodePc,
+        /// Compiler-required operand-stack depth.
+        expected: u32,
+        /// Verified reachable operand-stack depth.
+        actual: u32,
+    },
     /// The emitted body failed staged control-flow verification.
     BytecodeVerification {
+        /// Exact instruction span for the verifier PC, when the error has one.
+        span: Option<Span>,
+        /// Exact join-target span for a two-position verifier failure.
+        related_span: Option<Span>,
         /// Exact verifier failure.
         source: VerificationError,
     },
@@ -1932,8 +2124,31 @@ impl fmt::Display for LeafCompilationError {
                 }
                 write!(formatter, ": {source}")
             }
-            Self::BytecodeVerification { source } => {
-                write!(formatter, "bytecode verification failed: {source}")
+            Self::BytecodeStackInvariant {
+                span,
+                pc,
+                expected,
+                actual,
+            } => {
+                write!(
+                    formatter,
+                    "compiler stack invariant failed at {span:?} (PC {pc}): \
+                     expected depth {expected}, got {actual}"
+                )
+            }
+            Self::BytecodeVerification {
+                span,
+                related_span,
+                source,
+            } => {
+                write!(formatter, "{source}")?;
+                if let Some(span) = span {
+                    write!(formatter, " at source {span:?}")?;
+                }
+                if let Some(related_span) = related_span {
+                    write!(formatter, " (related source {related_span:?})")?;
+                }
+                Ok(())
             }
         }
     }
@@ -1944,12 +2159,384 @@ impl Error for LeafCompilationError {
         match self {
             Self::BytecodeEncoding { source, .. } => Some(source),
             Self::BytecodeAssembly { source, .. } => Some(source),
-            Self::BytecodeVerification { source } => Some(source),
+            Self::BytecodeVerification { source, .. } => Some(source),
             Self::ForeignExecutable { .. }
             | Self::InvalidExecutable { .. }
             | Self::Unsupported { .. }
             | Self::SemanticInvariant { .. }
-            | Self::CapacityExceeded { .. } => None,
+            | Self::CapacityExceeded { .. }
+            | Self::BytecodeStackInvariant { .. } => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compiler_labels_retain_owner_spans_for_bind_and_finish_failures() {
+        let owner = Span::new(10, 20);
+
+        let mut duplicate = PlannedControlFlow::new(VerificationLimits::default());
+        let label = duplicate.new_label(owner).expect("label");
+        duplicate.bind(&label).expect("first bind");
+        let error = duplicate.bind(&label).expect_err("duplicate bind");
+        assert!(matches!(
+            error,
+            LeafCompilationError::BytecodeAssembly {
+                span: Some(span),
+                source: AssemblerError::DuplicateLabel { .. },
+            } if span == owner
+        ));
+
+        let mut unbound = PlannedControlFlow::new(VerificationLimits::default());
+        let _unbound_label = unbound.new_label(owner).expect("unbound label");
+        let distractor_owner = Span::new(1, 2);
+        let distractor = unbound
+            .new_label(distractor_owner)
+            .expect("distractor label");
+        unbound.bind(&distractor).expect("distractor binding");
+        unbound
+            .emit(PlannedInstruction::new(
+                FinalOpcode::ReturnUndef,
+                Operands::None,
+                Span::new(30, 31),
+            ))
+            .expect("terminal");
+        let error = unbound.finish().expect_err("unbound label");
+        assert!(matches!(
+            error,
+            LeafCompilationError::BytecodeAssembly {
+                span: Some(span),
+                source: AssemblerError::UnboundLabel { .. },
+            } if span == owner
+        ));
+
+        let mut end_target = PlannedControlFlow::new(VerificationLimits::default());
+        let label = end_target.new_label(owner).expect("label");
+        let distractor_owner = Span::new(2, 3);
+        let distractor = end_target
+            .new_label(distractor_owner)
+            .expect("distractor label");
+        end_target.bind(&distractor).expect("distractor binding");
+        end_target
+            .branch(BranchKind::Goto, &label, Span::new(40, 41))
+            .expect("branch");
+        end_target.bind(&label).expect("bind at end");
+        let error = end_target.finish().expect_err("end target");
+        assert!(matches!(
+            error,
+            LeafCompilationError::BytecodeAssembly {
+                span: Some(span),
+                source: AssemblerError::TargetAtEnd { .. },
+            } if span == owner
+        ));
+    }
+
+    #[test]
+    fn reachable_statement_anchors_require_an_empty_stack() {
+        let anchor_span = Span::new(20, 30);
+        let mut flow = PlannedControlFlow::new(VerificationLimits::default());
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Push1,
+            Operands::NoneInt,
+            Span::new(10, 11),
+        ))
+        .expect("push");
+        let anchor = flow
+            .new_statement_label(anchor_span)
+            .expect("statement label");
+        flow.branch(BranchKind::Goto, &anchor, anchor_span)
+            .expect("widened branch");
+        for _ in 0..130 {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Nop,
+                Operands::None,
+                Span::new(12, 13),
+            ))
+            .expect("padding");
+        }
+        flow.bind(&anchor).expect("bind");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Return,
+            Operands::None,
+            Span::new(30, 31),
+        ))
+        .expect("return");
+
+        let finished = flow.finish().expect("assembly");
+        let error = finished
+            .verify(
+                FunctionIndexDomains::new(0, 0, 0, 0, 0),
+                UnverifiedFunctionHeader::stripped_ordinary_source_function(false, 0),
+                VerificationLimits::default(),
+            )
+            .expect_err("depth-one statement anchor");
+        assert!(matches!(
+            error,
+            LeafCompilationError::BytecodeStackInvariant {
+                span,
+                pc,
+                expected: 0,
+                actual: 1,
+            } if span == anchor_span && pc == BytecodePc::new(134)
+        ));
+    }
+
+    #[test]
+    fn unreachable_statement_anchors_have_no_required_entry_depth() {
+        let mut flow = PlannedControlFlow::new(VerificationLimits::default());
+        let live_exit = flow.new_label(Span::new(40, 41)).expect("live exit");
+        flow.branch(BranchKind::Goto, &live_exit, Span::new(0, 1))
+            .expect("skip unreachable region");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Push1,
+            Operands::NoneInt,
+            Span::new(10, 11),
+        ))
+        .expect("unreachable push");
+        let anchor = flow
+            .new_statement_label(Span::new(20, 21))
+            .expect("unreachable statement anchor");
+        flow.bind(&anchor).expect("unreachable anchor binding");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::ReturnUndef,
+            Operands::None,
+            Span::new(21, 22),
+        ))
+        .expect("unreachable terminal");
+        flow.bind(&live_exit).expect("live exit binding");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::ReturnUndef,
+            Operands::None,
+            Span::new(40, 41),
+        ))
+        .expect("live terminal");
+
+        let (source_instructions, control_flow) = flow
+            .finish()
+            .expect("assembly")
+            .verify(
+                FunctionIndexDomains::new(0, 0, 0, 0, 0),
+                UnverifiedFunctionHeader::stripped_ordinary_source_function(false, 0),
+                VerificationLimits::default(),
+            )
+            .expect("unreachable anchor is accepted");
+        let anchor_source = source_instructions
+            .iter()
+            .find(|instruction| instruction.span() == Span::new(21, 22))
+            .expect("unreachable target source");
+        let anchor_index = control_flow
+            .instruction_index_at(anchor_source.pc())
+            .expect("verified unreachable target");
+        assert_eq!(
+            control_flow
+                .instruction(anchor_index)
+                .expect("unreachable target instruction")
+                .entry_stack_depth(),
+            None
+        );
+    }
+
+    #[test]
+    fn inconsistent_join_maps_incoming_and_target_source_spans() {
+        let incoming_span = Span::new(20, 21);
+        let target_span = Span::new(30, 31);
+        let mut flow = PlannedControlFlow::new(VerificationLimits::default());
+        let join = flow.new_label(Span::new(10, 11)).expect("join");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Push1,
+            Operands::NoneInt,
+            Span::new(0, 1),
+        ))
+        .expect("condition");
+        flow.branch(BranchKind::IfFalse, &join, Span::new(1, 2))
+            .expect("conditional branch");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Push1,
+            Operands::NoneInt,
+            Span::new(2, 3),
+        ))
+        .expect("unbalanced value");
+        flow.branch(BranchKind::Goto, &join, incoming_span)
+            .expect("incoming edge");
+        flow.bind(&join).expect("join binding");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::ReturnUndef,
+            Operands::None,
+            target_span,
+        ))
+        .expect("join target");
+
+        let error = flow
+            .finish()
+            .expect("assembly")
+            .verify(
+                FunctionIndexDomains::new(0, 0, 0, 0, 0),
+                UnverifiedFunctionHeader::stripped_ordinary_source_function(false, 0),
+                VerificationLimits::default(),
+            )
+            .expect_err("inconsistent stack join");
+
+        assert!(matches!(
+            error,
+            LeafCompilationError::BytecodeVerification {
+                span: Some(span),
+                related_span: Some(related_span),
+                source,
+            } if span == incoming_span
+                && related_span == target_span
+                && matches!(
+                    source.kind(),
+                    VerificationErrorKind::InconsistentStackAtJoin { .. }
+                )
+        ));
+    }
+
+    #[test]
+    fn missing_primary_verifier_source_mapping_fails_as_a_compiler_invariant() {
+        let mut flow = PlannedControlFlow::new(VerificationLimits::default());
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Push1,
+            Operands::NoneInt,
+            Span::new(0, 1),
+        ))
+        .expect("first push");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Push1,
+            Operands::NoneInt,
+            Span::new(1, 2),
+        ))
+        .expect("second push");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Return,
+            Operands::None,
+            Span::new(2, 3),
+        ))
+        .expect("return");
+        let mut finished = flow.finish().expect("assembly");
+        finished
+            .source_instructions
+            .retain(|instruction| instruction.pc() != BytecodePc::new(1));
+
+        let error = finished
+            .verify(
+                FunctionIndexDomains::new(0, 0, 0, 0, 0),
+                UnverifiedFunctionHeader::stripped_ordinary_source_function(false, 0),
+                VerificationLimits::new(100, 10, 0, 0, 100, 1),
+            )
+            .expect_err("missing exact primary provenance");
+        assert!(matches!(
+            error,
+            LeafCompilationError::SemanticInvariant {
+                invariant: "verifier instruction PC resolves to an exact source instruction",
+                span: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn missing_join_target_source_mapping_fails_as_a_compiler_invariant() {
+        let mut flow = PlannedControlFlow::new(VerificationLimits::default());
+        let join = flow.new_label(Span::new(10, 11)).expect("join");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Push1,
+            Operands::NoneInt,
+            Span::new(0, 1),
+        ))
+        .expect("condition");
+        flow.branch(BranchKind::IfFalse, &join, Span::new(1, 2))
+            .expect("conditional branch");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Push1,
+            Operands::NoneInt,
+            Span::new(2, 3),
+        ))
+        .expect("unbalanced value");
+        flow.branch(BranchKind::Goto, &join, Span::new(3, 4))
+            .expect("incoming edge");
+        flow.bind(&join).expect("join binding");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::ReturnUndef,
+            Operands::None,
+            Span::new(4, 5),
+        ))
+        .expect("join target");
+        let mut finished = flow.finish().expect("assembly");
+        finished
+            .source_instructions
+            .retain(|instruction| instruction.span() != Span::new(4, 5));
+
+        let error = finished
+            .verify(
+                FunctionIndexDomains::new(0, 0, 0, 0, 0),
+                UnverifiedFunctionHeader::stripped_ordinary_source_function(false, 0),
+                VerificationLimits::default(),
+            )
+            .expect_err("missing exact related provenance");
+        assert!(matches!(
+            error,
+            LeafCompilationError::SemanticInvariant {
+                invariant: "verifier join target resolves to an exact source instruction",
+                span: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn widened_branch_verifier_failures_use_the_relocated_target_span() {
+        let target_span = Span::new(30, 31);
+        let mut flow = PlannedControlFlow::new(VerificationLimits::default());
+        let target = flow.new_label(Span::new(20, 21)).expect("target");
+        flow.branch(BranchKind::Goto, &target, Span::new(0, 1))
+            .expect("widened branch");
+        for _ in 0..130 {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Nop,
+                Operands::None,
+                Span::new(10, 11),
+            ))
+            .expect("padding");
+        }
+        flow.bind(&target).expect("target binding");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            target_span,
+        ))
+        .expect("underflowing target");
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::ReturnUndef,
+            Operands::None,
+            Span::new(31, 32),
+        ))
+        .expect("terminal");
+
+        let error = flow
+            .finish()
+            .expect("assembly")
+            .verify(
+                FunctionIndexDomains::new(0, 0, 0, 0, 0),
+                UnverifiedFunctionHeader::stripped_ordinary_source_function(false, 0),
+                VerificationLimits::default(),
+            )
+            .expect_err("reachable drop underflows");
+        assert!(matches!(
+            error,
+            LeafCompilationError::BytecodeVerification {
+                span: Some(span),
+                related_span: None,
+                source,
+            } if span == target_span
+                && source.pc() == Some(BytecodePc::new(133))
+                && matches!(
+                    source.kind(),
+                    VerificationErrorKind::StackUnderflow {
+                        required: 1,
+                        available: 0,
+                    }
+                )
+        ));
     }
 }

@@ -72,6 +72,14 @@ otherwise share the same complete predecode, metadata, target, successor,
 reachability, join-depth, and resource checks; neither returns execution
 authority.
 
+**Rust hardening.** The compiler applies one further source-language invariant
+to the returned certificate: each reachable structured-statement label must
+begin at ordinary stack depth zero. These anchors are recorded symbolically,
+relocated through the assembler's final instruction-PC table, and resolved with
+`VerifiedControlFlow::instruction_index_at`; unreachable anchors have no entry
+state and are accepted. Expression labels deliberately carry no absolute-depth
+expectation because their valid depth depends on the surrounding expression.
+
 ## Complete predecode and instruction boundaries
 
 **Upstream.** The final opcode table supplies fixed instruction sizes and fixed

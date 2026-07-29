@@ -116,6 +116,10 @@ A milestone is complete only when all of its checked items pass in CI.
   - [x] First final-instruction source table: strictly ordered instruction PCs
         retain byte-exact Oxc spans and owned source text across arena teardown
         for the ordinary leaf-function lowering slice.
+  - [x] Compiler verifier diagnostics resolve their exact final bytecode PC
+        through that relocated table; inconsistent joins retain both incoming
+        and target source spans, while root failures retain no invented
+        instruction location.
 - [ ] Bindings, lexical environments, closures, calls, constructors, and
       direct/indirect `eval`.
   - [x] First arena-independent binding-storage plan: direct Oxc semantic
@@ -156,9 +160,11 @@ A milestone is complete only when all of its checked items pass in CI.
         lower blocks, `if`/`else`, `while`, `do`/`while`, and unlabeled
         `break`/`continue`; loop-body lexicals reset on every re-entry; and
         unreachable source paths are still validated and structurally
-        terminated before verification. Labeled control and `for` families
-        remain fail-closed until their cleanup and per-iteration environment
-        semantics are implemented.
+        terminated before verification. Compiler-owned labels retain their
+        source spans, and every reachable statement anchor is independently
+        checked at verified stack depth zero after branch relocation. Labeled
+        control and `for` families remain fail-closed until their cleanup and
+        per-iteration environment semantics are implemented.
 - [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
 - [ ] Deterministic debug/line tables.
 

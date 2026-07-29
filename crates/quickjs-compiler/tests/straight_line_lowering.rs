@@ -1,7 +1,8 @@
 use std::error::Error as _;
 
 use quickjs_bytecode::{
-    BytecodePc, EncodeError, FinalOpcode, FunctionIndexDomains, Operands, VerificationLimits,
+    BytecodePc, EncodeError, FinalOpcode, FunctionIndexDomains, MAX_OPERAND_STACK_DEPTH, Operands,
+    VerificationErrorKind, VerificationLimits,
 };
 use quickjs_compiler::{
     CompilationContext, CompiledLeafFunction, LeafCompilationError, UnsupportedLeafFeature,
@@ -514,4 +515,116 @@ fn byte_limit_failures_keep_the_source_span_and_error_chain() {
     assert_eq!(*encoded_bytes, 1);
     assert_eq!(*byte_limit, 1);
     assert!(error.source().is_some());
+}
+
+#[test]
+fn verifier_failures_keep_primary_and_related_source_spans() {
+    let source = "function f(a,b){ return a+b; }";
+    let error = with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning");
+            let executable = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some("f"))
+                .expect("function executable");
+            context
+                .compile_leaf(&executable, VerificationLimits::new(100, 10, 0, 0, 100, 1))
+                .expect_err("the second argument exceeds stack depth one")
+        },
+    )
+    .expect("front-end acceptance");
+
+    let LeafCompilationError::BytecodeVerification {
+        span: Some(span),
+        related_span,
+        source: verification,
+    } = &error
+    else {
+        panic!("expected a source-mapped verifier failure, got {error:?}");
+    };
+    assert_eq!(&source[span.start as usize..span.end as usize], "b");
+    assert_eq!(*related_span, None);
+    assert_eq!(
+        verification.kind(),
+        &VerificationErrorKind::StackLimitExceeded { depth: 2, limit: 1 }
+    );
+    assert!(error.source().is_some());
+}
+
+#[test]
+fn verifier_source_mapping_uses_relocated_bytecode_pcs() {
+    let source = "function f(a,b,c){return a ? b+c : b;}";
+    let error = with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning");
+            let executable = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some("f"))
+                .expect("function executable");
+            context
+                .compile_leaf(&executable, VerificationLimits::new(100, 20, 0, 0, 100, 1))
+                .expect_err("the true branch exceeds stack depth one")
+        },
+    )
+    .expect("front-end acceptance");
+
+    let LeafCompilationError::BytecodeVerification {
+        span: Some(span),
+        related_span: None,
+        source: verification,
+    } = &error
+    else {
+        panic!("expected a source-mapped verifier failure, got {error:?}");
+    };
+    assert_eq!(&source[span.start as usize..span.end as usize], "c");
+    assert_eq!(verification.pc(), Some(BytecodePc::new(4)));
+    assert_eq!(verification.opcode(), Some(FinalOpcode::GetArg2));
+    assert_eq!(
+        verification.kind(),
+        &VerificationErrorKind::StackLimitExceeded { depth: 2, limit: 1 }
+    );
+}
+
+#[test]
+fn root_verifier_failures_do_not_fabricate_an_instruction_span() {
+    let source = "function f(a){return a;}";
+    let error = with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning");
+            let executable = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some("f"))
+                .expect("function executable");
+            context
+                .compile_leaf(
+                    &executable,
+                    VerificationLimits::new(100, 10, 0, 0, 100, MAX_OPERAND_STACK_DEPTH + 1),
+                )
+                .expect_err("the stack limit exceeds the structural maximum")
+        },
+    )
+    .expect("front-end acceptance");
+
+    let LeafCompilationError::BytecodeVerification {
+        span: None,
+        related_span: None,
+        source: verification,
+    } = &error
+    else {
+        panic!("expected a root verifier failure, got {error:?}");
+    };
+    assert_eq!(verification.pc(), None);
+    assert_eq!(
+        verification.kind(),
+        &VerificationErrorKind::InvalidStackLimit {
+            value: MAX_OPERAND_STACK_DEPTH + 1,
+            maximum: MAX_OPERAND_STACK_DEPTH,
+        }
+    );
 }
