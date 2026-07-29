@@ -34,5 +34,12 @@ strings, one private brand, and 13 well-known symbols. Their texts contain
 table's canonical FNV-1a fingerprint is `5854a56e5fa002b5`, computed over each
 one-based ordinal, namespace tag, text length, and text bytes.
 
+The ordinary property-descriptor foundation follows the release's independent
+`JS_PROP_HAS_*` presence flags and data/accessor exclusion
+(`quickjs.h:297-316`, `quickjs.c:39847-39923`). New ordinary properties take
+missing attributes as false and missing values as `undefined`
+(`quickjs.c:10110-10255`). Existing-property compatibility, exotic definitions,
+and getter/setter callability remain separate later algorithms.
+
 Upstream source and binaries may be used as development oracles. They are not
 vendored, linked, or required to build, test, or use the Rust implementation.

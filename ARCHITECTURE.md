@@ -152,13 +152,22 @@ cannot resurrect zombie nodes.
 - Property keys use immediate canonical array indices or table-validated public
   string/symbol atoms. Private names have a separate identity namespace and
   cannot be constructed as public property keys.
+- Incomplete property descriptors retain independent presence for `value`,
+  `writable`, `get`, `set`, `enumerable`, and `configurable`. Classification
+  produces an opaque generic/data/accessor descriptor, so callers cannot forge
+  a kind contradicted by its present fields. Completion in this foundation is
+  explicitly limited to creation of a new ordinary property; accessor
+  callability and existing-property compatibility remain later object-model
+  checks.
 - Bytecode never stores an `Atom` pointer or runtime identity. Atom operands
   are validated function-local pool indices; serialized units carry bounded
   atom contents and namespace metadata, and loading reinterns or creates each
   pool entry exactly once in the destination runtime.
 - Shapes are immutable and transition-interned. Deletion, flag changes, or
   prototype mutation move an object to an uninterned/dictionary shape.
-- Property slots are typed as data, accessor, binding cell, or lazy value.
+- Ordinary data/accessor layouts have an opaque value-independent
+  representation; accessor layouts cannot carry a writable flag. Future
+  property slots are typed as data, accessor, binding cell, or lazy value.
   Slot count, shape entries, flags, and property variants must agree.
 - Ordinary locals remain frame slots. Captured, module, mapped-arguments, and
   eval-visible bindings use heap binding cells.

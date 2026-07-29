@@ -104,6 +104,9 @@ A milestone is complete only when all of its checked items pass in CI.
 - [x] Runtime-local owning atoms, weak UTF-16 content interning, exact
       predefined atoms, global/unique/well-known symbols, private names,
       validated public property keys, and bounded logical usage.
+- [x] Opaque generic/data/accessor descriptor classification with exact field
+      presence, new-property completion defaults, and value-independent
+      ordinary data/accessor layouts.
 - [ ] ECMAScript primitive conversions, parsing/printing, and remaining numeric
       edge cases.
 - [ ] Property descriptors, shapes, prototypes, and exotic objects.

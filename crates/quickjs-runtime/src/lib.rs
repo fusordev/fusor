@@ -15,6 +15,7 @@ mod array_index;
 mod atom;
 mod number;
 mod predefined_atoms;
+mod property;
 mod string;
 
 pub use array_index::{ArrayIndex, MAX_ARRAY_INDEX};
@@ -25,4 +26,8 @@ pub use atom::{
 };
 pub use number::JsNumber;
 pub use predefined_atoms::PredefinedAtom;
+pub use property::{
+    CompletedPropertyDescriptor, DescriptorFields, PropertyDescriptor, PropertyDescriptorError,
+    PropertyDescriptorKind, PropertyLayout, PropertyLayoutKind,
+};
 pub use string::{CodeUnits, JsString, JsStringError, MAX_STRING_CODE_UNITS};
