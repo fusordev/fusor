@@ -138,8 +138,24 @@ cannot resurrect zombie nodes.
 
 - JavaScript strings preserve UTF-16 code units and unpaired surrogates.
   Internal forms may include Latin-1, UTF-16, and bounded ropes.
-- Property keys use immediate array indices or interned atoms. Private and
-  unique symbols preserve identity.
+- Each runtime owns one `AtomTable`. Owning `Atom` handles use identity
+  equality and carry a weak owner marker, so operations reject foreign and
+  orphaned identities. String atoms and global-symbol-registry entries are
+  content-interned in separate randomized namespaces; unique symbols and
+  private names are never content-interned.
+- Interner buckets contain weak entry handles rather than string keys. A miss
+  copies UTF-16 contents into a compact string so a short atom cannot retain an
+  input rope. Dead slots remain charged until the touched bucket or an explicit
+  bounded sweep removes them.
+- Runtime startup installs the pinned release's 242 predefined identities in
+  exact order: 228 strings, one private brand, and 13 well-known symbols.
+- Property keys use immediate canonical array indices or table-validated public
+  string/symbol atoms. Private names have a separate identity namespace and
+  cannot be constructed as public property keys.
+- Bytecode never stores an `Atom` pointer or runtime identity. Atom operands
+  are validated function-local pool indices; serialized units carry bounded
+  atom contents and namespace metadata, and loading reinterns or creates each
+  pool entry exactly once in the destination runtime.
 - Shapes are immutable and transition-interned. Deletion, flag changes, or
   prototype mutation move an object to an uninterned/dictionary shape.
 - Property slots are typed as data, accessor, binding cell, or lazy value.

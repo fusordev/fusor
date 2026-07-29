@@ -98,10 +98,12 @@ A milestone is complete only when all of its checked items pass in CI.
 - [x] JavaScript Number representation with signed-zero preservation, int32
       fast paths, overflow promotion, and all three numeric equality modes.
 - [x] Canonical property-key array-index recognition through `2^32 - 2`.
+- [x] Runtime-local owning atoms, weak UTF-16 content interning, exact
+      predefined atoms, global/unique/well-known symbols, private names,
+      validated public property keys, and bounded logical usage.
 - [ ] ECMAScript primitive conversions, parsing/printing, and remaining numeric
       edge cases.
-- [ ] Interned atoms, symbols, property descriptors, shapes, prototypes, and
-      exotic objects.
+- [ ] Property descriptors, shapes, prototypes, and exotic objects.
 - [ ] Dense/sparse arrays and typed indexed access.
 - [ ] Deterministic reference ownership plus cycle collection with explicit
       roots and finalization rules.

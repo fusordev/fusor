@@ -28,5 +28,11 @@ With the release's `SHORT_OPCODES=1` configuration, `quickjs-opcode.h` defines
 fingerprint is `37d5ab885a37011f`, computed over ordered
 `domain|mnemonic|size|pops|pushes|operand-format` rows.
 
+The release's `quickjs-atom.h` defines 242 predefined atoms in order: 228
+strings, one private brand, and 13 well-known symbols. Their texts contain
+2,078 ASCII bytes (and therefore 2,078 UTF-16 code units). The translated
+table's canonical FNV-1a fingerprint is `5854a56e5fa002b5`, computed over each
+one-based ordinal, namespace tag, text length, and text bytes.
+
 Upstream source and binaries may be used as development oracles. They are not
 vendored, linked, or required to build, test, or use the Rust implementation.

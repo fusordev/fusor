@@ -12,9 +12,17 @@
 #![forbid(unsafe_code)]
 
 mod array_index;
+mod atom;
 mod number;
+mod predefined_atoms;
 mod string;
 
 pub use array_index::{ArrayIndex, MAX_ARRAY_INDEX};
+pub use atom::{
+    Atom, AtomAllocationTarget, AtomError, AtomKind, AtomLimits, AtomTable, AtomUsage,
+    MAX_ATOM_ENTRIES, PREDEFINED_ATOM_COUNT, PREDEFINED_DESCRIPTION_CODE_UNITS,
+    PREDEFINED_INTERNER_SLOTS, PropertyKey,
+};
 pub use number::JsNumber;
+pub use predefined_atoms::PredefinedAtom;
 pub use string::{CodeUnits, JsString, JsStringError, MAX_STRING_CODE_UNITS};
