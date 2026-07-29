@@ -832,6 +832,24 @@ fn strict_block_function_is_a_single_local_binding() {
 }
 
 #[test]
+fn host_forced_strict_block_function_is_a_single_local_binding() {
+    let plan = script_with_goal(
+        "{ function local() {} }",
+        GlobalScriptGoal::new().with_forced_strict(true),
+    );
+    let binding = plan
+        .bindings()
+        .iter()
+        .find(|binding| binding.name() == "local")
+        .unwrap();
+    assert_eq!(binding.placement(), StoragePlacement::Local);
+    assert_eq!(
+        binding.policy().initialization(),
+        InitializationPolicy::FunctionAtScopeEntry
+    );
+}
+
+#[test]
 fn shadowed_bare_eval_still_fails_closed() {
     let (feature, _) = unsupported("function f(eval) { eval('code'); }", ParseMode::Script);
     assert_eq!(feature, UnsupportedFeature::DirectEval);

@@ -9,10 +9,10 @@ VM, garbage collector, built-in implementation, or RegExp engine.
 
 ### Oxc 0.142.0
 
-Oxc is the user-selected JavaScript parser. The workspace exactly pins its
-parser-facing crates and selectively vendors their complete active
-Oxc-family closure so an upstream AST, semantic, or diagnostic change cannot
-silently alter compilation:
+Oxc is the user-selected JavaScript parser. The workspace consumes its
+published crates directly and exactly pins the parser-facing versions so an
+upstream AST, semantic, or diagnostic change cannot silently alter
+compilation:
 
 - official parser guide: <https://oxc.rs/docs/guide/usage/parser.html>;
 - `oxc_allocator`
@@ -23,14 +23,9 @@ silently alter compilation:
 - `oxc_span`
 - `oxc_syntax`
 
-The 17 versioned package directories under `vendor/oxc/crates` are patched
-through `[patch.crates-io]`; unrelated dependencies remain registry-backed.
-`vendor/oxc/PROVENANCE.md` records every original registry checksum, VCS
-revision/path, license, and the machine-verifiable local-resolution check.
-Packaged `.cargo-checksum.json`, `.cargo_vcs_info.json`, and
-`Cargo.toml.orig` files are retained. The vendored Oxc source is the explicit
-parser/semantic dependency selected for this port, not a JavaScript runtime
-semantic reference.
+Oxc is not vendored, patched, or used as a runtime semantic reference.
+`Cargo.lock` records the registry checksums for the complete resolved
+dependency graph.
 
 `oxc_parser` has default features disabled. In particular, its
 `regular_expression` parser feature is not enabled: QuickJS-derived code will
@@ -38,9 +33,28 @@ implement RegExp pattern semantics. `oxc_regular_expression` is still present
 transitively because `oxc_ast` uses its types, but the front-end tests verify
 that validly delimited patterns are deferred to the runtime layer.
 
-Every source unit is rejected if Oxc reports either a parser diagnostic or a
-deferred semantic early error. TypeScript, JSX, V8 intrinsics, and Oxc's
-unambiguous source mode are not exposed by the engine front end.
+Every selected successful parse path is rejected if Oxc reports either a
+parser diagnostic or a deferred semantic early error. TypeScript, JSX, V8
+intrinsics, and Oxc's unambiguous source mode are not exposed as engine parse
+goals.
+
+The published crates do not directly provide host-forced-strict Script or
+asynchronous global Script modes. The project-owned adapter uses only
+published APIs:
+
+- host-forced strictness inserts a tracked zero-span semantic directive before
+  `oxc_semantic` runs, so binding and early errors are strict from the root
+  without rewriting source text or spans;
+- asynchronous global Script uses bounded Module/Script parse attempts,
+  restores Script identity, and applies explicit Script-context checks for
+  declarations, `import.meta`, `await` identifiers/labels, and HTML comments.
+
+High-level callback entries run Oxc parsing and semantic construction on a
+short-lived scoped worker with a dedicated stack. The arena and semantic graph
+remain inside that worker, while the callback result must be `Send`. The
+low-level caller-arena `parse` API remains available for controlled compiler
+integration and uses the caller's stack. No Oxc source is vendored or patched,
+and no project recursion guard is used.
 
 Successful units retain Oxc's `ModuleRecord` and complete `Semantic` model so
 the compiler receives module requests, AST-node mapping, class/private-name
@@ -99,13 +113,19 @@ deletion. Future runtime memory accounting must charge backing bytes at node
 creation and release them from the node's synchronous destruction path. `Arc`
 control-block allocation follows Rust's global allocator policy.
 
+Runtime atom entries and their owning table also use `Arc`. Their accounting
+remains `Cell`-backed, deliberately keeping atom handles and the runtime-local
+graph `!Send + !Sync`; no lock is introduced merely to make the ownership
+counter thread-safe.
+
 ## Approved planned dependencies
 
 - Tokio is required for host async I/O, timers, wakeups, and event-loop
   integration. It must not determine ECMAScript job ordering.
 - `parking_lot` is required for shared mutable host-side state. It is not used
   to make runtimes, contexts, heaps, or JavaScript value handles cross-thread,
-  and immutable string backing remains lock-free.
+  and immutable string and atom backing remains lock-free. It will be added
+  only with the first genuine shared host-state owner.
 
 ## JavaScript semantic provenance
 

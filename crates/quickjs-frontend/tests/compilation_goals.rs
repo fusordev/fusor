@@ -1,3 +1,4 @@
+use oxc_span::GetSpan;
 use quickjs_frontend::{
     Allocator, CompilationGoal, DiagnosticStage, FrontendDiagnosticCode, FrontendOptions,
     GlobalScriptGoal, ParseMode, parse,
@@ -57,6 +58,178 @@ fn forced_strictness_propagates_into_nested_functions() {
 }
 
 #[test]
+fn forced_strict_block_functions_keep_lexical_binding_topology() {
+    let source = "{ function local() { return local; } local; } local;";
+    let allocator = Allocator::new();
+    let goal = GlobalScriptGoal::new().with_forced_strict(true);
+    let unit = parse(
+        &allocator,
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(goal)),
+    )
+    .expect("a strict block function is valid");
+    let scoping = unit.scoping();
+    let root_scope = scoping.root_scope_id();
+    let symbol = scoping
+        .symbol_ids()
+        .find(|symbol| scoping.symbol_name(*symbol) == "local")
+        .expect("block function symbol");
+
+    assert_ne!(scoping.symbol_scope_id(symbol), root_scope);
+    assert!(scoping.get_root_binding("local".into()).is_none());
+    assert_eq!(scoping.get_resolved_reference_ids(symbol).len(), 2);
+    assert_eq!(
+        scoping
+            .root_unresolved_references()
+            .get("local")
+            .map(|references| references.len()),
+        Some(1)
+    );
+}
+
+#[test]
+fn forced_strict_block_functions_do_not_merge_with_outer_or_sibling_bindings() {
+    let source = concat!(
+        "{ function same() {} same; } ",
+        "{ function same() {} same; } ",
+        "var same; same;"
+    );
+    let allocator = Allocator::new();
+    let goal = GlobalScriptGoal::new().with_forced_strict(true);
+    let unit = parse(
+        &allocator,
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(goal)),
+    )
+    .expect("strict sibling and outer bindings are distinct");
+    let scoping = unit.scoping();
+    let symbols = scoping
+        .symbol_ids()
+        .filter(|symbol| scoping.symbol_name(*symbol) == "same")
+        .collect::<Vec<_>>();
+
+    assert_eq!(symbols.len(), 3);
+    assert_eq!(
+        symbols
+            .iter()
+            .filter(|symbol| scoping.symbol_scope_id(**symbol) == scoping.root_scope_id())
+            .count(),
+        1
+    );
+    assert!(
+        symbols
+            .iter()
+            .all(|symbol| { scoping.get_resolved_reference_ids(*symbol).len() == 1 })
+    );
+}
+
+#[test]
+fn forced_strict_nested_block_function_does_not_escape_its_block() {
+    let source = "function outer() { { function local() {} local; } local; }";
+    let allocator = Allocator::new();
+    let goal = GlobalScriptGoal::new().with_forced_strict(true);
+    let unit = parse(
+        &allocator,
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(goal)),
+    )
+    .expect("strict nested block function");
+    let scoping = unit.scoping();
+    let local = scoping
+        .symbol_ids()
+        .find(|symbol| scoping.symbol_name(*symbol) == "local")
+        .expect("local symbol");
+
+    assert_eq!(scoping.get_resolved_reference_ids(local).len(), 1);
+    assert_eq!(
+        scoping
+            .root_unresolved_references()
+            .get("local")
+            .map(|references| references.len()),
+        Some(1)
+    );
+}
+
+#[test]
+fn forced_strict_semantic_sentinel_preserves_the_caller_source_model() {
+    let source = "#!/usr/bin/env qjs\n{ function local() {} }";
+    let allocator = Allocator::new();
+    let goal = GlobalScriptGoal::new().with_forced_strict(true);
+    let unit = parse(
+        &allocator,
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(goal)),
+    )
+    .expect("forced strict Script with a hashbang");
+
+    assert!(unit.has_synthetic_strict_directive());
+    assert!(unit.source_directives().is_empty());
+    assert_eq!(unit.program().source_text, source);
+    assert!(unit.program().source_type.is_script());
+    assert_eq!(unit.program().body.len(), 1);
+    assert_eq!(unit.program().body[0].span().start, 19);
+    assert!(!unit.module_record().has_module_syntax);
+
+    let explicit_source = "\"use strict\";\nvalue;";
+    let explicit = parse(
+        &allocator,
+        explicit_source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(goal)),
+    )
+    .expect("source-provided strict directive");
+    assert!(!explicit.has_synthetic_strict_directive());
+    assert_eq!(explicit.source_directives().len(), 1);
+}
+
+#[test]
+fn forced_strict_diagnostics_retain_original_source_spans() {
+    let source = "with (object) { value; }";
+    let allocator = Allocator::new();
+    let goal = GlobalScriptGoal::new().with_forced_strict(true);
+    let error = parse(
+        &allocator,
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(goal)),
+    )
+    .expect_err("strict mode rejects with statements");
+    let label = error
+        .diagnostics()
+        .iter()
+        .flat_map(|diagnostic| &diagnostic.labels)
+        .next()
+        .expect("strict diagnostic label");
+
+    assert_eq!(
+        &source[label.span.start as usize..label.span.end as usize],
+        "with"
+    );
+}
+
+#[test]
+fn forced_strict_hashbang_diagnostics_retain_original_source_spans() {
+    let source = "#!/usr/bin/env qjs\nwith (object) { value; }";
+    let allocator = Allocator::new();
+    let goal = GlobalScriptGoal::new().with_forced_strict(true);
+    let error = parse(
+        &allocator,
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(goal)),
+    )
+    .expect_err("strict mode rejects with after a hashbang");
+    let label = error
+        .diagnostics()
+        .iter()
+        .flat_map(|diagnostic| &diagnostic.labels)
+        .next()
+        .expect("strict diagnostic label");
+
+    assert_eq!(
+        &source[label.span.start as usize..label.span.end as usize],
+        "with"
+    );
+}
+
+#[test]
 fn async_global_script_goal_admits_top_level_await_without_becoming_a_module() {
     let source = "const value = await promise;";
     let ordinary = parse_global(source, GlobalScriptGoal::new())
@@ -94,6 +267,29 @@ fn async_global_script_does_not_make_nested_functions_async() {
 }
 
 #[test]
+fn async_global_script_html_comment_retry_preserves_original_source_and_comments() {
+    let source = "await promise; <!-- html-open-comment\nvalue;";
+    let allocator = Allocator::new();
+    let goal = GlobalScriptGoal::new().with_top_level_await(true);
+    let unit = parse(
+        &allocator,
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(goal)),
+    )
+    .expect("async Script HTML comment");
+
+    assert_eq!(unit.program().source_text, source);
+    assert!(unit.program().source_type.is_script());
+    assert_eq!(unit.program().comments.len(), 1);
+    let comment = unit.program().comments[0];
+    assert_eq!(
+        &source[comment.span.start as usize..comment.span.end as usize],
+        "<!-- html-open-comment"
+    );
+    assert!(!unit.module_record().has_module_syntax);
+}
+
+#[test]
 fn async_global_script_preserves_quickjs_script_context_rules() {
     let goal = GlobalScriptGoal::new().with_top_level_await(true);
 
@@ -107,6 +303,11 @@ fn async_global_script_preserves_quickjs_script_context_rules() {
         "010;",
         "with (object) { value; }",
         "<!-- html-open-comment\nvalue;",
+        "await promise; 010;",
+        "await promise; with (object) { value; }",
+        "await promise; <!-- html-open-comment\nvalue;",
+        "await import('./dependency.js');",
+        "function nested() { await: while (false) { break await; } }",
     ] {
         parse_global(source, goal).unwrap_or_else(|error| {
             panic!("async Script should accept {source:?}: {error}");
@@ -119,10 +320,41 @@ fn async_global_script_preserves_quickjs_script_context_rules() {
         "return 1;",
         "new.target;",
         "import value from './value.js';",
+        "import.meta;",
+        "await import.meta;",
+        "await: while (false) { break await; }",
     ] {
         assert!(
             parse_global(source, goal).is_err(),
             "async Script should reject {source:?}"
+        );
+    }
+
+    for (source, expected_code) in [
+        (
+            "import value from './value.js';",
+            FrontendDiagnosticCode::AsyncScriptModuleDeclaration,
+        ),
+        (
+            "import.meta;",
+            FrontendDiagnosticCode::AsyncScriptImportMeta,
+        ),
+        (
+            "await: while (false) { break await; }",
+            FrontendDiagnosticCode::AsyncScriptAwaitIdentifier,
+        ),
+        (
+            "var await = 1;",
+            FrontendDiagnosticCode::AsyncScriptAwaitIdentifier,
+        ),
+    ] {
+        let error = parse_global(source, goal).expect_err("async Script contextual rejection");
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == expected_code),
+            "{source:?}: {error}"
         );
     }
 }

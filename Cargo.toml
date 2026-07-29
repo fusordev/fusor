@@ -26,27 +26,6 @@ oxc_syntax = "=0.142.0"
 serde_json = "=1.0.151"
 sourcemap = { version = "=9.3.2", default-features = false }
 
-[patch.crates-io]
-# This is a selective, versioned Oxc source override. Do not add a Cargo
-# `[source]` replacement: unrelated crates intentionally remain registry-backed.
-oxc-miette = { path = "vendor/oxc/crates/oxc-miette-3.0.1" }
-oxc-miette-derive = { path = "vendor/oxc/crates/oxc-miette-derive-3.0.1" }
-oxc_allocator = { path = "vendor/oxc/crates/oxc_allocator-0.142.0" }
-oxc_ast = { path = "vendor/oxc/crates/oxc_ast-0.142.0" }
-oxc_ast_macros = { path = "vendor/oxc/crates/oxc_ast_macros-0.142.0" }
-oxc_ast_visit = { path = "vendor/oxc/crates/oxc_ast_visit-0.142.0" }
-oxc_data_structures = { path = "vendor/oxc/crates/oxc_data_structures-0.142.0" }
-oxc_diagnostics = { path = "vendor/oxc/crates/oxc_diagnostics-0.142.0" }
-oxc_ecmascript = { path = "vendor/oxc/crates/oxc_ecmascript-0.142.0" }
-oxc_estree = { path = "vendor/oxc/crates/oxc_estree-0.142.0" }
-oxc_index = { path = "vendor/oxc/crates/oxc_index-5.0.0" }
-oxc_parser = { path = "vendor/oxc/crates/oxc_parser-0.142.0" }
-oxc_regular_expression = { path = "vendor/oxc/crates/oxc_regular_expression-0.142.0" }
-oxc_semantic = { path = "vendor/oxc/crates/oxc_semantic-0.142.0" }
-oxc_span = { path = "vendor/oxc/crates/oxc_span-0.142.0" }
-oxc_str = { path = "vendor/oxc/crates/oxc_str-0.142.0" }
-oxc_syntax = { path = "vendor/oxc/crates/oxc_syntax-0.142.0" }
-
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unused_lifetimes = "warn"

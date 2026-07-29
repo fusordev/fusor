@@ -1,4 +1,7 @@
-use std::cell::Cell;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    thread,
+};
 
 use quickjs_diagnostics::{SourceError, SourceRegistry, render_pretty};
 use quickjs_frontend::{
@@ -353,22 +356,24 @@ fn source_byte_limits_reject_malformed_input_before_oxc_for_every_entry() {
     assert!(!error.parser_panicked());
     assert_eq!(error.unsupported_goal(), None);
 
-    let callback_called = Cell::new(false);
-    let error = with_parsed_program(source, options, |_| callback_called.set(true))
-        .expect_err("callback entry must enforce the same limit");
+    let callback_called = AtomicBool::new(false);
+    let error = with_parsed_program(source, options, |_| {
+        callback_called.store(true, Ordering::Relaxed);
+    })
+    .expect_err("callback entry must enforce the same limit");
     assert_eq!(error.stage(), DiagnosticStage::ResourceLimit);
-    assert!(!callback_called.get());
+    assert!(!callback_called.load(Ordering::Relaxed));
 
     let mut sources = SourceRegistry::new();
     let source_id = sources
         .register("oversized.js", source)
         .expect("registered source");
-    let callback_called = Cell::new(false);
+    let callback_called = AtomicBool::new(false);
     let error = with_registered_program(&sources, &source_id, options, |_| {
-        callback_called.set(true);
+        callback_called.store(true, Ordering::Relaxed);
     })
     .expect_err("registered entry must enforce the same limit");
-    assert!(!callback_called.get());
+    assert!(!callback_called.load(Ordering::Relaxed));
     let RegisteredFrontendError::Diagnostics(diagnostics) = error else {
         panic!("expected a registered limit diagnostic");
     };
@@ -391,12 +396,12 @@ fn source_byte_limits_reject_malformed_input_before_oxc_for_every_entry() {
         &parameters,
         SourceFragment::new("def"),
     );
-    let callback_called = Cell::new(false);
+    let callback_called = AtomicBool::new(false);
     let error = with_dynamic_function_source(dynamic_source, FrontendLimits::new(5), |_, _| {
-        callback_called.set(true);
+        callback_called.store(true, Ordering::Relaxed);
     })
     .expect_err("dynamic fragments must be limited before wrapper preparation");
-    assert!(!callback_called.get());
+    assert!(!callback_called.load(Ordering::Relaxed));
     assert_eq!(
         error.limit_error(),
         Some(FrontendLimitError::SourceBytesExceeded {
@@ -722,6 +727,19 @@ fn callback_api_keeps_arena_owned_ast_inside_the_allocator_lifetime() {
     .expect("callback parse");
 
     assert_eq!(statement_count, 2);
+}
+
+#[test]
+fn callback_api_runs_parser_and_semantic_work_in_an_isolated_thread() {
+    let caller = thread::current().id();
+    let worker = with_parsed_program(
+        "let value = 1;",
+        FrontendOptions::new(ParseMode::Script),
+        |_| thread::current().id(),
+    )
+    .expect("isolated callback parse");
+
+    assert_ne!(worker, caller);
 }
 
 #[test]

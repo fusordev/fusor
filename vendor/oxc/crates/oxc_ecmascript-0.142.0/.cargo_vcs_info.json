@@ -1,6 +1,0 @@
-{
-  "git": {
-    "sha1": "fc702c1fa9f0412d06ec6908b58cd395b826cf7f"
-  },
-  "path_in_vcs": "crates/oxc_ecmascript"
-}

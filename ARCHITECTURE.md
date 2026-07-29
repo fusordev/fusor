@@ -65,6 +65,34 @@ compilation. Static Oxc resolution is only an input: `with`, direct eval,
 Annex B bindings, and global declaration instantiation require
 QuickJS-compatible dynamic handling.
 
+Production callback entries create a scoped `quickjs-frontend` worker with a
+dedicated 64 MiB stack. Parsing, semantic construction, the Oxc arena, and the
+arena-borrowing callback all remain on that worker; only a `Send` callback
+result crosses back to the caller. This isolates published Oxc's internal
+stack use from runtime and host event-loop threads. The lower-level
+`parse(&Allocator, ...)` API deliberately preserves caller-owned arena access
+and therefore runs on the caller's stack; it is not the stack-isolated entry
+for untrusted or deeply nested source. Project-owned compiler and verifier
+traversals use explicit work lists and do not need a recursion guard.
+
+Published Oxc has no host-forced-strict Script switch. For that goal the front
+end inserts a zero-span synthetic `"use strict"` directive before semantic
+construction, causing Oxc to bind and validate the original Script as strict
+from the root. The source text, Script source type, body, hashbang, real
+directives, and their spans remain unchanged. `ParsedUnit::source_directives`
+omits the semantic sentinel; `ParsedUnit::program` documents that its directive
+list includes it.
+
+Published Oxc also has no Script parser switch that admits top-level `await`.
+The asynchronous-global-Script adapter first uses Oxc's Module grammar to
+recognize `await`, falls back to Script grammar for Script-only forms, and
+retries a byte-length-preserving copy when Script-recognized HTML comments must
+be hidden from the Module lexer. The accepted program is reset to Script mode,
+retains the original source and comment spans, and explicitly rejects module
+declarations, `import.meta`, and root-context uses of `await` as an identifier
+or label. Dynamic `import()` remains Script syntax. These are project-owned
+goal diagnostics, not mislabeled Oxc diagnostics.
+
 The first compiler-owned lowering result is `StoragePlan`. While the
 `ParsedUnit` arena is alive, `quickjs-compiler` queries Oxc `Semantic` directly
 for scopes, symbols, declarations, and references. It then freezes only native

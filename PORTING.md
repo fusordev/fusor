@@ -59,18 +59,28 @@ A milestone is complete only when all of its checked items pass in CI.
       opt out for documented foreign-pointer operations.
 - [x] Add formatting, linting, test, documentation, and dependency-audit CI.
 - [x] Add an optional differential runner for the upstream `qjs` executable.
-- [x] Selectively vendor the exact pinned 17-package Oxc-family closure with
-      registry checksums, VCS provenance, licenses, local path overrides, and
-      offline source-resolution verification.
+- [x] Consume the exact pinned published Oxc parser and semantic crates
+      directly, with registry checksums retained in `Cargo.lock` and no
+      vendored or patched source.
 
 ### M1 — Oxc source front end
 
 - [x] Pin the current Oxc parser crates and define the arena-safe AST boundary.
+- [x] Run production callback entries in an isolated scoped parser/semantic
+      worker with a dedicated stack; retain the caller-arena `parse` API as an
+      explicitly non-isolated low-level entry.
 - [x] Represent global Script, Module, indirect/direct eval, and all dynamic
       Function-constructor goals losslessly; unsupported contextual adapters
       fail before Oxc without semantic downgrade.
 - [ ] Parse JavaScript scripts, modules, eval input, and Function-constructor
       bodies with explicit modes; do not enable TypeScript or JSX.
+  - [x] Adapt host-forced-strict Script through a tracked zero-span semantic
+        directive so Oxc binds strict scopes before analysis while source text,
+        hashbang, body, and real directive spans remain unchanged.
+  - [x] Adapt asynchronous global Script without patching Oxc: retain Script
+        identity and HTML comments, admit top-level `await` and dynamic import,
+        and reject module declarations, `import.meta`, and root `await`
+        identifiers or labels with stable project-owned diagnostics.
   - [x] Parse all four dynamic Function-constructor families through the exact
         QuickJS wrapper as a complete Oxc Script, retaining a byte-exact
         fragment map and fail-closed preparation limits.

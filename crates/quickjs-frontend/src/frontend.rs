@@ -11,11 +11,15 @@ use std::{error::Error, fmt};
 pub use oxc_allocator::Allocator;
 pub use oxc_ast::ast::Program;
 use oxc_ast::{
-    AstKind,
-    ast::{Argument, ImportPhase, ModuleExportName, VariableDeclarationKind, WithClauseKeyword},
+    AstKind, Comment,
+    ast::{
+        Argument, Directive, ImportPhase, ModuleExportName, VariableDeclarationKind,
+        WithClauseKeyword,
+    },
+    builder::AstBuilder,
 };
 use oxc_diagnostics::{Diagnostics, OxcDiagnostic};
-use oxc_parser::{ParseOptions as OxcParseOptions, Parser};
+use oxc_parser::{ParseOptions as OxcParseOptions, Parser, ParserReturn};
 use oxc_semantic::{AstNodes, SemanticBuilder};
 pub use oxc_semantic::{Scoping, Semantic};
 pub use oxc_span::Span;
@@ -40,6 +44,13 @@ pub const DEFAULT_MAX_DYNAMIC_FUNCTION_FRAGMENTS: usize = 1_048_576;
 
 /// The default maximum UTF-8 bytes retained in dynamic-function origin labels.
 pub const DEFAULT_MAX_DYNAMIC_FUNCTION_ORIGIN_BYTES: usize = 16 * 1024 * 1024;
+
+/// Stack reservation for the isolated Oxc parser/semantic worker.
+///
+/// Oxc owns its internal traversal strategy. Keeping it on a dedicated thread
+/// prevents its stack requirements from consuming the host or runtime thread's
+/// stack; project-owned lowering remains iterative.
+pub const DEFAULT_ISOLATED_FRONTEND_STACK_BYTES: usize = 64 * 1024 * 1024;
 
 const MAX_OXC_SOURCE_BYTES: usize = {
     let span_limit = u32::MAX as usize;
@@ -1676,6 +1687,8 @@ pub enum DiagnosticStage {
     ResourceLimit,
     /// The requested compilation goal cannot be processed by this source entry.
     CompilationGoal,
+    /// The isolated parser/semantic worker could not be created.
+    IsolatedContext,
     /// Oxc's lexer or parser emitted a diagnostic.
     Parser,
     /// The AST uses syntax outside the pinned `QuickJS` compatibility profile.
@@ -1692,6 +1705,7 @@ impl fmt::Display for DiagnosticStage {
         match self {
             Self::ResourceLimit => formatter.write_str("resource-limit"),
             Self::CompilationGoal => formatter.write_str("compilation-goal"),
+            Self::IsolatedContext => formatter.write_str("isolated-context"),
             Self::Parser => formatter.write_str("parser"),
             Self::Profile => formatter.write_str("profile"),
             Self::Semantic => formatter.write_str("semantic"),
@@ -1719,6 +1733,16 @@ pub enum FrontendDiagnosticCode {
     DynamicFunctionPreparationFailed,
     /// The requested compilation goal cannot be processed by this source entry.
     UnsupportedCompilationGoal,
+    /// The isolated Oxc parser/semantic worker could not be created.
+    IsolatedContextUnavailable,
+    /// A module declaration appeared in an asynchronous global Script.
+    AsyncScriptModuleDeclaration,
+    /// `await` appeared as an identifier or label in an asynchronous global Script.
+    AsyncScriptAwaitIdentifier,
+    /// `import.meta` appeared in an asynchronous global Script.
+    AsyncScriptImportMeta,
+    /// Preparing a Script-compatible asynchronous parse source could not allocate.
+    AsyncScriptPreparationFailed,
     /// An Oxc lexer or parser diagnostic.
     OxcParser,
     /// An Oxc semantic/early-error diagnostic.
@@ -1764,6 +1788,15 @@ impl FrontendDiagnosticCode {
                 "quickjs::frontend::limit::dynamic_function_preparation"
             }
             Self::UnsupportedCompilationGoal => "quickjs::frontend::unsupported_compilation_goal",
+            Self::IsolatedContextUnavailable => "quickjs::frontend::isolated_context_unavailable",
+            Self::AsyncScriptModuleDeclaration => {
+                "quickjs::frontend::async_script::module_declaration"
+            }
+            Self::AsyncScriptAwaitIdentifier => "quickjs::frontend::async_script::await_identifier",
+            Self::AsyncScriptImportMeta => "quickjs::frontend::async_script::import_meta",
+            Self::AsyncScriptPreparationFailed => {
+                "quickjs::frontend::limit::async_script_preparation"
+            }
             Self::OxcParser => "quickjs::frontend::oxc::parser",
             Self::OxcSemantic => "quickjs::frontend::oxc::semantic",
             Self::ModuleSyntaxLowering => "quickjs::frontend::lowering::module_syntax",
@@ -1795,6 +1828,11 @@ impl FrontendDiagnosticCode {
             | Self::DynamicFunctionOriginBytesExceeded
             | Self::DynamicFunctionPreparationFailed
             | Self::UnsupportedCompilationGoal
+            | Self::IsolatedContextUnavailable
+            | Self::AsyncScriptModuleDeclaration
+            | Self::AsyncScriptAwaitIdentifier
+            | Self::AsyncScriptImportMeta
+            | Self::AsyncScriptPreparationFailed
             | Self::OxcParser
             | Self::OxcSemantic
             | Self::ModuleSyntaxLowering => None,
@@ -1936,6 +1974,11 @@ pub enum FrontendLimitError {
         /// Number of bytes or entries requested.
         requested: usize,
     },
+    /// Preparing a Script-compatible source for asynchronous parsing failed.
+    AsyncScriptAllocationFailed {
+        /// Number of UTF-8 bytes requested.
+        requested: usize,
+    },
 }
 
 impl fmt::Display for FrontendLimitError {
@@ -1963,6 +2006,10 @@ impl fmt::Display for FrontendLimitError {
             } => write!(
                 formatter,
                 "could not reserve {requested} units for dynamic-function {resource}"
+            ),
+            Self::AsyncScriptAllocationFailed { requested } => write!(
+                formatter,
+                "could not reserve {requested} bytes for asynchronous Script preparation"
             ),
         }
     }
@@ -2000,6 +2047,9 @@ impl FrontendError {
             | FrontendLimitError::DynamicFunctionAllocationFailed { .. } => {
                 FrontendDiagnosticCode::DynamicFunctionPreparationFailed
             }
+            FrontendLimitError::AsyncScriptAllocationFailed { .. } => {
+                FrontendDiagnosticCode::AsyncScriptPreparationFailed
+            }
         };
         Self {
             stage: DiagnosticStage::ResourceLimit,
@@ -2024,6 +2074,74 @@ impl FrontendError {
             }],
             parser_panicked: false,
             unsupported_goal: Some(goal),
+            limit_error: None,
+        }
+    }
+
+    fn isolated_context_unavailable(error: &std::io::Error) -> Self {
+        Self {
+            stage: DiagnosticStage::IsolatedContext,
+            diagnostics: vec![FrontendDiagnostic {
+                code: FrontendDiagnosticCode::IsolatedContextUnavailable,
+                message: format!("could not create the isolated Oxc worker: {error}"),
+                labels: Vec::new(),
+            }],
+            parser_panicked: false,
+            unsupported_goal: None,
+            limit_error: None,
+        }
+    }
+
+    fn async_script_module_syntax(span: Span) -> Self {
+        Self {
+            stage: DiagnosticStage::Parser,
+            diagnostics: vec![FrontendDiagnostic {
+                code: FrontendDiagnosticCode::AsyncScriptModuleDeclaration,
+                message: "module declarations are not allowed in an asynchronous global Script"
+                    .to_owned(),
+                labels: vec![DiagnosticLabel {
+                    span,
+                    message: None,
+                }],
+            }],
+            parser_panicked: false,
+            unsupported_goal: None,
+            limit_error: None,
+        }
+    }
+
+    fn async_script_await_identifier(span: Span) -> Self {
+        Self {
+            stage: DiagnosticStage::Parser,
+            diagnostics: vec![FrontendDiagnostic {
+                code: FrontendDiagnosticCode::AsyncScriptAwaitIdentifier,
+                message: "`await` cannot be used as an identifier in an asynchronous global Script"
+                    .to_owned(),
+                labels: vec![DiagnosticLabel {
+                    span,
+                    message: None,
+                }],
+            }],
+            parser_panicked: false,
+            unsupported_goal: None,
+            limit_error: None,
+        }
+    }
+
+    fn async_script_import_meta(span: Span) -> Self {
+        Self {
+            stage: DiagnosticStage::Parser,
+            diagnostics: vec![FrontendDiagnostic {
+                code: FrontendDiagnosticCode::AsyncScriptImportMeta,
+                message: "`import.meta` is not available in an asynchronous global Script"
+                    .to_owned(),
+                labels: vec![DiagnosticLabel {
+                    span,
+                    message: None,
+                }],
+            }],
+            parser_panicked: false,
+            unsupported_goal: None,
             limit_error: None,
         }
     }
@@ -2614,6 +2732,7 @@ pub struct ParsedUnit<'arena, 'scope> {
     module_record: ModuleRecord<'arena>,
     semantic: Semantic<'arena>,
     module_syntax: ModuleSyntaxRecord,
+    synthetic_strict_directive: bool,
 }
 
 impl fmt::Debug for ParsedUnit<'_, '_> {
@@ -2627,6 +2746,10 @@ impl fmt::Debug for ParsedUnit<'_, '_> {
             .field("semantic_scopes", &self.semantic.scoping().scopes_len())
             .field("semantic_symbols", &self.semantic.scoping().symbols_len())
             .field("module_syntax", &self.module_syntax)
+            .field(
+                "synthetic_strict_directive",
+                &self.synthetic_strict_directive,
+            )
             .finish()
     }
 }
@@ -2638,10 +2761,31 @@ impl<'arena, 'scope> ParsedUnit<'arena, 'scope> {
         self.goal
     }
 
-    /// Returns the arena-owned Oxc program.
+    /// Returns the arena-owned Oxc semantic program.
+    ///
+    /// A host-forced strict Script contains one zero-span synthetic
+    /// `"use strict"` directive at index zero so published Oxc binds the
+    /// program under strict rules. [`Self::source_directives`] omits that
+    /// semantic sentinel.
     #[must_use]
     pub const fn program(&self) -> &Program<'arena> {
         self.program
+    }
+
+    /// Returns only directives that occur in the caller's source text.
+    #[must_use]
+    pub fn source_directives(&self) -> &[Directive<'arena>] {
+        if self.synthetic_strict_directive {
+            &self.program.directives[1..]
+        } else {
+            &self.program.directives
+        }
+    }
+
+    /// Returns whether strict binding required a synthetic semantic directive.
+    #[must_use]
+    pub const fn has_synthetic_strict_directive(&self) -> bool {
+        self.synthetic_strict_directive
     }
 
     /// Returns Oxc's parsed ECMAScript module record.
@@ -2736,12 +2880,13 @@ fn parse_in_mode<'arena, 'scope>(
         | CompilationGoal::DirectEval(_)
         | CompilationGoal::DynamicFunction(_) => (false, false),
     };
-    let parsed = Parser::new(allocator, source_text, mode.source_type())
-        .with_options(OxcParseOptions {
-            allow_top_level_await,
-            ..OxcParseOptions::default()
-        })
-        .parse();
+    let mut parsed = if allow_top_level_await {
+        parse_async_global_script(allocator, source_text, mode)?
+    } else {
+        Parser::new(allocator, source_text, mode.source_type())
+            .with_options(OxcParseOptions::default())
+            .parse()
+    };
 
     if parsed.panicked || !parsed.diagnostics.is_empty() {
         return Err(FrontendError::from_oxc(
@@ -2751,13 +2896,37 @@ fn parse_in_mode<'arena, 'scope>(
             parsed.panicked,
         ));
     }
-
-    let module_record = parsed.module_record;
+    if allow_top_level_await {
+        if let Some(module_declaration) = parsed
+            .program
+            .body
+            .iter()
+            .find(|statement| statement.is_module_declaration())
+        {
+            return Err(FrontendError::async_script_module_syntax(
+                module_declaration.span(),
+            ));
+        }
+        parsed.program.source_type = mode.source_type();
+    }
+    let mut module_record = parsed.module_record;
+    if allow_top_level_await {
+        module_record.has_module_syntax = false;
+    }
+    let synthetic_strict_directive =
+        force_strict && inject_forced_strict_directive(allocator, &mut parsed.program);
     let program: &'arena Program<'arena> = allocator.alloc(parsed.program);
     let semantic = SemanticBuilder::new_compiler()
         .with_build_nodes(true)
-        .with_forced_strict(force_strict)
         .build(program);
+    if allow_top_level_await
+        && let Some(span) = async_script_await_identifier_span(&semantic.semantic)
+    {
+        return Err(FrontendError::async_script_await_identifier(span));
+    }
+    if allow_top_level_await && let Some(span) = async_script_import_meta_span(&semantic.semantic) {
+        return Err(FrontendError::async_script_import_meta(span));
+    }
     let profile_diagnostics = quickjs_profile_diagnostics(semantic.semantic.nodes());
     if !profile_diagnostics.is_empty() {
         return Err(FrontendError::from_profile(profile_diagnostics));
@@ -2780,10 +2949,233 @@ fn parse_in_mode<'arena, 'scope>(
         module_record,
         semantic,
         module_syntax,
+        synthetic_strict_directive,
     })
 }
 
-/// Parses and validates a source unit inside a short-lived arena.
+fn parse_async_global_script<'arena>(
+    allocator: &'arena Allocator,
+    source_text: &'arena str,
+    mode: ParseMode,
+) -> Result<ParserReturn<'arena>, FrontendError> {
+    let module = Parser::new(allocator, source_text, ParseMode::Module.source_type())
+        .with_options(OxcParseOptions::default())
+        .parse();
+    if !module.panicked && module.diagnostics.is_empty() {
+        return Ok(module);
+    }
+
+    let fallback = Parser::new(
+        allocator,
+        source_text,
+        mode.source_type().with_unambiguous(true),
+    )
+    .with_options(OxcParseOptions::default())
+    .parse();
+    if !fallback.panicked && fallback.diagnostics.is_empty() {
+        return Ok(fallback);
+    }
+
+    let Some(sanitized_source) =
+        sanitize_script_html_comments(source_text, &fallback.program.comments)?
+    else {
+        return Ok(module);
+    };
+    let sanitized_source = allocator.alloc_str(&sanitized_source);
+    let mut sanitized = Parser::new(allocator, sanitized_source, ParseMode::Module.source_type())
+        .with_options(OxcParseOptions::default())
+        .parse();
+    if sanitized.panicked || !sanitized.diagnostics.is_empty() {
+        return Ok(module);
+    }
+
+    sanitized.program.source_text = source_text;
+    for comment in fallback
+        .program
+        .comments
+        .iter()
+        .filter(|comment| is_script_html_comment(source_text, comment.span))
+        .copied()
+    {
+        let insertion = sanitized
+            .program
+            .comments
+            .partition_point(|existing| existing.span.start < comment.span.start);
+        sanitized.program.comments.insert(insertion, comment);
+    }
+    Ok(sanitized)
+}
+
+fn sanitize_script_html_comments(
+    source_text: &str,
+    comments: &[Comment],
+) -> Result<Option<String>, FrontendError> {
+    let contains_html_comment = comments
+        .iter()
+        .any(|comment| is_script_html_comment(source_text, comment.span));
+    if !contains_html_comment {
+        return Ok(None);
+    }
+
+    let mut sanitized = String::new();
+    sanitized
+        .try_reserve_exact(source_text.len())
+        .map_err(|_| {
+            FrontendError::from_limit(FrontendLimitError::AsyncScriptAllocationFailed {
+                requested: source_text.len(),
+            })
+        })?;
+    let mut copied_until = 0;
+    for comment in comments {
+        if !is_script_html_comment(source_text, comment.span) {
+            continue;
+        }
+        let start = comment.span.start as usize;
+        let end = comment.span.end as usize;
+        if start < copied_until || end > source_text.len() {
+            continue;
+        }
+        sanitized.push_str(&source_text[copied_until..start]);
+        for character in source_text[start..end].chars() {
+            if matches!(character, '\r' | '\n' | '\u{2028}' | '\u{2029}') {
+                sanitized.push(character);
+            } else {
+                for _ in 0..character.len_utf8() {
+                    sanitized.push(' ');
+                }
+            }
+        }
+        copied_until = end;
+    }
+    sanitized.push_str(&source_text[copied_until..]);
+    debug_assert_eq!(sanitized.len(), source_text.len());
+    Ok(Some(sanitized))
+}
+
+fn is_script_html_comment(source_text: &str, span: Span) -> bool {
+    source_text
+        .get(span.start as usize..span.end as usize)
+        .is_some_and(|text| text.starts_with("<!--") || text.starts_with("-->"))
+}
+
+fn inject_forced_strict_directive<'arena>(
+    allocator: &'arena Allocator,
+    program: &mut Program<'arena>,
+) -> bool {
+    if program.has_use_strict_directive() {
+        return false;
+    }
+
+    let builder = AstBuilder::new(allocator);
+    program
+        .directives
+        .insert(0, Directive::new_use_strict(&builder));
+    true
+}
+
+fn async_script_await_identifier_span(semantic: &Semantic<'_>) -> Option<Span> {
+    let scoping = semantic.scoping();
+    let root = scoping.root_scope_id();
+    for symbol_id in scoping.symbol_ids() {
+        if scoping.symbol_scope_id(symbol_id) == root && scoping.symbol_name(symbol_id) == "await" {
+            return Some(scoping.symbol_span(symbol_id));
+        }
+    }
+
+    if let Some(reference_id) = scoping
+        .root_unresolved_references()
+        .get("await")
+        .and_then(|references| references.first())
+    {
+        let node_id = scoping.get_reference(*reference_id).node_id();
+        return Some(semantic.nodes().get_node(node_id).kind().span());
+    }
+
+    semantic.nodes().iter().find_map(|node| {
+        let AstKind::LabeledStatement(statement) = node.kind() else {
+            return None;
+        };
+        if statement.label.name != "await"
+            || scoping
+                .scope_ancestors(node.scope_id())
+                .any(|scope_id| scoping.scope_flags(scope_id).is_function())
+        {
+            return None;
+        }
+        Some(statement.label.span)
+    })
+}
+
+fn async_script_import_meta_span(semantic: &Semantic<'_>) -> Option<Span> {
+    semantic.nodes().iter().find_map(|node| {
+        let AstKind::ImportMeta(import_meta) = node.kind() else {
+            return None;
+        };
+        Some(import_meta.span)
+    })
+}
+
+/// An owned execution boundary for Oxc parser and semantic work.
+///
+/// The context creates a short-lived worker with a dedicated stack for each
+/// operation. Oxc arenas and semantic nodes never cross that worker boundary;
+/// only the callback result may escape. This also keeps parser/semantic stack
+/// use off runtime and host event-loop threads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IsolatedFrontendContext {
+    stack_bytes: usize,
+}
+
+impl IsolatedFrontendContext {
+    /// Creates the production isolated frontend context.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            stack_bytes: DEFAULT_ISOLATED_FRONTEND_STACK_BYTES,
+        }
+    }
+
+    /// Parses and validates a source unit inside an isolated short-lived arena.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same parser and semantic diagnostics as [`parse`], or
+    /// [`FrontendDiagnosticCode::IsolatedContextUnavailable`] if the worker
+    /// cannot be created. A panic from `callback` resumes on the caller.
+    pub fn with_parsed_program<'scope, R>(
+        self,
+        source_text: &str,
+        options: FrontendOptions<'scope>,
+        callback: impl for<'arena> FnOnce(&ParsedUnit<'arena, 'scope>) -> R + Send,
+    ) -> Result<R, FrontendError>
+    where
+        R: Send,
+    {
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("quickjs-frontend".to_owned())
+                .stack_size(self.stack_bytes)
+                .spawn_scoped(scope, move || {
+                    let allocator = Allocator::new();
+                    let unit = parse(&allocator, source_text, options)?;
+                    Ok(callback(&unit))
+                })
+                .map_err(|error| FrontendError::isolated_context_unavailable(&error))?;
+            match worker.join() {
+                Ok(result) => result,
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        })
+    }
+}
+
+impl Default for IsolatedFrontendContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Parses and validates a source unit inside an isolated short-lived arena.
 ///
 /// The higher-ranked callback cannot return a value that borrows the unit, so
 /// arena-backed nodes cannot escape this function. The callback can inspect
@@ -2795,11 +3187,12 @@ fn parse_in_mode<'arena, 'scope>(
 pub fn with_parsed_program<'scope, R>(
     source_text: &str,
     options: FrontendOptions<'scope>,
-    callback: impl for<'arena> FnOnce(&ParsedUnit<'arena, 'scope>) -> R,
-) -> Result<R, FrontendError> {
-    let allocator = Allocator::new();
-    let unit = parse(&allocator, source_text, options)?;
-    Ok(callback(&unit))
+    callback: impl for<'arena> FnOnce(&ParsedUnit<'arena, 'scope>) -> R + Send,
+) -> Result<R, FrontendError>
+where
+    R: Send,
+{
+    IsolatedFrontendContext::new().with_parsed_program(source_text, options, callback)
 }
 
 /// Parses one registered source inside a short-lived Oxc arena.
@@ -2823,15 +3216,17 @@ pub fn with_registered_program<'scope, R>(
     sources: &SourceRegistry,
     source_id: &SourceId,
     options: FrontendOptions<'scope>,
-    callback: impl for<'arena> FnOnce(&ParsedUnit<'arena, 'scope>) -> R,
-) -> Result<R, RegisteredFrontendError> {
+    callback: impl for<'arena> FnOnce(&ParsedUnit<'arena, 'scope>) -> R + Send,
+) -> Result<R, RegisteredFrontendError>
+where
+    R: Send,
+{
     let source = sources
         .source(source_id)
         .map_err(FrontendSourceError::Registry)
         .map_err(RegisteredFrontendError::Source)?;
-    let allocator = Allocator::new();
-    match parse(&allocator, source.text(), options) {
-        Ok(unit) => Ok(callback(&unit)),
+    match with_parsed_program(source.text(), options, callback) {
+        Ok(result) => Ok(result),
         Err(error) => {
             let diagnostics = error
                 .into_registered_diagnostics(sources, source_id)
@@ -2866,22 +3261,42 @@ pub fn with_registered_program<'scope, R>(
 pub fn with_dynamic_function_source<R>(
     source: DynamicFunctionSource<'_>,
     limits: FrontendLimits,
-    callback: impl for<'arena> FnOnce(&ParsedUnit<'arena, 'static>, &PreparedDynamicFunctionSource) -> R,
-) -> Result<R, DynamicFunctionError> {
-    let prepared = PreparedDynamicFunctionSource::prepare(source, limits)
-        .map_err(DynamicFunctionError::preparation)?;
-    let allocator = Allocator::new();
-    let goal = CompilationGoal::DynamicFunction(source.kind());
-    match parse_in_mode(
-        &allocator,
-        prepared.generated_source(),
-        goal,
-        ParseMode::Script,
-        limits,
-    ) {
-        Ok(unit) => Ok(callback(&unit, &prepared)),
-        Err(error) => Err(DynamicFunctionError::generated(error, prepared)),
-    }
+    callback: impl for<'arena> FnOnce(&ParsedUnit<'arena, 'static>, &PreparedDynamicFunctionSource) -> R
+    + Send,
+) -> Result<R, DynamicFunctionError>
+where
+    R: Send,
+{
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .name("quickjs-dynamic-frontend".to_owned())
+            .stack_size(DEFAULT_ISOLATED_FRONTEND_STACK_BYTES)
+            .spawn_scoped(scope, move || {
+                let prepared = PreparedDynamicFunctionSource::prepare(source, limits)
+                    .map_err(DynamicFunctionError::preparation)?;
+                let allocator = Allocator::new();
+                let goal = CompilationGoal::DynamicFunction(source.kind());
+                match parse_in_mode(
+                    &allocator,
+                    prepared.generated_source(),
+                    goal,
+                    ParseMode::Script,
+                    limits,
+                ) {
+                    Ok(unit) => Ok(callback(&unit, &prepared)),
+                    Err(error) => Err(DynamicFunctionError::generated(error, prepared)),
+                }
+            })
+            .map_err(|error| {
+                DynamicFunctionError::preparation(FrontendError::isolated_context_unavailable(
+                    &error,
+                ))
+            })?;
+        match worker.join() {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    })
 }
 
 #[cfg(test)]
