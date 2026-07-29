@@ -87,4 +87,17 @@ must not be regenerated to hide local changes. Project-specific Oxc changes
 must be reviewable in Git, documented here with their compatibility reason,
 and covered by focused QuickJS differential or safety tests.
 
-No local source modification has been applied at this baseline.
+The following project-owned compatibility extensions are applied after the
+published-package baseline:
+
+- `oxc_parser`: `ParseOptions::allow_top_level_await` enables the host's
+  QuickJS async-global Script goal without changing the source type to Module.
+- `oxc_semantic`: `SemanticBuilder::with_forced_strict` marks the root Script
+  scope strict for the corresponding QuickJS evaluation flag without
+  rewriting source text.
+- `oxc_semantic`: the statistics pre-pass and non-CFG semantic builder traverse
+  `BinaryExpression` and `LogicalExpression` chains with explicit task stacks.
+  This preserves generated visitor enter/child/leave order, semantic parent
+  IDs, reference resolution, and syntax checking while accepting the long
+  left-deep expressions supported by QuickJS 2026-06-04. CFG traversal is
+  unchanged.

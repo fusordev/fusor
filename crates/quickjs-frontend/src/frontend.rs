@@ -735,10 +735,7 @@ impl CompilationGoal<'_> {
 
     const fn supported_parse_mode(self) -> Result<ParseMode, UnsupportedCompilationGoal> {
         match self {
-            Self::GlobalScript(goal) if !goal.forces_strict() && !goal.allows_top_level_await() => {
-                Ok(ParseMode::Script)
-            }
-            Self::GlobalScript(goal) => Err(UnsupportedCompilationGoal::GlobalScript(goal)),
+            Self::GlobalScript(_) => Ok(ParseMode::Script),
             Self::Module => Ok(ParseMode::Module),
             Self::IndirectEval(goal) if !goal.forces_strict() => Ok(ParseMode::Script),
             Self::IndirectEval(goal) => Err(UnsupportedCompilationGoal::IndirectEval(goal)),
@@ -756,8 +753,6 @@ impl CompilationGoal<'_> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum UnsupportedCompilationGoal {
-    /// A global Script requested forced strictness or top-level `await`.
-    GlobalScript(GlobalScriptGoal),
     /// An indirect eval requested forced strictness.
     IndirectEval(IndirectEvalGoal),
     /// Direct eval requires caller grammar state and scope-chain integration.
@@ -770,11 +765,6 @@ pub enum UnsupportedCompilationGoal {
 impl UnsupportedCompilationGoal {
     fn message(self) -> String {
         match self {
-            Self::GlobalScript(goal) => format!(
-                "global Script compilation (force_strict={}, allow_top_level_await={}) is not implemented",
-                goal.forces_strict(),
-                goal.allows_top_level_await()
-            ),
             Self::IndirectEval(goal) => format!(
                 "indirect eval compilation (force_strict={}) is not implemented",
                 goal.forces_strict()
@@ -799,12 +789,6 @@ impl UnsupportedCompilationGoal {
 impl fmt::Display for UnsupportedCompilationGoal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::GlobalScript(goal) => write!(
-                formatter,
-                "global Script (forced strict: {}, top-level await: {})",
-                goal.forces_strict(),
-                goal.allows_top_level_await()
-            ),
             Self::IndirectEval(goal) => write!(
                 formatter,
                 "indirect eval (forced strict: {})",
@@ -2743,8 +2727,20 @@ fn parse_in_mode<'arena, 'scope>(
     limits: FrontendLimits,
 ) -> Result<ParsedUnit<'arena, 'scope>, FrontendError> {
     enforce_source_limit(source_text.len(), limits)?;
+    let (force_strict, allow_top_level_await) = match goal {
+        CompilationGoal::GlobalScript(goal) => {
+            (goal.forces_strict(), goal.allows_top_level_await())
+        }
+        CompilationGoal::Module
+        | CompilationGoal::IndirectEval(_)
+        | CompilationGoal::DirectEval(_)
+        | CompilationGoal::DynamicFunction(_) => (false, false),
+    };
     let parsed = Parser::new(allocator, source_text, mode.source_type())
-        .with_options(OxcParseOptions::default())
+        .with_options(OxcParseOptions {
+            allow_top_level_await,
+            ..OxcParseOptions::default()
+        })
         .parse();
 
     if parsed.panicked || !parsed.diagnostics.is_empty() {
@@ -2760,6 +2756,7 @@ fn parse_in_mode<'arena, 'scope>(
     let program: &'arena Program<'arena> = allocator.alloc(parsed.program);
     let semantic = SemanticBuilder::new_compiler()
         .with_build_nodes(true)
+        .with_forced_strict(force_strict)
         .build(program);
     let profile_diagnostics = quickjs_profile_diagnostics(semantic.semantic.nodes());
     if !profile_diagnostics.is_empty() {

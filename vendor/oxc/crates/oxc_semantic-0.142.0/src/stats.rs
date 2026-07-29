@@ -2,7 +2,10 @@ use std::cell::Cell;
 
 use oxc_ast::{
     AstKind,
-    ast::{BindingIdentifier, IdentifierReference, Program, TSEnumMemberName},
+    ast::{
+        BinaryExpression, BindingIdentifier, Expression, IdentifierReference, LogicalExpression,
+        Program, TSEnumMemberName,
+    },
 };
 use oxc_ast_visit::{Visit, walk::walk_ts_enum_member_name};
 use oxc_syntax::scope::{ScopeFlags, ScopeId};
@@ -142,6 +145,54 @@ struct Counter {
     stats: Stats,
 }
 
+enum ExpressionChainNode<'visit, 'a> {
+    Binary(&'visit BinaryExpression<'a>),
+    Logical(&'visit LogicalExpression<'a>),
+}
+
+enum ExpressionChainTask<'visit, 'a> {
+    Enter(ExpressionChainNode<'visit, 'a>),
+    Visit(&'visit Expression<'a>),
+    Leave(AstKind<'a>),
+}
+
+impl Counter {
+    fn visit_expression_chain<'a>(&mut self, root: ExpressionChainNode<'_, 'a>) {
+        let mut tasks = vec![ExpressionChainTask::Enter(root)];
+
+        while let Some(task) = tasks.pop() {
+            match task {
+                ExpressionChainTask::Enter(ExpressionChainNode::Binary(expr)) => {
+                    let kind = AstKind::BinaryExpression(self.alloc(expr));
+                    self.enter_node(kind);
+                    self.visit_span(&expr.span);
+                    tasks.push(ExpressionChainTask::Leave(kind));
+                    tasks.push(ExpressionChainTask::Visit(&expr.right));
+                    tasks.push(ExpressionChainTask::Visit(&expr.left));
+                }
+                ExpressionChainTask::Enter(ExpressionChainNode::Logical(expr)) => {
+                    let kind = AstKind::LogicalExpression(self.alloc(expr));
+                    self.enter_node(kind);
+                    self.visit_span(&expr.span);
+                    tasks.push(ExpressionChainTask::Leave(kind));
+                    tasks.push(ExpressionChainTask::Visit(&expr.right));
+                    tasks.push(ExpressionChainTask::Visit(&expr.left));
+                }
+                ExpressionChainTask::Visit(expr) => match expr {
+                    Expression::BinaryExpression(expr) => {
+                        tasks.push(ExpressionChainTask::Enter(ExpressionChainNode::Binary(expr)));
+                    }
+                    Expression::LogicalExpression(expr) => {
+                        tasks.push(ExpressionChainTask::Enter(ExpressionChainNode::Logical(expr)));
+                    }
+                    _ => self.visit_expression(expr),
+                },
+                ExpressionChainTask::Leave(kind) => self.leave_node(kind),
+            }
+        }
+    }
+}
+
 /// Visitor to count nodes, scopes, symbols and references in AST
 impl<'a> Visit<'a> for Counter {
     #[inline]
@@ -164,6 +215,14 @@ impl<'a> Visit<'a> for Counter {
     fn visit_identifier_reference(&mut self, _: &IdentifierReference<'a>) {
         self.stats.nodes += 1;
         self.stats.references += 1;
+    }
+
+    fn visit_binary_expression(&mut self, expr: &BinaryExpression<'a>) {
+        self.visit_expression_chain(ExpressionChainNode::Binary(expr));
+    }
+
+    fn visit_logical_expression(&mut self, expr: &LogicalExpression<'a>) {
+        self.visit_expression_chain(ExpressionChainNode::Logical(expr));
     }
 
     #[inline]

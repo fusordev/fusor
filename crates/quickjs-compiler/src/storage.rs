@@ -66,7 +66,7 @@ impl ResolvedReferenceId {
 /// Source-unit kind accepted by this storage-planning slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompilationUnitKind {
-    /// An ordinary host-loaded Script.
+    /// A host-loaded Script, including an asynchronous global Script.
     Script,
     /// An ECMAScript Module.
     Module,
@@ -76,7 +76,11 @@ pub enum CompilationUnitKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutableKind {
     /// The Script root body.
-    Script,
+    Script {
+        /// Whether the host requested asynchronous global Script evaluation,
+        /// which admits top-level `await` and produces a Promise when executed.
+        asynchronous: bool,
+    },
     /// The Module root body.
     Module,
     /// A non-arrow function.
@@ -707,6 +711,7 @@ impl DeclarationFacts {
 struct Planner<'unit, 'arena, 'scope> {
     unit: &'unit ParsedUnit<'arena, 'scope>,
     kind: CompilationUnitKind,
+    root_executable_kind: ExecutableKind,
     root_span: Span,
     executable_drafts: Vec<ExecutableDraft>,
     node_executables: Vec<Option<ExecutableId>>,
@@ -718,9 +723,14 @@ struct Planner<'unit, 'arena, 'scope> {
 impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn new(unit: &'unit ParsedUnit<'arena, 'scope>) -> Result<Self, CompilerError> {
         let root_span = unit.program().span;
-        let kind = match unit.goal() {
-            CompilationGoal::GlobalScript(_) => CompilationUnitKind::Script,
-            CompilationGoal::Module => CompilationUnitKind::Module,
+        let (kind, root_executable_kind) = match unit.goal() {
+            CompilationGoal::GlobalScript(goal) => (
+                CompilationUnitKind::Script,
+                ExecutableKind::Script {
+                    asynchronous: goal.allows_top_level_await(),
+                },
+            ),
+            CompilationGoal::Module => (CompilationUnitKind::Module, ExecutableKind::Module),
             CompilationGoal::IndirectEval(_) | CompilationGoal::DirectEval(_) => {
                 return Err(CompilerError::Unsupported {
                     feature: UnsupportedFeature::EvalCompilationGoal,
@@ -738,6 +748,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(Self {
             unit,
             kind,
+            root_executable_kind,
             root_span,
             executable_drafts: Vec::new(),
             node_executables: vec![None; semantic.nodes().len()],
@@ -872,10 +883,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         for (node_id, node) in nodes.iter_enumerated() {
             let (kind, scope_id, span, name, name_span, parameter_count) = match node.kind() {
                 AstKind::Program(program) => (
-                    match self.kind {
-                        CompilationUnitKind::Script => ExecutableKind::Script,
-                        CompilationUnitKind::Module => ExecutableKind::Module,
-                    },
+                    self.root_executable_kind,
                     program.scope_id(),
                     program.span,
                     None,
@@ -916,7 +924,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             };
 
             let id = executable_id(self.executable_drafts.len())?;
-            let parent = if matches!(kind, ExecutableKind::Script | ExecutableKind::Module) {
+            let parent = if matches!(kind, ExecutableKind::Script { .. } | ExecutableKind::Module) {
                 None
             } else {
                 nodes

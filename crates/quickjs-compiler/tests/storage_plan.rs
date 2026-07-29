@@ -8,9 +8,13 @@ use quickjs_frontend::{
 };
 
 fn script(source: &str) -> quickjs_compiler::StoragePlan {
+    script_with_goal(source, GlobalScriptGoal::new())
+}
+
+fn script_with_goal(source: &str, goal: GlobalScriptGoal) -> quickjs_compiler::StoragePlan {
     with_parsed_program(
         source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(goal)),
         build_storage_plan,
     )
     .expect("front-end acceptance")
@@ -37,7 +41,12 @@ fn plan_escapes_the_frontend_arena_with_dense_executable_ids() {
     for (index, executable) in plan.executables().iter().enumerate() {
         assert_eq!(executable.id().index(), index);
     }
-    assert_eq!(plan.executables()[0].kind(), ExecutableKind::Script);
+    assert_eq!(
+        plan.executables()[0].kind(),
+        ExecutableKind::Script {
+            asynchronous: false
+        }
+    );
     assert_eq!(plan.executables()[0].parent(), None);
     assert_eq!(
         plan.executables()[1].parent(),
@@ -59,6 +68,46 @@ fn plan_escapes_the_frontend_arena_with_dense_executable_ids() {
             asynchronous: false
         }
     );
+}
+
+#[test]
+fn ordinary_script_root_retains_synchronous_sloppy_metadata_after_arena_drop() {
+    let plan = script_with_goal("0;", GlobalScriptGoal::new());
+    let root = &plan.executables()[0];
+
+    assert_eq!(
+        root.kind(),
+        ExecutableKind::Script {
+            asynchronous: false
+        }
+    );
+    assert!(!root.is_strict());
+}
+
+#[test]
+fn async_script_root_retains_asynchronous_sloppy_metadata_after_arena_drop() {
+    let plan = script_with_goal(
+        "await 0;",
+        GlobalScriptGoal::new().with_top_level_await(true),
+    );
+    let root = &plan.executables()[0];
+
+    assert_eq!(root.kind(), ExecutableKind::Script { asynchronous: true });
+    assert!(!root.is_strict());
+}
+
+#[test]
+fn forced_strict_async_script_root_retains_both_flags_after_arena_drop() {
+    let plan = script_with_goal(
+        "await 0;",
+        GlobalScriptGoal::new()
+            .with_forced_strict(true)
+            .with_top_level_await(true),
+    );
+    let root = &plan.executables()[0];
+
+    assert_eq!(root.kind(), ExecutableKind::Script { asynchronous: true });
+    assert!(root.is_strict());
 }
 
 #[test]

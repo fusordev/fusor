@@ -59,6 +59,17 @@ macro_rules! control_flow {
     }};
 }
 
+enum ExpressionChainNode<'visit, 'a> {
+    Binary(&'visit BinaryExpression<'a>),
+    Logical(&'visit LogicalExpression<'a>),
+}
+
+enum ExpressionChainTask<'visit, 'a> {
+    Enter(ExpressionChainNode<'visit, 'a>),
+    Visit(&'visit Expression<'a>),
+    Leave(AstKind<'a>),
+}
+
 /// Semantic Builder
 ///
 /// Traverses a parsed AST and builds a [`Semantic`] representation of the
@@ -118,6 +129,12 @@ pub struct SemanticBuilder<'a> {
     /// See: [`crate::checker::check`]
     check_syntax_error: bool,
 
+    /// Whether the host forces strict mode for the root Script scope.
+    ///
+    /// Modules and explicit `"use strict"` directives remain strict
+    /// independently of this option.
+    force_strict: bool,
+
     #[cfg(feature = "cfg")]
     pub(crate) cfg: Option<ControlFlowGraphBuilder<'a>>,
     #[cfg(not(feature = "cfg"))]
@@ -171,6 +188,7 @@ impl<'a> SemanticBuilder<'a> {
             excess_capacity: 0.0,
             enum_eval: false,
             check_syntax_error: false,
+            force_strict: false,
             #[cfg(feature = "cfg")]
             cfg: None,
             #[cfg(not(feature = "cfg"))]
@@ -226,6 +244,17 @@ impl<'a> SemanticBuilder<'a> {
     #[must_use]
     pub fn with_check_syntax_error(mut self, yes: bool) -> Self {
         self.check_syntax_error = yes;
+        self
+    }
+
+    /// Force strict-mode semantics for the root scope.
+    ///
+    /// This is for host compilation flags that make Script code strict without
+    /// injecting a synthetic source directive. Child scopes inherit strictness
+    /// through the ordinary scope-flag propagation.
+    #[must_use]
+    pub fn with_forced_strict(mut self, yes: bool) -> Self {
+        self.force_strict = yes;
         self
     }
 
@@ -482,6 +511,53 @@ impl<'a> SemanticBuilder<'a> {
             AstNodeStoreKind::Ancestry(stack) => {
                 stack.pop();
                 self.node_store.current_node_id = stack.current_node_id();
+            }
+        }
+    }
+
+    /// Traverse binary and logical expression chains without consuming one Rust
+    /// stack frame per AST node.
+    ///
+    /// This is restricted to builders that are not constructing a CFG. Active
+    /// CFG traversal has additional short-circuit bookkeeping in
+    /// `visit_logical_expression` and retains its original recursive
+    /// implementation.
+    fn visit_expression_chain(&mut self, root: ExpressionChainNode<'_, 'a>) {
+        let mut tasks = vec![ExpressionChainTask::Enter(root)];
+
+        while let Some(task) = tasks.pop() {
+            match task {
+                ExpressionChainTask::Enter(ExpressionChainNode::Binary(expr)) => {
+                    let kind = AstKind::BinaryExpression(self.alloc(expr));
+                    self.enter_node(kind);
+                    self.visit_span(&expr.span);
+
+                    // Reverse push order preserves the generated visitor's
+                    // enter -> left -> right -> leave depth-first traversal.
+                    tasks.push(ExpressionChainTask::Leave(kind));
+                    tasks.push(ExpressionChainTask::Visit(&expr.right));
+                    tasks.push(ExpressionChainTask::Visit(&expr.left));
+                }
+                ExpressionChainTask::Enter(ExpressionChainNode::Logical(expr)) => {
+                    let kind = AstKind::LogicalExpression(self.alloc(expr));
+                    self.enter_node(kind);
+
+                    // The existing SemanticBuilder override does not visit the
+                    // span, so retain its exact observable callback order.
+                    tasks.push(ExpressionChainTask::Leave(kind));
+                    tasks.push(ExpressionChainTask::Visit(&expr.right));
+                    tasks.push(ExpressionChainTask::Visit(&expr.left));
+                }
+                ExpressionChainTask::Visit(expr) => match expr {
+                    Expression::BinaryExpression(expr) => {
+                        tasks.push(ExpressionChainTask::Enter(ExpressionChainNode::Binary(expr)));
+                    }
+                    Expression::LogicalExpression(expr) => {
+                        tasks.push(ExpressionChainTask::Enter(ExpressionChainNode::Logical(expr)));
+                    }
+                    _ => self.visit_expression(expr),
+                },
+                ExpressionChainTask::Leave(kind) => self.leave_node(kind),
             }
         }
     }
@@ -894,7 +970,10 @@ impl<'a> Visit<'a> for SemanticBuilder<'a> {
         // Inline the specific logic for `Program` here instead.
         // This simplifies logic in `enter_scope`, as it doesn't have to handle the special case.
         let mut flags = ScopeFlags::Top;
-        if self.source_type.is_strict() || program.has_use_strict_directive() {
+        if self.force_strict
+            || self.source_type.is_strict()
+            || program.has_use_strict_directive()
+        {
             flags |= ScopeFlags::StrictMode;
         }
         self.current_scope_id =
@@ -1117,7 +1196,28 @@ impl<'a> Visit<'a> for SemanticBuilder<'a> {
         self.leave_node(kind);
     }
 
+    fn visit_binary_expression(&mut self, expr: &BinaryExpression<'a>) {
+        #[cfg(feature = "cfg")]
+        if self.cfg.is_some() {
+            oxc_ast_visit::walk::walk_binary_expression(self, expr);
+            return;
+        }
+
+        self.visit_expression_chain(ExpressionChainNode::Binary(expr));
+    }
+
+    #[cfg(not(feature = "cfg"))]
     fn visit_logical_expression(&mut self, expr: &LogicalExpression<'a>) {
+        self.visit_expression_chain(ExpressionChainNode::Logical(expr));
+    }
+
+    #[cfg(feature = "cfg")]
+    fn visit_logical_expression(&mut self, expr: &LogicalExpression<'a>) {
+        if self.cfg.is_none() {
+            self.visit_expression_chain(ExpressionChainNode::Logical(expr));
+            return;
+        }
+
         // logical expressions are short-circuiting, and therefore
         // also represent control flow.
         // For example, in:

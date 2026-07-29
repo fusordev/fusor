@@ -284,7 +284,7 @@ fn plain_indirect_eval_succeeds_without_losing_its_compilation_goal() {
 }
 
 #[test]
-fn contextual_goals_fail_before_oxc_until_their_adapters_are_faithful() {
+fn eval_goals_fail_before_oxc_until_their_adapters_are_faithful() {
     let direct_capabilities = DirectEvalCapabilities::new()
         .with_strict(true)
         .with_new_target(true)
@@ -293,20 +293,6 @@ fn contextual_goals_fail_before_oxc_until_their_adapters_are_faithful() {
     let direct_context =
         DirectEvalContext::new(direct_capabilities, DirectEvalScopeSnapshot::default());
     let cases = [
-        (
-            CompilationGoal::GlobalScript(GlobalScriptGoal::new().with_forced_strict(true)),
-            UnsupportedCompilationGoal::GlobalScript(
-                GlobalScriptGoal::new().with_forced_strict(true),
-            ),
-            "force_strict=true, allow_top_level_await=false",
-        ),
-        (
-            CompilationGoal::GlobalScript(GlobalScriptGoal::new().with_top_level_await(true)),
-            UnsupportedCompilationGoal::GlobalScript(
-                GlobalScriptGoal::new().with_top_level_await(true),
-            ),
-            "force_strict=false, allow_top_level_await=true",
-        ),
         (
             CompilationGoal::IndirectEval(IndirectEvalGoal::new().with_forced_strict(true)),
             UnsupportedCompilationGoal::IndirectEval(

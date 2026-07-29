@@ -213,6 +213,15 @@ pub struct ParseOptions {
     /// [`return`]: oxc_ast::ast::ReturnStatement
     pub allow_return_outside_function: bool,
 
+    /// Allow `await` expressions at the top level of a Script.
+    ///
+    /// This keeps the source type as Script; it is intended for hosts that
+    /// compile global code with an async execution capability. Nested
+    /// non-async functions remain ordinary non-await contexts.
+    ///
+    /// Default: `false`
+    pub allow_top_level_await: bool,
+
     /// Emit [`ParenthesizedExpression`]s and [`TSParenthesizedType`] in AST.
     ///
     /// If this option is `true`, parenthesized expressions are represented by
@@ -253,6 +262,7 @@ impl Default for ParseOptions {
             #[cfg(feature = "regular_expression")]
             parse_regular_expression: false,
             allow_return_outside_function: false,
+            allow_top_level_await: false,
             preserve_parens: true,
             allow_v8_intrinsics: false,
             enable_ident_hashes: true,
@@ -861,7 +871,7 @@ impl<'a, C: ParserConfig> ParserImpl<'a, C> {
 
     fn default_context(source_type: SourceType, options: ParseOptions) -> Context {
         let mut ctx = Context::default().and_ambient(source_type.is_typescript_definition());
-        if source_type.is_module() {
+        if source_type.is_module() || options.allow_top_level_await {
             // for [top-level-await](https://tc39.es/proposal-top-level-await/)
             ctx = ctx.and_await(true);
         }
