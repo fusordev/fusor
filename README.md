@@ -38,10 +38,11 @@ target is the official **2026-06-04** release and its ES2025 language surface.
   human-readable Miette rendering, and carry source maps through compilation
   and stack traces.
 
-The implementation plan and compatibility gates live in
-[PORTING.md](PORTING.md). The exact upstream provenance is recorded in
-[UPSTREAM.md](UPSTREAM.md), and the external-crate policy is recorded in
-[DEPENDENCIES.md](DEPENDENCIES.md).
+The runtime/compiler boundaries and safety invariants live in
+[ARCHITECTURE.md](ARCHITECTURE.md), and the implementation plan and
+compatibility gates live in [PORTING.md](PORTING.md). The exact upstream
+provenance is recorded in [UPSTREAM.md](UPSTREAM.md), and the external-crate
+policy is recorded in [DEPENDENCIES.md](DEPENDENCIES.md).
 
 ## Development
 
