@@ -179,9 +179,9 @@ fn unsupported_leaf_shapes_fail_closed_at_source_spans() {
             "missing",
         ),
         (
-            "function f(arg) { let local = arg; local; return local; }",
+            "function f(arg) { let local = arg; if (local) {} return local; }",
             UnsupportedLeafFeature::UnsupportedBody,
-            "local;",
+            "if (local) {}",
         ),
         (
             "function f(arg) { let local = arg; return local; arg; }",

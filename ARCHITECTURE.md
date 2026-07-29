@@ -88,19 +88,28 @@ source identifier named `_default_` cannot collide with it.
 `SymbolId → BindingId`, and `ReferenceId → native reference` tables beside an
 `Arc<StoragePlan>` only while the arena is alive. Lowering never reconstructs
 identity from names or spans and never treats a unit-global `BindingId` as an
-argument or local slot. Its first end-to-end ordinary leaf-function slice
-is Script-only, accepts function declarations and anonymous `function`
-expressions, validates the complete selected body, assigns typed frame slots,
-emits final QuickJS opcodes with owned PC-to-source spans, and immediately
-produces a non-executable `VerifiedControlFlow` certificate. Module functions,
-object methods/accessors, and named function expressions fail closed until
-their distinct surrounding-storage, header, and self-binding behavior is
-implemented. The compiled artifact keeps the exact source text, storage plan,
-local layout, source table, and certificate in immutable `Arc` storage after
-the Oxc arena is dropped. Lowering accepts only an opaque executable selection
-issued by that context, so a same-index selection from another context is
-rejected. Unsupported bodies, unresolved names, captures, nested executables,
-and async/generator functions fail before byte emission.
+argument or local slot. The first end-to-end ordinary leaf-function family is
+Script-only and accepts function declarations and anonymous `function`
+expressions. Its pool-free straight-line slice handles simple
+`var`/`let`/`const` declarations, TDZ setup, immediate Boolean/null/int32 and
+compact `BigInt` values, the empty string, resolved argument/local reads, unary
+and binary operators, sequence and expression statements, and explicit or
+implicit returns. It lowers
+expressions with an iterative work list, validates the complete selected body
+into typed pseudo-instructions before byte emission, assigns typed frame
+slots, emits final QuickJS opcodes with owned PC-to-source spans, and
+immediately produces a non-executable `VerifiedControlFlow` certificate.
+Constants, atoms, and closures stay rejected until the compiled artifact owns
+their real pools.
+
+Module functions, object methods/accessors, and named function expressions fail
+closed until their distinct surrounding-storage, header, and self-binding
+behavior is implemented. The compiled artifact keeps the exact source text,
+storage plan, local layout, source table, and certificate in immutable `Arc`
+storage after the Oxc arena is dropped. Lowering accepts only an opaque
+executable selection issued by that context, so a same-index selection from
+another context is rejected. Unsupported bodies, unresolved names, captures,
+nested executables, and async/generator functions fail before byte emission.
 
 Every successful unit also owns a `ModuleSyntaxRecord` for the module data that
 must survive the Oxc allocator. Static requests remain in source occurrence

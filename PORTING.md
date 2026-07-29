@@ -132,6 +132,15 @@ A milestone is complete only when all of its checked items pass in CI.
         `set_loc_uninitialized; get_arg; put_loc; get_loc_check; return`
         family, track stack depth, and return only an owned non-executable
         `VerifiedControlFlow` certificate.
+  - [x] Expand that vertical to pool-free straight-line bodies: multiple
+        simple `var`/`let`/`const` declarations, reverse-order TDZ setup,
+        immediate Boolean/null/int32 and compact `BigInt` values, the empty
+        string, exact argument/local reads and writes, all value-only unary and
+        binary operators needing no pools, sequence/expression statements, and
+        explicit or implicit returns. Expression lowering uses an iterative
+        work list and validates the whole body before emitting bytes; atom,
+        constant, and closure pools remain fail-closed until their owned
+        records exist.
 - [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
 - [ ] Deterministic debug/line tables.
 

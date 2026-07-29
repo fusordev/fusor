@@ -11,6 +11,7 @@ publish = false
 oxc_ast.workspace = true
 oxc_semantic.workspace = true
 oxc_span.workspace = true
+oxc_syntax.workspace = true
 quickjs-bytecode = { path = "../quickjs-bytecode" }
 quickjs-frontend = { path = "../quickjs-frontend" }
 

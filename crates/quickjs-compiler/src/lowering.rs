@@ -3,12 +3,14 @@ use std::{error::Error, fmt, sync::Arc};
 use oxc_ast::{
     AstKind,
     ast::{
-        BindingPattern, Expression, Function, FunctionType, PropertyKind, Statement,
+        BindingPattern, Expression, Function, FunctionBody, FunctionType, PropertyKind,
+        SequenceExpression, Statement, UnaryExpression, VariableDeclaration,
         VariableDeclarationKind,
     },
 };
 use oxc_semantic::{ReferenceId, SymbolId};
 use oxc_span::GetSpan;
+use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
 use quickjs_bytecode::{
     BytecodeBuilder, BytecodePc, EncodeError, FinalOpcode, FunctionIndexDomains, Instruction,
     Operands, StackEffectError, UnverifiedFunctionBody, UnverifiedFunctionHeader,
@@ -212,9 +214,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     /// Lowers one validated ordinary leaf-function family to final bytecode.
     ///
-    /// The accepted initial Script-only family has one lexical binding
-    /// initialized from a resolved argument and returns that lexical binding.
-    /// The entire function is validated before any instruction is emitted.
+    /// The accepted Script-only family is straight-line and pool-free. It
+    /// supports simple local declarations, immediate primitive values,
+    /// resolved argument/local reads, unary and binary operators, expression
+    /// statements, and a terminal or implicit return. The entire function is
+    /// converted to typed pseudo-instructions before any byte is emitted.
     ///
     /// # Errors
     ///
@@ -230,29 +234,16 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         let validated = self.validate_leaf(executable)?;
         let mut emitter = StraightLineEmitter::new(limits.max_bytecode_bytes_per_function());
 
-        emitter.emit(
-            FinalOpcode::SetLocUninitialized,
-            Operands::Loc(validated.local_slot.index()),
-            validated.local_span,
-        )?;
-        let (get_argument, get_argument_operands) = compact_get_argument(validated.argument_slot);
-        emitter.emit(
-            get_argument,
-            get_argument_operands,
-            validated.initializer_span,
-        )?;
-        let (put_local, put_local_operands) = compact_put_local(validated.local_slot);
-        emitter.emit(put_local, put_local_operands, validated.local_span)?;
-        emitter.emit(
-            FinalOpcode::GetLocCheck,
-            Operands::Loc(validated.local_slot.index()),
-            validated.return_value_span,
-        )?;
-        emitter.emit(FinalOpcode::Return, Operands::None, validated.return_span)?;
+        for instruction in &validated.instructions {
+            emitter.emit(instruction.opcode, instruction.operands, instruction.span)?;
+        }
         if emitter.depth != 0 {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "ordinary leaf returns with an empty operand stack",
-                span: Some(validated.return_span),
+                span: validated
+                    .instructions
+                    .last()
+                    .map(|instruction| instruction.span),
             });
         }
 
@@ -273,10 +264,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             executable,
             storage_plan: Arc::clone(&self.planned.plan),
             source_text: Arc::clone(&self.source_text),
-            locals: Arc::from([LoweredLocal {
-                binding: validated.local_binding,
-                slot: validated.local_slot,
-            }]),
+            locals: validated.locals.into(),
             source_instructions: source_instructions.into(),
             control_flow: Arc::new(control_flow),
         })
@@ -309,63 +297,373 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         executable_id: ExecutableId,
     ) -> Result<ValidatedLeaf, LeafCompilationError> {
         let (executable, function) = self.selected_ordinary_leaf(executable_id)?;
-        let source = validate_source_shape(function)?;
         let layout = FrameLayout::new(&self.planned.plan, executable_id)?;
-
-        let local_binding = self.binding_for_identifier(source.local_symbol, source.local_span)?;
-        let local_slot = layout
-            .local(local_binding)
+        let body = function
+            .body
+            .as_ref()
             .ok_or(LeafCompilationError::Unsupported {
-                feature: UnsupportedLeafFeature::UnsupportedBinding,
-                span: source.local_span,
+                feature: UnsupportedLeafFeature::UnsupportedBody,
+                span: function.span,
             })?;
-        let local_storage = self.planned.plan.binding(local_binding).ok_or(
-            LeafCompilationError::SemanticInvariant {
-                invariant: "local compiler binding exists",
-                span: Some(source.local_span),
-            },
-        )?;
-        if !matches!(
-            local_storage.policy().kind(),
-            DeclarationKind::Let | DeclarationKind::Const
-        ) || !local_storage.policy().has_temporal_dead_zone()
-        {
-            return unsupported(
-                UnsupportedLeafFeature::UnsupportedBinding,
-                source.local_span,
-            );
+        let mut instructions = Vec::new();
+        for local in layout.locals.iter().rev() {
+            if local.has_temporal_dead_zone {
+                instructions.push(PlannedInstruction::new(
+                    FinalOpcode::SetLocUninitialized,
+                    Operands::Loc(local.slot.index()),
+                    local.declaration_span,
+                ));
+            }
         }
-
-        let initializer_binding =
-            self.resolved_binding(source.initializer_reference, source.initializer_span)?;
-        let argument_slot =
-            layout
-                .argument(initializer_binding)
-                .ok_or(LeafCompilationError::Unsupported {
-                    feature: UnsupportedLeafFeature::UnsupportedInitializer,
-                    span: source.initializer_span,
-                })?;
-        let return_binding =
-            self.resolved_binding(source.return_reference, source.return_value_span)?;
-        if return_binding != local_binding {
-            return unsupported(
-                UnsupportedLeafFeature::UnsupportedReturn,
-                source.return_value_span,
-            );
-        }
+        self.validate_body(body, &layout, &mut instructions)?;
 
         Ok(ValidatedLeaf {
             strict: executable.is_strict(),
             argument_count: executable.parameter_count(),
             local_count: u32::from(layout.local_count),
-            local_binding,
-            local_slot,
-            argument_slot,
-            local_span: source.local_span,
-            initializer_span: source.initializer_span,
-            return_value_span: source.return_value_span,
-            return_span: source.return_span,
+            locals: layout
+                .locals
+                .iter()
+                .map(|local| LoweredLocal {
+                    binding: local.binding,
+                    slot: local.slot,
+                })
+                .collect(),
+            instructions,
         })
+    }
+
+    fn validate_body(
+        &self,
+        body: &FunctionBody<'arena>,
+        layout: &FrameLayout,
+        instructions: &mut Vec<PlannedInstruction>,
+    ) -> Result<(), LeafCompilationError> {
+        let mut terminated = false;
+        for statement in &body.statements {
+            if terminated {
+                return unsupported(UnsupportedLeafFeature::UnsupportedBody, statement.span());
+            }
+            match statement {
+                Statement::VariableDeclaration(declaration) => {
+                    self.validate_declaration(declaration, layout, instructions)?;
+                }
+                Statement::ExpressionStatement(statement) => {
+                    self.plan_expression(&statement.expression, layout, instructions)?;
+                    instructions.push(PlannedInstruction::new(
+                        FinalOpcode::Drop,
+                        Operands::None,
+                        statement.expression.span(),
+                    ));
+                }
+                Statement::EmptyStatement(_) => {}
+                Statement::ReturnStatement(statement) => {
+                    if let Some(argument) = &statement.argument {
+                        self.plan_expression(argument, layout, instructions)?;
+                        instructions.push(PlannedInstruction::new(
+                            FinalOpcode::Return,
+                            Operands::None,
+                            statement.span,
+                        ));
+                    } else {
+                        instructions.push(PlannedInstruction::new(
+                            FinalOpcode::ReturnUndef,
+                            Operands::None,
+                            statement.span,
+                        ));
+                    }
+                    terminated = true;
+                }
+                _ => {
+                    return unsupported(UnsupportedLeafFeature::UnsupportedBody, statement.span());
+                }
+            }
+        }
+        if !terminated {
+            instructions.push(PlannedInstruction::new(
+                FinalOpcode::ReturnUndef,
+                Operands::None,
+                body.span,
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_declaration(
+        &self,
+        declaration: &VariableDeclaration<'arena>,
+        layout: &FrameLayout,
+        instructions: &mut Vec<PlannedInstruction>,
+    ) -> Result<(), LeafCompilationError> {
+        if declaration.declare
+            || !matches!(
+                declaration.kind,
+                VariableDeclarationKind::Var
+                    | VariableDeclarationKind::Let
+                    | VariableDeclarationKind::Const
+            )
+        {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedDeclaration,
+                declaration.span,
+            );
+        }
+
+        for declarator in &declaration.declarations {
+            let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+                return unsupported(
+                    UnsupportedLeafFeature::UnsupportedDeclaration,
+                    declarator.span,
+                );
+            };
+            let binding =
+                self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+            let frame_slot = layout
+                .slot(binding)
+                .ok_or(LeafCompilationError::Unsupported {
+                    feature: UnsupportedLeafFeature::UnsupportedBinding,
+                    span: identifier.span,
+                })?;
+            self.validate_declaration_storage(
+                declaration.kind,
+                binding,
+                frame_slot,
+                identifier.span,
+            )?;
+
+            match &declarator.init {
+                Some(initializer) => {
+                    self.plan_expression(initializer, layout, instructions)?;
+                    instructions.push(plan_put_slot(frame_slot, identifier.span));
+                }
+                None if declaration.kind == VariableDeclarationKind::Let => {
+                    instructions.push(PlannedInstruction::new(
+                        FinalOpcode::Undefined,
+                        Operands::None,
+                        identifier.span,
+                    ));
+                    instructions.push(plan_put_slot(frame_slot, identifier.span));
+                }
+                None if declaration.kind == VariableDeclarationKind::Var => {}
+                None => {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedDeclaration,
+                        declarator.span,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_declaration_storage(
+        &self,
+        declaration_kind: VariableDeclarationKind,
+        binding: BindingId,
+        frame_slot: FrameSlot,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "declared compiler binding exists",
+                    span: Some(span),
+                })?;
+        let valid = match declaration_kind {
+            VariableDeclarationKind::Let => {
+                matches!(storage.policy().kind(), DeclarationKind::Let)
+                    && storage.policy().has_temporal_dead_zone()
+                    && matches!(frame_slot, FrameSlot::Local(_))
+            }
+            VariableDeclarationKind::Const => {
+                matches!(storage.policy().kind(), DeclarationKind::Const)
+                    && storage.policy().has_temporal_dead_zone()
+                    && matches!(frame_slot, FrameSlot::Local(_))
+            }
+            VariableDeclarationKind::Var => {
+                matches!(
+                    storage.policy().kind(),
+                    DeclarationKind::Var | DeclarationKind::Parameter
+                ) && !storage.policy().has_temporal_dead_zone()
+            }
+            VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing => false,
+        };
+        if !valid {
+            return unsupported(UnsupportedLeafFeature::UnsupportedBinding, span);
+        }
+        Ok(())
+    }
+
+    fn plan_expression<'expression>(
+        &self,
+        expression: &'expression Expression<'arena>,
+        layout: &FrameLayout,
+        instructions: &mut Vec<PlannedInstruction>,
+    ) -> Result<(), LeafCompilationError> {
+        let mut work = vec![ExpressionWork::Visit(expression)];
+        while let Some(task) = work.pop() {
+            match task {
+                ExpressionWork::Emit(instruction) => instructions.push(instruction),
+                ExpressionWork::Visit(expression) => {
+                    if let Some(literal) = plan_literal(expression) {
+                        instructions.push(literal?);
+                        continue;
+                    }
+                    match expression {
+                        Expression::Identifier(identifier) => {
+                            let binding = self
+                                .resolved_binding(identifier.reference_id.get(), identifier.span)?;
+                            let frame_slot =
+                                layout
+                                    .slot(binding)
+                                    .ok_or(LeafCompilationError::Unsupported {
+                                        feature: UnsupportedLeafFeature::UnsupportedBinding,
+                                        span: identifier.span,
+                                    })?;
+                            instructions.push(self.plan_read_slot(
+                                binding,
+                                frame_slot,
+                                identifier.span,
+                            )?);
+                        }
+                        Expression::UnaryExpression(unary) => {
+                            Self::plan_unary_expression(unary, &mut work, instructions)?;
+                        }
+                        Expression::BinaryExpression(binary) => {
+                            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                                binary_opcode(binary.operator),
+                                Operands::None,
+                                binary.span,
+                            )));
+                            work.push(ExpressionWork::Visit(&binary.right));
+                            work.push(ExpressionWork::Visit(&binary.left));
+                        }
+                        Expression::ParenthesizedExpression(parenthesized) => {
+                            work.push(ExpressionWork::Visit(&parenthesized.expression));
+                        }
+                        Expression::SequenceExpression(sequence) => {
+                            Self::plan_sequence_expression(sequence, &mut work)?;
+                        }
+                        _ => {
+                            return unsupported(
+                                UnsupportedLeafFeature::UnsupportedExpression,
+                                expression.span(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn plan_unary_expression<'expression>(
+        unary: &'expression UnaryExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+        instructions: &mut Vec<PlannedInstruction>,
+    ) -> Result<(), LeafCompilationError> {
+        if unary.operator == UnaryOperator::UnaryNegation
+            && let Expression::NumericLiteral(literal) = &unary.argument
+            && literal.value != 0.0
+            && let Some(integer) = exact_negated_i32(literal.value)
+        {
+            instructions.push(plan_push_integer(integer, unary.span));
+            return Ok(());
+        }
+        match unary.operator {
+            UnaryOperator::UnaryPlus
+            | UnaryOperator::UnaryNegation
+            | UnaryOperator::LogicalNot
+            | UnaryOperator::BitwiseNot
+            | UnaryOperator::Typeof => {
+                let opcode = unary_opcode(unary.operator).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "supported unary operator has final opcode",
+                        span: Some(unary.span),
+                    },
+                )?;
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    opcode,
+                    Operands::None,
+                    unary.span,
+                )));
+                work.push(ExpressionWork::Visit(&unary.argument));
+            }
+            UnaryOperator::Void => {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Undefined,
+                    Operands::None,
+                    unary.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    unary.argument.span(),
+                )));
+                work.push(ExpressionWork::Visit(&unary.argument));
+            }
+            UnaryOperator::Delete => {
+                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, unary.span);
+            }
+        }
+        Ok(())
+    }
+
+    fn plan_sequence_expression<'expression>(
+        sequence: &'expression SequenceExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if sequence.expressions.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc sequence expression is nonempty",
+                span: Some(sequence.span),
+            });
+        }
+        for (index, expression) in sequence.expressions.iter().enumerate().rev() {
+            if index + 1 != sequence.expressions.len() {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    expression.span(),
+                )));
+            }
+            work.push(ExpressionWork::Visit(expression));
+        }
+        Ok(())
+    }
+
+    fn plan_read_slot(
+        &self,
+        binding: BindingId,
+        frame_slot: FrameSlot,
+        span: Span,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        match frame_slot {
+            FrameSlot::Argument(slot) => {
+                let (opcode, operands) = compact_get_argument(slot);
+                Ok(PlannedInstruction::new(opcode, operands, span))
+            }
+            FrameSlot::Local(slot) => {
+                let storage = self.planned.plan.binding(binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "read compiler binding exists",
+                        span: Some(span),
+                    },
+                )?;
+                if storage.policy().has_temporal_dead_zone() {
+                    Ok(PlannedInstruction::new(
+                        FinalOpcode::GetLocCheck,
+                        Operands::Loc(slot.index()),
+                        span,
+                    ))
+                } else {
+                    let (opcode, operands) = compact_get_local(slot);
+                    Ok(PlannedInstruction::new(opcode, operands, span))
+                }
+            }
+        }
     }
 
     fn selected_ordinary_leaf(
@@ -564,105 +862,26 @@ fn is_object_method_or_accessor(unit: &ParsedUnit<'_, '_>, node_id: oxc_semantic
         && (property.method || !matches!(property.kind, PropertyKind::Init))
 }
 
-struct ValidatedSourceShape {
-    local_symbol: Option<SymbolId>,
-    initializer_reference: Option<ReferenceId>,
-    return_reference: Option<ReferenceId>,
-    local_span: Span,
-    initializer_span: Span,
-    return_value_span: Span,
-    return_span: Span,
+#[derive(Clone, Copy)]
+struct PlannedInstruction {
+    opcode: FinalOpcode,
+    operands: Operands,
+    span: Span,
 }
 
-fn validate_source_shape(
-    function: &Function<'_>,
-) -> Result<ValidatedSourceShape, LeafCompilationError> {
-    let body = function
-        .body
-        .as_ref()
-        .ok_or(LeafCompilationError::Unsupported {
-            feature: UnsupportedLeafFeature::UnsupportedBody,
-            span: function.span,
-        })?;
-    let mut statements = body.statements.iter();
-    let declaration_statement = statements.next().ok_or(LeafCompilationError::Unsupported {
-        feature: UnsupportedLeafFeature::UnsupportedBody,
-        span: body.span,
-    })?;
-    let Statement::VariableDeclaration(declaration) = declaration_statement else {
-        return unsupported(
-            UnsupportedLeafFeature::UnsupportedBody,
-            declaration_statement.span(),
-        );
-    };
-    if !matches!(
-        declaration.kind,
-        VariableDeclarationKind::Let | VariableDeclarationKind::Const
-    ) || declaration.declarations.len() != 1
-    {
-        return unsupported(
-            UnsupportedLeafFeature::UnsupportedDeclaration,
-            declaration.span,
-        );
+impl PlannedInstruction {
+    const fn new(opcode: FinalOpcode, operands: Operands, span: Span) -> Self {
+        Self {
+            opcode,
+            operands,
+            span,
+        }
     }
-    let declarator = &declaration.declarations[0];
-    let BindingPattern::BindingIdentifier(binding_identifier) = &declarator.id else {
-        return unsupported(
-            UnsupportedLeafFeature::UnsupportedDeclaration,
-            declarator.span,
-        );
-    };
-    let initializer = declarator
-        .init
-        .as_ref()
-        .ok_or(LeafCompilationError::Unsupported {
-            feature: UnsupportedLeafFeature::UnsupportedDeclaration,
-            span: declarator.span,
-        })?;
-    let Expression::Identifier(initializer_identifier) = initializer else {
-        return unsupported(
-            UnsupportedLeafFeature::UnsupportedInitializer,
-            initializer.span(),
-        );
-    };
+}
 
-    let return_source = statements.next().ok_or(LeafCompilationError::Unsupported {
-        feature: UnsupportedLeafFeature::UnsupportedBody,
-        span: body.span,
-    })?;
-    let Statement::ReturnStatement(return_statement) = return_source else {
-        return unsupported(
-            UnsupportedLeafFeature::UnsupportedBody,
-            return_source.span(),
-        );
-    };
-    let return_value =
-        return_statement
-            .argument
-            .as_ref()
-            .ok_or(LeafCompilationError::Unsupported {
-                feature: UnsupportedLeafFeature::UnsupportedReturn,
-                span: return_statement.span,
-            })?;
-    let Expression::Identifier(return_identifier) = return_value else {
-        return unsupported(
-            UnsupportedLeafFeature::UnsupportedReturn,
-            return_value.span(),
-        );
-    };
-    if let Some(extra) = statements.next() {
-        return unsupported(UnsupportedLeafFeature::UnsupportedBody, extra.span());
-    }
-
-    Ok(ValidatedSourceShape {
-        local_symbol: binding_identifier.symbol_id.get(),
-        initializer_reference: initializer_identifier.reference_id.get(),
-        return_reference: return_identifier.reference_id.get(),
-        local_span: binding_identifier.span,
-        initializer_span: initializer_identifier.span,
-        return_value_span: return_identifier.span,
-        return_span: return_statement.span,
-    })
+enum ExpressionWork<'expression, 'arena> {
+    Visit(&'expression Expression<'arena>),
+    Emit(PlannedInstruction),
 }
 
 #[derive(Clone, Copy)]
@@ -674,14 +893,23 @@ enum FrameSlot {
     Local(LocalSlot),
 }
 
+struct FrameLocal {
+    binding: BindingId,
+    slot: LocalSlot,
+    has_temporal_dead_zone: bool,
+    declaration_span: Span,
+}
+
 struct FrameLayout {
     slots: Vec<Option<FrameSlot>>,
+    locals: Vec<FrameLocal>,
     local_count: u16,
 }
 
 impl FrameLayout {
     fn new(plan: &StoragePlan, executable: ExecutableId) -> Result<Self, LeafCompilationError> {
         let mut slots = vec![None; plan.bindings().len()];
+        let mut locals = Vec::new();
         let mut local_count = 0_u16;
         let bindings = plan
             .bindings_for(executable)
@@ -703,6 +931,18 @@ impl FrameLayout {
                             domain: "function local slots",
                         },
                     )?;
+                    let declaration_span = binding.declaration_spans().first().copied().ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "function local has a declaration span",
+                            span: None,
+                        },
+                    )?;
+                    locals.push(FrameLocal {
+                        binding: binding.id(),
+                        slot,
+                        has_temporal_dead_zone: binding.policy().has_temporal_dead_zone(),
+                        declaration_span,
+                    });
                     FrameSlot::Local(slot)
                 }
                 StoragePlacement::GlobalObject
@@ -730,21 +970,15 @@ impl FrameLayout {
                 });
             }
         }
-        Ok(Self { slots, local_count })
+        Ok(Self {
+            slots,
+            locals,
+            local_count,
+        })
     }
 
-    fn argument(&self, binding: BindingId) -> Option<ArgumentSlot> {
-        match self.slots.get(binding.index()).copied().flatten()? {
-            FrameSlot::Argument(slot) => Some(slot),
-            FrameSlot::Local(_) => None,
-        }
-    }
-
-    fn local(&self, binding: BindingId) -> Option<LocalSlot> {
-        match self.slots.get(binding.index()).copied().flatten()? {
-            FrameSlot::Local(slot) => Some(slot),
-            FrameSlot::Argument(_) => None,
-        }
+    fn slot(&self, binding: BindingId) -> Option<FrameSlot> {
+        self.slots.get(binding.index()).copied().flatten()
     }
 }
 
@@ -752,13 +986,8 @@ struct ValidatedLeaf {
     strict: bool,
     argument_count: u32,
     local_count: u32,
-    local_binding: BindingId,
-    local_slot: LocalSlot,
-    argument_slot: ArgumentSlot,
-    local_span: Span,
-    initializer_span: Span,
-    return_value_span: Span,
-    return_span: Span,
+    locals: Vec<LoweredLocal>,
+    instructions: Vec<PlannedInstruction>,
 }
 
 struct StraightLineEmitter {
@@ -843,6 +1072,29 @@ fn compact_get_argument(slot: ArgumentSlot) -> (FinalOpcode, Operands) {
     }
 }
 
+fn compact_put_argument(slot: ArgumentSlot) -> (FinalOpcode, Operands) {
+    match slot.0 {
+        0 => (FinalOpcode::PutArg0, Operands::NoneArg),
+        1 => (FinalOpcode::PutArg1, Operands::NoneArg),
+        2 => (FinalOpcode::PutArg2, Operands::NoneArg),
+        3 => (FinalOpcode::PutArg3, Operands::NoneArg),
+        index => (FinalOpcode::PutArg, Operands::Arg(index)),
+    }
+}
+
+fn compact_get_local(slot: LocalSlot) -> (FinalOpcode, Operands) {
+    match slot.0 {
+        0 => (FinalOpcode::GetLoc0, Operands::NoneLoc),
+        1 => (FinalOpcode::GetLoc1, Operands::NoneLoc),
+        2 => (FinalOpcode::GetLoc2, Operands::NoneLoc),
+        3 => (FinalOpcode::GetLoc3, Operands::NoneLoc),
+        index => match u8::try_from(index) {
+            Ok(short) => (FinalOpcode::GetLoc8, Operands::Loc8(short)),
+            Err(_) => (FinalOpcode::GetLoc, Operands::Loc(index)),
+        },
+    }
+}
+
 fn compact_put_local(slot: LocalSlot) -> (FinalOpcode, Operands) {
     match slot.0 {
         0 => (FinalOpcode::PutLoc0, Operands::NoneLoc),
@@ -853,6 +1105,146 @@ fn compact_put_local(slot: LocalSlot) -> (FinalOpcode, Operands) {
             Ok(short) => (FinalOpcode::PutLoc8, Operands::Loc8(short)),
             Err(_) => (FinalOpcode::PutLoc, Operands::Loc(index)),
         },
+    }
+}
+
+fn plan_put_slot(slot: FrameSlot, span: Span) -> PlannedInstruction {
+    let (opcode, operands) = match slot {
+        FrameSlot::Argument(slot) => compact_put_argument(slot),
+        FrameSlot::Local(slot) => compact_put_local(slot),
+    };
+    PlannedInstruction::new(opcode, operands, span)
+}
+
+fn plan_literal(
+    expression: &Expression<'_>,
+) -> Option<Result<PlannedInstruction, LeafCompilationError>> {
+    let planned = match expression {
+        Expression::BooleanLiteral(literal) => Ok(PlannedInstruction::new(
+            if literal.value {
+                FinalOpcode::PushTrue
+            } else {
+                FinalOpcode::PushFalse
+            },
+            Operands::None,
+            literal.span,
+        )),
+        Expression::NullLiteral(literal) => Ok(PlannedInstruction::new(
+            FinalOpcode::Null,
+            Operands::None,
+            literal.span,
+        )),
+        Expression::NumericLiteral(literal) => exact_i32(literal.value)
+            .map(|value| plan_push_integer(value, literal.span))
+            .ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedLiteral,
+                span: literal.span,
+            }),
+        Expression::BigIntLiteral(literal) => literal
+            .value
+            .parse::<i32>()
+            .map(|value| {
+                PlannedInstruction::new(
+                    FinalOpcode::PushBigIntI32,
+                    Operands::I32(value),
+                    literal.span,
+                )
+            })
+            .map_err(|_| LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedLiteral,
+                span: literal.span,
+            }),
+        Expression::StringLiteral(literal) if literal.value.is_empty() => Ok(
+            PlannedInstruction::new(FinalOpcode::PushEmptyString, Operands::None, literal.span),
+        ),
+        Expression::StringLiteral(literal) => {
+            unsupported(UnsupportedLeafFeature::UnsupportedLiteral, literal.span)
+        }
+        Expression::RegExpLiteral(literal) => {
+            unsupported(UnsupportedLeafFeature::UnsupportedLiteral, literal.span)
+        }
+        Expression::TemplateLiteral(template) => {
+            unsupported(UnsupportedLeafFeature::UnsupportedLiteral, template.span)
+        }
+        _ => return None,
+    };
+    Some(planned)
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn exact_i32(value: f64) -> Option<i32> {
+    if value.is_finite()
+        && value.fract() == 0.0
+        && value >= f64::from(i32::MIN)
+        && value <= f64::from(i32::MAX)
+    {
+        Some(value as i32)
+    } else {
+        None
+    }
+}
+
+fn exact_negated_i32(value: f64) -> Option<i32> {
+    exact_i32(-value)
+}
+
+fn plan_push_integer(value: i32, span: Span) -> PlannedInstruction {
+    let (opcode, operands) = match value {
+        -1 => (FinalOpcode::PushMinus1, Operands::NoneInt),
+        0 => (FinalOpcode::Push0, Operands::NoneInt),
+        1 => (FinalOpcode::Push1, Operands::NoneInt),
+        2 => (FinalOpcode::Push2, Operands::NoneInt),
+        3 => (FinalOpcode::Push3, Operands::NoneInt),
+        4 => (FinalOpcode::Push4, Operands::NoneInt),
+        5 => (FinalOpcode::Push5, Operands::NoneInt),
+        6 => (FinalOpcode::Push6, Operands::NoneInt),
+        7 => (FinalOpcode::Push7, Operands::NoneInt),
+        value => match i8::try_from(value) {
+            Ok(value) => (FinalOpcode::PushI8, Operands::I8(value)),
+            Err(_) => match i16::try_from(value) {
+                Ok(value) => (FinalOpcode::PushI16, Operands::I16(value)),
+                Err(_) => (FinalOpcode::PushI32, Operands::I32(value)),
+            },
+        },
+    };
+    PlannedInstruction::new(opcode, operands, span)
+}
+
+const fn unary_opcode(operator: UnaryOperator) -> Option<FinalOpcode> {
+    match operator {
+        UnaryOperator::UnaryPlus => Some(FinalOpcode::Plus),
+        UnaryOperator::UnaryNegation => Some(FinalOpcode::Neg),
+        UnaryOperator::LogicalNot => Some(FinalOpcode::Lnot),
+        UnaryOperator::BitwiseNot => Some(FinalOpcode::Not),
+        UnaryOperator::Typeof => Some(FinalOpcode::Typeof),
+        UnaryOperator::Void | UnaryOperator::Delete => None,
+    }
+}
+
+const fn binary_opcode(operator: BinaryOperator) -> FinalOpcode {
+    match operator {
+        BinaryOperator::Equality => FinalOpcode::Eq,
+        BinaryOperator::Inequality => FinalOpcode::Neq,
+        BinaryOperator::StrictEquality => FinalOpcode::StrictEq,
+        BinaryOperator::StrictInequality => FinalOpcode::StrictNeq,
+        BinaryOperator::LessThan => FinalOpcode::Lt,
+        BinaryOperator::LessEqualThan => FinalOpcode::Lte,
+        BinaryOperator::GreaterThan => FinalOpcode::Gt,
+        BinaryOperator::GreaterEqualThan => FinalOpcode::Gte,
+        BinaryOperator::Addition => FinalOpcode::Add,
+        BinaryOperator::Subtraction => FinalOpcode::Sub,
+        BinaryOperator::Multiplication => FinalOpcode::Mul,
+        BinaryOperator::Division => FinalOpcode::Div,
+        BinaryOperator::Remainder => FinalOpcode::Mod,
+        BinaryOperator::Exponential => FinalOpcode::Pow,
+        BinaryOperator::ShiftLeft => FinalOpcode::Shl,
+        BinaryOperator::ShiftRight => FinalOpcode::Sar,
+        BinaryOperator::ShiftRightZeroFill => FinalOpcode::Shr,
+        BinaryOperator::BitwiseOR => FinalOpcode::Or,
+        BinaryOperator::BitwiseXOR => FinalOpcode::Xor,
+        BinaryOperator::BitwiseAnd => FinalOpcode::And,
+        BinaryOperator::In => FinalOpcode::In,
+        BinaryOperator::Instanceof => FinalOpcode::InstanceOf,
     }
 }
 
@@ -875,14 +1267,15 @@ pub enum UnsupportedLeafFeature {
     NestedExecutable,
     /// Module-owned storage is outside this Script-only lowering slice.
     UnsupportedCompilationUnit,
-    /// A statement sequence is outside the validated two-statement family.
+    /// A statement sequence is outside the validated straight-line family.
     UnsupportedBody,
-    /// A declaration is not one simple lexical declarator.
+    /// A declaration is not a simple `var`, `let`, or `const` binding.
     UnsupportedDeclaration,
-    /// The initializer is not one resolved argument identifier.
-    UnsupportedInitializer,
-    /// The return is not the declared local identifier.
-    UnsupportedReturn,
+    /// An expression requires control flow, calls, properties, or another
+    /// unsupported semantic family.
+    UnsupportedExpression,
+    /// A literal requires a constant, atom, `BigInt`, or `RegExp` pool entry.
+    UnsupportedLiteral,
     /// A binding cannot be represented by this frame layout.
     UnsupportedBinding,
     /// A reference is not a pure read.
