@@ -65,21 +65,23 @@ typed-stack and whole-function rules below remain mandatory before
 
 The next compiler-only slice returns
 `VerifiedCompilerFunctionGraph`. It takes a flat `Arc`-backed graph, requires
-explicit body capture and constant layouts, owns the actual heterogeneous
-Number/function constant entries, function-template target identities, and
-normalized immediate-parent capture sources, rejects duplicate normalized
-sources within one compiler function, cycles, and unreachable records,
-validates every shared-parent edge, and charges aggregate body and edge-work
-budgets. Every pool entry is counted and kind-checked, but only `Function`
-entries form graph edges or contribute to topology and nesting depth. Traversal
-and depth accounting use explicit work lists; they never depend on Rust
-call-stack depth and require no `recursion_guard` layer or dependency. A
+explicit body capture and constant layouts, owns exact content-interned
+function-local String atoms, the actual heterogeneous Number/String/function
+constant entries, function-template target identities, and normalized
+immediate-parent capture sources. It rejects duplicate atoms, duplicate
+normalized capture sources, cycles, and unreachable records, validates every
+shared-parent edge, and charges aggregate body, compact string-payload, and
+edge-work budgets. Every constant entry is counted and kind-checked, but only
+`Function` entries form graph edges or contribute to topology and nesting
+depth. Traversal and depth accounting use explicit work lists; they never
+depend on Rust call-stack depth and require no `recursion_guard` layer or
+dependency. A
 selected root with imported closure variables is rejected because no verified
 external environment was supplied. This certificate is still not
-`VerifiedBytecode`: it lacks atom and non-Number constant pools,
-vardef/name/policy metadata, typed handler/finally/iterator states,
-source/debug validation, and the runtime function metadata required for exact
-behavior. It exposes no VM execution entry point.
+`VerifiedBytecode`: it lacks vardef/name/policy metadata, other value and atom
+namespaces, typed handler/finally/iterator states, source/debug validation, and
+the runtime function metadata required for exact behavior. It exposes no VM
+execution entry point.
 
 Serialized bodies provide a stored maximum stack size, and
 `verify_control_flow` requires it to equal the recomputed reachable maximum.
@@ -256,10 +258,11 @@ fail-closed capability.
   data, but the reader must materialize or validate each function's local pool
   before body verification. An index has no meaning in a parent, child, or
   sibling function merely because the numeric position exists there.
-- Atom-pool entries carry owned content plus explicit namespace/predefined
-  metadata. Loading a verified function later reinterns or creates each local
-  entry exactly once in the destination runtime. Verification itself never
-  interns into a runtime.
+- The current compiler graph accepts only opaque owned String atoms and rejects
+  duplicate exact contents within each local pool. Future serialized entries
+  also carry explicit namespace/predefined metadata. Loading a verified
+  function later reinterns or creates each local entry exactly once in the
+  destination runtime. Verification itself never interns into a runtime.
 - Nullable metadata atom fields use an explicit optional representation.
   Instruction operands and required metadata fields cannot encode null by
   smuggling a sentinel integer into `AtomPoolIndex`.
@@ -606,7 +609,7 @@ untrusted APIs start with this **provisional** default profile:
 | constant-pool slots in the graph | 1,048,576 |
 | distinct constant graph nodes | 1,048,576 |
 | atoms in the graph | 1,048,576 |
-| aggregate constant/atom payload bytes | 64 MiB |
+| aggregate String constant/atom payload bytes | 64 MiB |
 | `gosub` sites in one function | 65,534 |
 | compiler branch-relaxation instruction visits | 33,554,432 |
 | total transfer-function evaluations | 33,554,432 |

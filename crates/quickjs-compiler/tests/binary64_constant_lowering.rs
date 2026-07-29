@@ -56,7 +56,7 @@ fn instructions(function: &CompiledFunction) -> Vec<(FinalOpcode, Operands)> {
         .collect()
 }
 
-fn number_bits(constant: CompiledConstant) -> u64 {
+fn number_bits(constant: &CompiledConstant) -> u64 {
     let CompiledConstant::Value(CompilerConstantValue::Number(number)) = constant else {
         panic!("expected a binary64 Number constant");
     };
@@ -68,12 +68,12 @@ fn non_i32_numeric_literals_lower_to_exact_nondeduplicated_constants() {
     let compiled = compile_leaf("function f(){ return (1.5, 1e400, 1.5); }", "f");
 
     assert_eq!(compiled.constants().len(), 3);
-    assert_eq!(number_bits(compiled.constants()[0]), 1.5_f64.to_bits());
+    assert_eq!(number_bits(&compiled.constants()[0]), 1.5_f64.to_bits());
     assert_eq!(
-        number_bits(compiled.constants()[1]),
+        number_bits(&compiled.constants()[1]),
         f64::INFINITY.to_bits()
     );
-    assert_eq!(number_bits(compiled.constants()[2]), 1.5_f64.to_bits());
+    assert_eq!(number_bits(&compiled.constants()[2]), 1.5_f64.to_bits());
     assert_eq!(
         compiled
             .control_flow()
@@ -111,7 +111,6 @@ fn binary64_literals_preserve_rounding_subnormal_and_overflow_bits() {
         compiled
             .constants()
             .iter()
-            .copied()
             .map(number_bits)
             .collect::<Vec<_>>(),
         [
@@ -210,14 +209,14 @@ fn values_and_functions_share_the_compact_constant_index_boundary() {
     assert!(
         compact_function.constants()[..255]
             .iter()
-            .all(|constant| number_bits(*constant) == 1.5_f64.to_bits())
+            .all(|constant| number_bits(constant) == 1.5_f64.to_bits())
     );
     assert!(matches!(
         compact_function.constants()[255],
         CompiledConstant::Function(_)
     ));
     assert_eq!(
-        number_bits(compact_function.constants()[256]),
+        number_bits(&compact_function.constants()[256]),
         1.5_f64.to_bits()
     );
 
@@ -261,7 +260,7 @@ fn values_and_functions_share_the_compact_constant_index_boundary() {
     assert!(
         wide_function.constants()[..256]
             .iter()
-            .all(|constant| number_bits(*constant) == 1.5_f64.to_bits())
+            .all(|constant| number_bits(constant) == 1.5_f64.to_bits())
     );
     assert!(matches!(
         wide_function.constants()[256],
@@ -279,7 +278,7 @@ fn binary64_and_function_templates_share_one_typed_constant_pool() {
     let outer = tree.root();
 
     assert_eq!(outer.constants().len(), 3);
-    assert_eq!(number_bits(outer.constants()[0]), 1.5_f64.to_bits());
+    assert_eq!(number_bits(&outer.constants()[0]), 1.5_f64.to_bits());
     let CompiledConstant::Function(function) = outer.constants()[1] else {
         panic!("function template keeps its source-order pool position");
     };
@@ -287,8 +286,8 @@ fn binary64_and_function_templates_share_one_typed_constant_pool() {
         .function(function.executable())
         .expect("function constant resolves to its child");
     assert_eq!(child.constants().len(), 1);
-    assert_eq!(number_bits(child.constants()[0]), 4.5_f64.to_bits());
-    assert_eq!(number_bits(outer.constants()[2]), 2.5_f64.to_bits());
+    assert_eq!(number_bits(&child.constants()[0]), 4.5_f64.to_bits());
+    assert_eq!(number_bits(&outer.constants()[2]), 2.5_f64.to_bits());
     assert_eq!(
         outer
             .control_flow()

@@ -150,10 +150,14 @@ explicit work stacks; there is no `recursion_guard` layer or dependency.
 `compile_tree` freezes the selected subtree as a flat immutable
 `CompiledFunctionTree` in executable preorder. Compilation is child-first, but
 uses no Rust call-stack recursion. Each parent's immutable `Arc`-backed
-constant table is heterogeneous: Number literal occurrences requiring pool
-storage and direct child templates share one index namespace, remain in source
-order, and are not deduplicated. `push_const8` and `fclosure8` select indices
-`0..=255`; their full-width forms select indices `>= 256`.
+constant table is heterogeneous: Number literal occurrences, canonical decimal
+String values from `"0"` through `"2147483647"`, and direct child templates
+share one index namespace, remain in source order, and are not deduplicated.
+All other nonempty source strings use an immutable function-local atom table,
+deduplicated by exact UTF-16 contents; empty strings use `push_empty_string`.
+`push_const8` and `fclosure8` select constant indices `0..=255`; their
+full-width forms select indices `>= 256`, while `push_atom_value` always carries
+a typed full-width `AtomPoolIndex`.
 `Binary64Constant` preserves every non-NaN bit pattern, including subnormals,
 infinities, and signed zero.
 It canonicalizes NaN only as a deterministic compiler-artifact policy; it is
@@ -161,26 +165,31 @@ not the representation contract for runtime Number values, `DataView`, or
 typed-array storage, whose payload semantics remain separate.
 Directly negated `2^31` is intentionally normalized to `push_i32(i32::MIN)`
 without retaining an unused positive Number entry.
-Nearest-executable ownership and all pool candidates are computed in one
-semantic-node pass. Each pool keeps only compact direct-child and Number-span
-lookup tables, so compiling a tree does not rescan the semantic graph for every
-function.
+`CompilerString` canonicalizes immutable `Arc` storage to Latin-1 when possible
+and otherwise retains exact UTF-16 units, including lone surrogates. The shared
+frontend decoder is the sole boundary aware of Oxc's cooked-string marker
+encoding. Nearest-executable ownership and all pool candidates are computed in
+one semantic-node pass. Each pool keeps only compact direct-child, Number-span,
+and runtime-string-span lookup tables, so compiling a tree does not rescan the
+semantic graph for every function.
 
 Every child capture descriptor is normalized to either the immediate parent's
 own dense variable-reference cell or its imported closure environment. The
 compiler explicitly remaps plan-global executable identities into a dense
 flat graph and stores an `Arc<VerifiedCompilerFunctionGraph>` with the tree.
 Whole-graph verification preflights aggregate byte, instruction, constant,
-closure, and transfer-work budgets. Every heterogeneous constant entry counts
-toward pool and resource limits, while only `Function` entries form graph
-edges for target, cycle, reachability, nesting-depth, and capture-source
-checks. Capture work remains bounded across shared parent edges. A selected
+atom, compact string-payload, closure, and transfer-work budgets. It requires
+each body atom domain to have an exact owned table and rejects duplicate
+function-local atoms. Every heterogeneous constant entry counts toward pool and
+resource limits, while only `Function` entries form graph edges for target,
+cycle, reachability, nesting-depth, and capture-source checks. Capture work
+remains bounded across shared parent edges. A selected
 nested root with imported cells fails closed until an explicit verified root
-environment exists. `compile_leaf` remains the explicit
-nested-function-free API and rejects a selection with children. Atom and
-non-Number value constants, raw class/function stack entries, inferred
-anonymous-function names, labeled control, `for-in`, and `for-of` stay
-rejected until their owned records and semantics exist.
+environment exists. `compile_leaf` remains the explicit nested-function-free
+API and rejects a selection with children. BigInt/RegExp and other value
+families, non-string atom namespaces, raw class/function stack entries,
+inferred anonymous-function names, labeled control, `for-in`, and `for-of`
+stay rejected until their owned records and semantics exist.
 
 `BytecodeAssembler` keeps symbolic label handles provenance-bound to one
 assembler through immutable `Arc` identity. Labels never enter final operands.
@@ -217,13 +226,13 @@ is verified.
 Module functions, object methods/accessors, and named function expressions fail
 closed until their distinct surrounding-storage, header, and self-binding
 behavior is implemented. The compiled artifact keeps the exact source text,
-storage plan, local layout, direct-child constants, normalized capture
-descriptors, source table, and certificate in immutable `Arc` storage after the
-Oxc arena is dropped. Lowering accepts only an opaque executable selection
-issued by that context, so a same-index selection from another context is
-rejected. Unsupported bodies, unresolved names, global/module references
-requiring atom-backed operations, and async/generator functions fail before
-byte emission.
+storage plan, local layout, exact atom and heterogeneous constant pools,
+normalized capture descriptors, source table, and certificate in immutable
+`Arc` storage after the Oxc arena is dropped. Lowering accepts only an opaque
+executable selection issued by that context, so a same-index selection from
+another context is rejected. Unsupported bodies, unresolved names,
+global/module references requiring atom-backed operations, and async/generator
+functions fail before byte emission.
 
 Every successful unit also owns a `ModuleSyntaxRecord` for the module data that
 must survive the Oxc allocator. Static requests remain in source occurrence
@@ -276,14 +285,15 @@ successors, suspension and return function-kind compatibility, and reachable
 ordinary-value stack heights. Compiler bodies may supply capture and
 constant-kind layouts for the narrow `close_loc`, `push_const*`, and
 `fclosure*` cases described above. `VerifiedCompilerFunctionGraph` additionally
-cross-checks the compiler's actual heterogeneous Number/function pool, flat
-function targets, normalized capture edges, topology, and aggregate budgets
-with explicit work lists. Ordinary values never become topology edges. Both
-certificates remain non-executable. Serialized constant opcodes and opcodes
-requiring atom pools, non-Number constants, raw function slots, complete
-runtime metadata, handlers, finally return addresses, iterator markers, or
-packed stack offsets fail closed. The VM boundary continues to require the
-future whole-function `VerifiedBytecode`.
+cross-checks exact function-local String atoms, the compiler's actual
+heterogeneous Number/String/function pool, flat function targets, normalized
+capture edges, topology, and aggregate budgets with explicit work lists.
+Ordinary values never become topology edges. Both certificates remain
+non-executable. Serialized constant opcodes and opcodes requiring non-string
+atom namespaces, other value families, raw function slots, complete runtime
+metadata, handlers, finally return addresses, iterator markers, or packed
+stack offsets fail closed. The VM boundary continues to require the future
+whole-function `VerifiedBytecode`.
 The symbolic assembler chooses the componentwise shortest valid final branch
 layout. This can differ from a conservative QuickJS peephole boundary while
 preserving the same signed displacement rules and JavaScript behavior.

@@ -109,7 +109,7 @@ fn graph_verifier_retains_heterogeneous_value_and_function_constants() {
                 CompilerConstantKind::Value,
             ],
         ),
-        &[one, child, negative_zero],
+        &[one.clone(), child.clone(), negative_zero.clone()],
     );
     let leaf = function(
         compiler_flow(&[(FinalOpcode::ReturnUndef, Operands::None)], &[]),
@@ -137,7 +137,7 @@ fn graph_verifier_rejects_declared_and_owned_constant_kind_mismatch() {
             &[(FinalOpcode::ReturnUndef, Operands::None)],
             &[CompilerConstantKind::Function],
         ),
-        &[value],
+        std::slice::from_ref(&value),
     );
 
     let error = verify_compiler_function_graph(
@@ -218,7 +218,7 @@ fn a_value_only_pool_does_not_create_topology_edges() {
             &[(FinalOpcode::ReturnUndef, Operands::None)],
             &[CompilerConstantKind::Value],
         ),
-        &[value],
+        std::slice::from_ref(&value),
     );
 
     let graph = verify_compiler_function_graph(

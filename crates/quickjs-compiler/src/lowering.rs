@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, ops::Range, sync::Arc};
+use std::{collections::HashMap, error::Error, fmt, ops::Range, sync::Arc};
 
 use oxc_ast::{
     AstKind,
@@ -17,17 +17,18 @@ use oxc_syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
 };
 use quickjs_bytecode::{
-    AssemblerError, AssemblerLabel, AssemblerLimits, Binary64Constant, BranchKind,
-    BytecodeAssembler, BytecodePc, CompilerCaptureLayout, CompilerCapturedBinding,
+    AssemblerError, AssemblerLabel, AssemblerLimits, AtomPoolIndex, Binary64Constant, BranchKind,
+    BytecodeAssembler, BytecodePc, CompilerAtom, CompilerCaptureLayout, CompilerCapturedBinding,
     CompilerClosureSource as CompilerGraphClosureSource, CompilerConstant as CompilerGraphConstant,
-    CompilerConstantKind, CompilerConstantLayout, CompilerConstantValue, EncodeError, FinalOpcode,
-    FunctionGraphVerificationError, FunctionGraphVerificationLimits, FunctionIndexDomains,
-    FunctionTemplateId, MAX_FUNCTION_INDEX_ENTRIES, Operands, UnverifiedCompilerFunction,
+    CompilerConstantKind, CompilerConstantLayout, CompilerConstantValue, CompilerString,
+    CompilerStringError, EncodeError, FinalOpcode, FunctionGraphVerificationError,
+    FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId,
+    MAX_FUNCTION_INDEX_ENTRIES, Operands, UnverifiedCompilerFunction,
     UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader,
     VerificationError, VerificationErrorKind, VerificationLimits, VerifiedCompilerFunctionGraph,
     VerifiedControlFlow, verify_compiler_control_flow, verify_compiler_function_graph,
 };
-use quickjs_frontend::{ParsedUnit, Span};
+use quickjs_frontend::{OxcStringDecodeError, ParsedUnit, Span, decode_oxc_cooked_string};
 
 use crate::storage::{
     BindingId, CaptureSlot, CaptureSource, CompilationUnitKind, CompilerError, DeclarationKind,
@@ -92,7 +93,7 @@ impl SourceInstruction {
 }
 
 /// One owned entry in a compiled function's heterogeneous constant pool.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum CompiledConstant {
     /// An ordinary JavaScript value.
     Value(CompilerConstantValue),
@@ -103,7 +104,7 @@ pub enum CompiledConstant {
 impl CompiledConstant {
     /// Returns the verifier-visible constant kind.
     #[must_use]
-    pub const fn kind(self) -> CompilerConstantKind {
+    pub const fn kind(&self) -> CompilerConstantKind {
         match self {
             Self::Value(_) => CompilerConstantKind::Value,
             Self::Function(_) => CompilerConstantKind::Function,
@@ -112,7 +113,7 @@ impl CompiledConstant {
 
     /// Returns the value payload when this is an ordinary value constant.
     #[must_use]
-    pub const fn value(self) -> Option<CompilerConstantValue> {
+    pub const fn value(&self) -> Option<&CompilerConstantValue> {
         match self {
             Self::Value(value) => Some(value),
             Self::Function(_) => None,
@@ -121,10 +122,10 @@ impl CompiledConstant {
 
     /// Returns the template payload when this is a function constant.
     #[must_use]
-    pub const fn function(self) -> Option<CompiledFunctionConstant> {
+    pub const fn function(&self) -> Option<CompiledFunctionConstant> {
         match self {
             Self::Value(_) => None,
-            Self::Function(function) => Some(function),
+            Self::Function(function) => Some(*function),
         }
     }
 }
@@ -202,6 +203,7 @@ pub struct CompiledFunction {
     storage_plan: Arc<StoragePlan>,
     source_text: Arc<str>,
     locals: Arc<[LoweredLocal]>,
+    atoms: Arc<[CompilerAtom]>,
     constants: Arc<[CompiledConstant]>,
     closure_variables: Arc<[CompiledClosureVariable]>,
     source_instructions: Arc<[SourceInstruction]>,
@@ -231,6 +233,12 @@ impl CompiledFunction {
     #[must_use]
     pub fn locals(&self) -> &[LoweredLocal] {
         &self.locals
+    }
+
+    /// Returns exact content-interned atoms in function-local index order.
+    #[must_use]
+    pub fn atoms(&self) -> &[CompilerAtom] {
+        &self.atoms
     }
 
     /// Returns the complete typed constant pool in deterministic allocation order.
@@ -298,8 +306,8 @@ impl CompiledFunctionTree {
     /// Returns the cross-function certificate for this complete tree.
     ///
     /// Graph-local template identities index the same order as [`Self::functions`].
-    /// The certificate remains non-executable until runtime metadata and the
-    /// atom and non-Number value pools are verified.
+    /// The certificate remains non-executable until complete runtime metadata
+    /// and typed-stack capabilities are verified.
     #[must_use]
     pub fn function_graph(&self) -> &VerifiedCompilerFunctionGraph {
         &self.function_graph
@@ -455,11 +463,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     ///
     /// Compilation is child-first and iterative. The returned flat tree is in
     /// stable executable preorder. Each function's heterogeneous constant pool
-    /// retains Number values requiring pool storage and direct nested-function
-    /// templates in source order without deduplication. Values and templates
-    /// share one index domain: indices below 256 use compact instructions and
-    /// later entries use wide instructions. Imported closure descriptors are
-    /// normalized to the parent's own cell table or imported environment.
+    /// retains Number values and tagged-integer String values requiring pool
+    /// storage plus direct nested-function templates in source order without
+    /// deduplication. Other nonempty strings use a separate content-interned
+    /// function-local atom table. Values and templates share one constant index
+    /// domain: indices below 256 use compact instructions and later entries use
+    /// wide instructions. Imported closure descriptors are normalized to the
+    /// parent's own cell table or imported environment.
     ///
     /// # Errors
     ///
@@ -530,15 +540,20 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             capture_layout,
             locals,
             constants,
+            atoms,
             closure_variables,
             flow,
         } = validated;
+        let atom_count =
+            u32::try_from(atoms.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "atom pool entries",
+            })?;
         let constant_count =
             u32::try_from(constants.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
                 domain: "constant pool entries",
             })?;
         let domains = FunctionIndexDomains::new(
-            0,
+            atom_count,
             constant_count,
             argument_count,
             local_count,
@@ -557,7 +572,6 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         let constant_layout = CompilerConstantLayout::new(
             constants
                 .iter()
-                .copied()
                 .map(CompiledConstant::kind)
                 .collect::<Vec<_>>()
                 .into(),
@@ -576,6 +590,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             storage_plan: Arc::clone(&self.planned.plan),
             source_text: Arc::clone(&self.source_text),
             locals: locals.into(),
+            atoms,
             constants,
             closure_variables: closure_variables.into(),
             source_instructions: source_instructions.into(),
@@ -696,6 +711,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 })
                 .collect(),
             constants: Arc::clone(&constants.entries),
+            atoms: Arc::clone(&constants.atoms),
             closure_variables,
             flow,
         })
@@ -707,6 +723,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     ) -> Result<Box<[CompiledConstantPool]>, LeafCompilationError> {
         let executables = self.planned.plan.executables();
         let mut candidates = (0..executables.len())
+            .map(|_| Vec::new())
+            .collect::<Vec<_>>();
+        let mut atom_candidates = (0..executables.len())
             .map(|_| Vec::new())
             .collect::<Vec<_>>();
         for child in executables {
@@ -721,7 +740,35 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 span: child.span(),
             });
         }
+        self.record_literal_candidates(&mut candidates, &mut atom_candidates)?;
 
+        let mut pools = Vec::with_capacity(executables.len());
+        for (index, (mut candidates, mut atoms)) in
+            candidates.into_iter().zip(atom_candidates).enumerate()
+        {
+            let executable =
+                executables
+                    .get(index)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "constant-pool owner indexes dense executable metadata",
+                        span: None,
+                    })?;
+            candidates.sort_unstable_by_key(CompiledConstantCandidate::order_key);
+            atoms.sort_unstable_by_key(CompiledAtomCandidate::order_key);
+            pools.push(CompiledConstantPool::from_candidates(
+                tree_layout.children(executable.id())?,
+                candidates,
+                atoms,
+            )?);
+        }
+        Ok(pools.into_boxed_slice())
+    }
+
+    fn record_literal_candidates(
+        &self,
+        candidates: &mut [Vec<CompiledConstantCandidate>],
+        atom_candidates: &mut [Vec<CompiledAtomCandidate>],
+    ) -> Result<(), LeafCompilationError> {
         let nodes = self.unit.semantic().nodes();
         let mut owners = vec![None; nodes.len()];
         for (node_id, node) in nodes.iter_enumerated() {
@@ -754,10 +801,23 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         span: Some(node.kind().span()),
                     })?;
             *owner_slot = owner;
-            if let Some(owner) = owner
-                && let AstKind::NumericLiteral(literal) = node.kind()
-                && exact_i32(literal.value).is_none()
-            {
+            if let Some(owner) = owner {
+                self.record_node_literal_candidate(node_id, owner, candidates, atom_candidates)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn record_node_literal_candidate(
+        &self,
+        node_id: NodeId,
+        owner: ExecutableId,
+        candidates: &mut [Vec<CompiledConstantCandidate>],
+        atom_candidates: &mut [Vec<CompiledAtomCandidate>],
+    ) -> Result<(), LeafCompilationError> {
+        let nodes = self.unit.semantic().nodes();
+        match nodes.kind(node_id) {
+            AstKind::NumericLiteral(literal) if exact_i32(literal.value).is_none() => {
                 let parent = nodes.parent_id(node_id);
                 let folded_negative_i32 = matches!(
                     nodes.kind(parent),
@@ -767,33 +827,55 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                             && exact_negated_i32(literal.value).is_some()
                 );
                 if !folded_negative_i32 {
-                    let owner_candidates = candidates
+                    candidates
                         .get_mut(owner.index())
-                        .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?;
-                    owner_candidates.push(CompiledConstantCandidate::Number {
-                        value: Binary64Constant::from_f64(literal.value),
-                        span: literal.span,
-                    });
+                        .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
+                        .push(CompiledConstantCandidate::Number {
+                            value: Binary64Constant::from_f64(literal.value),
+                            span: literal.span,
+                        });
                 }
             }
+            AstKind::StringLiteral(literal)
+                if !matches!(nodes.parent_kind(node_id), AstKind::Directive(_)) =>
+            {
+                let value = decode_compiler_string(
+                    literal.value.as_str(),
+                    literal.lone_surrogates,
+                    literal.span,
+                )?;
+                record_string_candidate(owner, value, literal.span, candidates, atom_candidates)?;
+            }
+            AstKind::TemplateLiteral(template)
+                if !matches!(
+                    nodes.parent_kind(node_id),
+                    AstKind::TaggedTemplateExpression(_)
+                ) && template.expressions.is_empty()
+                    && template.quasis.len() == 1 =>
+            {
+                let quasi = &template.quasis[0];
+                if !quasi.tail {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "no-substitution template has one tail quasi",
+                        span: Some(template.span),
+                    });
+                }
+                let cooked =
+                    quasi
+                        .value
+                        .cooked
+                        .as_ref()
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "untagged no-substitution template has a cooked value",
+                            span: Some(template.span),
+                        })?;
+                let value =
+                    decode_compiler_string(cooked.as_str(), quasi.lone_surrogates, template.span)?;
+                record_string_candidate(owner, value, template.span, candidates, atom_candidates)?;
+            }
+            _ => {}
         }
-
-        let mut pools = Vec::with_capacity(executables.len());
-        for (index, mut candidates) in candidates.into_iter().enumerate() {
-            let executable =
-                executables
-                    .get(index)
-                    .ok_or(LeafCompilationError::SemanticInvariant {
-                        invariant: "constant-pool owner indexes dense executable metadata",
-                        span: None,
-                    })?;
-            candidates.sort_unstable_by_key(CompiledConstantCandidate::order_key);
-            pools.push(CompiledConstantPool::from_candidates(
-                tree_layout.children(executable.id())?,
-                candidates,
-            )?);
-        }
-        Ok(pools.into_boxed_slice())
+        Ok(())
     }
 
     fn validate_body<'statement>(
@@ -2801,10 +2883,10 @@ fn build_unverified_graph_records(
     let mut parent_counts = vec![0_u32; functions.len()];
     for function in functions {
         let mut constants = Vec::with_capacity(function.constants.len());
-        for constant in function.constants.iter().copied() {
+        for constant in function.constants.iter() {
             match constant {
                 CompiledConstant::Value(value) => {
-                    constants.push(CompilerGraphConstant::Value(value));
+                    constants.push(CompilerGraphConstant::Value(value.clone()));
                 }
                 CompiledConstant::Function(function_constant) => {
                     let template =
@@ -2848,11 +2930,14 @@ fn build_unverified_graph_records(
                 }
             });
         }
-        records.push(UnverifiedCompilerFunction::new(
-            Arc::clone(&function.control_flow),
-            constants.into(),
-            closure_sources.into(),
-        ));
+        records.push(
+            UnverifiedCompilerFunction::new(
+                Arc::clone(&function.control_flow),
+                constants.into(),
+                closure_sources.into(),
+            )
+            .with_atom_pool(Arc::clone(&function.atoms)),
+        );
     }
     Ok((records, parent_counts))
 }
@@ -3502,6 +3587,7 @@ struct ValidatedFunction {
     capture_count: u32,
     capture_layout: CompilerCaptureLayout,
     locals: Vec<LoweredLocal>,
+    atoms: Arc<[CompilerAtom]>,
     constants: Arc<[CompiledConstant]>,
     closure_variables: Vec<CompiledClosureVariable>,
     flow: PlannedControlFlow,
@@ -3516,14 +3602,20 @@ struct FunctionPlanningContext<'layout> {
 }
 
 struct CompiledConstantPool {
+    atoms: Arc<[CompilerAtom]>,
     entries: Arc<[CompiledConstant]>,
     function_indices: Box<[(ExecutableId, u32)]>,
     number_indices: Box<[(Span, u32)]>,
+    string_indices: Box<[(Span, CompiledStringLocation)]>,
 }
 
 enum CompiledConstantCandidate {
     Number {
         value: Binary64Constant,
+        span: Span,
+    },
+    String {
+        value: CompilerString,
         span: Span,
     },
     Function {
@@ -3536,15 +3628,184 @@ impl CompiledConstantCandidate {
     const fn order_key(&self) -> (u32, u32, u8) {
         match self {
             Self::Number { span, .. } => (span.start, span.end, 0),
-            Self::Function { span, .. } => (span.start, span.end, 1),
+            Self::String { span, .. } => (span.start, span.end, 1),
+            Self::Function { span, .. } => (span.start, span.end, 2),
         }
     }
+}
+
+struct CompiledAtomCandidate {
+    value: CompilerString,
+    span: Span,
+}
+
+impl CompiledAtomCandidate {
+    const fn order_key(&self) -> (u32, u32) {
+        (self.span.start, self.span.end)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CompiledStringLocation {
+    Constant(u32),
+    Atom(u32),
+}
+
+struct FrozenConstantCandidates {
+    entries: Vec<CompiledConstant>,
+    function_indices: Vec<(ExecutableId, u32)>,
+    number_indices: Vec<(Span, u32)>,
+    string_indices: Vec<(Span, CompiledStringLocation)>,
+}
+
+fn freeze_constant_candidates(
+    children: &[ExecutableId],
+    candidates: Vec<CompiledConstantCandidate>,
+    string_capacity: usize,
+) -> Result<FrozenConstantCandidates, LeafCompilationError> {
+    let mut frozen = FrozenConstantCandidates {
+        entries: Vec::with_capacity(candidates.len()),
+        function_indices: Vec::with_capacity(children.len()),
+        number_indices: Vec::with_capacity(candidates.len().checked_sub(children.len()).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "constant candidates include every direct child",
+                span: None,
+            },
+        )?),
+        string_indices: Vec::with_capacity(string_capacity),
+    };
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        let index = u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
+            domain: "constant pool entries",
+        })?;
+        match candidate {
+            CompiledConstantCandidate::Number { value, span } => {
+                frozen
+                    .entries
+                    .push(CompiledConstant::Value(CompilerConstantValue::Number(
+                        value,
+                    )));
+                frozen.number_indices.push((span, index));
+            }
+            CompiledConstantCandidate::String { value, span } => {
+                if value.is_empty() || !is_tagged_integer_string(&value) {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "string value constants are nonempty tagged-integer spellings",
+                        span: Some(span),
+                    });
+                }
+                frozen
+                    .entries
+                    .push(CompiledConstant::Value(CompilerConstantValue::String(
+                        value,
+                    )));
+                frozen
+                    .string_indices
+                    .push((span, CompiledStringLocation::Constant(index)));
+            }
+            CompiledConstantCandidate::Function { executable, span } => {
+                if children.binary_search(&executable).is_err() {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "constant-pool function is a direct child",
+                        span: Some(span),
+                    });
+                }
+                frozen.function_indices.push((executable, index));
+                frozen
+                    .entries
+                    .push(CompiledConstant::Function(CompiledFunctionConstant {
+                        executable,
+                    }));
+            }
+        }
+    }
+    Ok(frozen)
+}
+
+fn freeze_atom_candidates(
+    candidates: Vec<CompiledAtomCandidate>,
+    string_indices: &mut Vec<(Span, CompiledStringLocation)>,
+) -> Result<Vec<CompilerAtom>, LeafCompilationError> {
+    let mut atoms = Vec::with_capacity(candidates.len());
+    let mut interner = HashMap::with_capacity(candidates.len());
+    for candidate in candidates {
+        if candidate.value.is_empty() || is_tagged_integer_string(&candidate.value) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "atom strings are nonempty non-tagged-integer spellings",
+                span: Some(candidate.span),
+            });
+        }
+        let atom_index = if let Some(&index) = interner.get(&candidate.value) {
+            index
+        } else {
+            let next_count =
+                atoms
+                    .len()
+                    .checked_add(1)
+                    .ok_or(LeafCompilationError::CapacityExceeded {
+                        domain: "atom pool entries",
+                    })?;
+            checked_function_entry_count(next_count, "atom pool entries")?;
+            let index =
+                u32::try_from(atoms.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "atom pool entries",
+                })?;
+            atoms.push(CompilerAtom::new(candidate.value.clone()));
+            interner.insert(candidate.value, index);
+            index
+        };
+        string_indices.push((candidate.span, CompiledStringLocation::Atom(atom_index)));
+    }
+    Ok(atoms)
+}
+
+fn validate_frozen_constant_candidates(
+    children: &[ExecutableId],
+    expected_count: u32,
+    frozen: &mut FrozenConstantCandidates,
+) -> Result<(), LeafCompilationError> {
+    if u32::try_from(frozen.entries.len()) != Ok(expected_count) {
+        return Err(LeafCompilationError::SemanticInvariant {
+            invariant: "constant-pool candidate count remains stable",
+            span: None,
+        });
+    }
+    frozen
+        .function_indices
+        .sort_unstable_by_key(|(executable, _)| *executable);
+    if frozen.function_indices.len() != children.len()
+        || !frozen
+            .function_indices
+            .iter()
+            .map(|(executable, _)| *executable)
+            .eq(children.iter().copied())
+    {
+        return Err(LeafCompilationError::SemanticInvariant {
+            invariant: "constant pool owns every direct child exactly once",
+            span: None,
+        });
+    }
+    frozen
+        .string_indices
+        .sort_unstable_by_key(|(span, _)| (span.start, span.end));
+    if let Some(span) = frozen
+        .string_indices
+        .windows(2)
+        .find_map(|pair| (pair[0].0 == pair[1].0).then_some(pair[0].0))
+    {
+        return Err(LeafCompilationError::SemanticInvariant {
+            invariant: "runtime string literal spans are unique within a function",
+            span: Some(span),
+        });
+    }
+    Ok(())
 }
 
 impl CompiledConstantPool {
     fn from_candidates(
         children: &[ExecutableId],
         candidates: Vec<CompiledConstantCandidate>,
+        atom_candidates: Vec<CompiledAtomCandidate>,
     ) -> Result<Self, LeafCompilationError> {
         let count = checked_function_entry_count(candidates.len(), "constant pool entries")?;
         if children.windows(2).any(|pair| pair[0] >= pair[1]) {
@@ -3553,63 +3814,20 @@ impl CompiledConstantPool {
                 span: None,
             });
         }
-        let mut entries = Vec::with_capacity(candidates.len());
-        let mut function_indices = Vec::with_capacity(children.len());
-        let mut number_indices =
-            Vec::with_capacity(candidates.len().checked_sub(children.len()).ok_or(
-                LeafCompilationError::SemanticInvariant {
-                    invariant: "constant candidates include every direct child",
-                    span: None,
-                },
-            )?);
-        for (index, candidate) in candidates.into_iter().enumerate() {
-            let index =
-                u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
-                    domain: "constant pool entries",
-                })?;
-            match candidate {
-                CompiledConstantCandidate::Number { value, span } => {
-                    entries.push(CompiledConstant::Value(CompilerConstantValue::Number(
-                        value,
-                    )));
-                    number_indices.push((span, index));
-                }
-                CompiledConstantCandidate::Function { executable, span } => {
-                    if children.binary_search(&executable).is_err() {
-                        return Err(LeafCompilationError::SemanticInvariant {
-                            invariant: "constant-pool function is a direct child",
-                            span: Some(span),
-                        });
-                    }
-                    function_indices.push((executable, index));
-                    entries.push(CompiledConstant::Function(CompiledFunctionConstant {
-                        executable,
-                    }));
-                }
-            }
-        }
-        if u32::try_from(entries.len()) != Ok(count) {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "constant-pool candidate count remains stable",
-                span: None,
-            });
-        }
-        function_indices.sort_unstable_by_key(|(executable, _)| *executable);
-        if function_indices.len() != children.len()
-            || !function_indices
-                .iter()
-                .map(|(executable, _)| *executable)
-                .eq(children.iter().copied())
-        {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "constant pool owns every direct child exactly once",
-                span: None,
-            });
-        }
+        let string_capacity = candidates.len().checked_add(atom_candidates.len()).ok_or(
+            LeafCompilationError::CapacityExceeded {
+                domain: "string literal occurrences",
+            },
+        )?;
+        let mut frozen = freeze_constant_candidates(children, candidates, string_capacity)?;
+        let atoms = freeze_atom_candidates(atom_candidates, &mut frozen.string_indices)?;
+        validate_frozen_constant_candidates(children, count, &mut frozen)?;
         Ok(Self {
-            entries: entries.into(),
-            function_indices: function_indices.into_boxed_slice(),
-            number_indices: number_indices.into_boxed_slice(),
+            atoms: atoms.into(),
+            entries: frozen.entries.into(),
+            function_indices: frozen.function_indices.into_boxed_slice(),
+            number_indices: frozen.number_indices.into_boxed_slice(),
+            string_indices: frozen.string_indices.into_boxed_slice(),
         })
     }
 
@@ -3632,14 +3850,13 @@ impl CompiledConstantPool {
             usize::try_from(index)
                 .ok()
                 .and_then(|index| self.entries.get(index))
-                .copied()
         else {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "numeric constant index resolves to its binary64 payload",
                 span: Some(span),
             });
         };
-        if actual != Binary64Constant::from_f64(value) {
+        if *actual != Binary64Constant::from_f64(value) {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "numeric constant retains its parsed binary64 payload",
                 span: Some(span),
@@ -3652,6 +3869,64 @@ impl CompiledConstantPool {
         Ok(PlannedInstruction::new(opcode, operands, span))
     }
 
+    fn plan_string(&self, span: Span) -> Result<PlannedInstruction, LeafCompilationError> {
+        let position = self
+            .string_indices
+            .binary_search_by_key(&(span.start, span.end), |(candidate, _)| {
+                (candidate.start, candidate.end)
+            })
+            .map_err(|_| LeafCompilationError::SemanticInvariant {
+                invariant: "nonempty runtime string has one pool location",
+                span: Some(span),
+            })?;
+        let instruction = match self.string_indices[position].1 {
+            CompiledStringLocation::Constant(index) => {
+                let Some(CompiledConstant::Value(CompilerConstantValue::String(value))) =
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|index| self.entries.get(index))
+                else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "string constant index resolves to an exact string payload",
+                        span: Some(span),
+                    });
+                };
+                if !is_tagged_integer_string(value) {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "string constant retains its tagged-integer spelling",
+                        span: Some(span),
+                    });
+                }
+                match u8::try_from(index) {
+                    Ok(index) => (FinalOpcode::PushConst8, Operands::Const8(index)),
+                    Err(_) => (FinalOpcode::PushConst, Operands::Const(index)),
+                }
+            }
+            CompiledStringLocation::Atom(index) => {
+                let Some(atom) = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| self.atoms.get(index))
+                else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "string atom index resolves to an exact atom payload",
+                        span: Some(span),
+                    });
+                };
+                if atom.string().is_empty() || is_tagged_integer_string(atom.string()) {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "string atom retains its non-tagged spelling",
+                        span: Some(span),
+                    });
+                }
+                (
+                    FinalOpcode::PushAtomValue,
+                    Operands::Atom(AtomPoolIndex::new(index)),
+                )
+            }
+        };
+        Ok(PlannedInstruction::new(instruction.0, instruction.1, span))
+    }
+
     fn function_index(&self, executable: ExecutableId) -> Result<u32, LeafCompilationError> {
         self.function_indices
             .binary_search_by_key(&executable, |(candidate, _)| *candidate)
@@ -3662,6 +3937,71 @@ impl CompiledConstantPool {
                 span: None,
             })
     }
+}
+
+fn decode_compiler_string(
+    value: &str,
+    lone_surrogates: bool,
+    span: Span,
+) -> Result<CompilerString, LeafCompilationError> {
+    let code_units = decode_oxc_cooked_string(value, lone_surrogates)
+        .map_err(|source| LeafCompilationError::CookedStringDecoding { span, source })?;
+    CompilerString::try_from_code_units(code_units)
+        .map_err(|source| LeafCompilationError::CompilerString { span, source })
+}
+
+fn record_string_candidate(
+    owner: ExecutableId,
+    value: CompilerString,
+    span: Span,
+    constants: &mut [Vec<CompiledConstantCandidate>],
+    atoms: &mut [Vec<CompiledAtomCandidate>],
+) -> Result<(), LeafCompilationError> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    if is_tagged_integer_string(&value) {
+        constants
+            .get_mut(owner.index())
+            .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
+            .push(CompiledConstantCandidate::String { value, span });
+    } else {
+        atoms
+            .get_mut(owner.index())
+            .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
+            .push(CompiledAtomCandidate { value, span });
+    }
+    Ok(())
+}
+
+fn is_tagged_integer_string(value: &CompilerString) -> bool {
+    let mut units = value.code_units();
+    let Some(first) = units.next() else {
+        return false;
+    };
+    if first == u16::from(b'0') {
+        return units.next().is_none();
+    }
+    if !(u16::from(b'1')..=u16::from(b'9')).contains(&first) {
+        return false;
+    }
+    let mut integer = u32::from(first - u16::from(b'0'));
+    for unit in units {
+        if !(u16::from(b'0')..=u16::from(b'9')).contains(&unit) {
+            return false;
+        }
+        let Some(next) = integer
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(u32::from(unit - u16::from(b'0'))))
+        else {
+            return false;
+        };
+        if next > i32::MAX as u32 {
+            return false;
+        }
+        integer = next;
+    }
+    true
 }
 
 #[derive(Clone, Copy)]
@@ -4146,11 +4486,33 @@ fn plan_literal(
         Expression::StringLiteral(literal) if literal.value.is_empty() => Ok(
             PlannedInstruction::new(FinalOpcode::PushEmptyString, Operands::None, literal.span),
         ),
-        Expression::StringLiteral(literal) => {
-            unsupported(UnsupportedLeafFeature::UnsupportedLiteral, literal.span)
-        }
+        Expression::StringLiteral(literal) => constants.plan_string(literal.span),
         Expression::RegExpLiteral(literal) => {
             unsupported(UnsupportedLeafFeature::UnsupportedLiteral, literal.span)
+        }
+        Expression::TemplateLiteral(template)
+            if template.expressions.is_empty() && template.quasis.len() == 1 =>
+        {
+            let quasi = &template.quasis[0];
+            if quasi.tail {
+                match quasi.value.cooked.as_ref() {
+                    None => Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "untagged no-substitution template has a cooked value",
+                        span: Some(template.span),
+                    }),
+                    Some(cooked) if cooked.is_empty() => Ok(PlannedInstruction::new(
+                        FinalOpcode::PushEmptyString,
+                        Operands::None,
+                        template.span,
+                    )),
+                    Some(_) => constants.plan_string(template.span),
+                }
+            } else {
+                Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "no-substitution template has one tail quasi",
+                    span: Some(template.span),
+                })
+            }
         }
         Expression::TemplateLiteral(template) => {
             unsupported(UnsupportedLeafFeature::UnsupportedLiteral, template.span)
@@ -4307,6 +4669,20 @@ pub enum LeafCompilationError {
         /// Stable capacity-domain label.
         domain: &'static str,
     },
+    /// Oxc's retained cooked-string transport encoding was malformed.
+    CookedStringDecoding {
+        /// Exact source span of the affected literal.
+        span: Span,
+        /// Exact decoder failure.
+        source: OxcStringDecodeError,
+    },
+    /// A cooked string could not be frozen as an exact compiler value.
+    CompilerString {
+        /// Exact source span of the affected literal.
+        span: Span,
+        /// Exact string-construction failure.
+        source: CompilerStringError,
+    },
     /// A typed final instruction could not be encoded.
     BytecodeEncoding {
         /// Source span responsible for the instruction.
@@ -4375,6 +4751,15 @@ impl fmt::Display for LeafCompilationError {
             Self::CapacityExceeded { domain } => {
                 write!(formatter, "compiler capacity exceeded for {domain}")
             }
+            Self::CookedStringDecoding { span, source } => {
+                write!(
+                    formatter,
+                    "cooked string decoding failed at {span:?}: {source}"
+                )
+            }
+            Self::CompilerString { span, source } => {
+                write!(formatter, "compiler string failed at {span:?}: {source}")
+            }
             Self::BytecodeEncoding { span, source } => {
                 write!(formatter, "bytecode encoding failed at {span:?}: {source}")
             }
@@ -4429,6 +4814,8 @@ impl Error for LeafCompilationError {
             Self::BytecodeAssembly { source, .. } => Some(source),
             Self::BytecodeVerification { source, .. } => Some(source),
             Self::FunctionGraphVerification { source, .. } => Some(source),
+            Self::CookedStringDecoding { source, .. } => Some(source),
+            Self::CompilerString { source, .. } => Some(source),
             Self::ForeignExecutable { .. }
             | Self::InvalidExecutable { .. }
             | Self::Unsupported { .. }

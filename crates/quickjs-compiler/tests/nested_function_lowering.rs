@@ -39,7 +39,7 @@ fn opcodes(function: &CompiledFunction) -> Vec<(FinalOpcode, Operands)> {
         .collect()
 }
 
-fn function_executable(constant: CompiledConstant) -> ExecutableId {
+fn function_executable(constant: &CompiledConstant) -> ExecutableId {
     constant
         .function()
         .expect("expected a function-template constant")
@@ -120,7 +120,7 @@ fn nested_function_constants_connect_forwarded_capture_cells() {
         [CompilerCapturedBinding::Argument(0)]
     );
 
-    let middle_id = function_executable(outer.constants()[0]);
+    let middle_id = function_executable(&outer.constants()[0]);
     let middle = tree.function(middle_id).expect("middle function");
     assert_eq!(
         tree.function_by_template(FunctionTemplateId::new(1)),
@@ -141,7 +141,7 @@ fn nested_function_constants_connect_forwarded_capture_cells() {
         ]
     );
 
-    let inner_id = function_executable(middle.constants()[0]);
+    let inner_id = function_executable(&middle.constants()[0]);
     let inner = tree.function(inner_id).expect("inner function");
     assert!(inner.constants().is_empty());
     assert_eq!(inner.closure_variables().len(), 1);
@@ -183,7 +183,7 @@ fn public_tree_compilation_preserves_captured_classic_for_rotation() {
     assert_eq!(tree.functions().len(), 2);
     let outer = tree.root();
     let child = tree
-        .function(function_executable(outer.constants()[0]))
+        .function(function_executable(&outer.constants()[0]))
         .expect("loop closure child");
 
     let capture_layout = outer
@@ -296,7 +296,7 @@ fn owned_argument_and_local_cells_keep_distinct_parent_reference_indices() {
         ]
     );
     let child = tree
-        .function(function_executable(outer.constants()[0]))
+        .function(function_executable(&outer.constants()[0]))
         .expect("child function");
     assert_eq!(
         child
@@ -343,7 +343,7 @@ fn direct_child_constant_indices_cross_the_compact_boundary_exactly() {
         closure_instructions[256],
         (FinalOpcode::FClosure, Operands::Const(256))
     );
-    for &constant in outer.constants() {
+    for constant in outer.constants() {
         assert!(tree.function(function_executable(constant)).is_some());
     }
 }
@@ -543,7 +543,7 @@ fn duplicate_function_declarations_keep_all_children_but_instantiate_the_last() 
         })
         .collect::<Vec<_>>();
     assert_eq!(closure_operands, [Operands::Const8(1)]);
-    for &constant in outer.constants() {
+    for constant in outer.constants() {
         assert!(tree.function(function_executable(constant)).is_some());
     }
 }
@@ -582,7 +582,7 @@ fn strict_block_function_declarations_reinstantiate_on_loop_scope_entry() {
     );
     let outer = tree.root();
     let child = tree
-        .function(function_executable(outer.constants()[0]))
+        .function(function_executable(&outer.constants()[0]))
         .expect("block declaration child");
     assert_eq!(
         child.closure_variables()[0].source(),

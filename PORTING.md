@@ -200,8 +200,8 @@ A milestone is complete only when all of its checked items pass in CI.
         argument redeclarations; strict block declarations instantiate on
         every scope entry. All compiler traversal uses explicit iterative work
         stacks. Labeled control, `for-in`, `for-of`, inferred
-        anonymous-function names, atom-backed values, non-Number value
-        constants, and immutable-write throws remain fail-closed.
+        anonymous-function names, non-string atom namespaces, other value
+        families, and immutable-write throws remain fail-closed.
   - [x] Add exact binary64 Number constants to the compiler-owned heterogeneous
         pool. Number literals requiring pool storage and direct child templates
         share one immutable `Arc`-backed source-order index namespace with no
@@ -218,6 +218,19 @@ A milestone is complete only when all of its checked items pass in CI.
         retaining an unused positive Number entry. Ownership and candidates
         are precomputed in one semantic-node pass with per-owner compact lookup
         tables rather than rescanning the graph for each function.
+  - [x] Add exact source strings and owned function-local atom tables. A shared
+        frontend decoder converts Oxc cooked strings to arena-independent
+        UTF-16, preserving lone surrogates. `CompilerString` freezes them into
+        canonical Latin-1 or UTF-16 `Arc` storage with the QuickJS length cap.
+        Empty strings use `push_empty_string`; canonical decimal strings from
+        `"0"` through `"2147483647"` remain non-deduplicated String values in
+        the heterogeneous pool; all other nonempty strings use deduplicated
+        `push_atom_value` entries. Quoted and no-substitution template literals
+        share routing and atom contents. Directives leave no dead payloads; this
+        intentionally omits QuickJS's unobservable numeric-directive constant
+        artifact while preserving directive semantics.
+        Whole-graph verification owns exact atom tables, rejects duplicates,
+        and bounds aggregate atom entries and compact string payload bytes.
   - [x] Cross-check compiler function trees as bounded flat graphs:
         plan-global executable identities are explicitly remapped to dense
         template identities; aggregate body and capture-edge work is charged
@@ -226,8 +239,9 @@ A milestone is complete only when all of its checked items pass in CI.
         queues. The immutable `Arc<VerifiedCompilerFunctionGraph>` is retained
         with `CompiledFunctionTree`, while selected roots needing an omitted
         parent environment fail closed. This intermediate certificate is not
-        VM execution authority; runtime-visible metadata, atom and non-Number
-        constant pools, and the complete typed-stack boundary remain pending.
+        VM execution authority; runtime-visible vardef/name/policy metadata,
+        other value and atom namespaces, and the complete typed-stack boundary
+        remain pending.
 - [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
 - [ ] Deterministic debug/line tables.
 

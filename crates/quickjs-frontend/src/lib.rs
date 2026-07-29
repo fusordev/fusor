@@ -7,6 +7,7 @@
 
 mod frontend;
 mod module_syntax;
+mod string_code_units;
 
 pub use frontend::{
     Allocator, CompilationGoal, DEFAULT_ISOLATED_FRONTEND_STACK_BYTES,
@@ -31,6 +32,7 @@ pub use module_syntax::{
     ModuleImportEntry, ModuleImportName, ModuleNameSpan, ModuleRequestIndex, ModuleRequestKind,
     ModuleSyntaxRecord, StaticModuleRequest,
 };
+pub use string_code_units::{OxcStringDecodeError, decode_oxc_cooked_string};
 
 /// The official `QuickJS` release whose behavior this port targets.
 pub const QUICKJS_COMPATIBILITY_RELEASE: &str = "2026-06-04";

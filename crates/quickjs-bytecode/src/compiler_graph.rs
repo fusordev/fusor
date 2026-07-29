@@ -6,17 +6,17 @@
 //! source before producing [`VerifiedCompilerFunctionGraph`].
 //!
 //! This certificate remains compiler-facing and is deliberately not execution
-//! authority: runtime-visible names, binding policies, atom pools, non-Number
-//! values, and exception/debug metadata are not represented yet.
+//! authority: runtime-visible names, binding policies, non-string value
+//! families, and exception/debug metadata are not represented yet.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     error::Error,
     fmt,
     sync::Arc,
 };
 
-use crate::{CompilerConstantKind, VerifiedControlFlow};
+use crate::{CompilerAtom, CompilerConstantKind, CompilerString, VerifiedControlFlow};
 
 /// Provisional maximum number of compiler function templates in one graph.
 pub const MAX_FUNCTION_GRAPH_TEMPLATES: u32 = 65_535;
@@ -27,6 +27,8 @@ pub const MAX_FUNCTION_GRAPH_NESTING_DEPTH: u32 = 256;
 const DEFAULT_MAX_GRAPH_BYTECODE_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_MAX_GRAPH_INSTRUCTIONS: u64 = 8_388_608;
 const DEFAULT_MAX_GRAPH_CONSTANTS: u64 = 1_048_576;
+const DEFAULT_MAX_GRAPH_ATOMS: u64 = 1_048_576;
+const DEFAULT_MAX_GRAPH_STRING_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_MAX_GRAPH_CLOSURE_VARIABLES: u64 = 1_048_576;
 const DEFAULT_MAX_GRAPH_CLOSURE_EDGE_EVALUATIONS: u64 = 33_554_432;
 const DEFAULT_MAX_GRAPH_TRANSFER_EVALUATIONS: u64 = 33_554_432;
@@ -78,10 +80,12 @@ impl Binary64Constant {
 ///
 /// This enum keeps the value namespace extensible without weakening the
 /// function/value distinction already certified by body verification.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum CompilerConstantValue {
     /// An ECMAScript Number represented by exact binary64 bits.
     Number(Binary64Constant),
+    /// An ECMAScript String represented by exact UTF-16 code units.
+    String(CompilerString),
 }
 
 /// Dense identity of one function template in a compiler graph.
@@ -114,7 +118,7 @@ impl fmt::Display for FunctionTemplateId {
 }
 
 /// One owned entry in a compiler function's heterogeneous constant pool.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum CompilerConstant {
     /// An ordinary JavaScript value.
     Value(CompilerConstantValue),
@@ -125,7 +129,7 @@ pub enum CompilerConstant {
 impl CompilerConstant {
     /// Returns the body-verifier kind represented by this owned payload.
     #[must_use]
-    pub const fn kind(self) -> CompilerConstantKind {
+    pub const fn kind(&self) -> CompilerConstantKind {
         match self {
             Self::Value(_) => CompilerConstantKind::Value,
             Self::Function(_) => CompilerConstantKind::Function,
@@ -160,6 +164,7 @@ impl fmt::Display for CompilerClosureSource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnverifiedCompilerFunction {
     control_flow: Arc<VerifiedControlFlow>,
+    atoms: Option<Arc<[CompilerAtom]>>,
     constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
 }
@@ -174,15 +179,29 @@ impl UnverifiedCompilerFunction {
     ) -> Self {
         Self {
             control_flow,
+            atoms: None,
             constants,
             closure_sources,
         }
+    }
+
+    /// Installs the exact function-local atom payloads.
+    #[must_use]
+    pub fn with_atom_pool(mut self, atoms: Arc<[CompilerAtom]>) -> Self {
+        self.atoms = Some(atoms);
+        self
     }
 
     /// Returns the independently verified body certificate.
     #[must_use]
     pub fn control_flow(&self) -> &Arc<VerifiedControlFlow> {
         &self.control_flow
+    }
+
+    /// Returns owned atoms in function-local pool order.
+    #[must_use]
+    pub fn atoms(&self) -> Option<&[CompilerAtom]> {
+        self.atoms.as_deref()
     }
 
     /// Returns owned constants in constant-pool order.
@@ -241,6 +260,10 @@ pub enum FunctionGraphResource {
     Instructions,
     /// Constant-pool slots across all functions.
     Constants,
+    /// Content-interned atom slots across all functions.
+    Atoms,
+    /// Compact string payload bytes retained by all values and atoms.
+    StringPayloadBytes,
     /// Imported closure-variable slots across all functions.
     ClosureVariables,
     /// Child closure sources checked across every parent edge.
@@ -251,6 +274,8 @@ pub enum FunctionGraphResource {
     TopologyEntries,
     /// Temporary entries used to validate closure-source uniqueness.
     ClosureSourceEntries,
+    /// Temporary entries used to validate atom uniqueness.
+    AtomDedupEntries,
     /// Frozen verified function records.
     VerifiedFunctions,
 }
@@ -263,11 +288,14 @@ impl fmt::Display for FunctionGraphResource {
             Self::BytecodeBytes => "graph bytecode bytes",
             Self::Instructions => "graph instructions",
             Self::Constants => "graph constants",
+            Self::Atoms => "graph atoms",
+            Self::StringPayloadBytes => "graph string payload bytes",
             Self::ClosureVariables => "graph closure variables",
             Self::ClosureEdgeEvaluations => "graph closure-edge evaluations",
             Self::TransferEvaluations => "graph transfer evaluations",
             Self::TopologyEntries => "graph topology entries",
             Self::ClosureSourceEntries => "closure-source validation entries",
+            Self::AtomDedupEntries => "atom-pool validation entries",
             Self::VerifiedFunctions => "verified function records",
         })
     }
@@ -282,6 +310,8 @@ pub struct FunctionGraphVerificationLimits {
     max_bytecode_bytes: u64,
     max_instructions: u64,
     max_constants: u64,
+    max_atoms: u64,
+    max_string_payload_bytes: u64,
     max_closure_variables: u64,
     max_closure_edge_evaluations: u64,
     max_transfer_evaluations: u64,
@@ -294,12 +324,18 @@ impl FunctionGraphVerificationLimits {
     /// `max_transfer_evaluations`; callers may tune it independently with
     /// [`Self::with_max_closure_edge_evaluations`].
     #[must_use]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "every independent untrusted graph budget is explicit"
+    )]
     pub const fn new(
         max_functions: u32,
         max_nesting_depth: u32,
         max_bytecode_bytes: u64,
         max_instructions: u64,
         max_constants: u64,
+        max_atoms: u64,
+        max_string_payload_bytes: u64,
         max_closure_variables: u64,
         max_transfer_evaluations: u64,
     ) -> Self {
@@ -309,6 +345,8 @@ impl FunctionGraphVerificationLimits {
             max_bytecode_bytes,
             max_instructions,
             max_constants,
+            max_atoms,
+            max_string_payload_bytes,
             max_closure_variables,
             max_closure_edge_evaluations: max_transfer_evaluations,
             max_transfer_evaluations,
@@ -347,6 +385,20 @@ impl FunctionGraphVerificationLimits {
     #[must_use]
     pub const fn with_max_constants(mut self, maximum: u64) -> Self {
         self.max_constants = maximum;
+        self
+    }
+
+    /// Returns a copy with a different aggregate atom maximum.
+    #[must_use]
+    pub const fn with_max_atoms(mut self, maximum: u64) -> Self {
+        self.max_atoms = maximum;
+        self
+    }
+
+    /// Returns a copy with a different aggregate compact string-payload maximum in bytes.
+    #[must_use]
+    pub const fn with_max_string_payload_bytes(mut self, maximum: u64) -> Self {
+        self.max_string_payload_bytes = maximum;
         self
     }
 
@@ -401,6 +453,18 @@ impl FunctionGraphVerificationLimits {
         self.max_constants
     }
 
+    /// Returns the aggregate atom maximum.
+    #[must_use]
+    pub const fn max_atoms(self) -> u64 {
+        self.max_atoms
+    }
+
+    /// Returns the aggregate retained compact string-payload maximum in bytes.
+    #[must_use]
+    pub const fn max_string_payload_bytes(self) -> u64 {
+        self.max_string_payload_bytes
+    }
+
     /// Returns the aggregate closure-variable maximum.
     #[must_use]
     pub const fn max_closure_variables(self) -> u64 {
@@ -428,6 +492,8 @@ impl Default for FunctionGraphVerificationLimits {
             DEFAULT_MAX_GRAPH_BYTECODE_BYTES,
             DEFAULT_MAX_GRAPH_INSTRUCTIONS,
             DEFAULT_MAX_GRAPH_CONSTANTS,
+            DEFAULT_MAX_GRAPH_ATOMS,
+            DEFAULT_MAX_GRAPH_STRING_PAYLOAD_BYTES,
             DEFAULT_MAX_GRAPH_CLOSURE_VARIABLES,
             DEFAULT_MAX_GRAPH_TRANSFER_EVALUATIONS,
         )
@@ -442,6 +508,8 @@ pub struct FunctionGraphUsage {
     bytecode_bytes: u64,
     instructions: u64,
     constants: u64,
+    atoms: u64,
+    string_payload_bytes: u64,
     closure_variables: u64,
     closure_edge_evaluations: u64,
     transfer_evaluations: u64,
@@ -472,6 +540,18 @@ impl FunctionGraphUsage {
         self.constants
     }
 
+    /// Returns total content-interned atom slots.
+    #[must_use]
+    pub const fn atoms(self) -> u64 {
+        self.atoms
+    }
+
+    /// Returns total compact payload bytes retained by string constants and atoms.
+    #[must_use]
+    pub const fn string_payload_bytes(self) -> u64 {
+        self.string_payload_bytes
+    }
+
     /// Returns total imported closure-variable slots.
     #[must_use]
     pub const fn closure_variables(self) -> u64 {
@@ -495,6 +575,7 @@ impl FunctionGraphUsage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedCompilerFunction {
     control_flow: Arc<VerifiedControlFlow>,
+    atoms: Arc<[CompilerAtom]>,
     constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
 }
@@ -504,6 +585,12 @@ impl VerifiedCompilerFunction {
     #[must_use]
     pub fn control_flow(&self) -> &VerifiedControlFlow {
         &self.control_flow
+    }
+
+    /// Returns verified content-interned atoms in pool order.
+    #[must_use]
+    pub fn atoms(&self) -> &[CompilerAtom] {
+        &self.atoms
     }
 
     /// Returns verified heterogeneous constants in pool order.
@@ -523,8 +610,8 @@ impl VerifiedCompilerFunction {
 ///
 /// The graph is flat: child constants are dense identities rather than nested
 /// owning pointers, while ordinary values retain immutable typed payloads.
-/// Serialized bytecode, atom constants, and unsupported opcode capabilities
-/// cannot construct this type. It does not yet authorize runtime execution.
+/// Serialized bytecode and unsupported opcode capabilities cannot construct
+/// this type. It does not yet authorize runtime execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedCompilerFunctionGraph {
     root: FunctionTemplateId,
@@ -645,6 +732,11 @@ pub enum FunctionGraphVerificationErrorKind {
         /// Observed value.
         observed: u64,
     },
+    /// Exact aggregate resource accounting overflowed its encoded width.
+    ResourceUsageOverflow {
+        /// Resource whose exact usage did not fit in `u64`.
+        resource: FunctionGraphResource,
+    },
     /// Temporary verifier storage could not be allocated.
     AllocationFailed {
         /// Allocation purpose.
@@ -656,10 +748,24 @@ pub enum FunctionGraphVerificationErrorKind {
     MissingCompilerCaptureLayout,
     /// A body did not retain explicit compiler constant metadata.
     MissingCompilerConstantLayout,
-    /// The graph does not own the declared atom pool.
+    /// A nonempty body atom domain has no supplied atom table.
     MissingAtomPool {
         /// Declared atom entries.
         declared: u32,
+    },
+    /// Actual atom-pool entries do not match the body domain.
+    AtomCountMismatch {
+        /// Body-declared atom count.
+        declared: u32,
+        /// Supplied atom entries.
+        entries: u64,
+    },
+    /// A compiler function's atom pool contains the same string twice.
+    DuplicateAtom {
+        /// First atom-pool index containing the string.
+        first: u32,
+        /// Repeated atom-pool index.
+        duplicate: u32,
     },
     /// Actual constant-pool entries do not match the body domain.
     ConstantCountMismatch {
@@ -726,6 +832,10 @@ pub enum FunctionGraphVerificationErrorKind {
 }
 
 impl fmt::Display for FunctionGraphVerificationErrorKind {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "each structured verifier error has one local exact message"
+    )]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyGraph => formatter.write_str("compiler function graph is empty"),
@@ -745,6 +855,12 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
                 formatter,
                 "{resource} limit {limit} was exceeded by observed value {observed}"
             ),
+            Self::ResourceUsageOverflow { resource } => {
+                write!(
+                    formatter,
+                    "exact {resource} usage exceeds the u64 accounting domain"
+                )
+            }
             Self::AllocationFailed {
                 resource,
                 requested,
@@ -761,6 +877,14 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
             Self::MissingAtomPool { declared } => write!(
                 formatter,
                 "body declares {declared} atoms, but the compiler graph has no atom pool"
+            ),
+            Self::AtomCountMismatch { declared, entries } => write!(
+                formatter,
+                "actual atom count {entries} does not equal body domain {declared}"
+            ),
+            Self::DuplicateAtom { first, duplicate } => write!(
+                formatter,
+                "atom slots {first} and {duplicate} contain the same string"
             ),
             Self::ConstantCountMismatch { declared, entries } => write!(
                 formatter,
@@ -886,10 +1010,16 @@ pub fn verify_compiler_function_graph(
             },
         )
     })?;
-    verified.extend(functions.iter().map(|function| VerifiedCompilerFunction {
-        control_flow: Arc::clone(&function.control_flow),
-        constants: Arc::clone(&function.constants),
-        closure_sources: Arc::clone(&function.closure_sources),
+    verified.extend(functions.iter().map(|function| {
+        VerifiedCompilerFunction {
+            control_flow: Arc::clone(&function.control_flow),
+            atoms: function
+                .atoms
+                .as_ref()
+                .map_or_else(|| Arc::from([]), Arc::clone),
+            constants: Arc::clone(&function.constants),
+            closure_sources: Arc::clone(&function.closure_sources),
+        }
     }));
 
     Ok(VerifiedCompilerFunctionGraph {
@@ -920,11 +1050,24 @@ fn validate_function_records(
             )
         })?;
         let domains = flow.domains();
-        if domains.atom_pool_len() != 0 {
+        let atom_entries = function
+            .atoms
+            .as_ref()
+            .map_or(0, |atoms| usize_to_u64(atoms.len()));
+        if domains.atom_pool_len() != 0 && function.atoms.is_none() {
             return Err(FunctionGraphVerificationError::at_function(
                 id,
                 FunctionGraphVerificationErrorKind::MissingAtomPool {
                     declared: domains.atom_pool_len(),
+                },
+            ));
+        }
+        if atom_entries != u64::from(domains.atom_pool_len()) {
+            return Err(FunctionGraphVerificationError::at_function(
+                id,
+                FunctionGraphVerificationErrorKind::AtomCountMismatch {
+                    declared: domains.atom_pool_len(),
+                    entries: atom_entries,
                 },
             ));
         }
@@ -948,8 +1091,11 @@ fn validate_function_records(
                 },
             ));
         }
+        if let Some(atoms) = &function.atoms {
+            validate_unique_atoms(id, atoms)?;
+        }
         validate_unique_closure_sources(id, &function.closure_sources)?;
-        for (constant_index, (&constant, declared)) in function
+        for (constant_index, (constant, declared)) in function
             .constants
             .iter()
             .zip(constant_layout.kinds().iter().copied())
@@ -1007,6 +1153,23 @@ fn preflight_graph_usage(
             id,
         )?;
         charge_usage(
+            &mut usage.atoms,
+            function
+                .atoms
+                .as_ref()
+                .map_or(0, |atoms| usize_to_u64(atoms.len())),
+            FunctionGraphResource::Atoms,
+            limits.max_atoms,
+            id,
+        )?;
+        charge_usage(
+            &mut usage.string_payload_bytes,
+            function_string_payload_bytes(function, id)?,
+            FunctionGraphResource::StringPayloadBytes,
+            limits.max_string_payload_bytes,
+            id,
+        )?;
+        charge_usage(
             &mut usage.closure_variables,
             usize_to_u64(function.closure_sources.len()),
             FunctionGraphResource::ClosureVariables,
@@ -1055,6 +1218,69 @@ fn validate_unique_closure_sources(
         }
     }
     Ok(())
+}
+
+fn validate_unique_atoms(
+    function: FunctionTemplateId,
+    atoms: &[CompilerAtom],
+) -> Result<(), FunctionGraphVerificationError> {
+    let mut seen = HashMap::new();
+    seen.try_reserve(atoms.len()).map_err(|_| {
+        FunctionGraphVerificationError::at_function(
+            function,
+            FunctionGraphVerificationErrorKind::AllocationFailed {
+                resource: FunctionGraphResource::AtomDedupEntries,
+                requested: usize_to_u64(atoms.len()),
+            },
+        )
+    })?;
+    for (duplicate, atom) in atoms.iter().enumerate() {
+        let duplicate = usize_to_u32(duplicate);
+        if let Some(&first) = seen.get(atom) {
+            return Err(FunctionGraphVerificationError::at_function(
+                function,
+                FunctionGraphVerificationErrorKind::DuplicateAtom { first, duplicate },
+            ));
+        }
+        seen.insert(atom, duplicate);
+    }
+    Ok(())
+}
+
+fn function_string_payload_bytes(
+    function: &UnverifiedCompilerFunction,
+    id: FunctionTemplateId,
+) -> Result<u64, FunctionGraphVerificationError> {
+    let mut total = 0_u64;
+    for atom in function
+        .atoms
+        .as_ref()
+        .into_iter()
+        .flat_map(|atoms| atoms.iter())
+    {
+        total = checked_resource_add(
+            total,
+            usize_to_u64(atom.string().payload_bytes()),
+            FunctionGraphResource::StringPayloadBytes,
+            id,
+        )?;
+    }
+    for constant in function.constants.iter() {
+        let payload_bytes = match constant {
+            CompilerConstant::Value(CompilerConstantValue::String(value)) => {
+                usize_to_u64(value.payload_bytes())
+            }
+            CompilerConstant::Value(CompilerConstantValue::Number(_))
+            | CompilerConstant::Function(_) => 0,
+        };
+        total = checked_resource_add(
+            total,
+            payload_bytes,
+            FunctionGraphResource::StringPayloadBytes,
+            id,
+        )?;
+    }
+    Ok(total)
 }
 
 fn validate_closure_edges(
@@ -1249,10 +1475,9 @@ fn function_constant_targets(
 ) -> impl Iterator<Item = (usize, FunctionTemplateId)> + '_ {
     constants
         .iter()
-        .copied()
         .enumerate()
         .filter_map(|(index, constant)| match constant {
-            CompilerConstant::Function(target) => Some((index, target)),
+            CompilerConstant::Function(target) => Some((index, *target)),
             CompilerConstant::Value(_) => None,
         })
 }
@@ -1285,10 +1510,24 @@ fn charge_usage(
     limit: u64,
     function: FunctionTemplateId,
 ) -> Result<(), FunctionGraphVerificationError> {
-    let observed = total.checked_add(increment).unwrap_or(u64::MAX);
+    let observed = checked_resource_add(*total, increment, resource, function)?;
     enforce_limit(resource, limit, observed, Some(function))?;
     *total = observed;
     Ok(())
+}
+
+fn checked_resource_add(
+    total: u64,
+    increment: u64,
+    resource: FunctionGraphResource,
+    function: FunctionTemplateId,
+) -> Result<u64, FunctionGraphVerificationError> {
+    total.checked_add(increment).ok_or_else(|| {
+        FunctionGraphVerificationError::at_function(
+            function,
+            FunctionGraphVerificationErrorKind::ResourceUsageOverflow { resource },
+        )
+    })
 }
 
 fn enforce_limit(
@@ -1365,4 +1604,32 @@ fn usize_to_u64(value: usize) -> u64 {
 
 fn usize_to_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        FunctionGraphResource, FunctionGraphVerificationErrorKind, FunctionTemplateId, charge_usage,
+    };
+
+    #[test]
+    fn resource_accounting_overflow_fails_even_with_the_largest_limit() {
+        let mut total = u64::MAX;
+        let error = charge_usage(
+            &mut total,
+            1,
+            FunctionGraphResource::StringPayloadBytes,
+            u64::MAX,
+            FunctionTemplateId::new(0),
+        )
+        .expect_err("overflow cannot become an accepted saturated usage");
+
+        assert_eq!(total, u64::MAX);
+        assert_eq!(
+            error.kind(),
+            &FunctionGraphVerificationErrorKind::ResourceUsageOverflow {
+                resource: FunctionGraphResource::StringPayloadBytes,
+            }
+        );
+    }
 }

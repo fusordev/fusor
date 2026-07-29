@@ -366,7 +366,7 @@ fn graph_requires_exact_compiler_owned_metadata() {
 }
 
 #[test]
-fn owned_constant_kinds_must_match_and_atom_domains_remain_unsupported() {
+fn owned_constant_kinds_must_match_and_declared_atom_domains_require_tables() {
     let value_constant = compiler_flow(
         &[(FinalOpcode::ReturnUndef, Operands::None)],
         0,

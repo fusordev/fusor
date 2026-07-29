@@ -20,6 +20,7 @@ use std::{error::Error, fmt};
 mod assembler;
 mod codec;
 mod compiler_graph;
+mod compiler_string;
 mod disassembly;
 mod function;
 mod verifier;
@@ -40,6 +41,10 @@ pub use compiler_graph::{
     MAX_FUNCTION_GRAPH_NESTING_DEPTH, MAX_FUNCTION_GRAPH_TEMPLATES, UnverifiedCompilerFunction,
     UnverifiedCompilerFunctionGraph, VerifiedCompilerFunction, VerifiedCompilerFunctionGraph,
     verify_compiler_function_graph,
+};
+pub use compiler_string::{
+    CompilerAtom, CompilerString, CompilerStringCodeUnits, CompilerStringError,
+    CompilerStringLengthError, MAX_COMPILER_STRING_CODE_UNITS,
 };
 pub use disassembly::{
     DisassemblyError, DisassemblyLimits, DisassemblySummary, render_disassembly,

@@ -18,7 +18,7 @@ use oxc_syntax::module_record::{
     ModuleRecord as OxcModuleRecord, NameSpan as OxcNameSpan,
 };
 
-const OXC_LONE_SURROGATE_MARKER: &[u8; 3] = b"\xef\xbf\xbd";
+use crate::decode_oxc_cooked_string;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ModuleSyntaxLoweringError {
@@ -140,11 +140,11 @@ impl ModuleNameSpan {
 
     fn from_literal(literal: &StringLiteral<'_>) -> Result<Self, ModuleSyntaxLoweringError> {
         Ok(Self {
-            code_units: decode_oxc_string(
-                literal.value.as_str(),
-                literal.lone_surrogates,
-                literal.span,
-            )?,
+            code_units: decode_oxc_cooked_string(literal.value.as_str(), literal.lone_surrogates)
+                .map_err(|source| ModuleSyntaxLoweringError::MalformedOxcString {
+                span: literal.span,
+                encoded_offset: source.encoded_offset(),
+            })?,
             span: literal.span,
         })
     }
@@ -835,92 +835,5 @@ const fn export_role_order(role: ModuleExportEntryRole) -> u8 {
         ModuleExportEntryRole::Local => 0,
         ModuleExportEntryRole::Indirect => 1,
         ModuleExportEntryRole::Star => 2,
-    }
-}
-
-fn decode_oxc_string(
-    value: &str,
-    lone_surrogates: bool,
-    span: Span,
-) -> Result<Arc<[u16]>, ModuleSyntaxLoweringError> {
-    if !lone_surrogates {
-        return Ok(value.encode_utf16().collect::<Vec<_>>().into());
-    }
-
-    let bytes = value.as_bytes();
-    let mut units = Vec::with_capacity(value.len());
-    let mut offset = 0;
-    while offset < bytes.len() {
-        if bytes[offset..].starts_with(OXC_LONE_SURROGATE_MARKER) {
-            let Some(hex) = bytes.get(
-                offset + OXC_LONE_SURROGATE_MARKER.len()
-                    ..offset + OXC_LONE_SURROGATE_MARKER.len() + 4,
-            ) else {
-                return Err(ModuleSyntaxLoweringError::MalformedOxcString {
-                    span,
-                    encoded_offset: offset,
-                });
-            };
-            let Some(unit) = decode_hex_code_unit(hex) else {
-                return Err(ModuleSyntaxLoweringError::MalformedOxcString {
-                    span,
-                    encoded_offset: offset,
-                });
-            };
-            if unit != 0xfffd && !(0xd800..=0xdfff).contains(&unit) {
-                return Err(ModuleSyntaxLoweringError::MalformedOxcString {
-                    span,
-                    encoded_offset: offset,
-                });
-            }
-            units.push(unit);
-            offset += OXC_LONE_SURROGATE_MARKER.len() + 4;
-        } else {
-            let Some(character) = value[offset..].chars().next() else {
-                return Err(ModuleSyntaxLoweringError::MalformedOxcString {
-                    span,
-                    encoded_offset: offset,
-                });
-            };
-            let mut encoded = [0; 2];
-            units.extend_from_slice(character.encode_utf16(&mut encoded));
-            offset += character.len_utf8();
-        }
-    }
-    Ok(units.into())
-}
-
-fn decode_hex_code_unit(hex: &[u8]) -> Option<u16> {
-    let mut value = 0_u16;
-    for byte in hex {
-        value = value.checked_mul(16)?;
-        value = value.checked_add(u16::from(match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => return None,
-        }))?;
-    }
-    Some(value)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ModuleSyntaxLoweringError, decode_oxc_string};
-    use oxc_span::Span;
-
-    #[test]
-    fn rejects_non_surrogate_oxc_marker_payloads() {
-        let span = Span::new(3, 12);
-        let error = decode_oxc_string("\u{fffd}0041", true, span)
-            .expect_err("marker payload must be a surrogate or escaped replacement character");
-
-        assert_eq!(
-            error,
-            ModuleSyntaxLoweringError::MalformedOxcString {
-                span,
-                encoded_offset: 0,
-            }
-        );
     }
 }
