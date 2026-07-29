@@ -32,10 +32,11 @@ Every source unit is rejected if Oxc reports either a parser diagnostic or a
 deferred semantic early error. TypeScript, JSX, V8 intrinsics, and Oxc's
 unambiguous source mode are not exposed by the engine front end.
 
-Successful units retain Oxc's `ModuleRecord` and owned `Scoping` model so the
-compiler receives module requests, scopes, symbols, and resolved/unresolved
-references directly. These are syntax-analysis inputs, not QuickJS runtime
-storage locations or declaration-instantiation semantics.
+Successful units retain Oxc's `ModuleRecord` and complete `Semantic` model so
+the compiler receives module requests, AST-node mapping, class/private-name
+analysis, scopes, symbols, and resolved/unresolved references directly. These
+are syntax-analysis inputs, not QuickJS runtime storage locations or
+declaration-instantiation semantics.
 
 The selected compatibility policy permits narrow Oxc-vs-QuickJS parser
 differences. Such differences must be recorded and covered by differential or

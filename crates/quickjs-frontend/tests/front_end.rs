@@ -77,6 +77,34 @@ fn retains_oxc_semantic_scopes_symbols_and_unresolved_references() {
     );
     assert_eq!(scoping.root_unresolved_references().len(), 2);
     assert_eq!(scoping.references_len(), 4);
+    assert!(unit.semantic().nodes().len() > scoping.references_len());
+}
+
+#[test]
+fn retains_oxc_class_and_private_name_semantics() {
+    let source = "class Box { #value = 1; read() { return this.#value; } }";
+    let allocator = Allocator::new();
+    let unit =
+        parse(&allocator, source, FrontendOptions::new(ParseMode::Script)).expect("valid class");
+
+    let classes = unit.semantic().classes();
+    assert_eq!(classes.len(), 1);
+    let (class_id, _) = classes
+        .iter_enumerated()
+        .next()
+        .expect("class semantic entry");
+    assert!(
+        classes.elements[class_id]
+            .iter()
+            .any(|element| element.is_private && element.name == "value")
+    );
+    let references = classes
+        .iter_private_identifiers(class_id)
+        .collect::<Vec<_>>();
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].name, "value");
+    assert_eq!(references[0].element_ids.len(), 1);
+    assert!(!unit.semantic().nodes().is_empty());
 }
 
 #[test]

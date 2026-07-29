@@ -20,8 +20,8 @@ pub use frontend::{
     FrontendDiagnosticCode, FrontendError, FrontendLimitError, FrontendLimits, FrontendOptions,
     FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal, ModuleRecord, ParseMode, ParsedUnit,
     PreparedDynamicFunctionSource, Program, RegisteredFrontendDiagnostics, RegisteredFrontendError,
-    Scoping, SourceFragment, Span, UnsupportedCompilationGoal, parse, with_dynamic_function_source,
-    with_parsed_program, with_registered_program,
+    Scoping, Semantic, SourceFragment, Span, UnsupportedCompilationGoal, parse,
+    with_dynamic_function_source, with_parsed_program, with_registered_program,
 };
 
 /// The official `QuickJS` release whose behavior this port targets.

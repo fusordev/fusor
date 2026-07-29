@@ -16,8 +16,8 @@ use oxc_ast::{
 };
 use oxc_diagnostics::{Diagnostics, OxcDiagnostic};
 use oxc_parser::{ParseOptions as OxcParseOptions, Parser};
-pub use oxc_semantic::Scoping;
 use oxc_semantic::{AstNodes, SemanticBuilder};
+pub use oxc_semantic::{Scoping, Semantic};
 use oxc_span::SourceType;
 pub use oxc_span::Span;
 pub use oxc_syntax::module_record::ModuleRecord;
@@ -2532,12 +2532,25 @@ impl Error for RegisteredFrontendError {
 /// engine entry-point identity such as global Script versus indirect eval.
 /// This wrapper keeps the validated [`CompilationGoal`] attached to the arena-
 /// owned [`Program`].
-#[derive(Debug)]
 pub struct ParsedUnit<'arena, 'scope> {
     goal: CompilationGoal<'scope>,
-    program: Program<'arena>,
+    program: &'arena Program<'arena>,
     module_record: ModuleRecord<'arena>,
-    scoping: Scoping,
+    semantic: Semantic<'arena>,
+}
+
+impl fmt::Debug for ParsedUnit<'_, '_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ParsedUnit")
+            .field("goal", &self.goal)
+            .field("program", &self.program)
+            .field("module_record", &self.module_record)
+            .field("semantic_nodes", &self.semantic.nodes().len())
+            .field("semantic_scopes", &self.semantic.scoping().scopes_len())
+            .field("semantic_symbols", &self.semantic.scoping().symbols_len())
+            .finish()
+    }
 }
 
 impl<'arena, 'scope> ParsedUnit<'arena, 'scope> {
@@ -2550,7 +2563,7 @@ impl<'arena, 'scope> ParsedUnit<'arena, 'scope> {
     /// Returns the arena-owned Oxc program.
     #[must_use]
     pub const fn program(&self) -> &Program<'arena> {
-        &self.program
+        self.program
     }
 
     /// Returns Oxc's parsed ECMAScript module record.
@@ -2562,14 +2575,21 @@ impl<'arena, 'scope> ParsedUnit<'arena, 'scope> {
         &self.module_record
     }
 
-    /// Returns Oxc's owned semantic scope, symbol, and reference model.
+    /// Returns Oxc's complete semantic model.
     ///
-    /// The compiler may consume this model as syntax analysis input, but
-    /// `QuickJS` runtime storage locations and declaration instantiation
-    /// remain project-owned.
+    /// This includes AST-node mapping, scopes, symbols, references, and class
+    /// private-name analysis. The compiler may consume it as syntax analysis
+    /// input, but `QuickJS` runtime storage locations and declaration
+    /// instantiation remain project-owned.
     #[must_use]
-    pub const fn scoping(&self) -> &Scoping {
-        &self.scoping
+    pub const fn semantic(&self) -> &Semantic<'arena> {
+        &self.semantic
+    }
+
+    /// Returns Oxc's owned scope, symbol, and reference tables.
+    #[must_use]
+    pub fn scoping(&self) -> &Scoping {
+        self.semantic.scoping()
     }
 }
 
@@ -2633,10 +2653,10 @@ fn parse_in_mode<'arena, 'scope>(
     }
 
     let module_record = parsed.module_record;
-    let program = parsed.program;
+    let program: &'arena Program<'arena> = allocator.alloc(parsed.program);
     let semantic = SemanticBuilder::new_compiler()
         .with_build_nodes(true)
-        .build(&program);
+        .build(program);
     let profile_diagnostics = quickjs_profile_diagnostics(semantic.semantic.nodes());
     if !profile_diagnostics.is_empty() {
         return Err(FrontendError::from_profile(profile_diagnostics));
@@ -2649,13 +2669,13 @@ fn parse_in_mode<'arena, 'scope>(
             false,
         ));
     }
-    let scoping = semantic.semantic.into_scoping();
+    let semantic = semantic.semantic;
 
     Ok(ParsedUnit {
         goal,
         program,
         module_record,
-        scoping,
+        semantic,
     })
 }
 
