@@ -25,14 +25,14 @@
 
 //! Runtime-local JavaScript atoms and property keys.
 //!
-//! Atom handles own their entries and intentionally use [`Rc`], keeping a
-//! runtime and all values derived from it on one thread. String atoms and the
-//! global symbol registry are content-interned in separate namespaces. The
+//! Atom handles own their entries through [`Arc`] while the table's [`Cell`]
+//! accounting keeps the runtime-local graph `!Send + !Sync`. String atoms and
+//! the global symbol registry are content-interned in separate namespaces. The
 //! interner stores only weak entry handles, so collecting dead slots also
 //! releases their descriptions.
 //!
 //! Growable collection storage and compact string copies use fallible reserve
-//! operations. Allocation of `Rc` and `Arc` control blocks follows Rust's global
+//! operations. Allocation of `Arc` control blocks follows Rust's global
 //! allocator policy.
 
 use std::{
@@ -41,7 +41,7 @@ use std::{
     error::Error,
     fmt,
     hash::{BuildHasher, Hash, Hasher, RandomState},
-    rc::{Rc, Weak},
+    sync::{Arc, Weak},
 };
 
 use crate::{
@@ -77,8 +77,18 @@ pub enum AtomKind {
 /// An owning, runtime-local atom handle.
 ///
 /// Equality and hashing use identity, not description contents.
+///
+/// Atom ownership uses `Arc`, but the runtime-local accounting deliberately
+/// prevents atom handles from crossing threads.
+///
+/// ```compile_fail
+/// use quickjs_runtime::Atom;
+///
+/// fn require_send_and_sync<T: Send + Sync>() {}
+/// require_send_and_sync::<Atom>();
+/// ```
 #[derive(Clone)]
-pub struct Atom(Rc<AtomEntry>);
+pub struct Atom(Arc<AtomEntry>);
 
 struct AtomEntry {
     owner: Weak<TableState>,
@@ -112,7 +122,7 @@ impl Atom {
     /// Tests identity without inspecting the atom description.
     #[must_use]
     pub fn is_same_identity(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.0, &other.0)
     }
 
     /// Returns whether the owning atom table has already been dropped.
@@ -132,7 +142,7 @@ impl Eq for Atom {}
 
 impl Hash for Atom {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        Rc::as_ptr(&self.0).hash(state);
+        Arc::as_ptr(&self.0).hash(state);
     }
 }
 
@@ -333,7 +343,7 @@ type InternBucket = Vec<Weak<AtomEntry>>;
 
 /// One runtime's bounded atom identities and weak content interners.
 pub struct AtomTable {
-    state: Rc<TableState>,
+    state: Arc<TableState>,
     limits: AtomLimits,
     hash_builder: RandomState,
     buckets: HashMap<BucketKey, InternBucket, RandomState>,
@@ -364,6 +374,10 @@ impl AtomTable {
     /// Returns a structured error for an invalid ceiling, a ceiling below
     /// predefined startup usage, or a recoverable backing-storage allocation
     /// failure.
+    #[allow(
+        clippy::arc_with_non_send_sync,
+        reason = "the user-selected Arc ownership is intentionally runtime-local through Cell"
+    )]
     pub fn try_new(limits: AtomLimits) -> Result<Self, AtomError> {
         validate_limits(limits)?;
         validate_startup_limits(limits)?;
@@ -386,7 +400,7 @@ impl AtomTable {
             })?;
 
         let mut table = Self {
-            state: Rc::new(TableState {
+            state: Arc::new(TableState {
                 usage: Cell::new(AtomUsage::default()),
             }),
             limits,
@@ -531,7 +545,7 @@ impl AtomTable {
         let Some(owner) = atom.0.owner.upgrade() else {
             return Err(AtomError::OrphanedAtom);
         };
-        if Rc::ptr_eq(&owner, &self.state) {
+        if Arc::ptr_eq(&owner, &self.state) {
             Ok(())
         } else {
             Err(AtomError::ForeignAtom)
@@ -719,7 +733,7 @@ impl AtomTable {
             Some(description),
             predefined,
         );
-        bucket.push(Rc::downgrade(&atom.0));
+        bucket.push(Arc::downgrade(&atom.0));
         self.buckets.insert(key, bucket);
         self.state.usage.set(next_usage);
         Ok(atom)
@@ -850,13 +864,17 @@ fn prune_dead_slots(bucket: &mut InternBucket) -> u32 {
 }
 
 fn create_entry(
-    owner: &Rc<TableState>,
+    owner: &Arc<TableState>,
     kind: AtomKind,
     description: Option<JsString>,
     predefined: Option<PredefinedAtom>,
 ) -> Atom {
-    Atom(Rc::new(AtomEntry {
-        owner: Rc::downgrade(owner),
+    #[allow(
+        clippy::arc_with_non_send_sync,
+        reason = "atom entries share runtime-local Cell accounting without a lock"
+    )]
+    Atom(Arc::new(AtomEntry {
+        owner: Arc::downgrade(owner),
         kind,
         description,
         predefined,
@@ -1047,7 +1065,7 @@ impl fmt::Display for AtomAllocationTarget {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, rc::Rc};
+    use std::{collections::HashSet, sync::Arc};
 
     use super::{
         AtomError, AtomKind, AtomLimits, AtomTable, AtomUsage, BucketKey, InternNamespace,
@@ -1221,7 +1239,7 @@ mod tests {
         let description = string("ephemeral atom key");
         let atom = table.intern_string(&description).unwrap();
         let clone = atom.clone();
-        let weak = Rc::downgrade(&atom.0);
+        let weak = Arc::downgrade(&atom.0);
 
         assert_eq!(table.usage().live_atoms, startup.live_atoms + 1);
         assert_eq!(table.usage().interner_slots, startup.interner_slots + 1);
@@ -1240,7 +1258,7 @@ mod tests {
         assert_eq!(table.usage(), startup);
 
         let reinterned = table.intern_string(&description).unwrap();
-        assert!(!weak.ptr_eq(&Rc::downgrade(&reinterned.0)));
+        assert!(!weak.ptr_eq(&Arc::downgrade(&reinterned.0)));
     }
 
     #[test]
@@ -1249,7 +1267,7 @@ mod tests {
         let startup = table.usage();
         let description = string("touched dead atom");
         let first = table.intern_string(&description).unwrap();
-        let weak = Rc::downgrade(&first.0);
+        let weak = Arc::downgrade(&first.0);
         drop(first);
 
         assert_eq!(table.usage().interner_slots, startup.interner_slots + 1);
@@ -1257,7 +1275,7 @@ mod tests {
         assert_eq!(weak.strong_count(), 0);
         assert_eq!(table.usage().interner_slots, startup.interner_slots + 1);
         assert_eq!(table.usage().live_atoms, startup.live_atoms + 1);
-        assert!(!weak.ptr_eq(&Rc::downgrade(&second.0)));
+        assert!(!weak.ptr_eq(&Arc::downgrade(&second.0)));
     }
 
     #[test]
