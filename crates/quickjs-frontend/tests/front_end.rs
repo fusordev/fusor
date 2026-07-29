@@ -1,5 +1,7 @@
+use quickjs_diagnostics::{SourceError, SourceRegistry, render_pretty};
 use quickjs_frontend::{
-    Allocator, DiagnosticStage, FrontendOptions, ParseMode, Span, parse, with_parsed_program,
+    Allocator, DiagnosticStage, FrontendDiagnosticCode, FrontendOptions, FrontendSourceError,
+    ParseMode, RegisteredFrontendError, Span, parse, with_parsed_program, with_registered_program,
 };
 
 #[test]
@@ -44,6 +46,13 @@ fn rejects_both_fatal_and_recoverable_parser_diagnostics() {
 
         assert_eq!(error.stage(), DiagnosticStage::Parser, "{source}");
         assert!(!error.diagnostics().is_empty(), "{source}");
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| diagnostic.code == FrontendDiagnosticCode::OxcParser),
+            "{source}"
+        );
     }
 }
 
@@ -55,6 +64,12 @@ fn rejects_semantic_early_errors_and_retains_diagnostic_byte_spans() {
         .expect_err("redeclaration is an ECMAScript early error");
 
     assert_eq!(error.stage(), DiagnosticStage::Semantic);
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code == FrontendDiagnosticCode::OxcSemantic)
+    );
     let source_len = u32::try_from(source.len()).expect("test source fits in an Oxc span");
     assert!(error.diagnostics().iter().any(|diagnostic| {
         diagnostic
@@ -101,7 +116,7 @@ fn engine_mode_rejects_typescript_and_jsx() {
     }
 }
 
-fn assert_profile_rejection(source: &str, mode: ParseMode, expected_message: &str) {
+fn assert_profile_rejection(source: &str, mode: ParseMode, expected_code: FrontendDiagnosticCode) {
     let allocator = Allocator::new();
     let error = parse(&allocator, source, FrontendOptions::new(mode))
         .expect_err("syntax outside the QuickJS profile must be rejected");
@@ -112,8 +127,15 @@ fn assert_profile_rejection(source: &str, mode: ParseMode, expected_message: &st
         error
             .diagnostics()
             .iter()
-            .any(|diagnostic| diagnostic.message.contains(expected_message)),
+            .any(|diagnostic| diagnostic.code == expected_code),
         "{source}: {error:?}"
+    );
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| !diagnostic.message.is_empty()),
+        "{source}: canonical messages must be retained"
     );
 
     let source_len = u32::try_from(source.len()).expect("test source fits in an Oxc span");
@@ -127,60 +149,63 @@ fn assert_profile_rejection(source: &str, mode: ParseMode, expected_message: &st
 
 #[test]
 fn rejects_explicit_resource_management_outside_the_quickjs_profile() {
-    for (source, mode, expected_message) in [
+    for (source, mode, expected_code) in [
         (
             "using resource = acquire();",
             ParseMode::Script,
-            "`using` declarations",
+            FrontendDiagnosticCode::UnsupportedUsingDeclaration,
         ),
         (
             "async function collect() { await using resource = acquire(); }",
             ParseMode::Script,
-            "`await using` declarations",
+            FrontendDiagnosticCode::UnsupportedAwaitUsingDeclaration,
         ),
     ] {
-        assert_profile_rejection(source, mode, expected_message);
+        assert_profile_rejection(source, mode, expected_code);
     }
 }
 
 #[test]
 fn rejects_import_phases_outside_the_quickjs_profile() {
-    for (source, mode, expected_message) in [
+    for (source, mode, expected_code) in [
         (
             "import source wasm from './module.wasm';",
             ParseMode::Module,
-            "`import source`",
+            FrontendDiagnosticCode::UnsupportedImportSource,
         ),
         (
             "import defer * as dependency from './dep.js';",
             ParseMode::Module,
-            "`import defer`",
+            FrontendDiagnosticCode::UnsupportedImportDefer,
         ),
         (
             "const wasm = import.source('./module.wasm');",
             ParseMode::Script,
-            "`import source`",
+            FrontendDiagnosticCode::UnsupportedImportSource,
         ),
         (
             "const dependency = import.defer('./dep.js');",
             ParseMode::Script,
-            "`import defer`",
+            FrontendDiagnosticCode::UnsupportedImportDefer,
         ),
     ] {
-        assert_profile_rejection(source, mode, expected_message);
+        assert_profile_rejection(source, mode, expected_code);
     }
 }
 
 #[test]
 fn rejects_decorators_and_class_accessor_declarations() {
-    for (source, expected_message) in [
-        ("@sealed class Example {}", "decorators"),
+    for (source, expected_code) in [
+        (
+            "@sealed class Example {}",
+            FrontendDiagnosticCode::UnsupportedDecorator,
+        ),
         (
             "class Example { accessor value = 1; }",
-            "class `accessor` declarations",
+            FrontendDiagnosticCode::UnsupportedClassAccessor,
         ),
     ] {
-        assert_profile_rejection(source, ParseMode::Script, expected_message);
+        assert_profile_rejection(source, ParseMode::Script, expected_code);
     }
 }
 
@@ -189,7 +214,7 @@ fn rejects_legacy_import_assertions_but_accepts_import_attributes() {
     assert_profile_rejection(
         "import data from './data.json' assert { type: 'json' };",
         ParseMode::Module,
-        "legacy import assertions",
+        FrontendDiagnosticCode::UnsupportedLegacyImportAssertion,
     );
 
     let allocator = Allocator::new();
@@ -244,4 +269,123 @@ fn callback_api_keeps_arena_owned_ast_inside_the_allocator_lifetime() {
     .expect("callback parse");
 
     assert_eq!(statement_count, 2);
+}
+
+#[test]
+fn registered_source_callback_keeps_the_ast_in_a_short_lived_arena() {
+    let mut sources = SourceRegistry::new();
+    let source_id = sources
+        .register("registered.js", "let first = 1; let second = 2;")
+        .expect("source");
+
+    let statement_count = with_registered_program(
+        &sources,
+        &source_id,
+        FrontendOptions::new(ParseMode::Script),
+        |program| program.body.len(),
+    )
+    .expect("registered parse");
+
+    assert_eq!(statement_count, 2);
+}
+
+#[test]
+fn registered_source_errors_distinguish_foreign_ids_from_javascript_diagnostics() {
+    let mut owner = SourceRegistry::new();
+    let foreign_id = owner.register("foreign.js", "let x;").expect("foreign");
+    let mut sources = SourceRegistry::new();
+    sources.register("local.js", "let y;").expect("local");
+
+    let error = with_registered_program(
+        &sources,
+        &foreign_id,
+        FrontendOptions::new(ParseMode::Script),
+        |_| (),
+    )
+    .expect_err("foreign source ID");
+    assert!(matches!(
+        error,
+        RegisteredFrontendError::Source(FrontendSourceError::Registry(
+            SourceError::ForeignSourceId
+        ))
+    ));
+
+    let invalid_id = sources
+        .register("invalid.js", "const missing = ;")
+        .expect("invalid source");
+    let error = with_registered_program(
+        &sources,
+        &invalid_id,
+        FrontendOptions::new(ParseMode::Script),
+        |_| (),
+    )
+    .expect_err("invalid JavaScript");
+    let RegisteredFrontendError::Diagnostics(diagnostics) = error else {
+        panic!("expected JavaScript diagnostics");
+    };
+    assert_eq!(diagnostics.stage(), DiagnosticStage::Parser);
+    assert_eq!(diagnostics.source_id(), &invalid_id);
+    assert!(diagnostics.diagnostics().iter().all(|diagnostic| {
+        diagnostic.code().as_str() == FrontendDiagnosticCode::OxcParser.as_str()
+    }));
+}
+
+#[test]
+fn registered_multibyte_diagnostics_render_with_validated_miette_spans() {
+    let source_text = "const π = ;\n";
+    let mut sources = SourceRegistry::new();
+    let source_id = sources
+        .register("multibyte.js", source_text)
+        .expect("source");
+    let error = with_registered_program(
+        &sources,
+        &source_id,
+        FrontendOptions::new(ParseMode::Script),
+        |_| (),
+    )
+    .expect_err("missing initializer");
+    let RegisteredFrontendError::Diagnostics(diagnostics) = error else {
+        panic!("expected parser diagnostics");
+    };
+
+    assert!(!diagnostics.diagnostics().is_empty());
+    for diagnostic in diagnostics.diagnostics() {
+        for label in diagnostic.labels() {
+            assert!(label.span().bytes().end() as usize <= source_text.len());
+        }
+    }
+    let rendered =
+        render_pretty(&sources, &diagnostics.diagnostics()[0]).expect("Miette rendering");
+    assert!(rendered.contains("multibyte.js"));
+    assert!(rendered.contains("const π = ;"));
+    assert!(rendered.contains(FrontendDiagnosticCode::OxcParser.as_str()));
+}
+
+#[test]
+fn profile_diagnostic_codes_convert_without_message_matching() {
+    let mut sources = SourceRegistry::new();
+    let source_id = sources
+        .register("profile.js", "using resource = acquire();")
+        .expect("source");
+    let error = with_registered_program(
+        &sources,
+        &source_id,
+        FrontendOptions::new(ParseMode::Script),
+        |_| (),
+    )
+    .expect_err("unsupported profile syntax");
+    let RegisteredFrontendError::Diagnostics(diagnostics) = error else {
+        panic!("expected profile diagnostics");
+    };
+
+    assert_eq!(diagnostics.stage(), DiagnosticStage::Profile);
+    assert!(diagnostics.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code().as_str() == FrontendDiagnosticCode::UnsupportedUsingDeclaration.as_str()
+    }));
+    assert!(
+        diagnostics
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.help().is_some())
+    );
 }

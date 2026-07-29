@@ -19,6 +19,11 @@ use oxc_parser::{ParseOptions as OxcParseOptions, Parser};
 use oxc_semantic::{AstNodes, SemanticBuilder};
 use oxc_span::SourceType;
 pub use oxc_span::Span;
+use quickjs_diagnostics::{
+    Diagnostic as SharedDiagnostic, DiagnosticCode as SharedDiagnosticCode, DiagnosticCodeError,
+    DiagnosticLabel as SharedDiagnosticLabel, DiagnosticSeverity, SourceError, SourceId,
+    SourceRegistry,
+};
 
 /// The ECMAScript parse goal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +113,78 @@ impl fmt::Display for DiagnosticStage {
     }
 }
 
+/// Stable identity for one normalized front-end diagnostic.
+///
+/// Oxc parser and semantic diagnostics use stage-level identities because
+/// their canonical message text is currently retained rather than translated
+/// into QuickJS-exact diagnostic kinds. Compatibility-profile exclusions have
+/// one identity per excluded syntax feature.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum FrontendDiagnosticCode {
+    /// An Oxc lexer or parser diagnostic.
+    OxcParser,
+    /// An Oxc semantic/early-error diagnostic.
+    OxcSemantic,
+    /// A `using` declaration unsupported by the pinned `QuickJS` profile.
+    UnsupportedUsingDeclaration,
+    /// An `await using` declaration unsupported by the pinned `QuickJS` profile.
+    UnsupportedAwaitUsingDeclaration,
+    /// An `import source` declaration or expression.
+    UnsupportedImportSource,
+    /// An `import defer` declaration or expression.
+    UnsupportedImportDefer,
+    /// Decorator syntax.
+    UnsupportedDecorator,
+    /// A class `accessor` declaration.
+    UnsupportedClassAccessor,
+    /// A legacy `assert` import clause.
+    UnsupportedLegacyImportAssertion,
+}
+
+impl FrontendDiagnosticCode {
+    /// Returns the stable machine-readable code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OxcParser => "quickjs::frontend::oxc::parser",
+            Self::OxcSemantic => "quickjs::frontend::oxc::semantic",
+            Self::UnsupportedUsingDeclaration => "quickjs::frontend::profile::using_declaration",
+            Self::UnsupportedAwaitUsingDeclaration => {
+                "quickjs::frontend::profile::await_using_declaration"
+            }
+            Self::UnsupportedImportSource => "quickjs::frontend::profile::import_source",
+            Self::UnsupportedImportDefer => "quickjs::frontend::profile::import_defer",
+            Self::UnsupportedDecorator => "quickjs::frontend::profile::decorator",
+            Self::UnsupportedClassAccessor => "quickjs::frontend::profile::class_accessor",
+            Self::UnsupportedLegacyImportAssertion => {
+                "quickjs::frontend::profile::legacy_import_assertion"
+            }
+        }
+    }
+
+    const fn profile_help(self) -> Option<&'static str> {
+        match self {
+            Self::OxcParser | Self::OxcSemantic => None,
+            Self::UnsupportedUsingDeclaration
+            | Self::UnsupportedAwaitUsingDeclaration
+            | Self::UnsupportedImportSource
+            | Self::UnsupportedImportDefer
+            | Self::UnsupportedDecorator
+            | Self::UnsupportedClassAccessor
+            | Self::UnsupportedLegacyImportAssertion => {
+                Some("rewrite this syntax for the QuickJS 2026-06-04 compatibility profile")
+            }
+        }
+    }
+}
+
+impl fmt::Display for FrontendDiagnosticCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// A byte-span label attached to a front-end diagnostic.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiagnosticLabel {
@@ -120,14 +197,20 @@ pub struct DiagnosticLabel {
 /// A source diagnostic copied out of Oxc's internal representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrontendDiagnostic {
+    /// Stable normalized identity.
+    pub code: FrontendDiagnosticCode,
     /// Primary diagnostic message.
+    ///
+    /// Parser and semantic messages retain Oxc's canonical text. They are not
+    /// yet translated into QuickJS-exact wording; callers should use
+    /// [`Self::code`] for stable identity.
     pub message: String,
     /// Labeled UTF-8 byte spans.
     pub labels: Vec<DiagnosticLabel>,
 }
 
-impl From<OxcDiagnostic> for FrontendDiagnostic {
-    fn from(diagnostic: OxcDiagnostic) -> Self {
+impl FrontendDiagnostic {
+    fn from_oxc(code: FrontendDiagnosticCode, diagnostic: &OxcDiagnostic) -> Self {
         let labels = diagnostic
             .labels
             .iter()
@@ -143,6 +226,7 @@ impl From<OxcDiagnostic> for FrontendDiagnostic {
             .collect();
 
         Self {
+            code,
             message: diagnostic.to_string(),
             labels,
         }
@@ -158,13 +242,19 @@ pub struct FrontendError {
 }
 
 impl FrontendError {
-    fn from_oxc(stage: DiagnosticStage, diagnostics: Diagnostics, parser_panicked: bool) -> Self {
+    fn from_oxc(
+        stage: DiagnosticStage,
+        code: FrontendDiagnosticCode,
+        diagnostics: Diagnostics,
+        parser_panicked: bool,
+    ) -> Self {
         let mut diagnostics = diagnostics
             .into_iter()
-            .map(FrontendDiagnostic::from)
+            .map(|diagnostic| FrontendDiagnostic::from_oxc(code, &diagnostic))
             .collect::<Vec<_>>();
         if diagnostics.is_empty() {
             diagnostics.push(FrontendDiagnostic {
+                code,
                 message: "front end aborted without a diagnostic".to_owned(),
                 labels: Vec::new(),
             });
@@ -177,7 +267,6 @@ impl FrontendError {
     }
 
     fn from_profile(diagnostics: Vec<FrontendDiagnostic>) -> Self {
-        debug_assert!(!diagnostics.is_empty());
         Self {
             stage: DiagnosticStage::Profile,
             diagnostics,
@@ -202,19 +291,102 @@ impl FrontendError {
     pub const fn parser_panicked(&self) -> bool {
         self.parser_panicked
     }
+
+    /// Converts every diagnostic and label to the shared source-registry
+    /// representation.
+    ///
+    /// Oxc and compatibility-profile spans are validated against the
+    /// registered source before any shared diagnostic is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured source-integration error for a foreign source ID,
+    /// an invalid UTF-8 byte span, or an invalid internal stable code.
+    pub fn into_registered_diagnostics(
+        self,
+        sources: &SourceRegistry,
+        source_id: &SourceId,
+    ) -> Result<RegisteredFrontendDiagnostics, FrontendSourceError> {
+        sources
+            .source(source_id)
+            .map_err(FrontendSourceError::Registry)?;
+        let diagnostics = self
+            .diagnostics
+            .into_iter()
+            .enumerate()
+            .map(|(diagnostic_index, diagnostic)| {
+                convert_diagnostic(sources, source_id, diagnostic_index, diagnostic)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(RegisteredFrontendDiagnostics {
+            source_id: source_id.clone(),
+            stage: self.stage,
+            diagnostics,
+            parser_panicked: self.parser_panicked,
+        })
+    }
 }
 
 impl fmt::Display for FrontendError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{} validation failed: {}",
-            self.stage, self.diagnostics[0].message
-        )
+        let message = self
+            .diagnostics
+            .first()
+            .map_or("front end aborted without a diagnostic", |diagnostic| {
+                diagnostic.message.as_str()
+            });
+        write!(formatter, "{} validation failed: {message}", self.stage)
     }
 }
 
 impl Error for FrontendError {}
+
+fn convert_diagnostic(
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+    diagnostic_index: usize,
+    diagnostic: FrontendDiagnostic,
+) -> Result<SharedDiagnostic, FrontendSourceError> {
+    let code = SharedDiagnosticCode::new(diagnostic.code.as_str()).map_err(|error| {
+        FrontendSourceError::DiagnosticCode {
+            diagnostic_index,
+            code: diagnostic.code,
+            error,
+        }
+    })?;
+    let mut shared = SharedDiagnostic::new(code, DiagnosticSeverity::Error, diagnostic.message);
+    if let Some(help) = diagnostic.code.profile_help() {
+        shared = shared.with_help(help);
+    }
+    for (label_index, label) in diagnostic.labels.into_iter().enumerate() {
+        let span = sources
+            .span(
+                source_id,
+                label.span.start as usize,
+                label.span.end as usize,
+            )
+            .map_err(|error| FrontendSourceError::DiagnosticSpan {
+                diagnostic_index,
+                label_index,
+                span: label.span,
+                error,
+            })?;
+        let label = if label_index == 0 {
+            SharedDiagnosticLabel::primary(span, label.message)
+        } else {
+            SharedDiagnosticLabel::secondary(span, label.message)
+        };
+        shared = shared.with_label(label);
+    }
+    Ok(shared)
+}
+
+#[derive(Clone, Copy)]
+struct ProfileViolation {
+    span: Span,
+    code: FrontendDiagnosticCode,
+    message: &'static str,
+}
 
 fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> {
     let mut violations = Vec::new();
@@ -222,14 +394,16 @@ fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> 
     for node in nodes {
         match node.kind() {
             AstKind::VariableDeclaration(declaration) => match declaration.kind {
-                VariableDeclarationKind::Using => violations.push((
-                    declaration.span,
-                    "QuickJS 2026-06-04 does not support `using` declarations",
-                )),
-                VariableDeclarationKind::AwaitUsing => violations.push((
-                    declaration.span,
-                    "QuickJS 2026-06-04 does not support `await using` declarations",
-                )),
+                VariableDeclarationKind::Using => violations.push(ProfileViolation {
+                    span: declaration.span,
+                    code: FrontendDiagnosticCode::UnsupportedUsingDeclaration,
+                    message: "QuickJS 2026-06-04 does not support `using` declarations",
+                }),
+                VariableDeclarationKind::AwaitUsing => violations.push(ProfileViolation {
+                    span: declaration.span,
+                    code: FrontendDiagnosticCode::UnsupportedAwaitUsingDeclaration,
+                    message: "QuickJS 2026-06-04 does not support `await using` declarations",
+                }),
                 VariableDeclarationKind::Var
                 | VariableDeclarationKind::Let
                 | VariableDeclarationKind::Const => {}
@@ -240,37 +414,41 @@ fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> 
             AstKind::ImportExpression(expression) => {
                 push_import_phase_violation(&mut violations, expression.phase, expression.span);
             }
-            AstKind::Decorator(decorator) => violations.push((
-                decorator.span,
-                "QuickJS 2026-06-04 does not support decorators",
-            )),
-            AstKind::AccessorProperty(property) => violations.push((
-                property.span,
-                "QuickJS 2026-06-04 does not support class `accessor` declarations",
-            )),
+            AstKind::Decorator(decorator) => violations.push(ProfileViolation {
+                span: decorator.span,
+                code: FrontendDiagnosticCode::UnsupportedDecorator,
+                message: "QuickJS 2026-06-04 does not support decorators",
+            }),
+            AstKind::AccessorProperty(property) => violations.push(ProfileViolation {
+                span: property.span,
+                code: FrontendDiagnosticCode::UnsupportedClassAccessor,
+                message: "QuickJS 2026-06-04 does not support class `accessor` declarations",
+            }),
             AstKind::WithClause(clause) if clause.keyword == WithClauseKeyword::Assert => {
-                violations.push((
-                    clause.span,
-                    "QuickJS 2026-06-04 does not support legacy import assertions; use import attributes with `with`",
-                ));
+                violations.push(ProfileViolation {
+                    span: clause.span,
+                    code: FrontendDiagnosticCode::UnsupportedLegacyImportAssertion,
+                    message: "QuickJS 2026-06-04 does not support legacy import assertions; use import attributes with `with`",
+                });
             }
             _ => {}
         }
     }
 
-    violations.sort_unstable_by(|(left_span, left_message), (right_span, right_message)| {
-        left_span
+    violations.sort_unstable_by(|left, right| {
+        left.span
             .start
-            .cmp(&right_span.start)
-            .then_with(|| left_span.end.cmp(&right_span.end))
-            .then_with(|| left_message.cmp(right_message))
+            .cmp(&right.span.start)
+            .then_with(|| left.span.end.cmp(&right.span.end))
+            .then_with(|| left.code.as_str().cmp(right.code.as_str()))
     });
     violations
         .into_iter()
-        .map(|(span, message)| FrontendDiagnostic {
-            message: message.to_owned(),
+        .map(|violation| FrontendDiagnostic {
+            code: violation.code,
+            message: violation.message.to_owned(),
             labels: vec![DiagnosticLabel {
-                span,
+                span: violation.span,
                 message: Some("unsupported by the QuickJS 2026-06-04 profile".to_owned()),
             }],
         })
@@ -278,16 +456,166 @@ fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> 
 }
 
 fn push_import_phase_violation(
-    violations: &mut Vec<(Span, &'static str)>,
+    violations: &mut Vec<ProfileViolation>,
     phase: Option<ImportPhase>,
     span: Span,
 ) {
-    let message = match phase {
-        Some(ImportPhase::Source) => "QuickJS 2026-06-04 does not support `import source`",
-        Some(ImportPhase::Defer) => "QuickJS 2026-06-04 does not support `import defer`",
+    let (code, message) = match phase {
+        Some(ImportPhase::Source) => (
+            FrontendDiagnosticCode::UnsupportedImportSource,
+            "QuickJS 2026-06-04 does not support `import source`",
+        ),
+        Some(ImportPhase::Defer) => (
+            FrontendDiagnosticCode::UnsupportedImportDefer,
+            "QuickJS 2026-06-04 does not support `import defer`",
+        ),
         None => return,
     };
-    violations.push((span, message));
+    violations.push(ProfileViolation {
+        span,
+        code,
+        message,
+    });
+}
+
+/// Shared diagnostics produced for one registered source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegisteredFrontendDiagnostics {
+    source_id: SourceId,
+    stage: DiagnosticStage,
+    diagnostics: Vec<SharedDiagnostic>,
+    parser_panicked: bool,
+}
+
+impl RegisteredFrontendDiagnostics {
+    /// Returns the registered source that produced these diagnostics.
+    #[must_use]
+    pub const fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the rejecting front-end stage.
+    #[must_use]
+    pub const fn stage(&self) -> DiagnosticStage {
+        self.stage
+    }
+
+    /// Returns every validated shared diagnostic.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[SharedDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// Returns whether Oxc stopped after an unrecoverable parser error.
+    #[must_use]
+    pub const fn parser_panicked(&self) -> bool {
+        self.parser_panicked
+    }
+}
+
+impl fmt::Display for RegisteredFrontendDiagnostics {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} validation failed with {} diagnostic(s)",
+            self.stage,
+            self.diagnostics.len()
+        )
+    }
+}
+
+impl Error for RegisteredFrontendDiagnostics {}
+
+/// Source-registry or diagnostic-conversion failures at the registered-source
+/// boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FrontendSourceError {
+    /// The source ID was foreign or otherwise invalid.
+    Registry(SourceError),
+    /// A stable internal code failed shared-code validation.
+    DiagnosticCode {
+        /// Index of the front-end diagnostic.
+        diagnostic_index: usize,
+        /// Typed front-end identity.
+        code: FrontendDiagnosticCode,
+        /// Shared-code validation failure.
+        error: DiagnosticCodeError,
+    },
+    /// A front-end label was not a valid range in the registered source.
+    DiagnosticSpan {
+        /// Index of the front-end diagnostic.
+        diagnostic_index: usize,
+        /// Index of the label within that diagnostic.
+        label_index: usize,
+        /// Rejected Oxc UTF-8 byte span.
+        span: Span,
+        /// Range or UTF-8-boundary failure.
+        error: SourceError,
+    },
+}
+
+impl fmt::Display for FrontendSourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Registry(error) => write!(formatter, "cannot access registered source: {error}"),
+            Self::DiagnosticCode {
+                diagnostic_index,
+                code,
+                error,
+            } => write!(
+                formatter,
+                "front-end diagnostic {diagnostic_index} has invalid stable code `{code}`: {error}"
+            ),
+            Self::DiagnosticSpan {
+                diagnostic_index,
+                label_index,
+                span,
+                error,
+            } => write!(
+                formatter,
+                "front-end diagnostic {diagnostic_index} label {label_index} has invalid byte span {}..{}: {error}",
+                span.start, span.end
+            ),
+        }
+    }
+}
+
+impl Error for FrontendSourceError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Registry(error) | Self::DiagnosticSpan { error, .. } => Some(error),
+            Self::DiagnosticCode { error, .. } => Some(error),
+        }
+    }
+}
+
+/// Failure from [`with_registered_program`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RegisteredFrontendError {
+    /// Registry access or diagnostic conversion failed.
+    Source(FrontendSourceError),
+    /// The registered JavaScript source was rejected.
+    Diagnostics(RegisteredFrontendDiagnostics),
+}
+
+impl fmt::Display for RegisteredFrontendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Source(error) => fmt::Display::fmt(error, formatter),
+            Self::Diagnostics(diagnostics) => fmt::Display::fmt(diagnostics, formatter),
+        }
+    }
+}
+
+impl Error for RegisteredFrontendError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Source(error) => Some(error),
+            Self::Diagnostics(diagnostics) => Some(diagnostics),
+        }
+    }
 }
 
 /// Parses and validates JavaScript using a caller-owned Oxc arena.
@@ -319,6 +647,7 @@ pub fn parse<'arena>(
     if parsed.panicked || !parsed.diagnostics.is_empty() {
         return Err(FrontendError::from_oxc(
             DiagnosticStage::Parser,
+            FrontendDiagnosticCode::OxcParser,
             parsed.diagnostics,
             parsed.panicked,
         ));
@@ -335,6 +664,7 @@ pub fn parse<'arena>(
     if !semantic.diagnostics.is_empty() {
         return Err(FrontendError::from_oxc(
             DiagnosticStage::Semantic,
+            FrontendDiagnosticCode::OxcSemantic,
             semantic.diagnostics,
             false,
         ));
@@ -360,4 +690,84 @@ pub fn with_parsed_program<R>(
     let allocator = Allocator::new();
     let program = parse(&allocator, source_text, options)?;
     Ok(callback(&program))
+}
+
+/// Parses one registered source inside a short-lived Oxc arena.
+///
+/// The source text is obtained from `sources` using `source_id`. The
+/// higher-ranked callback cannot return a value borrowing the arena-backed AST,
+/// so neither the [`Program`] nor any of its nodes can escape.
+///
+/// Parser and semantic diagnostics retain the canonical text supplied by the
+/// pinned Oxc dependency. Their stable identity is stage-normalized, but their
+/// wording is not yet translated to QuickJS-exact messages.
+///
+/// # Errors
+///
+/// Returns [`RegisteredFrontendError::Source`] when the source ID is invalid or
+/// a produced diagnostic span cannot be validated. Returns
+/// [`RegisteredFrontendError::Diagnostics`] when JavaScript parsing, the
+/// `QuickJS` compatibility profile, or ECMAScript early-error validation rejects
+/// the source.
+pub fn with_registered_program<R>(
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+    options: FrontendOptions,
+    callback: impl for<'arena> FnOnce(&Program<'arena>) -> R,
+) -> Result<R, RegisteredFrontendError> {
+    let source = sources
+        .source(source_id)
+        .map_err(FrontendSourceError::Registry)
+        .map_err(RegisteredFrontendError::Source)?;
+    let allocator = Allocator::new();
+    match parse(&allocator, source.text(), options) {
+        Ok(program) => Ok(callback(&program)),
+        Err(error) => {
+            let diagnostics = error
+                .into_registered_diagnostics(sources, source_id)
+                .map_err(RegisteredFrontendError::Source)?;
+            Err(RegisteredFrontendError::Diagnostics(diagnostics))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DiagnosticLabel, DiagnosticStage, FrontendDiagnostic, FrontendDiagnosticCode,
+        FrontendError, FrontendSourceError,
+    };
+    use oxc_span::Span;
+    use quickjs_diagnostics::SourceRegistry;
+
+    #[test]
+    fn malformed_internal_label_span_is_a_structured_conversion_error() {
+        let mut sources = SourceRegistry::new();
+        let source_id = sources.register("malformed.js", "é").expect("source");
+        let error = FrontendError {
+            stage: DiagnosticStage::Parser,
+            diagnostics: vec![FrontendDiagnostic {
+                code: FrontendDiagnosticCode::OxcParser,
+                message: "synthetic malformed span".to_owned(),
+                labels: vec![DiagnosticLabel {
+                    span: Span::new(1, 2),
+                    message: None,
+                }],
+            }],
+            parser_panicked: false,
+        };
+
+        let conversion = error
+            .into_registered_diagnostics(&sources, &source_id)
+            .expect_err("offset one splits the UTF-8 encoding of é");
+        assert!(matches!(
+            conversion,
+            FrontendSourceError::DiagnosticSpan {
+                diagnostic_index: 0,
+                label_index: 0,
+                span,
+                ..
+            } if span == Span::new(1, 2)
+        ));
+    }
 }

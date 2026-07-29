@@ -8,8 +8,10 @@
 mod frontend;
 
 pub use frontend::{
-    Allocator, DiagnosticLabel, DiagnosticStage, FrontendDiagnostic, FrontendError,
-    FrontendOptions, ParseMode, Program, Span, parse, with_parsed_program,
+    Allocator, DiagnosticLabel, DiagnosticStage, FrontendDiagnostic, FrontendDiagnosticCode,
+    FrontendError, FrontendOptions, FrontendSourceError, ParseMode, Program,
+    RegisteredFrontendDiagnostics, RegisteredFrontendError, Span, parse, with_parsed_program,
+    with_registered_program,
 };
 
 /// The official `QuickJS` release whose behavior this port targets.
