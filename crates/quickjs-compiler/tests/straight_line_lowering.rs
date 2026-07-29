@@ -406,9 +406,9 @@ fn primitive_literal_forms_do_not_require_a_constant_pool() {
 fn unsupported_expression_families_fail_closed_at_the_exact_span() {
     let cases = [
         (
-            "function f(a){ return a && a; }",
+            "function f(a){ return a.value; }",
             UnsupportedLeafFeature::UnsupportedExpression,
-            "a && a",
+            "a.value",
         ),
         (
             "function f(a){ return a(); }",

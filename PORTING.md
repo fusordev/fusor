@@ -141,6 +141,15 @@ A milestone is complete only when all of its checked items pass in CI.
         work list and validates the whole body before emitting bytes; atom,
         constant, and closure pools remain fail-closed until their owned
         records exist.
+  - [x] Add compiler-owned control flow without recursion guards: provenance-
+        checked symbolic labels, duplicate/unbound/end-target rejection,
+        shortest-upward QuickJS-width branch relaxation with bounded
+        instruction visits, relocated source PCs, and a compiler verifier
+        entry that derives the exact reachable stack maximum, validates joins,
+        and rejects residual values at reachable exits. Conditional
+        expressions and value-preserving `&&`/`||`/`??` lower iteratively,
+        including shared natural left-chain joins and whole-path fail-closed
+        validation.
 - [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
 - [ ] Deterministic debug/line tables.
 

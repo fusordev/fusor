@@ -90,17 +90,31 @@ source identifier named `_default_` cannot collide with it.
 identity from names or spans and never treats a unit-global `BindingId` as an
 argument or local slot. The first end-to-end ordinary leaf-function family is
 Script-only and accepts function declarations and anonymous `function`
-expressions. Its pool-free straight-line slice handles simple
+expressions. Its pool-free body slice handles simple
 `var`/`let`/`const` declarations, TDZ setup, immediate Boolean/null/int32 and
 compact `BigInt` values, the empty string, resolved argument/local reads, unary
-and binary operators, sequence and expression statements, and explicit or
-implicit returns. It lowers
-expressions with an iterative work list, validates the complete selected body
-into typed pseudo-instructions before byte emission, assigns typed frame
-slots, emits final QuickJS opcodes with owned PC-to-source spans, and
-immediately produces a non-executable `VerifiedControlFlow` certificate.
-Constants, atoms, and closures stay rejected until the compiled artifact owns
-their real pools.
+and binary operators, short-circuit `&&`/`||`/`??`, conditional expressions,
+sequence and expression statements, and explicit or implicit returns. It
+lowers expressions with an iterative work list, validates the complete
+selected body into typed pseudo-instructions before byte emission, assigns
+typed frame slots, and immediately produces a non-executable
+`VerifiedControlFlow` certificate. Constants, atoms, and closures stay rejected
+until the compiled artifact owns their real pools.
+
+`BytecodeAssembler` keeps symbolic label handles provenance-bound to one
+assembler through immutable `Arc` identity. Labels never enter final operands.
+After whole-body planning, the assembler rejects foreign, duplicate, unbound,
+or end-of-stream targets, starts branches at their shortest forms, and
+monotonically widens conditionals to 8/32-bit and gotos to 8/16/32-bit
+displacements using the QuickJS `opcode_pc + 1` base. This computes the least
+valid fixed point even when two branch widths mutually enable their short
+forms. Planned instructions and per-pass relaxation visits are bounded before
+the assembler encodes once through `BytecodeBuilder`. It returns the relocated
+PC of every instruction so source entries are built only after branch widths
+are final. The compiler verifier entry independently derives reachable stack
+maxima and equal-depth joins and requires reachable terminals to empty the
+ordinary value stack; the serialized-bytecode entry separately retains its
+exact stored-versus-computed stack-size comparison and QuickJS exit semantics.
 
 Module functions, object methods/accessors, and named function expressions fail
 closed until their distinct surrounding-storage, header, and self-binding
@@ -163,6 +177,9 @@ function-kind compatibility, and reachable ordinary-value stack heights.
 Opcodes that require typed constants, raw function slots, handlers, finally
 return addresses, iterator markers, or packed stack offsets fail closed. The VM
 boundary continues to require the future whole-function `VerifiedBytecode`.
+The symbolic assembler chooses the componentwise shortest valid final branch
+layout. This can differ from a conservative QuickJS peephole boundary while
+preserving the same signed displacement rules and JavaScript behavior.
 
 The complete trust boundary, typed abstract stack, control-flow rules,
 resource limits, and acceptance suite are normative in

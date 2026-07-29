@@ -3,18 +3,19 @@ use std::{error::Error, fmt, sync::Arc};
 use oxc_ast::{
     AstKind,
     ast::{
-        BindingPattern, Expression, Function, FunctionBody, FunctionType, PropertyKind,
-        SequenceExpression, Statement, UnaryExpression, VariableDeclaration,
-        VariableDeclarationKind,
+        BindingPattern, ConditionalExpression, Expression, Function, FunctionBody, FunctionType,
+        LogicalExpression, PropertyKind, SequenceExpression, Statement, UnaryExpression,
+        VariableDeclaration, VariableDeclarationKind,
     },
 };
 use oxc_semantic::{ReferenceId, SymbolId};
 use oxc_span::GetSpan;
-use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
+use oxc_syntax::operator::{BinaryOperator, LogicalOperator, UnaryOperator};
 use quickjs_bytecode::{
-    BytecodeBuilder, BytecodePc, EncodeError, FinalOpcode, FunctionIndexDomains, Instruction,
-    Operands, StackEffectError, UnverifiedFunctionBody, UnverifiedFunctionHeader,
-    VerificationError, VerificationLimits, VerifiedControlFlow, verify_control_flow,
+    AssemblerError, AssemblerLabel, AssemblerLimits, BranchKind, BytecodeAssembler, BytecodePc,
+    EncodeError, FinalOpcode, FunctionIndexDomains, Operands, UnverifiedCompilerFunctionBody,
+    UnverifiedFunctionHeader, VerificationError, VerificationLimits, VerifiedControlFlow,
+    verify_compiler_control_flow,
 };
 use quickjs_frontend::{ParsedUnit, Span};
 
@@ -79,7 +80,7 @@ impl SourceInstruction {
     }
 }
 
-/// Owned output from the validated ordinary leaf-function lowering slice.
+/// Owned output from the validated ordinary leaf-function lowering family.
 ///
 /// This artifact is deliberately not execution authority. Its control-flow
 /// certificate still requires the future whole-function verifier.
@@ -214,48 +215,38 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     /// Lowers one validated ordinary leaf-function family to final bytecode.
     ///
-    /// The accepted Script-only family is straight-line and pool-free. It
-    /// supports simple local declarations, immediate primitive values,
-    /// resolved argument/local reads, unary and binary operators, expression
-    /// statements, and a terminal or implicit return. The entire function is
-    /// converted to typed pseudo-instructions before any byte is emitted.
+    /// The accepted Script-only family is pool-free. It supports simple local
+    /// declarations, immediate primitive values, resolved argument/local
+    /// reads, value operators including short-circuit and conditional
+    /// expressions, expression statements, and a terminal or implicit return.
+    /// The entire function is converted to typed symbolic instructions before
+    /// branch relaxation emits any bytes.
     ///
     /// # Errors
     ///
     /// Rejects foreign executable selections, unsupported source structure,
-    /// inconsistent semantic identities, bytecode encoding failures, and
-    /// verifier failures.
+    /// inconsistent semantic identities, assembler resource or encoding
+    /// failures, and verifier failures.
     pub fn compile_leaf(
         &self,
         selection: &CompilationExecutable,
         limits: VerificationLimits,
     ) -> Result<CompiledLeafFunction, LeafCompilationError> {
         let executable = self.resolve_selection(selection)?;
-        let validated = self.validate_leaf(executable)?;
-        let mut emitter = StraightLineEmitter::new(limits.max_bytecode_bytes_per_function());
-
-        for instruction in &validated.instructions {
-            emitter.emit(instruction.opcode, instruction.operands, instruction.span)?;
-        }
-        if emitter.depth != 0 {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "ordinary leaf returns with an empty operand stack",
-                span: validated
-                    .instructions
-                    .last()
-                    .map(|instruction| instruction.span),
-            });
-        }
-
-        let (bytecode, source_instructions, expected_stack_size) = emitter.finish();
-        let domains =
-            FunctionIndexDomains::new(0, 0, validated.argument_count, validated.local_count, 0);
-        let header = UnverifiedFunctionHeader::stripped_ordinary_source_function(
-            validated.strict,
-            validated.argument_count,
-        );
-        let control_flow = verify_control_flow(
-            UnverifiedFunctionBody::new(bytecode, expected_stack_size, domains, header),
+        let validated = self.validate_leaf(executable, limits)?;
+        let ValidatedLeaf {
+            strict,
+            argument_count,
+            local_count,
+            locals,
+            flow,
+        } = validated;
+        let (bytecode, source_instructions) = flow.finish()?;
+        let domains = FunctionIndexDomains::new(0, 0, argument_count, local_count, 0);
+        let header =
+            UnverifiedFunctionHeader::stripped_ordinary_source_function(strict, argument_count);
+        let control_flow = verify_compiler_control_flow(
+            UnverifiedCompilerFunctionBody::new(bytecode, domains, header),
             limits,
         )
         .map_err(|source| LeafCompilationError::BytecodeVerification { source })?;
@@ -264,7 +255,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             executable,
             storage_plan: Arc::clone(&self.planned.plan),
             source_text: Arc::clone(&self.source_text),
-            locals: validated.locals.into(),
+            locals: locals.into(),
             source_instructions: source_instructions.into(),
             control_flow: Arc::new(control_flow),
         })
@@ -295,6 +286,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     fn validate_leaf(
         &self,
         executable_id: ExecutableId,
+        limits: VerificationLimits,
     ) -> Result<ValidatedLeaf, LeafCompilationError> {
         let (executable, function) = self.selected_ordinary_leaf(executable_id)?;
         let layout = FrameLayout::new(&self.planned.plan, executable_id)?;
@@ -305,17 +297,17 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 feature: UnsupportedLeafFeature::UnsupportedBody,
                 span: function.span,
             })?;
-        let mut instructions = Vec::new();
+        let mut flow = PlannedControlFlow::new(limits);
         for local in layout.locals.iter().rev() {
             if local.has_temporal_dead_zone {
-                instructions.push(PlannedInstruction::new(
+                flow.emit(PlannedInstruction::new(
                     FinalOpcode::SetLocUninitialized,
                     Operands::Loc(local.slot.index()),
                     local.declaration_span,
-                ));
+                ))?;
             }
         }
-        self.validate_body(body, &layout, &mut instructions)?;
+        self.validate_body(body, &layout, &mut flow)?;
 
         Ok(ValidatedLeaf {
             strict: executable.is_strict(),
@@ -329,7 +321,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     slot: local.slot,
                 })
                 .collect(),
-            instructions,
+            flow,
         })
     }
 
@@ -337,7 +329,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         &self,
         body: &FunctionBody<'arena>,
         layout: &FrameLayout,
-        instructions: &mut Vec<PlannedInstruction>,
+        flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let mut terminated = false;
         for statement in &body.statements {
@@ -346,31 +338,31 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
             match statement {
                 Statement::VariableDeclaration(declaration) => {
-                    self.validate_declaration(declaration, layout, instructions)?;
+                    self.validate_declaration(declaration, layout, flow)?;
                 }
                 Statement::ExpressionStatement(statement) => {
-                    self.plan_expression(&statement.expression, layout, instructions)?;
-                    instructions.push(PlannedInstruction::new(
+                    self.plan_expression(&statement.expression, layout, flow)?;
+                    flow.emit(PlannedInstruction::new(
                         FinalOpcode::Drop,
                         Operands::None,
                         statement.expression.span(),
-                    ));
+                    ))?;
                 }
                 Statement::EmptyStatement(_) => {}
                 Statement::ReturnStatement(statement) => {
                     if let Some(argument) = &statement.argument {
-                        self.plan_expression(argument, layout, instructions)?;
-                        instructions.push(PlannedInstruction::new(
+                        self.plan_expression(argument, layout, flow)?;
+                        flow.emit(PlannedInstruction::new(
                             FinalOpcode::Return,
                             Operands::None,
                             statement.span,
-                        ));
+                        ))?;
                     } else {
-                        instructions.push(PlannedInstruction::new(
+                        flow.emit(PlannedInstruction::new(
                             FinalOpcode::ReturnUndef,
                             Operands::None,
                             statement.span,
-                        ));
+                        ))?;
                     }
                     terminated = true;
                 }
@@ -380,11 +372,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
         }
         if !terminated {
-            instructions.push(PlannedInstruction::new(
+            flow.emit(PlannedInstruction::new(
                 FinalOpcode::ReturnUndef,
                 Operands::None,
                 body.span,
-            ));
+            ))?;
         }
         Ok(())
     }
@@ -393,7 +385,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         &self,
         declaration: &VariableDeclaration<'arena>,
         layout: &FrameLayout,
-        instructions: &mut Vec<PlannedInstruction>,
+        flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         if declaration.declare
             || !matches!(
@@ -433,16 +425,16 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
             match &declarator.init {
                 Some(initializer) => {
-                    self.plan_expression(initializer, layout, instructions)?;
-                    instructions.push(plan_put_slot(frame_slot, identifier.span));
+                    self.plan_expression(initializer, layout, flow)?;
+                    flow.emit(plan_put_slot(frame_slot, identifier.span))?;
                 }
                 None if declaration.kind == VariableDeclarationKind::Let => {
-                    instructions.push(PlannedInstruction::new(
+                    flow.emit(PlannedInstruction::new(
                         FinalOpcode::Undefined,
                         Operands::None,
                         identifier.span,
-                    ));
-                    instructions.push(plan_put_slot(frame_slot, identifier.span));
+                    ))?;
+                    flow.emit(plan_put_slot(frame_slot, identifier.span))?;
                 }
                 None if declaration.kind == VariableDeclarationKind::Var => {}
                 None => {
@@ -500,15 +492,19 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         &self,
         expression: &'expression Expression<'arena>,
         layout: &FrameLayout,
-        instructions: &mut Vec<PlannedInstruction>,
+        flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let mut work = vec![ExpressionWork::Visit(expression)];
         while let Some(task) = work.pop() {
             match task {
-                ExpressionWork::Emit(instruction) => instructions.push(instruction),
+                ExpressionWork::Emit(instruction) => flow.emit(instruction)?,
+                ExpressionWork::Branch { kind, target, span } => {
+                    flow.branch(kind, &target, span)?;
+                }
+                ExpressionWork::Bind(label) => flow.bind(&label)?,
                 ExpressionWork::Visit(expression) => {
                     if let Some(literal) = plan_literal(expression) {
-                        instructions.push(literal?);
+                        flow.emit(literal?)?;
                         continue;
                     }
                     match expression {
@@ -522,14 +518,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                                         feature: UnsupportedLeafFeature::UnsupportedBinding,
                                         span: identifier.span,
                                     })?;
-                            instructions.push(self.plan_read_slot(
+                            flow.emit(self.plan_read_slot(
                                 binding,
                                 frame_slot,
                                 identifier.span,
-                            )?);
+                            )?)?;
                         }
                         Expression::UnaryExpression(unary) => {
-                            Self::plan_unary_expression(unary, &mut work, instructions)?;
+                            Self::plan_unary_expression(unary, &mut work, flow)?;
                         }
                         Expression::BinaryExpression(binary) => {
                             work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -545,6 +541,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         }
                         Expression::SequenceExpression(sequence) => {
                             Self::plan_sequence_expression(sequence, &mut work)?;
+                        }
+                        Expression::ConditionalExpression(conditional) => {
+                            Self::plan_conditional_expression(conditional, flow, &mut work)?;
+                        }
+                        Expression::LogicalExpression(logical) => {
+                            Self::plan_logical_expression(logical, flow, &mut work)?;
                         }
                         _ => {
                             return unsupported(
@@ -562,14 +564,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     fn plan_unary_expression<'expression>(
         unary: &'expression UnaryExpression<'arena>,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
-        instructions: &mut Vec<PlannedInstruction>,
+        flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         if unary.operator == UnaryOperator::UnaryNegation
             && let Expression::NumericLiteral(literal) = &unary.argument
             && literal.value != 0.0
             && let Some(integer) = exact_negated_i32(literal.value)
         {
-            instructions.push(plan_push_integer(integer, unary.span));
+            flow.emit(plan_push_integer(integer, unary.span))?;
             return Ok(());
         }
         match unary.operator {
@@ -607,6 +609,81 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             UnaryOperator::Delete => {
                 return unsupported(UnsupportedLeafFeature::UnsupportedExpression, unary.span);
             }
+        }
+        Ok(())
+    }
+
+    fn plan_conditional_expression<'expression>(
+        conditional: &'expression ConditionalExpression<'arena>,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let alternate = flow.new_label(conditional.alternate.span())?;
+        let done = flow.new_label(conditional.span)?;
+
+        work.push(ExpressionWork::Bind(done.clone()));
+        work.push(ExpressionWork::Visit(&conditional.alternate));
+        work.push(ExpressionWork::Bind(alternate.clone()));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span: conditional.span,
+        });
+        work.push(ExpressionWork::Visit(&conditional.consequent));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::IfFalse,
+            target: alternate,
+            span: conditional.test.span(),
+        });
+        work.push(ExpressionWork::Visit(&conditional.test));
+        Ok(())
+    }
+
+    fn plan_logical_expression<'expression>(
+        logical: &'expression LogicalExpression<'arena>,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let done = flow.new_label(logical.span)?;
+        let mut operands = same_operator_left_chain(logical);
+        let final_operand = operands
+            .pop()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc logical expression has two operands",
+                span: Some(logical.span),
+            })?;
+        let branch_kind = match logical.operator {
+            LogicalOperator::Or => BranchKind::IfTrue,
+            LogicalOperator::And | LogicalOperator::Coalesce => BranchKind::IfFalse,
+        };
+
+        work.push(ExpressionWork::Bind(done.clone()));
+        work.push(ExpressionWork::Visit(final_operand));
+        for operand in operands.into_iter().rev() {
+            let span = operand.span();
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                span,
+            )));
+            work.push(ExpressionWork::Branch {
+                kind: branch_kind,
+                target: done.clone(),
+                span,
+            });
+            if logical.operator == LogicalOperator::Coalesce {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::IsUndefinedOrNull,
+                    Operands::None,
+                    span,
+                )));
+            }
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Dup,
+                Operands::None,
+                span,
+            )));
+            work.push(ExpressionWork::Visit(operand));
         }
         Ok(())
     }
@@ -862,6 +939,22 @@ fn is_object_method_or_accessor(unit: &ParsedUnit<'_, '_>, node_id: oxc_semantic
         && (property.method || !matches!(property.kind, PropertyKind::Init))
 }
 
+fn same_operator_left_chain<'expression, 'arena>(
+    logical: &'expression LogicalExpression<'arena>,
+) -> Vec<&'expression Expression<'arena>> {
+    let mut reversed = vec![&logical.right];
+    let mut left = &logical.left;
+    while let Expression::LogicalExpression(inner) = left
+        && inner.operator == logical.operator
+    {
+        reversed.push(&inner.right);
+        left = &inner.left;
+    }
+    reversed.push(left);
+    reversed.reverse();
+    reversed
+}
+
 #[derive(Clone, Copy)]
 struct PlannedInstruction {
     opcode: FinalOpcode,
@@ -882,6 +975,12 @@ impl PlannedInstruction {
 enum ExpressionWork<'expression, 'arena> {
     Visit(&'expression Expression<'arena>),
     Emit(PlannedInstruction),
+    Branch {
+        kind: BranchKind,
+        target: AssemblerLabel,
+        span: Span,
+    },
+    Bind(AssemblerLabel),
 }
 
 #[derive(Clone, Copy)]
@@ -987,78 +1086,105 @@ struct ValidatedLeaf {
     argument_count: u32,
     local_count: u32,
     locals: Vec<LoweredLocal>,
-    instructions: Vec<PlannedInstruction>,
+    flow: PlannedControlFlow,
 }
 
-struct StraightLineEmitter {
-    builder: BytecodeBuilder,
-    source_instructions: Vec<SourceInstruction>,
-    depth: u32,
-    max_depth: u32,
+struct PlannedControlFlow {
+    assembler: BytecodeAssembler,
+    instruction_spans: Vec<Span>,
 }
 
-impl StraightLineEmitter {
-    fn new(byte_limit: u32) -> Self {
+impl PlannedControlFlow {
+    fn new(limits: VerificationLimits) -> Self {
+        let assembler_limits = AssemblerLimits::new(
+            limits.max_bytecode_bytes_per_function(),
+            limits.max_instructions_per_function(),
+            limits.max_transfer_evaluations(),
+        );
         Self {
-            builder: BytecodeBuilder::with_byte_limit(byte_limit),
-            source_instructions: Vec::new(),
-            depth: 0,
-            max_depth: 0,
+            assembler: BytecodeAssembler::with_limits(assembler_limits),
+            instruction_spans: Vec::new(),
         }
     }
 
-    fn emit(
-        &mut self,
-        opcode: FinalOpcode,
-        operands: Operands,
-        span: Span,
-    ) -> Result<(), LeafCompilationError> {
-        let pc = self.builder.next_pc();
-        let instruction = Instruction::new(opcode, operands).map_err(|source| {
-            LeafCompilationError::BytecodeEncoding {
-                span,
-                source: EncodeError::InvalidInstruction { pc, source },
-            }
-        })?;
-        let effect = instruction
-            .stack_effect()
-            .map_err(|source| LeafCompilationError::BytecodeStackEffect { span, source })?;
-        if self.depth < effect.pops() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "compiler-emitted straight-line stack does not underflow",
-                span: Some(span),
-            });
-        }
-        let output_depth = self
-            .depth
-            .checked_sub(effect.pops())
-            .and_then(|depth| depth.checked_add(effect.pushes()))
-            .ok_or(LeafCompilationError::CapacityExceeded {
-                domain: "operand stack depth",
+    fn emit(&mut self, instruction: PlannedInstruction) -> Result<(), LeafCompilationError> {
+        self.assembler
+            .push(instruction.opcode, instruction.operands)
+            .map_err(|source| LeafCompilationError::BytecodeAssembly {
+                span: Some(instruction.span),
+                source,
             })?;
-        let emitted_pc = self
-            .builder
-            .push_instruction(instruction)
-            .map_err(|source| LeafCompilationError::BytecodeEncoding { span, source })?;
-        if emitted_pc != pc {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "bytecode builder returns its prior next position",
-                span: Some(span),
-            });
-        }
-        self.depth = output_depth;
-        self.max_depth = self.max_depth.max(output_depth);
-        self.source_instructions
-            .push(SourceInstruction { pc, span });
+        self.instruction_spans.push(instruction.span);
         Ok(())
     }
 
-    fn finish(self) -> (Vec<u8>, Vec<SourceInstruction>, u32) {
-        (
-            self.builder.into_bytes(),
-            self.source_instructions,
-            self.max_depth,
-        )
+    fn new_label(&mut self, span: Span) -> Result<AssemblerLabel, LeafCompilationError> {
+        self.assembler
+            .new_label()
+            .map_err(|source| LeafCompilationError::BytecodeAssembly {
+                span: Some(span),
+                source,
+            })
+    }
+
+    fn branch(
+        &mut self,
+        kind: BranchKind,
+        target: &AssemblerLabel,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        self.assembler.branch(kind, target).map_err(|source| {
+            LeafCompilationError::BytecodeAssembly {
+                span: Some(span),
+                source,
+            }
+        })?;
+        self.instruction_spans.push(span);
+        Ok(())
+    }
+
+    fn bind(&mut self, label: &AssemblerLabel) -> Result<(), LeafCompilationError> {
+        self.assembler
+            .bind(label)
+            .map_err(|source| LeafCompilationError::BytecodeAssembly { span: None, source })
+    }
+
+    fn finish(self) -> Result<(Vec<u8>, Vec<SourceInstruction>), LeafCompilationError> {
+        let spans = self.instruction_spans;
+        let assembled = match self.assembler.finish() {
+            Ok(assembled) => assembled,
+            Err(AssemblerError::Encoding {
+                instruction_index,
+                source,
+            }) => {
+                let span = spans.get(instruction_index as usize).copied().ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "assembler encoding failure indexes a planned source span",
+                        span: None,
+                    },
+                )?;
+                return Err(LeafCompilationError::BytecodeEncoding { span, source });
+            }
+            Err(source) => {
+                let span = source
+                    .instruction_index()
+                    .and_then(|index| spans.get(index as usize).copied());
+                return Err(LeafCompilationError::BytecodeAssembly { span, source });
+            }
+        };
+        let (bytecode, instruction_pcs) = assembled.into_parts();
+        if instruction_pcs.len() != spans.len() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "assembler returns one final PC per planned instruction",
+                span: spans.last().copied(),
+            });
+        }
+        let source_instructions = instruction_pcs
+            .into_iter()
+            .zip(spans)
+            .map(|(pc, span)| SourceInstruction { pc, span })
+            .collect();
+        Ok((bytecode, source_instructions))
     }
 }
 
@@ -1267,11 +1393,11 @@ pub enum UnsupportedLeafFeature {
     NestedExecutable,
     /// Module-owned storage is outside this Script-only lowering slice.
     UnsupportedCompilationUnit,
-    /// A statement sequence is outside the validated straight-line family.
+    /// A statement requires unsupported control flow or scope entry behavior.
     UnsupportedBody,
     /// A declaration is not a simple `var`, `let`, or `const` binding.
     UnsupportedDeclaration,
-    /// An expression requires control flow, calls, properties, or another
+    /// An expression requires calls, properties, mutation, or another
     /// unsupported semantic family.
     UnsupportedExpression,
     /// A literal requires a constant, atom, `BigInt`, or `RegExp` pool entry.
@@ -1323,12 +1449,12 @@ pub enum LeafCompilationError {
         /// Exact encoder failure.
         source: EncodeError,
     },
-    /// Static opcode metadata could not produce a complete stack effect.
-    BytecodeStackEffect {
-        /// Source span responsible for the instruction.
-        span: Span,
-        /// Exact stack-effect failure.
-        source: StackEffectError,
+    /// Symbolic labels or branch relaxation could not produce final bytecode.
+    BytecodeAssembly {
+        /// Related source span, when the failure belongs to one instruction.
+        span: Option<Span>,
+        /// Exact assembler failure.
+        source: AssemblerError,
     },
     /// The emitted body failed staged control-flow verification.
     BytecodeVerification {
@@ -1365,11 +1491,12 @@ impl fmt::Display for LeafCompilationError {
             Self::BytecodeEncoding { span, source } => {
                 write!(formatter, "bytecode encoding failed at {span:?}: {source}")
             }
-            Self::BytecodeStackEffect { span, source } => {
-                write!(
-                    formatter,
-                    "bytecode stack effect failed at {span:?}: {source}"
-                )
+            Self::BytecodeAssembly { span, source } => {
+                write!(formatter, "bytecode assembly failed")?;
+                if let Some(span) = span {
+                    write!(formatter, " at {span:?}")?;
+                }
+                write!(formatter, ": {source}")
             }
             Self::BytecodeVerification { source } => {
                 write!(formatter, "bytecode verification failed: {source}")
@@ -1382,7 +1509,7 @@ impl Error for LeafCompilationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::BytecodeEncoding { source, .. } => Some(source),
-            Self::BytecodeStackEffect { source, .. } => Some(source),
+            Self::BytecodeAssembly { source, .. } => Some(source),
             Self::BytecodeVerification { source } => Some(source),
             Self::ForeignExecutable { .. }
             | Self::InvalidExecutable { .. }

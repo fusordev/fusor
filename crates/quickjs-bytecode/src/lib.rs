@@ -17,11 +17,16 @@
 
 use std::{error::Error, fmt};
 
+mod assembler;
 mod codec;
 mod disassembly;
 mod function;
 mod verifier;
 
+pub use assembler::{
+    AssembledBytecode, AssemblerError, AssemblerLabel, AssemblerLimits, AssemblerResource,
+    BranchKind, BytecodeAssembler,
+};
 pub use codec::{
     AtomPoolIndex, BytecodeBuilder, BytecodePc, DecodeError, DecodedInstruction, EncodeError,
     EncodedOperands, Instruction, InstructionDecoder, InstructionError, MAX_ENCODED_OPERAND_BYTES,
@@ -37,9 +42,10 @@ pub use function::{
 pub use verifier::{
     ControlFlowEdge, FunctionCountDomain, FunctionIndexDomains, FunctionPath, InstructionIndex,
     InvalidControlFlowTargetReason, MAX_FUNCTION_INDEX_ENTRIES, MAX_OPERAND_STACK_DEPTH,
-    OperandIndexDomain, SecondaryOperandField, UnsupportedVerifierFeature, UnverifiedFunctionBody,
-    VerificationError, VerificationErrorKind, VerificationLimits, VerificationResource,
-    VerifiedControlFlow, VerifiedInstruction, VerifiedSuccessorKind, VerifiedSuccessors,
+    OperandIndexDomain, SecondaryOperandField, UnsupportedVerifierFeature,
+    UnverifiedCompilerFunctionBody, UnverifiedFunctionBody, VerificationError,
+    VerificationErrorKind, VerificationLimits, VerificationResource, VerifiedControlFlow,
+    VerifiedInstruction, VerifiedSuccessorKind, VerifiedSuccessors, verify_compiler_control_flow,
     verify_control_flow,
 };
 

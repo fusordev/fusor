@@ -60,6 +60,18 @@ addresses, or packed stack offsets. Its opaque certificate has no execution
 API and cannot cross the VM trust boundary. The complete typed-stack and
 whole-function rules below remain mandatory before `VerifiedBytecode` exists.
 
+Serialized bodies provide a stored maximum stack size, and
+`verify_control_flow` requires it to equal the recomputed reachable maximum.
+Compiler-generated bodies have no serialized maximum yet, so the distinct
+`verify_compiler_control_flow` entry recomputes and retains that value without
+a comparison. It additionally requires every reachable terminal to leave the
+ordinary value stack empty, catching compiler bugs that strand values at
+`return` or `return_undef`. Serialized bodies retain QuickJS's stored-body
+semantics and do not impose that compiler-only invariant. Both entries
+otherwise share the same complete predecode, metadata, target, successor,
+reachability, join-depth, and resource checks; neither returns execution
+authority.
+
 ## Complete predecode and instruction boundaries
 
 **Upstream.** The final opcode table supplies fixed instruction sizes and fixed
@@ -526,6 +538,7 @@ start with this **provisional** default profile:
 | atoms in the graph | 1,048,576 |
 | aggregate constant/atom payload bytes | 64 MiB |
 | `gosub` sites in one function | 65,534 |
+| compiler branch-relaxation instruction visits | 33,554,432 |
 | total transfer-function evaluations | 33,554,432 |
 
 These values are **provisional Rust hardening policy**, not upstream QuickJS
@@ -534,7 +547,10 @@ stabilized, corpus measurements must record the largest per-function and
 aggregate values for the pinned upstream suites, Test262 baseline, generated
 stress fixtures, and representative application bundles. Ratified defaults
 must leave documented headroom while retaining bounded worst-case memory and
-transfer work; any changed numbers update this table and its limit tests.
+transfer work; any changed numbers update this table and its limit tests. The
+current compiler applies the transfer-evaluation number independently as its
+pre-verification branch-relaxation visit limit, so both assembly and verifier
+graph work are bounded without sharing a mutable counter.
 
 A caller may lower the current profile. Raising it is available only through
 an explicit trusted configuration, never as an implicit retry after
