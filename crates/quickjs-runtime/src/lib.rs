@@ -11,8 +11,10 @@
 
 #![forbid(unsafe_code)]
 
+mod array_index;
 mod number;
 mod string;
 
+pub use array_index::{ArrayIndex, MAX_ARRAY_INDEX};
 pub use number::JsNumber;
 pub use string::{CodeUnits, JsString, JsStringError, MAX_STRING_CODE_UNITS};
