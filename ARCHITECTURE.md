@@ -75,6 +75,10 @@ Only `VerifiedBytecode` may execute. Verification checks:
 Malformed serialized bytecode returns a structured verifier error. It never
 reaches unchecked indexing in the VM.
 
+The complete trust boundary, typed abstract stack, control-flow rules,
+resource limits, and acceptance suite are normative in
+[BYTECODE_VERIFIER.md](BYTECODE_VERIFIER.md).
+
 ## Runtime ownership
 
 A runtime owns one object heap. Contexts/realms inside that runtime may share
