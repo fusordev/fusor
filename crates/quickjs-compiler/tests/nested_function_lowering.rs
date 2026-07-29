@@ -1,11 +1,11 @@
 use quickjs_bytecode::{
-    CompilerCapturedBinding, CompilerClosureSource as VerifiedClosureSource, CompilerConstantKind,
-    FinalOpcode, FunctionGraphVerificationErrorKind, FunctionGraphVerificationLimits,
-    FunctionTemplateId, Operands, VerificationLimits,
+    CompilerCapturedBinding, CompilerClosureSource as VerifiedClosureSource, CompilerConstant,
+    CompilerConstantKind, FinalOpcode, FunctionGraphVerificationErrorKind,
+    FunctionGraphVerificationLimits, FunctionTemplateId, Operands, VerificationLimits,
 };
 use quickjs_compiler::{
-    CompilationContext, CompiledClosureSource, CompiledFunction, CompiledFunctionTree,
-    LeafCompilationError, UnsupportedLeafFeature,
+    CompilationContext, CompiledClosureSource, CompiledConstant, CompiledFunction,
+    CompiledFunctionTree, ExecutableId, LeafCompilationError, UnsupportedLeafFeature,
 };
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
@@ -39,12 +39,22 @@ fn opcodes(function: &CompiledFunction) -> Vec<(FinalOpcode, Operands)> {
         .collect()
 }
 
+fn function_executable(constant: CompiledConstant) -> ExecutableId {
+    constant
+        .function()
+        .expect("expected a function-template constant")
+        .executable()
+}
+
 fn assert_three_level_function_graph(tree: &CompiledFunctionTree) {
     let graph = tree.function_graph();
     assert_eq!(graph.root_id(), FunctionTemplateId::new(0));
     assert_ne!(tree.root_executable().index(), 0);
     assert_eq!(graph.functions().len(), tree.functions().len());
-    assert_eq!(graph.root().constants(), [FunctionTemplateId::new(1)]);
+    assert_eq!(
+        graph.root().constants(),
+        [CompilerConstant::Function(FunctionTemplateId::new(1))]
+    );
     assert_eq!(
         graph
             .function(FunctionTemplateId::new(1))
@@ -110,7 +120,7 @@ fn nested_function_constants_connect_forwarded_capture_cells() {
         [CompilerCapturedBinding::Argument(0)]
     );
 
-    let middle_id = outer.constants()[0].executable();
+    let middle_id = function_executable(outer.constants()[0]);
     let middle = tree.function(middle_id).expect("middle function");
     assert_eq!(
         tree.function_by_template(FunctionTemplateId::new(1)),
@@ -131,7 +141,7 @@ fn nested_function_constants_connect_forwarded_capture_cells() {
         ]
     );
 
-    let inner_id = middle.constants()[0].executable();
+    let inner_id = function_executable(middle.constants()[0]);
     let inner = tree.function(inner_id).expect("inner function");
     assert!(inner.constants().is_empty());
     assert_eq!(inner.closure_variables().len(), 1);
@@ -173,7 +183,7 @@ fn public_tree_compilation_preserves_captured_classic_for_rotation() {
     assert_eq!(tree.functions().len(), 2);
     let outer = tree.root();
     let child = tree
-        .function(outer.constants()[0].executable())
+        .function(function_executable(outer.constants()[0]))
         .expect("loop closure child");
 
     let capture_layout = outer
@@ -205,7 +215,7 @@ fn public_tree_compilation_preserves_captured_classic_for_rotation() {
 }
 
 #[test]
-fn compile_leaf_remains_an_explicit_pool_free_boundary() {
+fn compile_leaf_remains_an_explicit_nested_function_free_boundary() {
     let error = with_parsed_program(
         "function outer(){ return function(){ return 1; }; }",
         FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
@@ -286,7 +296,7 @@ fn owned_argument_and_local_cells_keep_distinct_parent_reference_indices() {
         ]
     );
     let child = tree
-        .function(outer.constants()[0].executable())
+        .function(function_executable(outer.constants()[0]))
         .expect("child function");
     assert_eq!(
         child
@@ -333,8 +343,8 @@ fn direct_child_constant_indices_cross_the_compact_boundary_exactly() {
         closure_instructions[256],
         (FinalOpcode::FClosure, Operands::Const(256))
     );
-    for constant in outer.constants() {
-        assert!(tree.function(constant.executable()).is_some());
+    for &constant in outer.constants() {
+        assert!(tree.function(function_executable(constant)).is_some());
     }
 }
 
@@ -533,8 +543,8 @@ fn duplicate_function_declarations_keep_all_children_but_instantiate_the_last() 
         })
         .collect::<Vec<_>>();
     assert_eq!(closure_operands, [Operands::Const8(1)]);
-    for constant in outer.constants() {
-        assert!(tree.function(constant.executable()).is_some());
+    for &constant in outer.constants() {
+        assert!(tree.function(function_executable(constant)).is_some());
     }
 }
 
@@ -572,7 +582,7 @@ fn strict_block_function_declarations_reinstantiate_on_loop_scope_entry() {
     );
     let outer = tree.root();
     let child = tree
-        .function(outer.constants()[0].executable())
+        .function(function_executable(outer.constants()[0]))
         .expect("block declaration child");
     assert_eq!(
         child.closure_variables()[0].source(),

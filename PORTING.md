@@ -149,14 +149,14 @@ A milestone is complete only when all of its checked items pass in CI.
         `set_loc_uninitialized; get_arg; put_loc; get_loc_check; return`
         family, track stack depth, and return only an owned non-executable
         `VerifiedControlFlow` certificate.
-  - [x] Expand that vertical to pool-free straight-line bodies: multiple
+  - [x] Establish the pool-free straight-line base: multiple
         simple `var`/`let`/`const` declarations, reverse-order TDZ setup,
         immediate Boolean/null/int32 and compact `BigInt` values, the empty
         string, exact argument/local reads and writes, all value-only unary and
         binary operators needing no pools, sequence/expression statements, and
         explicit or implicit returns. Expression lowering uses an iterative
-        work list and validates the whole body before emitting bytes; atom and
-        ordinary value pools remain fail-closed until their owned records
+        work list and validates the whole body before emitting bytes.
+        Atom-backed constants remain fail-closed until their owned records
         exist.
   - [x] Add compiler-owned control flow without recursion guards: provenance-
         checked symbolic labels, duplicate/unbound/end-target rejection,
@@ -199,9 +199,25 @@ A milestone is complete only when all of its checked items pass in CI.
         before user code with last-declaration-wins semantics, including
         argument redeclarations; strict block declarations instantiate on
         every scope entry. All compiler traversal uses explicit iterative work
-        stacks. Labeled control, `for-in`, `for-of`, inferred anonymous-function
-        names, ordinary value constants, and immutable-write throws remain
-        fail-closed.
+        stacks. Labeled control, `for-in`, `for-of`, inferred
+        anonymous-function names, atom-backed values, non-Number value
+        constants, and immutable-write throws remain fail-closed.
+  - [x] Add exact binary64 Number constants to the compiler-owned heterogeneous
+        pool. Number literals requiring pool storage and direct child templates
+        share one immutable `Arc`-backed source-order index namespace with no
+        deduplication. Both `push_const*` and `fclosure*` use compact indices
+        `0..=255` and full-width indices `>= 256`. The owned graph checks every
+        entry against the body-declared kind and charges every entry to
+        constant budgets, but only `Function` entries participate in
+        topology, depth, reachability, and closure-edge work. The compiler and
+        graph verifier use explicit work lists with no `recursion_guard`
+        dependency. `Binary64Constant` preserves all non-NaN binary64 bits and
+        canonicalizes NaN only for deterministic compiler artifacts; runtime
+        Number, `DataView`, and typed-array payload semantics remain separate.
+        Directly negated `2^31` is normalized to `push_i32(i32::MIN)` without
+        retaining an unused positive Number entry. Ownership and candidates
+        are precomputed in one semantic-node pass with per-owner compact lookup
+        tables rather than rescanning the graph for each function.
   - [x] Cross-check compiler function trees as bounded flat graphs:
         plan-global executable identities are explicitly remapped to dense
         template identities; aggregate body and capture-edge work is charged
@@ -210,8 +226,8 @@ A milestone is complete only when all of its checked items pass in CI.
         queues. The immutable `Arc<VerifiedCompilerFunctionGraph>` is retained
         with `CompiledFunctionTree`, while selected roots needing an omitted
         parent environment fail closed. This intermediate certificate is not
-        VM execution authority; runtime-visible metadata, actual value/atom
-        pools, and the complete typed-stack boundary remain pending.
+        VM execution authority; runtime-visible metadata, atom and non-Number
+        constant pools, and the complete typed-stack boundary remain pending.
 - [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
 - [ ] Deterministic debug/line tables.
 

@@ -417,11 +417,6 @@ fn unsupported_expression_families_fail_closed_at_the_exact_span() {
             "a()",
         ),
         (
-            "function f(){ return 1.5; }",
-            UnsupportedLeafFeature::UnsupportedLiteral,
-            "1.5",
-        ),
-        (
             "function f(){ return \"constant pool\"; }",
             UnsupportedLeafFeature::UnsupportedLiteral,
             "\"constant pool\"",

@@ -124,47 +124,63 @@ argument or local slot. The first end-to-end ordinary function-tree family is
 Script-only and accepts function declarations and anonymous `function`
 expressions. Each function body's value-producing slice handles simple
 `var`/`let`/`const` declarations, TDZ setup, immediate Boolean/null/int32 and
-compact `BigInt` values, the empty string, resolved argument/local reads, unary
-and binary operators, short-circuit `&&`/`||`/`??`, conditional expressions,
-sequence and expression statements, mutable identifier assignment and update,
-lexical blocks, `if`/`else`, `while`, `do`/`while`, classic `for`, unlabeled
-`break`/`continue`, and explicit or implicit returns. A deepest leaf may read
-or write argument/local cells forwarded through ancestor capture slots. It
-lowers expressions and statements with iterative work lists, validates the
-complete selected body into typed pseudo-instructions before byte emission,
-assigns typed frame and imported-capture slots, and immediately produces a
-non-executable `VerifiedControlFlow` certificate. Scope entry reads Oxc's
-creator `ScopeId` directly, checks its creator `NodeId`, instantiates body
-function declarations before user instructions, recreates block function
-declarations on every scope entry, and emits TDZ initialization only for
-ordinary lexical bindings owned by that exact scope. Duplicate body
-declarations retain every child template but only the last declaration
-initializes the shared argument/local slot. Scope exit and abrupt loop edges
-emit reverse-order `close_loc` for captured scoped locals; returns rely on
-whole-frame teardown. Classic `for` has one explicit loop-head scope and
-rotates its captured cells after initialization and on every natural or
-`continue` edge before update, without re-running TDZ initialization. All
-scheduling remains iterative and uses explicit work stacks; there is no
-recursion guard.
+compact `BigInt` values, the empty string, exact binary64 Number constants,
+resolved argument/local reads, unary and binary operators, short-circuit
+`&&`/`||`/`??`, conditional expressions, sequence and expression statements,
+mutable identifier assignment and update, lexical blocks, `if`/`else`,
+`while`, `do`/`while`, classic `for`, unlabeled `break`/`continue`, and
+explicit or implicit returns. A deepest leaf may read or write argument/local
+cells forwarded through ancestor capture slots. It lowers expressions and
+statements with iterative work lists, validates the complete selected body
+into typed pseudo-instructions before byte emission, assigns typed frame and
+imported-capture slots, and immediately produces a non-executable
+`VerifiedControlFlow` certificate. Scope entry reads Oxc's creator `ScopeId`
+directly, checks its creator `NodeId`, instantiates body function declarations
+before user instructions, recreates block function declarations on every
+scope entry, and emits TDZ initialization only for ordinary lexical bindings
+owned by that exact scope. Duplicate body declarations retain every child
+template but only the last declaration initializes the shared argument/local
+slot. Scope exit and abrupt loop edges emit reverse-order `close_loc` for
+captured scoped locals; returns rely on whole-frame teardown. Classic `for`
+has one explicit loop-head scope and rotates its captured cells after
+initialization and on every natural or `continue` edge before update, without
+re-running TDZ initialization. All scheduling remains iterative and uses
+explicit work stacks; there is no `recursion_guard` layer or dependency.
 
 `compile_tree` freezes the selected subtree as a flat immutable
 `CompiledFunctionTree` in executable preorder. Compilation is child-first, but
-uses no Rust call-stack recursion. Each parent's constant table contains its
-direct child templates in source order, and `fclosure8`/`fclosure` select the
-compact or full constant index encoding. Every child capture descriptor is
-normalized to either the immediate parent's own dense variable-reference cell
-or its imported closure environment. The compiler explicitly remaps
-plan-global executable identities into a dense flat graph and stores an
-`Arc<VerifiedCompilerFunctionGraph>` with the tree. Whole-graph verification
-preflights aggregate byte, instruction, constant, closure, and transfer-work
-budgets; checks every function-constant target, graph cycle, reachable node,
-nesting depth, and capture source; and bounds capture checks across shared
-parent edges. A selected nested root with imported cells fails closed until an
-explicit verified root environment exists. `compile_leaf` remains the explicit
-pool-free API and rejects a selection with children. Value and atom constants,
-raw class/function stack entries, inferred anonymous-function names, labeled
-control, `for-in`, and `for-of` stay rejected until their owned records and
-semantics exist.
+uses no Rust call-stack recursion. Each parent's immutable `Arc`-backed
+constant table is heterogeneous: Number literal occurrences requiring pool
+storage and direct child templates share one index namespace, remain in source
+order, and are not deduplicated. `push_const8` and `fclosure8` select indices
+`0..=255`; their full-width forms select indices `>= 256`.
+`Binary64Constant` preserves every non-NaN bit pattern, including subnormals,
+infinities, and signed zero.
+It canonicalizes NaN only as a deterministic compiler-artifact policy; it is
+not the representation contract for runtime Number values, `DataView`, or
+typed-array storage, whose payload semantics remain separate.
+Directly negated `2^31` is intentionally normalized to `push_i32(i32::MIN)`
+without retaining an unused positive Number entry.
+Nearest-executable ownership and all pool candidates are computed in one
+semantic-node pass. Each pool keeps only compact direct-child and Number-span
+lookup tables, so compiling a tree does not rescan the semantic graph for every
+function.
+
+Every child capture descriptor is normalized to either the immediate parent's
+own dense variable-reference cell or its imported closure environment. The
+compiler explicitly remaps plan-global executable identities into a dense
+flat graph and stores an `Arc<VerifiedCompilerFunctionGraph>` with the tree.
+Whole-graph verification preflights aggregate byte, instruction, constant,
+closure, and transfer-work budgets. Every heterogeneous constant entry counts
+toward pool and resource limits, while only `Function` entries form graph
+edges for target, cycle, reachability, nesting-depth, and capture-source
+checks. Capture work remains bounded across shared parent edges. A selected
+nested root with imported cells fails closed until an explicit verified root
+environment exists. `compile_leaf` remains the explicit
+nested-function-free API and rejects a selection with children. Atom and
+non-Number value constants, raw class/function stack entries, inferred
+anonymous-function names, labeled control, `for-in`, and `for-of` stay
+rejected until their owned records and semantics exist.
 
 `BytecodeAssembler` keeps symbolic label handles provenance-bound to one
 assembler through immutable `Arc` identity. Labels never enter final operands.
@@ -260,13 +276,14 @@ successors, suspension and return function-kind compatibility, and reachable
 ordinary-value stack heights. Compiler bodies may supply capture and
 constant-kind layouts for the narrow `close_loc`, `push_const*`, and
 `fclosure*` cases described above. `VerifiedCompilerFunctionGraph` additionally
-cross-checks the compiler's actual flat function targets, normalized capture
-edges, topology, and aggregate budgets without recursive traversal. Both
+cross-checks the compiler's actual heterogeneous Number/function pool, flat
+function targets, normalized capture edges, topology, and aggregate budgets
+with explicit work lists. Ordinary values never become topology edges. Both
 certificates remain non-executable. Serialized constant opcodes and opcodes
-requiring actual value/atom pools, raw function slots, complete runtime
-metadata, handlers, finally return addresses, iterator markers, or packed
-stack offsets fail closed. The VM boundary continues to require the future
-whole-function `VerifiedBytecode`.
+requiring atom pools, non-Number constants, raw function slots, complete
+runtime metadata, handlers, finally return addresses, iterator markers, or
+packed stack offsets fail closed. The VM boundary continues to require the
+future whole-function `VerifiedBytecode`.
 The symbolic assembler chooses the componentwise shortest valid final branch
 layout. This can differ from a conservative QuickJS peephole boundary while
 preserving the same signed displacement rules and JavaScript behavior.

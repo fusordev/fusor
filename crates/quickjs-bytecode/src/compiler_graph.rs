@@ -6,8 +6,8 @@
 //! source before producing [`VerifiedCompilerFunctionGraph`].
 //!
 //! This certificate remains compiler-facing and is deliberately not execution
-//! authority: runtime-visible names, binding policies, values, atoms, and
-//! exception/debug metadata are not represented yet.
+//! authority: runtime-visible names, binding policies, atom pools, non-Number
+//! values, and exception/debug metadata are not represented yet.
 
 use std::{
     collections::{HashSet, VecDeque},
@@ -30,6 +30,59 @@ const DEFAULT_MAX_GRAPH_CONSTANTS: u64 = 1_048_576;
 const DEFAULT_MAX_GRAPH_CLOSURE_VARIABLES: u64 = 1_048_576;
 const DEFAULT_MAX_GRAPH_CLOSURE_EDGE_EVALUATIONS: u64 = 33_554_432;
 const DEFAULT_MAX_GRAPH_TRANSFER_EVALUATIONS: u64 = 33_554_432;
+
+/// Exact binary64 payload for one compiler-owned Number constant.
+///
+/// Every non-NaN bit pattern is preserved, including signed zero,
+/// subnormals, and infinities. Compiler-owned NaN encodings are normalized to
+/// one deterministic quiet NaN. This is a compiler-artifact policy, not a
+/// general runtime Number, `DataView`, or typed-array storage representation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(transparent)]
+pub struct Binary64Constant(u64);
+
+impl Binary64Constant {
+    /// Canonical quiet-NaN bits retained by compiler constant pools.
+    pub const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
+
+    /// Creates an exact constant from a binary64 bit pattern.
+    #[must_use]
+    pub const fn from_bits(bits: u64) -> Self {
+        if (bits & 0x7fff_ffff_ffff_ffff) > 0x7ff0_0000_0000_0000 {
+            Self(Self::CANONICAL_NAN_BITS)
+        } else {
+            Self(bits)
+        }
+    }
+
+    /// Creates an exact constant from a binary64 value.
+    #[must_use]
+    pub fn from_f64(value: f64) -> Self {
+        Self::from_bits(value.to_bits())
+    }
+
+    /// Returns the retained canonical bit pattern.
+    #[must_use]
+    pub const fn to_bits(self) -> u64 {
+        self.0
+    }
+
+    /// Reconstructs the retained binary64 value.
+    #[must_use]
+    pub const fn to_f64(self) -> f64 {
+        f64::from_bits(self.0)
+    }
+}
+
+/// One ordinary compiler-owned constant value.
+///
+/// This enum keeps the value namespace extensible without weakening the
+/// function/value distinction already certified by body verification.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CompilerConstantValue {
+    /// An ECMAScript Number represented by exact binary64 bits.
+    Number(Binary64Constant),
+}
 
 /// Dense identity of one function template in a compiler graph.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -60,6 +113,26 @@ impl fmt::Display for FunctionTemplateId {
     }
 }
 
+/// One owned entry in a compiler function's heterogeneous constant pool.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CompilerConstant {
+    /// An ordinary JavaScript value.
+    Value(CompilerConstantValue),
+    /// A nested bytecode-function template.
+    Function(FunctionTemplateId),
+}
+
+impl CompilerConstant {
+    /// Returns the body-verifier kind represented by this owned payload.
+    #[must_use]
+    pub const fn kind(self) -> CompilerConstantKind {
+        match self {
+            Self::Value(_) => CompilerConstantKind::Value,
+            Self::Function(_) => CompilerConstantKind::Function,
+        }
+    }
+}
+
 /// One normalized source for a child function's imported closure cell.
 ///
 /// These are the two non-global domains needed by the current compiler.
@@ -87,7 +160,7 @@ impl fmt::Display for CompilerClosureSource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnverifiedCompilerFunction {
     control_flow: Arc<VerifiedControlFlow>,
-    constants: Arc<[FunctionTemplateId]>,
+    constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
 }
 
@@ -96,7 +169,7 @@ impl UnverifiedCompilerFunction {
     #[must_use]
     pub const fn new(
         control_flow: Arc<VerifiedControlFlow>,
-        constants: Arc<[FunctionTemplateId]>,
+        constants: Arc<[CompilerConstant]>,
         closure_sources: Arc<[CompilerClosureSource]>,
     ) -> Self {
         Self {
@@ -112,9 +185,9 @@ impl UnverifiedCompilerFunction {
         &self.control_flow
     }
 
-    /// Returns graph-local function constants in constant-pool order.
+    /// Returns owned constants in constant-pool order.
     #[must_use]
-    pub fn constants(&self) -> &[FunctionTemplateId] {
+    pub fn constants(&self) -> &[CompilerConstant] {
         &self.constants
     }
 
@@ -422,7 +495,7 @@ impl FunctionGraphUsage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedCompilerFunction {
     control_flow: Arc<VerifiedControlFlow>,
-    constants: Arc<[FunctionTemplateId]>,
+    constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
 }
 
@@ -433,9 +506,9 @@ impl VerifiedCompilerFunction {
         &self.control_flow
     }
 
-    /// Returns verified function constants in pool order.
+    /// Returns verified heterogeneous constants in pool order.
     #[must_use]
-    pub fn constants(&self) -> &[FunctionTemplateId] {
+    pub fn constants(&self) -> &[CompilerConstant] {
         &self.constants
     }
 
@@ -449,9 +522,9 @@ impl VerifiedCompilerFunction {
 /// Immutable cross-function certificate for the supported compiler subset.
 ///
 /// The graph is flat: child constants are dense identities rather than nested
-/// owning pointers. Serialized bytecode, atom/value constants, and unsupported
-/// opcode capabilities cannot construct this type. It does not yet authorize
-/// runtime execution.
+/// owning pointers, while ordinary values retain immutable typed payloads.
+/// Serialized bytecode, atom constants, and unsupported opcode capabilities
+/// cannot construct this type. It does not yet authorize runtime execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedCompilerFunctionGraph {
     root: FunctionTemplateId,
@@ -588,7 +661,7 @@ pub enum FunctionGraphVerificationErrorKind {
         /// Declared atom entries.
         declared: u32,
     },
-    /// Actual constant edges do not match the body domain.
+    /// Actual constant-pool entries do not match the body domain.
     ConstantCountMismatch {
         /// Body-declared constant count.
         declared: u32,
@@ -611,12 +684,14 @@ pub enum FunctionGraphVerificationErrorKind {
         /// Repeated normalized source.
         source: CompilerClosureSource,
     },
-    /// The graph has no owned payload for this compiler constant kind.
-    UnsupportedConstantKind {
+    /// An owned constant payload does not match the body-declared kind.
+    ConstantKindMismatch {
         /// Constant-pool index.
         index: u32,
-        /// Rejected compiler kind.
-        kind: CompilerConstantKind,
+        /// Kind retained by body verification.
+        declared: CompilerConstantKind,
+        /// Kind of the supplied owned payload.
+        actual: CompilerConstantKind,
     },
     /// A function constant points outside the flat graph.
     FunctionConstantOutOfBounds {
@@ -689,7 +764,7 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
             ),
             Self::ConstantCountMismatch { declared, entries } => write!(
                 formatter,
-                "actual function-constant count {entries} does not equal body domain {declared}"
+                "actual constant count {entries} does not equal body domain {declared}"
             ),
             Self::ClosureVariableCountMismatch { declared, entries } => write!(
                 formatter,
@@ -703,9 +778,13 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
                 formatter,
                 "closure slots {first} and {duplicate} both import {source}"
             ),
-            Self::UnsupportedConstantKind { index, kind } => write!(
+            Self::ConstantKindMismatch {
+                index,
+                declared,
+                actual,
+            } => write!(
                 formatter,
-                "constant {index} has unsupported compiler graph kind {kind}"
+                "constant {index} has owned kind {actual}, but the body declares {declared}"
             ),
             Self::FunctionConstantOutOfBounds {
                 index,
@@ -740,8 +819,8 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
     }
 }
 
-/// Verifies compiler function constants, capture recipes, topology, and
-/// aggregate budgets without recursive traversal.
+/// Verifies compiler constant payloads, function edges, capture recipes,
+/// topology, and aggregate budgets without recursive traversal.
 ///
 /// # Errors
 ///
@@ -870,18 +949,25 @@ fn validate_function_records(
             ));
         }
         validate_unique_closure_sources(id, &function.closure_sources)?;
-        for (constant_index, kind) in constant_layout.kinds().iter().copied().enumerate() {
-            if kind != CompilerConstantKind::Function {
+        for (constant_index, (&constant, declared)) in function
+            .constants
+            .iter()
+            .zip(constant_layout.kinds().iter().copied())
+            .enumerate()
+        {
+            let actual = constant.kind();
+            if actual != declared {
                 return Err(FunctionGraphVerificationError::at_function(
                     id,
-                    FunctionGraphVerificationErrorKind::UnsupportedConstantKind {
+                    FunctionGraphVerificationErrorKind::ConstantKindMismatch {
                         index: usize_to_u32(constant_index),
-                        kind,
+                        declared,
+                        actual,
                     },
                 ));
             }
         }
-        for (constant_index, &target) in function.constants.iter().enumerate() {
+        for (constant_index, target) in function_constant_targets(&function.constants) {
             constant_target_index(id, constant_index, target, functions.len())?;
         }
     }
@@ -978,7 +1064,7 @@ fn validate_closure_edges(
     let mut evaluations = 0_u64;
     for (parent_index, parent) in functions.iter().enumerate() {
         let parent_id = function_id(parent_index)?;
-        for (constant_index, &child_id) in parent.constants.iter().enumerate() {
+        for (constant_index, child_id) in function_constant_targets(&parent.constants) {
             let child_index =
                 constant_target_index(parent_id, constant_index, child_id, functions.len())?;
             let Some(child) = functions.get(child_index) else {
@@ -1037,7 +1123,7 @@ fn build_topological_order(
     let mut indegrees = try_zeroed_u64(functions.len(), FunctionGraphResource::TopologyEntries)?;
     for (parent_index, function) in functions.iter().enumerate() {
         let parent = function_id(parent_index)?;
-        for (constant_index, &target) in function.constants.iter().enumerate() {
+        for (constant_index, target) in function_constant_targets(&function.constants) {
             let index = constant_target_index(parent, constant_index, target, functions.len())?;
             indegrees[index] = indegrees[index].checked_add(1).ok_or_else(|| {
                 FunctionGraphVerificationError::graph(
@@ -1078,7 +1164,7 @@ fn build_topological_order(
         order.push(parent_index);
         let parent = function_id(parent_index)?;
         let function = &functions[parent_index];
-        for (constant_index, &target) in function.constants.iter().enumerate() {
+        for (constant_index, target) in function_constant_targets(&function.constants) {
             let target_index =
                 constant_target_index(parent, constant_index, target, functions.len())?;
             let indegree = &mut indegrees[target_index];
@@ -1113,7 +1199,12 @@ fn validate_nesting_depth(
     for &parent_index in order {
         let parent_id = function_id(parent_index)?;
         let parent_depth = depths[parent_index];
-        if parent_depth == 0 || functions[parent_index].constants.is_empty() {
+        if parent_depth == 0
+            || !functions[parent_index]
+                .constants
+                .iter()
+                .any(|constant| matches!(constant, CompilerConstant::Function(_)))
+        {
             continue;
         }
         let child_depth = parent_depth.checked_add(1).ok_or_else(|| {
@@ -1126,7 +1217,9 @@ fn validate_nesting_depth(
                 },
             )
         })?;
-        for (constant_index, &child_id) in functions[parent_index].constants.iter().enumerate() {
+        for (constant_index, child_id) in
+            function_constant_targets(&functions[parent_index].constants)
+        {
             let child_index =
                 constant_target_index(parent_id, constant_index, child_id, functions.len())?;
             if child_depth > depths[child_index] {
@@ -1149,6 +1242,19 @@ fn validate_nesting_depth(
         ));
     }
     Ok(maximum)
+}
+
+fn function_constant_targets(
+    constants: &[CompilerConstant],
+) -> impl Iterator<Item = (usize, FunctionTemplateId)> + '_ {
+    constants
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(index, constant)| match constant {
+            CompilerConstant::Function(target) => Some((index, target)),
+            CompilerConstant::Value(_) => None,
+        })
 }
 
 fn constant_target_index(

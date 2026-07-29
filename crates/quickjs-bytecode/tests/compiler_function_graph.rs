@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use quickjs_bytecode::{
     BytecodeBuilder, CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureSource,
-    CompilerConstantKind, CompilerConstantLayout, FinalOpcode, FunctionGraphResource,
-    FunctionGraphVerificationErrorKind, FunctionGraphVerificationLimits, FunctionIndexDomains,
-    FunctionTemplateId, Operands, UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody,
-    UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader, VerificationLimits,
-    VerifiedCompilerFunctionGraph, VerifiedControlFlow, verify_compiler_control_flow,
-    verify_compiler_function_graph,
+    CompilerConstant, CompilerConstantKind, CompilerConstantLayout, FinalOpcode,
+    FunctionGraphResource, FunctionGraphVerificationErrorKind, FunctionGraphVerificationLimits,
+    FunctionIndexDomains, FunctionTemplateId, Operands, UnverifiedCompilerFunction,
+    UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader,
+    VerificationLimits, VerifiedCompilerFunctionGraph, VerifiedControlFlow,
+    verify_compiler_control_flow, verify_compiler_function_graph,
 };
 
 fn encode(instructions: &[(FinalOpcode, Operands)]) -> Vec<u8> {
@@ -74,7 +74,7 @@ fn function(
             constants
                 .iter()
                 .copied()
-                .map(FunctionTemplateId::new)
+                .map(|index| CompilerConstant::Function(FunctionTemplateId::new(index)))
                 .collect::<Vec<_>>(),
         ),
         Arc::from(closure_sources),
@@ -141,7 +141,10 @@ fn accepts_a_nonzero_root_identity_without_reordering_records() {
     .expect("dense identities do not require the root to occupy slot zero");
 
     assert_eq!(verified.root_id(), FunctionTemplateId::new(1));
-    assert_eq!(verified.root().constants(), [FunctionTemplateId::new(0)]);
+    assert_eq!(
+        verified.root().constants(),
+        [CompilerConstant::Function(FunctionTemplateId::new(0))]
+    );
     assert_eq!(verified.max_nesting_depth(), 2);
 }
 
@@ -203,7 +206,10 @@ fn verifies_nested_function_constants_and_both_capture_source_domains() {
     .expect("complete nested graph must verify");
 
     assert_eq!(verified.root_id(), FunctionTemplateId::new(0));
-    assert_eq!(verified.root().constants(), [FunctionTemplateId::new(1)]);
+    assert_eq!(
+        verified.root().constants(),
+        [CompilerConstant::Function(FunctionTemplateId::new(1))]
+    );
     assert_eq!(
         verified
             .function(FunctionTemplateId::new(1))
@@ -360,7 +366,7 @@ fn graph_requires_exact_compiler_owned_metadata() {
 }
 
 #[test]
-fn value_constants_and_atom_domains_do_not_gain_a_graph_certificate() {
+fn owned_constant_kinds_must_match_and_atom_domains_remain_unsupported() {
     let value_constant = compiler_flow(
         &[(FinalOpcode::ReturnUndef, Operands::None)],
         0,
@@ -373,12 +379,13 @@ fn value_constants_and_atom_domains_do_not_gain_a_graph_certificate() {
         graph(vec![function(value_constant, &[0], &[])]),
         FunctionGraphVerificationLimits::default(),
     )
-    .expect_err("graph has no actual ordinary value payload");
+    .expect_err("a function payload cannot satisfy a value-kind slot");
     assert_eq!(
         error.kind(),
-        &FunctionGraphVerificationErrorKind::UnsupportedConstantKind {
+        &FunctionGraphVerificationErrorKind::ConstantKindMismatch {
             index: 0,
-            kind: CompilerConstantKind::Value,
+            declared: CompilerConstantKind::Value,
+            actual: CompilerConstantKind::Function,
         }
     );
 

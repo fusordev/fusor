@@ -65,18 +65,21 @@ typed-stack and whole-function rules below remain mandatory before
 
 The next compiler-only slice returns
 `VerifiedCompilerFunctionGraph`. It takes a flat `Arc`-backed graph, requires
-explicit body capture and constant layouts, owns the actual function-template
-target identities and normalized immediate-parent capture sources, rejects
-duplicate normalized sources within one compiler function, cycles, and
-unreachable records, validates every shared-parent edge, and charges aggregate
-body and edge-work budgets. Traversal and depth accounting are iterative; they
-never depend on Rust call-stack depth. A selected root with imported closure
-variables is rejected because no verified external environment was supplied.
-This certificate is still not `VerifiedBytecode`:
-it lacks actual ordinary-value and atom pools, vardef/name/policy metadata,
-typed handler/finally/iterator states, source/debug validation, and the runtime
-function metadata required for exact behavior. It exposes no VM execution
-entry point.
+explicit body capture and constant layouts, owns the actual heterogeneous
+Number/function constant entries, function-template target identities, and
+normalized immediate-parent capture sources, rejects duplicate normalized
+sources within one compiler function, cycles, and unreachable records,
+validates every shared-parent edge, and charges aggregate body and edge-work
+budgets. Every pool entry is counted and kind-checked, but only `Function`
+entries form graph edges or contribute to topology and nesting depth. Traversal
+and depth accounting use explicit work lists; they never depend on Rust
+call-stack depth and require no `recursion_guard` layer or dependency. A
+selected root with imported closure variables is rejected because no verified
+external environment was supplied. This certificate is still not
+`VerifiedBytecode`: it lacks atom and non-Number constant pools,
+vardef/name/policy metadata, typed handler/finally/iterator states,
+source/debug validation, and the runtime function metadata required for exact
+behavior. It exposes no VM execution entry point.
 
 Serialized bodies provide a stored maximum stack size, and
 `verify_control_flow` requires it to equal the recomputed reachable maximum.
@@ -110,9 +113,20 @@ constant-index bounds validation precede kind checks. `push_const8` and
 `push_const` require a value entry; `fclosure8` and `fclosure` require a
 function entry. Pushing a function entry remains rejected as a raw function
 stack value. The layout does not contain actual values or child bodies and
-therefore grants no execution authority. Serialized constant operations remain
-fail-closed until the whole-function graph verifier owns and validates the
-actual pool.
+therefore grants no execution authority.
+
+The compiler graph pairs that layout with an immutable `Arc`-backed
+heterogeneous pool and rejects any declared/actual kind mismatch at the exact
+pool index. The compiler constructs Number literals requiring pool storage and
+direct child templates in source order without deduplication; verification
+preserves those positions rather than rebuilding the pool. As an intentional
+compiler normalization, directly negated `2^31` emits `push_i32(i32::MIN)` and
+does not retain an unused positive literal slot. A Number entry stores a
+`Binary64Constant`: every non-NaN bit pattern is exact, while NaN is
+canonicalized only as a deterministic compiler-artifact policy. This type must
+not be reused as the general runtime Number, `DataView`, or typed-array storage
+contract. Serialized constant operations remain fail-closed until the future
+whole-function verifier owns and validates their complete pool.
 
 **Rust hardening.** The compiler applies one further source-language invariant
 to the returned certificate: each reachable structured-statement label must
@@ -284,6 +298,11 @@ fail-closed capability.
 | `rest` | first argument index is at most `arg_count` |
 | `eval`, `apply_eval` | decoded scope start is -2, -1, or a local index and its `scope_next` chain is valid |
 
+Value and function operands share one constant-pool index domain. Compiler
+lowering selects the compact `push_const8`/`fclosure8` forms for indices
+`0..=255` and the full-width `push_const`/`fclosure` forms for indices
+`>= 256`; neither kind receives a separate compact namespace.
+
 The distinct local, argument, and closure-reference operand domains are visible
 in the opcode table (`quickjs-opcode.h:159-177`,
 `quickjs-opcode.h:196-199`, `quickjs-opcode.h:305-344`) and in the interpreter's
@@ -311,12 +330,13 @@ that discriminator (`quickjs.c:17323-17354`).
   in the corresponding eval/module context, and module indices are checked
   against the enclosing module tables;
 - `is_const` implies `is_lexical`, and `var_kind` is a defined upstream kind;
-- every bytecode-function constant is recursively verified, whether or not an
-  `fclosure` currently references it;
+- every bytecode-function constant is verified, whether or not an `fclosure`
+  currently references it;
 - child functions form an acyclic graph. A shared child's intrinsic body and
   metadata are verified once by identity, but every parent edge separately
-  validates the child's closure descriptors against that parent; an
-  active-recursion back edge is rejected.
+  validates the child's closure descriptors against that parent; a graph back
+  edge is rejected. All graph walks use bounded explicit work lists rather
+  than recursive calls.
 
 ### Counts, packed offsets, enums, and flags
 
@@ -608,7 +628,10 @@ an explicit trusted configuration, never as an implicit retry after
 `LimitExceeded`. Structural maxima such as stack depth and 16-bit index
 domains remain unchanged. Shared child function bodies are charged once,
 while their capture sources are charged and checked separately for every
-parent edge. Cycles are rejected rather than recursively charged.
+parent edge. Every `Value` and `Function` pool entry is charged to the constant
+budget. Only `Function` entries create child edges; value-only pools do not
+increase function nesting depth. Cycles are rejected through the iterative
+topology pass rather than recursively charged.
 
 ## Acceptance tests
 
@@ -641,7 +664,9 @@ The verifier is complete only when the following tests are automated.
    resume shapes, and mixed subroutine identities.
 8. **Indices:** for each index family, accept `count - 1` and reject `count`;
    include implied short indices, `var_ref` versus `closure_var_count`,
-   captured-vardef bijection, wrong-type `fclosure` constants, class raw
+   captured-vardef bijection, heterogeneous value/function pools,
+   declared/actual kind mismatches in both directions, shared compact index
+   255 versus full-width index 256, wrong-type `fclosure` constants, class raw
    functions, invalid scope chains, and child closure descriptors.
 9. **Flags:** exhaust valid and invalid values for `special_object`,
    `throw_error`, `apply`, `iterator_call`, method/class flags, function flags,

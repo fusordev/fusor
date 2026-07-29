@@ -17,12 +17,12 @@ use oxc_syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
 };
 use quickjs_bytecode::{
-    AssemblerError, AssemblerLabel, AssemblerLimits, BranchKind, BytecodeAssembler, BytecodePc,
-    CompilerCaptureLayout, CompilerCapturedBinding,
-    CompilerClosureSource as CompilerGraphClosureSource, CompilerConstantKind,
-    CompilerConstantLayout, EncodeError, FinalOpcode, FunctionGraphVerificationError,
-    FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId,
-    MAX_FUNCTION_INDEX_ENTRIES, Operands, UnverifiedCompilerFunction,
+    AssemblerError, AssemblerLabel, AssemblerLimits, Binary64Constant, BranchKind,
+    BytecodeAssembler, BytecodePc, CompilerCaptureLayout, CompilerCapturedBinding,
+    CompilerClosureSource as CompilerGraphClosureSource, CompilerConstant as CompilerGraphConstant,
+    CompilerConstantKind, CompilerConstantLayout, CompilerConstantValue, EncodeError, FinalOpcode,
+    FunctionGraphVerificationError, FunctionGraphVerificationLimits, FunctionIndexDomains,
+    FunctionTemplateId, MAX_FUNCTION_INDEX_ENTRIES, Operands, UnverifiedCompilerFunction,
     UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader,
     VerificationError, VerificationErrorKind, VerificationLimits, VerifiedCompilerFunctionGraph,
     VerifiedControlFlow, verify_compiler_control_flow, verify_compiler_function_graph,
@@ -88,6 +88,44 @@ impl SourceInstruction {
     #[must_use]
     pub const fn span(self) -> Span {
         self.span
+    }
+}
+
+/// One owned entry in a compiled function's heterogeneous constant pool.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CompiledConstant {
+    /// An ordinary JavaScript value.
+    Value(CompilerConstantValue),
+    /// A nested-function template.
+    Function(CompiledFunctionConstant),
+}
+
+impl CompiledConstant {
+    /// Returns the verifier-visible constant kind.
+    #[must_use]
+    pub const fn kind(self) -> CompilerConstantKind {
+        match self {
+            Self::Value(_) => CompilerConstantKind::Value,
+            Self::Function(_) => CompilerConstantKind::Function,
+        }
+    }
+
+    /// Returns the value payload when this is an ordinary value constant.
+    #[must_use]
+    pub const fn value(self) -> Option<CompilerConstantValue> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Function(_) => None,
+        }
+    }
+
+    /// Returns the template payload when this is a function constant.
+    #[must_use]
+    pub const fn function(self) -> Option<CompiledFunctionConstant> {
+        match self {
+            Self::Value(_) => None,
+            Self::Function(function) => Some(function),
+        }
     }
 }
 
@@ -164,7 +202,7 @@ pub struct CompiledFunction {
     storage_plan: Arc<StoragePlan>,
     source_text: Arc<str>,
     locals: Arc<[LoweredLocal]>,
-    constants: Arc<[CompiledFunctionConstant]>,
+    constants: Arc<[CompiledConstant]>,
     closure_variables: Arc<[CompiledClosureVariable]>,
     source_instructions: Arc<[SourceInstruction]>,
     control_flow: Arc<VerifiedControlFlow>,
@@ -195,9 +233,9 @@ impl CompiledFunction {
         &self.locals
     }
 
-    /// Returns the typed function-template constant pool.
+    /// Returns the complete typed constant pool in deterministic allocation order.
     #[must_use]
-    pub fn constants(&self) -> &[CompiledFunctionConstant] {
+    pub fn constants(&self) -> &[CompiledConstant] {
         &self.constants
     }
 
@@ -220,8 +258,8 @@ impl CompiledFunction {
     }
 }
 
-/// Backward-compatible name for the pool-free [`CompilationContext::compile_leaf`]
-/// result.
+/// Backward-compatible name for the nested-function-free
+/// [`CompilationContext::compile_leaf`] result.
 pub type CompiledLeafFunction = CompiledFunction;
 
 /// Failure-atomic output for one compiled ordinary-function subtree.
@@ -260,8 +298,8 @@ impl CompiledFunctionTree {
     /// Returns the cross-function certificate for this complete tree.
     ///
     /// Graph-local template identities index the same order as [`Self::functions`].
-    /// The certificate remains non-executable until runtime metadata and actual
-    /// value/atom pools are verified.
+    /// The certificate remains non-executable until runtime metadata and the
+    /// atom and non-Number value pools are verified.
     #[must_use]
     pub fn function_graph(&self) -> &VerifiedCompilerFunctionGraph {
         &self.function_graph
@@ -380,12 +418,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     /// Lowers one validated ordinary leaf-function family to final bytecode.
     ///
-    /// The accepted Script-only family is pool-free. It supports simple local
-    /// declarations, immediate primitive values, resolved argument/local
-    /// reads and mutable writes, value operators including short-circuit and
-    /// conditional expressions, lexical blocks, `if`/`else`, `while`,
-    /// `do`/`while`, classic `for`, unlabeled `break`/`continue`, expression
-    /// statements, and explicit or implicit returns. A leaf may read or write
+    /// The accepted Script-only family contains no nested executable. It
+    /// supports simple local declarations, immediate primitive values,
+    /// resolved argument/local reads and mutable writes, value operators
+    /// including short-circuit and conditional expressions, lexical blocks,
+    /// `if`/`else`, `while`, `do`/`while`, classic `for`, unlabeled
+    /// `break`/`continue`, expression statements, and explicit or implicit
+    /// returns. A leaf may own ordinary value constants and may read or write
     /// frame cells captured from an ancestor. The entire function is converted
     /// to typed symbolic instructions before branch relaxation emits any bytes.
     ///
@@ -415,11 +454,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     /// Lowers an ordinary function and every nested ordinary function template.
     ///
     /// Compilation is child-first and iterative. The returned flat tree is in
-    /// stable executable preorder, while each parent constant pool contains
-    /// only its direct children in source order. Function expressions emit
-    /// `fclosure8` for indices below 256 and `fclosure` otherwise. Imported
-    /// closure descriptors are normalized to the parent's own cell table or
-    /// imported environment.
+    /// stable executable preorder. Each function's heterogeneous constant pool
+    /// retains Number values requiring pool storage and direct nested-function
+    /// templates in source order without deduplication. Values and templates
+    /// share one index domain: indices below 256 use compact instructions and
+    /// later entries use wide instructions. Imported closure descriptors are
+    /// normalized to the parent's own cell table or imported environment.
     ///
     /// # Errors
     ///
@@ -495,7 +535,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         } = validated;
         let constant_count =
             u32::try_from(constants.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
-                domain: "function constants",
+                domain: "constant pool entries",
             })?;
         let domains = FunctionIndexDomains::new(
             0,
@@ -514,10 +554,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 argument_count,
                 variable_reference_count,
             );
-        let constant_layout = CompilerConstantLayout::new(Arc::from(vec![
-                CompilerConstantKind::Function;
-                constants.len()
-            ]));
+        let constant_layout = CompilerConstantLayout::new(
+            constants
+                .iter()
+                .copied()
+                .map(CompiledConstant::kind)
+                .collect::<Vec<_>>()
+                .into(),
+        );
         let finished = flow.finish()?;
         let (source_instructions, control_flow) = finished.verify_with_layouts(
             domains,
@@ -532,7 +576,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             storage_plan: Arc::clone(&self.planned.plan),
             source_text: Arc::clone(&self.source_text),
             locals: locals.into(),
-            constants: constants.into(),
+            constants,
             closure_variables: closure_variables.into(),
             source_instructions: source_instructions.into(),
             control_flow: Arc::new(control_flow),
@@ -599,6 +643,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
             layout.record_function_declaration(binding, executable.id())?;
         }
+        let constant_pools = self.compiled_constant_pools(&layout)?;
+        layout.install_constant_pools(constant_pools)?;
         Ok(layout)
     }
 
@@ -618,14 +664,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 span: function.span,
             })?;
         let mut flow = PlannedControlFlow::new(limits);
-        self.validate_body(
-            executable_id,
-            function,
-            body,
-            &layout,
+        let constants = tree_layout.constant_pool(executable_id)?;
+        let planning = FunctionPlanningContext {
+            executable: executable_id,
+            layout: &layout,
             tree_layout,
-            &mut flow,
-        )?;
+            constants,
+        };
+        self.validate_body(function, body, &planning, &mut flow)?;
         let function_scope = self.created_scope(
             function.scope_id.get(),
             function.node_id.get(),
@@ -633,12 +679,6 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         )?;
         let capture_layout =
             self.compiler_capture_layout(executable_id, function_scope, &layout, tree_layout)?;
-        let constants = tree_layout
-            .children(executable_id)?
-            .iter()
-            .copied()
-            .map(|executable| CompiledFunctionConstant { executable })
-            .collect();
         let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
 
         Ok(ValidatedFunction {
@@ -655,19 +695,112 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     slot: local.slot,
                 })
                 .collect(),
-            constants,
+            constants: Arc::clone(&constants.entries),
             closure_variables,
             flow,
         })
     }
 
+    fn compiled_constant_pools(
+        &self,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<Box<[CompiledConstantPool]>, LeafCompilationError> {
+        let executables = self.planned.plan.executables();
+        let mut candidates = (0..executables.len())
+            .map(|_| Vec::new())
+            .collect::<Vec<_>>();
+        for child in executables {
+            let Some(parent) = child.parent() else {
+                continue;
+            };
+            let owner = candidates
+                .get_mut(parent.index())
+                .ok_or(LeafCompilationError::InvalidExecutable { executable: parent })?;
+            owner.push(CompiledConstantCandidate::Function {
+                executable: child.id(),
+                span: child.span(),
+            });
+        }
+
+        let nodes = self.unit.semantic().nodes();
+        let mut owners = vec![None; nodes.len()];
+        for (node_id, node) in nodes.iter_enumerated() {
+            let owner = match node.kind() {
+                AstKind::Program(_)
+                | AstKind::Function(_)
+                | AstKind::ArrowFunctionExpression(_) => self
+                    .planned
+                    .identities
+                    .executable_by_node
+                    .get(node_id.index())
+                    .copied()
+                    .flatten(),
+                _ => {
+                    let parent = nodes.parent_id(node_id);
+                    if parent.index() >= node_id.index() {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "semantic parents precede children in node order",
+                            span: Some(node.kind().span()),
+                        });
+                    }
+                    owners.get(parent.index()).copied().flatten()
+                }
+            };
+            let owner_slot =
+                owners
+                    .get_mut(node_id.index())
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "semantic node identity indexes constant-pool ownership",
+                        span: Some(node.kind().span()),
+                    })?;
+            *owner_slot = owner;
+            if let Some(owner) = owner
+                && let AstKind::NumericLiteral(literal) = node.kind()
+                && exact_i32(literal.value).is_none()
+            {
+                let parent = nodes.parent_id(node_id);
+                let folded_negative_i32 = matches!(
+                    nodes.kind(parent),
+                    AstKind::UnaryExpression(unary)
+                        if unary.operator == UnaryOperator::UnaryNegation
+                            && literal.value != 0.0
+                            && exact_negated_i32(literal.value).is_some()
+                );
+                if !folded_negative_i32 {
+                    let owner_candidates = candidates
+                        .get_mut(owner.index())
+                        .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?;
+                    owner_candidates.push(CompiledConstantCandidate::Number {
+                        value: Binary64Constant::from_f64(literal.value),
+                        span: literal.span,
+                    });
+                }
+            }
+        }
+
+        let mut pools = Vec::with_capacity(executables.len());
+        for (index, mut candidates) in candidates.into_iter().enumerate() {
+            let executable =
+                executables
+                    .get(index)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "constant-pool owner indexes dense executable metadata",
+                        span: None,
+                    })?;
+            candidates.sort_unstable_by_key(CompiledConstantCandidate::order_key);
+            pools.push(CompiledConstantPool::from_candidates(
+                tree_layout.children(executable.id())?,
+                candidates,
+            )?);
+        }
+        Ok(pools.into_boxed_slice())
+    }
+
     fn validate_body<'statement>(
         &self,
-        executable: ExecutableId,
         function: &'statement Function<'arena>,
         body: &'statement FunctionBody<'arena>,
-        layout: &FrameLayout,
-        tree_layout: &FunctionTreeLayout,
+        planning: &FunctionPlanningContext<'_>,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let function_scope = self.created_scope(
@@ -693,69 +826,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         };
 
         while let Some(task) = state.work.pop() {
-            match task {
-                StatementWork::VisitList { statements, next } => {
-                    if let Some(statement) = statements.get(next) {
-                        state.work.push(StatementWork::VisitList {
-                            statements,
-                            next: next + 1,
-                        });
-                        state.work.push(StatementWork::Visit(statement));
-                    }
-                }
-                StatementWork::PushScope {
-                    scope,
-                    creator,
-                    span,
-                } => {
-                    self.plan_scope_entry(scope, creator, span, layout, tree_layout, flow)?;
-                    state.active_scopes.push(scope);
-                }
-                StatementWork::PopScope(expected) => {
-                    if state.active_scopes.len() > 1 {
-                        self.plan_scope_exit(executable, expected, layout, flow)?;
-                    }
-                    let actual = state.active_scopes.pop().ok_or(
-                        LeafCompilationError::SemanticInvariant {
-                            invariant: "statement scope stack is nonempty on exit",
-                            span: Some(body.span),
-                        },
-                    )?;
-                    if actual != expected {
-                        return Err(LeafCompilationError::SemanticInvariant {
-                            invariant: "statement scopes exit in last-in-first-out order",
-                            span: Some(body.span),
-                        });
-                    }
-                }
-                StatementWork::CloseScope(scope) => {
-                    self.plan_scope_exit(executable, scope, layout, flow)?;
-                }
-                StatementWork::PushLoop(control) => state.loop_controls.push(control),
-                StatementWork::PopLoop => {
-                    state
-                        .loop_controls
-                        .pop()
-                        .ok_or(LeafCompilationError::SemanticInvariant {
-                            invariant: "statement loop stack is nonempty on exit",
-                            span: Some(body.span),
-                        })?;
-                }
-                StatementWork::Expression(expression) => {
-                    self.plan_expression(expression, layout, tree_layout, flow)?;
-                }
-                StatementWork::Declaration(declaration) => {
-                    self.validate_declaration(declaration, layout, tree_layout, flow)?;
-                }
-                StatementWork::Emit(instruction) => flow.emit(instruction)?,
-                StatementWork::Branch { kind, target, span } => {
-                    flow.branch(kind, &target, span)?;
-                }
-                StatementWork::Bind(label) => flow.bind(&label)?,
-                StatementWork::Visit(statement) => {
-                    self.plan_statement(statement, layout, tree_layout, flow, &mut state)?;
-                }
-            }
+            self.process_statement_work(task, body.span, planning, flow, &mut state)?;
         }
         if !state.active_scopes.is_empty() || !state.loop_controls.is_empty() {
             return Err(LeafCompilationError::SemanticInvariant {
@@ -767,11 +838,101 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    fn process_statement_work<'statement>(
+        &self,
+        task: StatementWork<'statement, 'arena>,
+        body_span: Span,
+        planning: &FunctionPlanningContext<'_>,
+        flow: &mut PlannedControlFlow,
+        state: &mut StatementPlanningState<'statement, 'arena>,
+    ) -> Result<(), LeafCompilationError> {
+        match task {
+            StatementWork::VisitList { statements, next } => {
+                if let Some(statement) = statements.get(next) {
+                    state.work.push(StatementWork::VisitList {
+                        statements,
+                        next: next + 1,
+                    });
+                    state.work.push(StatementWork::Visit(statement));
+                }
+            }
+            StatementWork::PushScope {
+                scope,
+                creator,
+                span,
+            } => {
+                self.plan_scope_entry(scope, creator, span, planning, flow)?;
+                state.active_scopes.push(scope);
+            }
+            StatementWork::PopScope(expected) => {
+                if state.active_scopes.len() > 1 {
+                    self.plan_scope_exit(planning.executable, expected, planning.layout, flow)?;
+                }
+                let actual =
+                    state
+                        .active_scopes
+                        .pop()
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "statement scope stack is nonempty on exit",
+                            span: Some(body_span),
+                        })?;
+                if actual != expected {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "statement scopes exit in last-in-first-out order",
+                        span: Some(body_span),
+                    });
+                }
+            }
+            StatementWork::CloseScope(scope) => {
+                self.plan_scope_exit(planning.executable, scope, planning.layout, flow)?;
+            }
+            StatementWork::PushLoop(control) => state.loop_controls.push(control),
+            StatementWork::PopLoop => {
+                state
+                    .loop_controls
+                    .pop()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "statement loop stack is nonempty on exit",
+                        span: Some(body_span),
+                    })?;
+            }
+            StatementWork::Expression(expression) => self.plan_expression(
+                expression,
+                planning.layout,
+                planning.tree_layout,
+                planning.constants,
+                flow,
+            )?,
+            StatementWork::Declaration(declaration) => self.validate_declaration(
+                declaration,
+                planning.layout,
+                planning.tree_layout,
+                planning.constants,
+                flow,
+            )?,
+            StatementWork::Emit(instruction) => flow.emit(instruction)?,
+            StatementWork::Branch { kind, target, span } => {
+                flow.branch(kind, &target, span)?;
+            }
+            StatementWork::Bind(label) => flow.bind(&label)?,
+            StatementWork::Visit(statement) => self.plan_statement(
+                statement,
+                planning.layout,
+                planning.tree_layout,
+                planning.constants,
+                flow,
+                state,
+            )?,
+        }
+        Ok(())
+    }
+
     fn plan_statement<'statement>(
         &self,
         statement: &'statement Statement<'arena>,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         state: &mut StatementPlanningState<'statement, 'arena>,
     ) -> Result<(), LeafCompilationError> {
@@ -788,7 +949,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 )?;
             }
             Statement::VariableDeclaration(declaration) => {
-                self.validate_declaration(declaration, layout, tree_layout, flow)?;
+                self.validate_declaration(declaration, layout, tree_layout, constants, flow)?;
             }
             Statement::ExpressionStatement(statement) => {
                 Self::schedule_expression_statement(statement, &mut state.work);
@@ -1171,8 +1332,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         scope: ScopeId,
         creator: NodeId,
         span: Span,
-        layout: &FrameLayout,
-        tree_layout: &FunctionTreeLayout,
+        planning: &FunctionPlanningContext<'_>,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let scoping = self.unit.semantic().scoping();
@@ -1182,7 +1342,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 span: Some(span),
             });
         }
-        let executable = layout.executable;
+        let executable = planning.executable;
         let function_creator = self
             .planned
             .identities
@@ -1194,8 +1354,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 span: Some(span),
             })?;
         let function_scope = creator == function_creator;
-        let mut entries =
-            self.scope_entry_initializations(executable, scope, layout, tree_layout)?;
+        let mut entries = self.scope_entry_initializations(
+            executable,
+            scope,
+            planning.layout,
+            planning.tree_layout,
+        )?;
         entries.sort_unstable_by_key(ScopeEntryInitialization::order_key);
         if function_scope {
             for entry in entries
@@ -1203,7 +1367,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 .copied()
                 .filter(|entry| matches!(entry, ScopeEntryInitialization::Function { .. }))
             {
-                self.emit_scope_entry_initialization(executable, entry, tree_layout, flow)?;
+                self.emit_scope_entry_initialization(
+                    executable,
+                    entry,
+                    planning.tree_layout,
+                    planning.constants,
+                    flow,
+                )?;
             }
             for entry in entries
                 .iter()
@@ -1211,11 +1381,23 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 .copied()
                 .filter(|entry| matches!(entry, ScopeEntryInitialization::Uninitialized { .. }))
             {
-                self.emit_scope_entry_initialization(executable, entry, tree_layout, flow)?;
+                self.emit_scope_entry_initialization(
+                    executable,
+                    entry,
+                    planning.tree_layout,
+                    planning.constants,
+                    flow,
+                )?;
             }
         } else {
             for entry in entries.into_iter().rev() {
-                self.emit_scope_entry_initialization(executable, entry, tree_layout, flow)?;
+                self.emit_scope_entry_initialization(
+                    executable,
+                    entry,
+                    planning.tree_layout,
+                    planning.constants,
+                    flow,
+                )?;
             }
         }
         Ok(())
@@ -1323,6 +1505,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         executable: ExecutableId,
         entry: ScopeEntryInitialization,
         tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         match entry {
@@ -1339,6 +1522,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     executable,
                     span,
                     tree_layout,
+                    constants,
                 )?)?;
                 flow.emit(plan_put_slot(slot, span))?;
             }
@@ -1461,7 +1645,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             .executable(child)
             .ok_or(LeafCompilationError::InvalidExecutable { executable: child })?;
         if child_metadata.parent() != Some(parent)
-            || tree_layout.constant_index(child).is_none()
+            || tree_layout.children(parent)?.binary_search(&child).is_err()
             || child_metadata.name_span() != Some(identifier.span)
         {
             return Err(LeafCompilationError::SemanticInvariant {
@@ -1477,6 +1661,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         declaration: &VariableDeclaration<'arena>,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         if declaration.declare
@@ -1520,7 +1705,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     if let Some(span) = anonymous_function_definition_span(initializer) {
                         return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
                     }
-                    self.plan_expression(initializer, layout, tree_layout, flow)?;
+                    self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
                     flow.emit(plan_put_slot(frame_slot, identifier.span))?;
                 }
                 None if declaration.kind == VariableDeclarationKind::Let => {
@@ -1588,6 +1773,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         expression: &'expression Expression<'arena>,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let mut work = vec![ExpressionWork::Visit(expression)];
@@ -1599,7 +1785,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 }
                 ExpressionWork::Bind(label) => flow.bind(&label)?,
                 ExpressionWork::Visit(expression) => {
-                    if let Some(literal) = plan_literal(expression) {
+                    if let Some(literal) = plan_literal(expression, constants) {
                         flow.emit(literal?)?;
                         continue;
                     }
@@ -1655,6 +1841,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                                 function,
                                 layout.executable,
                                 tree_layout,
+                                constants,
                             )?)?;
                         }
                         _ => {
@@ -1675,9 +1862,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         function: &Function<'arena>,
         parent: ExecutableId,
         tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
     ) -> Result<PlannedInstruction, LeafCompilationError> {
         let child = self.executable_for_function(function)?;
-        self.plan_child_function_closure(child, parent, function.span, tree_layout)
+        self.plan_child_function_closure(child, parent, function.span, tree_layout, constants)
     }
 
     fn executable_for_function(
@@ -1703,25 +1891,22 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         parent: ExecutableId,
         span: Span,
         tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
     ) -> Result<PlannedInstruction, LeafCompilationError> {
         let child_metadata = self
             .planned
             .plan
             .executable(child)
             .ok_or(LeafCompilationError::InvalidExecutable { executable: child })?;
-        if child_metadata.parent() != Some(parent) {
+        if child_metadata.parent() != Some(parent)
+            || tree_layout.children(parent)?.binary_search(&child).is_err()
+        {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "nested function constant names a direct child executable",
                 span: Some(span),
             });
         }
-        let constant_index =
-            tree_layout
-                .constant_index(child)
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "direct child executable has a parent constant index",
-                    span: Some(span),
-                })?;
+        let constant_index = constants.function_index(child)?;
         let (opcode, operands) = match u8::try_from(constant_index) {
             Ok(index) => (FinalOpcode::FClosure8, Operands::Const8(index)),
             Err(_) => (FinalOpcode::FClosure, Operands::Const(constant_index)),
@@ -2578,54 +2763,7 @@ fn verify_compiled_function_graph(
             span: None,
         })?;
 
-    let mut records = Vec::with_capacity(functions.len());
-    let mut parent_counts = vec![0_u32; functions.len()];
-    for function in functions {
-        let mut constants = Vec::with_capacity(function.constants.len());
-        for constant in function.constants.iter().copied() {
-            let template = resolve_function_template_id(&identities, constant.executable())?;
-            let template_index = usize::try_from(template.get()).map_err(|_| {
-                LeafCompilationError::SemanticInvariant {
-                    invariant: "graph-local template identity fits usize",
-                    span: None,
-                }
-            })?;
-            let count = parent_counts.get_mut(template_index).ok_or(
-                LeafCompilationError::SemanticInvariant {
-                    invariant: "function constant has a graph parent-count slot",
-                    span: None,
-                },
-            )?;
-            *count = count
-                .checked_add(1)
-                .ok_or(LeafCompilationError::CapacityExceeded {
-                    domain: "compiler function parent edges",
-                })?;
-            constants.push(template);
-        }
-        let mut closure_sources = Vec::with_capacity(function.closure_variables.len());
-        for (index, closure) in function.closure_variables.iter().copied().enumerate() {
-            if closure.slot().index() != index {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "compiled closure slots are dense and ordered",
-                    span: None,
-                });
-            }
-            closure_sources.push(match closure.source() {
-                CompiledClosureSource::ParentVariableReference(index) => {
-                    CompilerGraphClosureSource::ParentVariableReference(u32::from(index))
-                }
-                CompiledClosureSource::ParentClosure(index) => {
-                    CompilerGraphClosureSource::ParentClosure(u32::from(index))
-                }
-            });
-        }
-        records.push(UnverifiedCompilerFunction::new(
-            Arc::clone(&function.control_flow),
-            constants.into(),
-            closure_sources.into(),
-        ));
-    }
+    let (records, parent_counts) = build_unverified_graph_records(functions, &identities)?;
     for (index, &actual) in parent_counts.iter().enumerate() {
         let expected = u32::from(index != root_index);
         if actual != expected {
@@ -2653,6 +2791,70 @@ fn verify_compiled_function_graph(
             });
         LeafCompilationError::FunctionGraphVerification { span, source }
     })
+}
+
+fn build_unverified_graph_records(
+    functions: &[CompiledFunction],
+    identities: &[(ExecutableId, FunctionTemplateId)],
+) -> Result<(Vec<UnverifiedCompilerFunction>, Vec<u32>), LeafCompilationError> {
+    let mut records = Vec::with_capacity(functions.len());
+    let mut parent_counts = vec![0_u32; functions.len()];
+    for function in functions {
+        let mut constants = Vec::with_capacity(function.constants.len());
+        for constant in function.constants.iter().copied() {
+            match constant {
+                CompiledConstant::Value(value) => {
+                    constants.push(CompilerGraphConstant::Value(value));
+                }
+                CompiledConstant::Function(function_constant) => {
+                    let template =
+                        resolve_function_template_id(identities, function_constant.executable())?;
+                    let template_index = usize::try_from(template.get()).map_err(|_| {
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "graph-local template identity fits usize",
+                            span: None,
+                        }
+                    })?;
+                    let count = parent_counts.get_mut(template_index).ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "function constant has a graph parent-count slot",
+                            span: None,
+                        },
+                    )?;
+                    *count =
+                        count
+                            .checked_add(1)
+                            .ok_or(LeafCompilationError::CapacityExceeded {
+                                domain: "compiler function parent edges",
+                            })?;
+                    constants.push(CompilerGraphConstant::Function(template));
+                }
+            }
+        }
+        let mut closure_sources = Vec::with_capacity(function.closure_variables.len());
+        for (index, closure) in function.closure_variables.iter().copied().enumerate() {
+            if closure.slot().index() != index {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "compiled closure slots are dense and ordered",
+                    span: None,
+                });
+            }
+            closure_sources.push(match closure.source() {
+                CompiledClosureSource::ParentVariableReference(index) => {
+                    CompilerGraphClosureSource::ParentVariableReference(u32::from(index))
+                }
+                CompiledClosureSource::ParentClosure(index) => {
+                    CompilerGraphClosureSource::ParentClosure(u32::from(index))
+                }
+            });
+        }
+        records.push(UnverifiedCompilerFunction::new(
+            Arc::clone(&function.control_flow),
+            constants.into(),
+            closure_sources.into(),
+        ));
+    }
+    Ok((records, parent_counts))
 }
 
 fn checked_function_template_id(index: usize) -> Result<FunctionTemplateId, LeafCompilationError> {
@@ -2881,7 +3083,7 @@ impl ScopeEntryInitialization {
 struct FunctionTreeLayout {
     child_ranges: Box<[Range<usize>]>,
     children: Box<[ExecutableId]>,
-    constant_indices: Box<[Option<u32>]>,
+    constant_pools: Box<[CompiledConstantPool]>,
     variable_references: Box<[Option<u16>]>,
     function_declarations: Box<[Option<ExecutableId>]>,
 }
@@ -2889,12 +3091,6 @@ struct FunctionTreeLayout {
 struct FunctionChildLayout {
     child_ranges: Box<[Range<usize>]>,
     children: Box<[ExecutableId]>,
-    constant_indices: Box<[Option<u32>]>,
-}
-
-struct FunctionChildTables {
-    children: Box<[ExecutableId]>,
-    constant_indices: Box<[Option<u32>]>,
 }
 
 impl FunctionTreeLayout {
@@ -2903,13 +3099,12 @@ impl FunctionTreeLayout {
         let FunctionChildLayout {
             child_ranges,
             children,
-            constant_indices,
         } = Self::build_child_layout(executables)?;
         let variable_references = Self::build_variable_references(plan, executables)?;
         Ok(Self {
             child_ranges,
             children,
-            constant_indices,
+            constant_pools: Box::default(),
             variable_references,
             function_declarations: vec![None; plan.bindings().len()].into_boxed_slice(),
         })
@@ -2920,14 +3115,10 @@ impl FunctionTreeLayout {
     ) -> Result<FunctionChildLayout, LeafCompilationError> {
         let child_counts = Self::count_children(executables)?;
         let (child_ranges, child_total) = Self::build_child_ranges(child_counts)?;
-        let FunctionChildTables {
-            children,
-            constant_indices,
-        } = Self::populate_child_tables(executables, &child_ranges, child_total)?;
+        let children = Self::populate_child_tables(executables, &child_ranges, child_total)?;
         Ok(FunctionChildLayout {
             child_ranges: child_ranges.into_boxed_slice(),
             children,
-            constant_indices,
         })
     }
 
@@ -2983,13 +3174,12 @@ impl FunctionTreeLayout {
         executables: &[Executable],
         child_ranges: &[Range<usize>],
         child_total: usize,
-    ) -> Result<FunctionChildTables, LeafCompilationError> {
+    ) -> Result<Box<[ExecutableId]>, LeafCompilationError> {
         let mut children = vec![None; child_total];
         let mut child_cursors = child_ranges
             .iter()
             .map(|range| range.start)
             .collect::<Vec<_>>();
-        let mut constant_indices = vec![None; executables.len()];
         for executable in executables {
             let Some(parent) = executable.parent() else {
                 continue;
@@ -3000,15 +3190,12 @@ impl FunctionTreeLayout {
             let range = child_ranges
                 .get(parent.index())
                 .ok_or(LeafCompilationError::InvalidExecutable { executable: parent })?;
-            let constant_index = u32::try_from(cursor.checked_sub(range.start).ok_or(
-                LeafCompilationError::SemanticInvariant {
+            if !range.contains(cursor) {
+                return Err(LeafCompilationError::SemanticInvariant {
                     invariant: "child cursor remains inside its parent range",
                     span: Some(executable.span()),
-                },
-            )?)
-            .map_err(|_| LeafCompilationError::CapacityExceeded {
-                domain: "function constants",
-            })?;
+                });
+            }
             let target =
                 children
                     .get_mut(*cursor)
@@ -3027,17 +3214,6 @@ impl FunctionTreeLayout {
                 .ok_or(LeafCompilationError::CapacityExceeded {
                     domain: "function constants",
                 })?;
-            let slot = constant_indices.get_mut(executable.id().index()).ok_or(
-                LeafCompilationError::InvalidExecutable {
-                    executable: executable.id(),
-                },
-            )?;
-            if slot.replace(constant_index).is_some() {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "child executable has one parent constant index",
-                    span: Some(executable.span()),
-                });
-            }
         }
         let children = children
             .into_iter()
@@ -3049,10 +3225,7 @@ impl FunctionTreeLayout {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(FunctionChildTables {
-            children: children.into_boxed_slice(),
-            constant_indices: constant_indices.into_boxed_slice(),
-        })
+        Ok(children.into_boxed_slice())
     }
 
     fn child_owner_span(
@@ -3121,11 +3294,27 @@ impl FunctionTreeLayout {
             })
     }
 
-    fn constant_index(&self, executable: ExecutableId) -> Option<u32> {
-        self.constant_indices
+    fn install_constant_pools(
+        &mut self,
+        constant_pools: Box<[CompiledConstantPool]>,
+    ) -> Result<(), LeafCompilationError> {
+        if !self.constant_pools.is_empty() || constant_pools.len() != self.child_ranges.len() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "constant pools install exactly once for every executable",
+                span: None,
+            });
+        }
+        self.constant_pools = constant_pools;
+        Ok(())
+    }
+
+    fn constant_pool(
+        &self,
+        executable: ExecutableId,
+    ) -> Result<&CompiledConstantPool, LeafCompilationError> {
+        self.constant_pools
             .get(executable.index())
-            .copied()
-            .flatten()
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })
     }
 
     fn variable_reference(&self, binding: BindingId) -> Option<u16> {
@@ -3313,9 +3502,166 @@ struct ValidatedFunction {
     capture_count: u32,
     capture_layout: CompilerCaptureLayout,
     locals: Vec<LoweredLocal>,
-    constants: Vec<CompiledFunctionConstant>,
+    constants: Arc<[CompiledConstant]>,
     closure_variables: Vec<CompiledClosureVariable>,
     flow: PlannedControlFlow,
+}
+
+#[derive(Clone, Copy)]
+struct FunctionPlanningContext<'layout> {
+    executable: ExecutableId,
+    layout: &'layout FrameLayout,
+    tree_layout: &'layout FunctionTreeLayout,
+    constants: &'layout CompiledConstantPool,
+}
+
+struct CompiledConstantPool {
+    entries: Arc<[CompiledConstant]>,
+    function_indices: Box<[(ExecutableId, u32)]>,
+    number_indices: Box<[(Span, u32)]>,
+}
+
+enum CompiledConstantCandidate {
+    Number {
+        value: Binary64Constant,
+        span: Span,
+    },
+    Function {
+        executable: ExecutableId,
+        span: Span,
+    },
+}
+
+impl CompiledConstantCandidate {
+    const fn order_key(&self) -> (u32, u32, u8) {
+        match self {
+            Self::Number { span, .. } => (span.start, span.end, 0),
+            Self::Function { span, .. } => (span.start, span.end, 1),
+        }
+    }
+}
+
+impl CompiledConstantPool {
+    fn from_candidates(
+        children: &[ExecutableId],
+        candidates: Vec<CompiledConstantCandidate>,
+    ) -> Result<Self, LeafCompilationError> {
+        let count = checked_function_entry_count(candidates.len(), "constant pool entries")?;
+        if children.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "direct child executables are strictly ordered",
+                span: None,
+            });
+        }
+        let mut entries = Vec::with_capacity(candidates.len());
+        let mut function_indices = Vec::with_capacity(children.len());
+        let mut number_indices =
+            Vec::with_capacity(candidates.len().checked_sub(children.len()).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "constant candidates include every direct child",
+                    span: None,
+                },
+            )?);
+        for (index, candidate) in candidates.into_iter().enumerate() {
+            let index =
+                u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "constant pool entries",
+                })?;
+            match candidate {
+                CompiledConstantCandidate::Number { value, span } => {
+                    entries.push(CompiledConstant::Value(CompilerConstantValue::Number(
+                        value,
+                    )));
+                    number_indices.push((span, index));
+                }
+                CompiledConstantCandidate::Function { executable, span } => {
+                    if children.binary_search(&executable).is_err() {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "constant-pool function is a direct child",
+                            span: Some(span),
+                        });
+                    }
+                    function_indices.push((executable, index));
+                    entries.push(CompiledConstant::Function(CompiledFunctionConstant {
+                        executable,
+                    }));
+                }
+            }
+        }
+        if u32::try_from(entries.len()) != Ok(count) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "constant-pool candidate count remains stable",
+                span: None,
+            });
+        }
+        function_indices.sort_unstable_by_key(|(executable, _)| *executable);
+        if function_indices.len() != children.len()
+            || !function_indices
+                .iter()
+                .map(|(executable, _)| *executable)
+                .eq(children.iter().copied())
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "constant pool owns every direct child exactly once",
+                span: None,
+            });
+        }
+        Ok(Self {
+            entries: entries.into(),
+            function_indices: function_indices.into_boxed_slice(),
+            number_indices: number_indices.into_boxed_slice(),
+        })
+    }
+
+    fn plan_number(
+        &self,
+        value: f64,
+        span: Span,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        let position = self
+            .number_indices
+            .binary_search_by_key(&(span.start, span.end), |(candidate, _)| {
+                (candidate.start, candidate.end)
+            })
+            .map_err(|_| LeafCompilationError::SemanticInvariant {
+                invariant: "non-integer numeric literal has one constant-pool entry",
+                span: Some(span),
+            })?;
+        let index = self.number_indices[position].1;
+        let Some(CompiledConstant::Value(CompilerConstantValue::Number(actual))) =
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| self.entries.get(index))
+                .copied()
+        else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "numeric constant index resolves to its binary64 payload",
+                span: Some(span),
+            });
+        };
+        if actual != Binary64Constant::from_f64(value) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "numeric constant retains its parsed binary64 payload",
+                span: Some(span),
+            });
+        }
+        let (opcode, operands) = match u8::try_from(index) {
+            Ok(index) => (FinalOpcode::PushConst8, Operands::Const8(index)),
+            Err(_) => (FinalOpcode::PushConst, Operands::Const(index)),
+        };
+        Ok(PlannedInstruction::new(opcode, operands, span))
+    }
+
+    fn function_index(&self, executable: ExecutableId) -> Result<u32, LeafCompilationError> {
+        self.function_indices
+            .binary_search_by_key(&executable, |(candidate, _)| *candidate)
+            .ok()
+            .map(|position| self.function_indices[position].1)
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "direct child executable has a constant-pool index",
+                span: None,
+            })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3762,6 +4108,7 @@ fn anonymous_function_definition_span(mut expression: &Expression<'_>) -> Option
 
 fn plan_literal(
     expression: &Expression<'_>,
+    constants: &CompiledConstantPool,
 ) -> Option<Result<PlannedInstruction, LeafCompilationError>> {
     let planned = match expression {
         Expression::BooleanLiteral(literal) => Ok(PlannedInstruction::new(
@@ -3778,12 +4125,10 @@ fn plan_literal(
             Operands::None,
             literal.span,
         )),
-        Expression::NumericLiteral(literal) => exact_i32(literal.value)
-            .map(|value| plan_push_integer(value, literal.span))
-            .ok_or(LeafCompilationError::Unsupported {
-                feature: UnsupportedLeafFeature::UnsupportedLiteral,
-                span: literal.span,
-            }),
+        Expression::NumericLiteral(literal) => match exact_i32(literal.value) {
+            Some(value) => Ok(plan_push_integer(value, literal.span)),
+            None => constants.plan_number(literal.value, literal.span),
+        },
         Expression::BigIntLiteral(literal) => literal
             .value
             .parse::<i32>()
@@ -4123,6 +4468,49 @@ mod tests {
                 domain: "test index"
             })
         ));
+    }
+
+    #[test]
+    fn constant_pool_ownership_includes_the_program_and_nearest_function() {
+        with_parsed_program(
+            "1.5; function child(){ return 2.5; }",
+            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+            |unit| {
+                let context = CompilationContext::new(unit).expect("storage plan");
+                let root = context
+                    .executables()
+                    .find(|candidate| candidate.metadata().parent().is_none())
+                    .expect("program executable")
+                    .id();
+                let child = context
+                    .executables()
+                    .find(|candidate| candidate.metadata().name() == Some("child"))
+                    .expect("child executable")
+                    .id();
+                let layout = context
+                    .function_tree_layout()
+                    .expect("function tree layout");
+
+                let root_pool = layout.constant_pool(root).expect("program constant pool");
+                assert_eq!(
+                    root_pool.entries.as_ref(),
+                    [
+                        CompiledConstant::Value(CompilerConstantValue::Number(
+                            Binary64Constant::from_f64(1.5),
+                        )),
+                        CompiledConstant::Function(CompiledFunctionConstant { executable: child }),
+                    ]
+                );
+                let child_pool = layout.constant_pool(child).expect("child constant pool");
+                assert_eq!(
+                    child_pool.entries.as_ref(),
+                    [CompiledConstant::Value(CompilerConstantValue::Number(
+                        Binary64Constant::from_f64(2.5),
+                    ))]
+                );
+            },
+        )
+        .expect("front-end acceptance");
     }
 
     #[test]
@@ -4627,8 +5015,11 @@ mod tests {
                     .plan_scope_exit(executable.id(), scope, &layout, &mut flow)
                     .expect("loop-head rotation");
                 let update = statement.update.as_ref().expect("update");
+                let constants = tree_layout
+                    .constant_pool(executable.id())
+                    .expect("constant pool");
                 context
-                    .plan_expression(update, &layout, &tree_layout, &mut flow)
+                    .plan_expression(update, &layout, &tree_layout, constants, &mut flow)
                     .expect("update");
                 flow.emit(PlannedInstruction::new(
                     FinalOpcode::Drop,

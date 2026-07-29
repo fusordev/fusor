@@ -34,11 +34,12 @@ pub use codec::{
     OperandDecodeError, OperandEncodeError, Operands, decode_instruction,
 };
 pub use compiler_graph::{
-    CompilerClosureSource, FunctionGraphResource, FunctionGraphUsage,
-    FunctionGraphVerificationError, FunctionGraphVerificationErrorKind,
-    FunctionGraphVerificationLimits, FunctionTemplateId, MAX_FUNCTION_GRAPH_NESTING_DEPTH,
-    MAX_FUNCTION_GRAPH_TEMPLATES, UnverifiedCompilerFunction, UnverifiedCompilerFunctionGraph,
-    VerifiedCompilerFunction, VerifiedCompilerFunctionGraph, verify_compiler_function_graph,
+    Binary64Constant, CompilerClosureSource, CompilerConstant, CompilerConstantValue,
+    FunctionGraphResource, FunctionGraphUsage, FunctionGraphVerificationError,
+    FunctionGraphVerificationErrorKind, FunctionGraphVerificationLimits, FunctionTemplateId,
+    MAX_FUNCTION_GRAPH_NESTING_DEPTH, MAX_FUNCTION_GRAPH_TEMPLATES, UnverifiedCompilerFunction,
+    UnverifiedCompilerFunctionGraph, VerifiedCompilerFunction, VerifiedCompilerFunctionGraph,
+    verify_compiler_function_graph,
 };
 pub use disassembly::{
     DisassemblyError, DisassemblyLimits, DisassemblySummary, render_disassembly,
