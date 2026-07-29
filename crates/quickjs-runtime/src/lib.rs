@@ -11,6 +11,8 @@
 
 #![forbid(unsafe_code)]
 
+mod number;
 mod string;
 
+pub use number::JsNumber;
 pub use string::{CodeUnits, JsString, JsStringError, MAX_STRING_CODE_UNITS};

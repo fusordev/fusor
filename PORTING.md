@@ -75,7 +75,10 @@ A milestone is complete only when all of its checked items pass in CI.
 
 - [x] JavaScript UTF-16 string primitive with lone-surrogate preservation,
       Latin-1 leaves, depth-bounded ropes, and QuickJS-compatible length limits.
-- [ ] ECMAScript primitive conversions and numeric edge cases.
+- [x] JavaScript Number representation with signed-zero preservation, int32
+      fast paths, overflow promotion, and all three numeric equality modes.
+- [ ] ECMAScript primitive conversions, parsing/printing, and remaining numeric
+      edge cases.
 - [ ] Interned atoms, symbols, property descriptors, shapes, prototypes, and
       exotic objects.
 - [ ] Dense/sparse arrays and typed indexed access.
