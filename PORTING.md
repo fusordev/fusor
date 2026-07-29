@@ -73,6 +73,8 @@ A milestone is complete only when all of its checked items pass in CI.
 
 ### M3 — values and object model
 
+- [x] JavaScript UTF-16 string primitive with lone-surrogate preservation,
+      Latin-1 leaves, depth-bounded ropes, and QuickJS-compatible length limits.
 - [ ] ECMAScript primitive conversions and numeric edge cases.
 - [ ] Interned atoms, symbols, property descriptors, shapes, prototypes, and
       exotic objects.

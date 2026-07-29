@@ -3,6 +3,7 @@ members = [
     "crates/quickjs-bytecode",
     "crates/quickjs-diagnostics",
     "crates/quickjs-frontend",
+    "crates/quickjs-runtime",
     "xtask",
 ]
 resolver = "3"

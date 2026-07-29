@@ -1,0 +1,11 @@
+[package]
+name = "quickjs-runtime"
+version = "0.0.1"
+description = "Reusable safe-Rust runtime core for the QuickJS port"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
