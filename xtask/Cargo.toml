@@ -6,5 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[dependencies]
+quickjs-frontend = { path = "../crates/quickjs-frontend" }
+
 [lints]
 workspace = true

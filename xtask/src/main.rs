@@ -2,6 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+mod parser_differential;
+
+use parser_differential::{ParserDifferentialOptions, run_parser_differential};
 use std::env;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
@@ -13,6 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const DEFAULT_CORPUS: &str = "tests/differential";
+const DEFAULT_PARSER_CORPUS: &str = "tests/parser";
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 
 fn main() -> ExitCode {
@@ -22,6 +26,14 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Args::Differential(options)) => match run_differential(&options) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(error) => {
+                eprintln!("xtask: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(Args::ParserDifferential(options)) => match run_parser_differential(&options) {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::FAILURE,
             Err(error) => {
@@ -42,9 +54,11 @@ fn print_usage() {
         "\
 Usage:
   cargo xtask differential --oracle PATH --candidate PATH [OPTIONS]
+  cargo xtask parser-differential --oracle PATH [OPTIONS]
 
 Options:
-  --corpus PATH       JavaScript corpus directory (default: {DEFAULT_CORPUS})
+  --corpus PATH       Corpus directory (runtime default: {DEFAULT_CORPUS};
+                      parser default: {DEFAULT_PARSER_CORPUS})
   --timeout-ms N      Per-process timeout (default: {DEFAULT_TIMEOUT_MS})
   -h, --help          Show this help
 "
@@ -55,6 +69,7 @@ Options:
 enum Args {
     Help,
     Differential(DifferentialOptions),
+    ParserDifferential(ParserDifferentialOptions),
 }
 
 impl Args {
@@ -69,40 +84,84 @@ impl Args {
         if command == "-h" || command == "--help" {
             return Ok(Self::Help);
         }
-        if command != "differential" {
-            return Err(format!("unknown task `{}`", command.to_string_lossy()));
+        let arguments = arguments.collect::<Vec<_>>();
+        if arguments
+            .iter()
+            .any(|argument| argument == "-h" || argument == "--help")
+        {
+            return Ok(Self::Help);
         }
+        match command.to_string_lossy().as_ref() {
+            "differential" => {
+                parse_differential_options(arguments.into_iter()).map(Self::Differential)
+            }
+            "parser-differential" => parse_parser_differential_options(arguments.into_iter())
+                .map(Self::ParserDifferential),
+            unknown => Err(format!("unknown task `{unknown}`")),
+        }
+    }
+}
 
-        let mut oracle = None;
-        let mut candidate = None;
-        let mut corpus = PathBuf::from(DEFAULT_CORPUS);
-        let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+fn parse_differential_options(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<DifferentialOptions, String> {
+    let mut oracle = None;
+    let mut candidate = None;
+    let mut corpus = PathBuf::from(DEFAULT_CORPUS);
+    let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
 
-        while let Some(option) = arguments.next() {
-            match option.to_string_lossy().as_ref() {
-                "--oracle" => oracle = Some(required_path(&mut arguments, "--oracle")?),
-                "--candidate" => candidate = Some(required_path(&mut arguments, "--candidate")?),
-                "--corpus" => corpus = required_path(&mut arguments, "--corpus")?,
-                "--timeout-ms" => {
-                    let value = required_value(&mut arguments, "--timeout-ms")?;
-                    let milliseconds = value
-                        .to_string_lossy()
-                        .parse::<u64>()
-                        .map_err(|_| "--timeout-ms must be a non-negative integer".to_owned())?;
-                    timeout = Duration::from_millis(milliseconds);
-                }
-                "-h" | "--help" => return Ok(Self::Help),
-                unknown => return Err(format!("unknown differential option `{unknown}`")),
+    while let Some(option) = arguments.next() {
+        match option.to_string_lossy().as_ref() {
+            "--oracle" => oracle = Some(required_path(&mut arguments, "--oracle")?),
+            "--candidate" => candidate = Some(required_path(&mut arguments, "--candidate")?),
+            "--corpus" => corpus = required_path(&mut arguments, "--corpus")?,
+            "--timeout-ms" => timeout = required_timeout(&mut arguments)?,
+            unknown => return Err(format!("unknown differential option `{unknown}`")),
+        }
+    }
+
+    Ok(DifferentialOptions {
+        oracle: oracle.ok_or("missing required --oracle PATH")?,
+        candidate: candidate.ok_or("missing required --candidate PATH")?,
+        corpus,
+        timeout,
+    })
+}
+
+fn parse_parser_differential_options(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<ParserDifferentialOptions, String> {
+    let mut oracle = None;
+    let mut corpus = PathBuf::from(DEFAULT_PARSER_CORPUS);
+    let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    while let Some(option) = arguments.next() {
+        match option.to_string_lossy().as_ref() {
+            "--oracle" => oracle = Some(required_path(&mut arguments, "--oracle")?),
+            "--corpus" => corpus = required_path(&mut arguments, "--corpus")?,
+            "--timeout-ms" => timeout = required_timeout(&mut arguments)?,
+            unknown => {
+                return Err(format!("unknown parser-differential option `{unknown}`"));
             }
         }
-
-        Ok(Self::Differential(DifferentialOptions {
-            oracle: oracle.ok_or("missing required --oracle PATH")?,
-            candidate: candidate.ok_or("missing required --candidate PATH")?,
-            corpus,
-            timeout,
-        }))
     }
+
+    Ok(ParserDifferentialOptions {
+        oracle: oracle.ok_or("missing required --oracle PATH")?,
+        corpus,
+        timeout,
+    })
+}
+
+fn required_timeout(
+    arguments: &mut impl Iterator<Item = std::ffi::OsString>,
+) -> Result<Duration, String> {
+    let value = required_value(arguments, "--timeout-ms")?;
+    let milliseconds = value
+        .to_string_lossy()
+        .parse::<u64>()
+        .map_err(|_| "--timeout-ms must be a non-negative integer".to_owned())?;
+    Ok(Duration::from_millis(milliseconds))
 }
 
 fn required_path(
@@ -177,7 +236,7 @@ fn run_differential(options: &DifferentialOptions) -> Result<bool, String> {
     Ok(false)
 }
 
-fn validate_executable(path: &Path, role: &str) -> Result<(), String> {
+pub(crate) fn validate_executable(path: &Path, role: &str) -> Result<(), String> {
     let metadata = fs::metadata(path)
         .map_err(|error| format!("{role} executable {}: {error}", path.display()))?;
     if !metadata.is_file() {
@@ -189,7 +248,10 @@ fn validate_executable(path: &Path, role: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn collect_javascript_files(directory: &Path, output: &mut Vec<PathBuf>) -> io::Result<()> {
+pub(crate) fn collect_javascript_files(
+    directory: &Path,
+    output: &mut Vec<PathBuf>,
+) -> io::Result<()> {
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
@@ -206,14 +268,14 @@ fn collect_javascript_files(directory: &Path, output: &mut Vec<PathBuf>) -> io::
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct ProgramOutput {
-    status: Status,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+pub(crate) struct ProgramOutput {
+    pub(crate) status: Status,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum Status {
+pub(crate) enum Status {
     Exited(Option<i32>),
     TimedOut,
 }
@@ -223,8 +285,16 @@ fn run_program(
     fixture: &Path,
     timeout: Duration,
 ) -> Result<ProgramOutput, String> {
+    run_program_with_arguments(executable, &[fixture.as_os_str()], timeout)
+}
+
+pub(crate) fn run_program_with_arguments(
+    executable: &Path,
+    arguments: &[&OsStr],
+    timeout: Duration,
+) -> Result<ProgramOutput, String> {
     let mut child = Command::new(executable)
-        .arg(fixture)
+        .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

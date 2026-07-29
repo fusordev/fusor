@@ -1071,6 +1071,9 @@ dependencies = [
 [[package]]
 name = "xtask"
 version = "0.0.0"
+dependencies = [
+ "quickjs-frontend",
+]
 
 [[package]]
 name = "yoke"

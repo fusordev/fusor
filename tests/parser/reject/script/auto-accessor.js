@@ -1,0 +1,3 @@
+class Example {
+    accessor value;
+}
