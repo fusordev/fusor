@@ -59,6 +59,9 @@ A milestone is complete only when all of its checked items pass in CI.
       opt out for documented foreign-pointer operations.
 - [x] Add formatting, linting, test, documentation, and dependency-audit CI.
 - [x] Add an optional differential runner for the upstream `qjs` executable.
+- [x] Selectively vendor the exact pinned 17-package Oxc-family closure with
+      registry checksums, VCS provenance, licenses, local path overrides, and
+      offline source-resolution verification.
 
 ### M1 — Oxc source front end
 

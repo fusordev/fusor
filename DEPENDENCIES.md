@@ -10,8 +10,9 @@ VM, garbage collector, built-in implementation, or RegExp engine.
 ### Oxc 0.142.0
 
 Oxc is the user-selected JavaScript parser. The workspace exactly pins its
-parser-facing crates so an upstream AST or diagnostic change cannot silently
-alter compilation:
+parser-facing crates and selectively vendors their complete active
+Oxc-family closure so an upstream AST, semantic, or diagnostic change cannot
+silently alter compilation:
 
 - official parser guide: <https://oxc.rs/docs/guide/usage/parser.html>;
 - `oxc_allocator`
@@ -21,6 +22,15 @@ alter compilation:
 - `oxc_semantic`
 - `oxc_span`
 - `oxc_syntax`
+
+The 17 versioned package directories under `vendor/oxc/crates` are patched
+through `[patch.crates-io]`; unrelated dependencies remain registry-backed.
+`vendor/oxc/PROVENANCE.md` records every original registry checksum, VCS
+revision/path, license, and the machine-verifiable local-resolution check.
+Packaged `.cargo-checksum.json`, `.cargo_vcs_info.json`, and
+`Cargo.toml.orig` files are retained. The vendored Oxc source is the explicit
+parser/semantic dependency selected for this port, not a JavaScript runtime
+semantic reference.
 
 `oxc_parser` has default features disabled. In particular, its
 `regular_expression` parser feature is not enabled: QuickJS-derived code will
