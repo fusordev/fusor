@@ -101,18 +101,116 @@ fn engine_mode_rejects_typescript_and_jsx() {
     }
 }
 
-#[test]
-fn accepts_an_es2025_explicit_resource_management_sample() {
-    let source = r"
-        export async function collect() {
-            await using resource = acquire();
-            return Promise.try(() => resource);
-        }
-    ";
+fn assert_profile_rejection(source: &str, mode: ParseMode, expected_message: &str) {
     let allocator = Allocator::new();
+    let error = parse(&allocator, source, FrontendOptions::new(mode))
+        .expect_err("syntax outside the QuickJS profile must be rejected");
 
-    let program =
-        parse(&allocator, source, FrontendOptions::new(ParseMode::Module)).expect("ES2025 module");
+    assert_eq!(error.stage(), DiagnosticStage::Profile, "{source}");
+    assert!(!error.parser_panicked(), "{source}");
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains(expected_message)),
+        "{source}: {error:?}"
+    );
+
+    let source_len = u32::try_from(source.len()).expect("test source fits in an Oxc span");
+    assert!(error.diagnostics().iter().all(|diagnostic| {
+        diagnostic
+            .labels
+            .iter()
+            .any(|label| label.span.start < label.span.end && label.span.end <= source_len)
+    }));
+}
+
+#[test]
+fn rejects_explicit_resource_management_outside_the_quickjs_profile() {
+    for (source, mode, expected_message) in [
+        (
+            "using resource = acquire();",
+            ParseMode::Script,
+            "`using` declarations",
+        ),
+        (
+            "async function collect() { await using resource = acquire(); }",
+            ParseMode::Script,
+            "`await using` declarations",
+        ),
+    ] {
+        assert_profile_rejection(source, mode, expected_message);
+    }
+}
+
+#[test]
+fn rejects_import_phases_outside_the_quickjs_profile() {
+    for (source, mode, expected_message) in [
+        (
+            "import source wasm from './module.wasm';",
+            ParseMode::Module,
+            "`import source`",
+        ),
+        (
+            "import defer * as dependency from './dep.js';",
+            ParseMode::Module,
+            "`import defer`",
+        ),
+        (
+            "const wasm = import.source('./module.wasm');",
+            ParseMode::Script,
+            "`import source`",
+        ),
+        (
+            "const dependency = import.defer('./dep.js');",
+            ParseMode::Script,
+            "`import defer`",
+        ),
+    ] {
+        assert_profile_rejection(source, mode, expected_message);
+    }
+}
+
+#[test]
+fn rejects_decorators_and_class_accessor_declarations() {
+    for (source, expected_message) in [
+        ("@sealed class Example {}", "decorators"),
+        (
+            "class Example { accessor value = 1; }",
+            "class `accessor` declarations",
+        ),
+    ] {
+        assert_profile_rejection(source, ParseMode::Script, expected_message);
+    }
+}
+
+#[test]
+fn rejects_legacy_import_assertions_but_accepts_import_attributes() {
+    assert_profile_rejection(
+        "import data from './data.json' assert { type: 'json' };",
+        ParseMode::Module,
+        "legacy import assertions",
+    );
+
+    let allocator = Allocator::new();
+    let program = parse(
+        &allocator,
+        "import data from './data.json' with { type: 'json' }; export default data;",
+        FrontendOptions::new(ParseMode::Module),
+    )
+    .expect("QuickJS supports import attributes using `with`");
+    assert_eq!(program.body.len(), 2);
+}
+
+#[test]
+fn accepts_promise_try_from_the_quickjs_es2025_profile() {
+    let allocator = Allocator::new();
+    let program = parse(
+        &allocator,
+        "const result = Promise.try(() => 42);",
+        FrontendOptions::new(ParseMode::Script),
+    )
+    .expect("QuickJS 2026-06-04 supports Promise.try");
 
     assert_eq!(program.body.len(), 1);
 }

@@ -10,9 +10,13 @@ use std::{error::Error, fmt};
 
 pub use oxc_allocator::Allocator;
 pub use oxc_ast::ast::Program;
+use oxc_ast::{
+    AstKind,
+    ast::{ImportPhase, VariableDeclarationKind, WithClauseKeyword},
+};
 use oxc_diagnostics::{Diagnostics, OxcDiagnostic};
 use oxc_parser::{ParseOptions as OxcParseOptions, Parser};
-use oxc_semantic::SemanticBuilder;
+use oxc_semantic::{AstNodes, SemanticBuilder};
 use oxc_span::SourceType;
 pub use oxc_span::Span;
 
@@ -88,6 +92,8 @@ impl Default for FrontendOptions {
 pub enum DiagnosticStage {
     /// Oxc's lexer or parser emitted a diagnostic.
     Parser,
+    /// The AST uses syntax outside the pinned `QuickJS` compatibility profile.
+    Profile,
     /// Oxc's deferred ECMAScript early-error checks emitted a diagnostic.
     Semantic,
 }
@@ -96,6 +102,7 @@ impl fmt::Display for DiagnosticStage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parser => formatter.write_str("parser"),
+            Self::Profile => formatter.write_str("profile"),
             Self::Semantic => formatter.write_str("semantic"),
         }
     }
@@ -169,6 +176,15 @@ impl FrontendError {
         }
     }
 
+    fn from_profile(diagnostics: Vec<FrontendDiagnostic>) -> Self {
+        debug_assert!(!diagnostics.is_empty());
+        Self {
+            stage: DiagnosticStage::Profile,
+            diagnostics,
+            parser_panicked: false,
+        }
+    }
+
     /// Returns the phase that rejected the source.
     #[must_use]
     pub const fn stage(&self) -> DiagnosticStage {
@@ -200,6 +216,80 @@ impl fmt::Display for FrontendError {
 
 impl Error for FrontendError {}
 
+fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> {
+    let mut violations = Vec::new();
+
+    for node in nodes {
+        match node.kind() {
+            AstKind::VariableDeclaration(declaration) => match declaration.kind {
+                VariableDeclarationKind::Using => violations.push((
+                    declaration.span,
+                    "QuickJS 2026-06-04 does not support `using` declarations",
+                )),
+                VariableDeclarationKind::AwaitUsing => violations.push((
+                    declaration.span,
+                    "QuickJS 2026-06-04 does not support `await using` declarations",
+                )),
+                VariableDeclarationKind::Var
+                | VariableDeclarationKind::Let
+                | VariableDeclarationKind::Const => {}
+            },
+            AstKind::ImportDeclaration(declaration) => {
+                push_import_phase_violation(&mut violations, declaration.phase, declaration.span);
+            }
+            AstKind::ImportExpression(expression) => {
+                push_import_phase_violation(&mut violations, expression.phase, expression.span);
+            }
+            AstKind::Decorator(decorator) => violations.push((
+                decorator.span,
+                "QuickJS 2026-06-04 does not support decorators",
+            )),
+            AstKind::AccessorProperty(property) => violations.push((
+                property.span,
+                "QuickJS 2026-06-04 does not support class `accessor` declarations",
+            )),
+            AstKind::WithClause(clause) if clause.keyword == WithClauseKeyword::Assert => {
+                violations.push((
+                    clause.span,
+                    "QuickJS 2026-06-04 does not support legacy import assertions; use import attributes with `with`",
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    violations.sort_unstable_by(|(left_span, left_message), (right_span, right_message)| {
+        left_span
+            .start
+            .cmp(&right_span.start)
+            .then_with(|| left_span.end.cmp(&right_span.end))
+            .then_with(|| left_message.cmp(right_message))
+    });
+    violations
+        .into_iter()
+        .map(|(span, message)| FrontendDiagnostic {
+            message: message.to_owned(),
+            labels: vec![DiagnosticLabel {
+                span,
+                message: Some("unsupported by the QuickJS 2026-06-04 profile".to_owned()),
+            }],
+        })
+        .collect()
+}
+
+fn push_import_phase_violation(
+    violations: &mut Vec<(Span, &'static str)>,
+    phase: Option<ImportPhase>,
+    span: Span,
+) {
+    let message = match phase {
+        Some(ImportPhase::Source) => "QuickJS 2026-06-04 does not support `import source`",
+        Some(ImportPhase::Defer) => "QuickJS 2026-06-04 does not support `import defer`",
+        None => return,
+    };
+    violations.push((span, message));
+}
+
 /// Parses and validates JavaScript using a caller-owned Oxc arena.
 ///
 /// The returned AST borrows both `allocator` and `source_text`; callers must
@@ -209,8 +299,9 @@ impl Error for FrontendError {}
 /// # Errors
 ///
 /// Returns an error if the parser emits any diagnostic (including a
-/// recoverable one) or if deferred semantic early-error checking emits any
-/// diagnostic.
+/// recoverable one), if the AST uses syntax outside the pinned `QuickJS`
+/// compatibility profile, or if deferred semantic early-error checking emits
+/// any diagnostic.
 pub fn parse<'arena>(
     allocator: &'arena Allocator,
     source_text: &'arena str,
@@ -234,7 +325,13 @@ pub fn parse<'arena>(
     }
 
     let program = parsed.program;
-    let semantic = SemanticBuilder::new_compiler().build(&program);
+    let semantic = SemanticBuilder::new_compiler()
+        .with_build_nodes(true)
+        .build(&program);
+    let profile_diagnostics = quickjs_profile_diagnostics(semantic.semantic.nodes());
+    if !profile_diagnostics.is_empty() {
+        return Err(FrontendError::from_profile(profile_diagnostics));
+    }
     if !semantic.diagnostics.is_empty() {
         return Err(FrontendError::from_oxc(
             DiagnosticStage::Semantic,
