@@ -12,9 +12,11 @@ The target is QuickJS 2026-06-04:
   Atomics, and SharedArrayBuffer;
 - `qjs`, a Rust-native `qjsc`, and the documented `std`/`os` host surface.
 
-Binary layout and C ABI compatibility are not goals. Rust callers receive an
-idiomatic, lifetime-safe API. Any host behavior that cannot be reproduced
-portably or safely will be documented with a compatibility test.
+QuickJS binary layout and C API compatibility are not goals. Rust callers
+receive an idiomatic, lifetime-safe API. The optional N-API boundary separately
+targets that external C ABI through a Rust-written adapter. Any host behavior
+that cannot be reproduced portably or safely will be documented with a
+compatibility test.
 
 ## Planned crate topology
 
@@ -31,8 +33,16 @@ Every production crate must be independently reusable and documented:
   jobs, limits, interrupts, and embedding APIs;
 - `quickjs-tokio`: optional Tokio host driver for async I/O, timers, workers,
   and event-loop integration;
+- `quickjs-inspector`: runtime debugger API and transport-independent Chrome
+  DevTools Protocol adapter;
+- `quickjs-wasm`: optional Wasmtime-backed JavaScript WebAssembly surface;
+- `quickjs-napi-core` and `quickjs-napi-abi`: low-priority safe N-API
+  semantics plus an isolated Rust C-ABI boundary;
+- `quickjs-typescript-strip`: low-priority, source-mapped, erasable
+  TypeScript preprocessing;
 - `quickjs`: ergonomic facade with deliberate feature flags;
-- thin `qjs` and `qjsc` binary crates built entirely on those libraries.
+- thin `qjs`, `qjsc`, and bytecode-viewer binary crates built entirely on
+  those libraries.
 
 `xtask` and fuzz/benchmark harnesses are repository tooling rather than
 production crates. Production crates remain usable without the CLIs.
@@ -44,13 +54,18 @@ A milestone is complete only when all of its checked items pass in CI.
 ### M0 — reproducible foundation
 
 - [x] Record the upstream release and archive digest.
-- [x] Establish an `unsafe`-free Rust workspace.
+- [x] Require workspace-owned core crates to forbid `unsafe`; audit
+      dependencies separately. Only the future isolated N-API ABI crate may
+      opt out for documented foreign-pointer operations.
 - [x] Add formatting, linting, test, documentation, and dependency-audit CI.
 - [x] Add an optional differential runner for the upstream `qjs` executable.
 
 ### M1 — Oxc source front end
 
 - [x] Pin the current Oxc parser crates and define the arena-safe AST boundary.
+- [x] Represent global Script, Module, indirect/direct eval, and all dynamic
+      Function-constructor goals losslessly; unsupported contextual adapters
+      fail before Oxc without semantic downgrade.
 - [ ] Parse JavaScript scripts, modules, eval input, and Function-constructor
       bodies with explicit modes; do not enable TypeScript or JSX.
 - [x] Reject parser and deferred semantic diagnostics with byte-accurate source
@@ -82,6 +97,7 @@ A milestone is complete only when all of its checked items pass in CI.
       Latin-1 leaves, depth-bounded ropes, and QuickJS-compatible length limits.
 - [x] JavaScript Number representation with signed-zero preservation, int32
       fast paths, overflow promotion, and all three numeric equality modes.
+- [x] Canonical property-key array-index recognition through `2^32 - 2`.
 - [ ] ECMAScript primitive conversions, parsing/printing, and remaining numeric
       edge cases.
 - [ ] Interned atoms, symbols, property descriptors, shapes, prototypes, and
@@ -111,10 +127,14 @@ A milestone is complete only when all of its checked items pass in CI.
 - [ ] Module linking, cyclic graphs, dynamic import, and top-level await.
 - [ ] Evaluate Oxc Resolver as an implementation aid without inheriting its
       Node defaults; preserve QuickJS relative/system module-name semantics.
-- [ ] `qjs` CLI, REPL, script/module detection, and documented options.
+- [ ] Minimal `qjs` runtime and ESM-aware REPL with multiline input, static
+      and dynamic modules, top-level await, limits, and clean Tokio shutdown.
+- [ ] `qjs` CLI script/module detection and documented options.
 - [ ] Rust-native `qjsc` artifact generation with no C compiler dependency.
 - [ ] Bytecode viewer CLI with verified function metadata, resolved atoms and
       constants, control-flow targets, and source-map annotations.
+- [ ] CDP inspection adapter with safe-point pause/step/breakpoints, scopes,
+      object previews, exceptions, console events, and source-mapped locations.
 - [ ] Portable `std`/`os` modules with documented platform and safety policy.
 
 ### M6 — conformance and performance
@@ -135,6 +155,17 @@ A milestone is complete only when all of its checked items pass in CI.
 - [ ] Production audit: supported-platform matrix, resource limits,
       cancellation/shutdown, malformed-input hardening, dependency policy, and
       reproducible release artifacts.
+
+### M7 — optional compatibility layers
+
+- [ ] Wasmtime-backed JavaScript `WebAssembly` API with bounded compilation,
+      execution, memory, tables, imports/exports, and exception conversion.
+- [ ] Safe N-API semantic core plus an isolated, audited Rust C-ABI adapter
+      with no C/C++ source, bindgen, or C compiler.
+- [ ] Opt-in erasable TypeScript stripping that emits a mandatory source map
+      before entering the ordinary JavaScript frontend.
+- [ ] Feature, platform, conformance, diagnostics, cancellation, and security
+      matrices for every optional layer.
 
 ## Engineering rules
 

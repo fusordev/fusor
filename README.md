@@ -10,7 +10,9 @@ target is the official **2026-06-04** release and its ES2025 language surface.
 
 ## Contract
 
-- No C, C++, FFI, bindgen, or C compiler in the build or runtime path.
+- No C or C++ source, bindgen output, or C compiler in the engine build or
+  runtime path. The optional N-API adapter is the sole isolated foreign-ABI
+  boundary and is written in Rust.
 - The pinned QuickJS release is the sole JavaScript-runtime implementation
   reference. Oxc is the explicitly selected JavaScript parser; no other
   engine, port, VM, garbage collector, or RegExp implementation is consulted
@@ -18,7 +20,9 @@ target is the official **2026-06-04** release and its ES2025 language surface.
 - General-purpose Rust crates may provide infrastructure, but they are not
   semantic references. Observable JavaScript behavior comes from the pinned
   QuickJS release and its compatibility tests.
-- `unsafe` Rust is forbidden at the workspace level.
+- Core engine, compiler, runtime, host, and tool crates forbid `unsafe` Rust.
+  Any C-ABI pointer handling required by the optional N-API adapter is confined
+  to its boundary crate and audited separately.
 - Preserve observable ECMAScript behavior, not QuickJS's private in-memory
   representation.
 - Rust-native performance changes are allowed when differential tests preserve
@@ -43,8 +47,10 @@ The runtime/compiler boundaries and safety invariants live in
 compatibility gates live in [PORTING.md](PORTING.md). The exact upstream
 provenance is recorded in [UPSTREAM.md](UPSTREAM.md), the hardened bytecode
 trust boundary is specified in [BYTECODE_VERIFIER.md](BYTECODE_VERIFIER.md),
-and the external-crate policy is recorded in
-[DEPENDENCIES.md](DEPENDENCIES.md).
+the external-crate policy is recorded in
+[DEPENDENCIES.md](DEPENDENCIES.md), and the ESM REPL, bytecode viewer, CDP,
+Wasmtime, N-API, and TypeScript-strip surfaces are specified in
+[EXTENSIONS.md](EXTENSIONS.md).
 
 ## Development
 
