@@ -12,14 +12,14 @@ pub use oxc_allocator::Allocator;
 pub use oxc_ast::ast::Program;
 use oxc_ast::{
     AstKind,
-    ast::{ImportPhase, ModuleExportName, VariableDeclarationKind, WithClauseKeyword},
+    ast::{Argument, ImportPhase, ModuleExportName, VariableDeclarationKind, WithClauseKeyword},
 };
 use oxc_diagnostics::{Diagnostics, OxcDiagnostic};
 use oxc_parser::{ParseOptions as OxcParseOptions, Parser};
 use oxc_semantic::{AstNodes, SemanticBuilder};
 pub use oxc_semantic::{Scoping, Semantic};
-use oxc_span::SourceType;
 pub use oxc_span::Span;
+use oxc_span::{GetSpan, SourceType};
 pub use oxc_syntax::module_record::ModuleRecord;
 use quickjs_diagnostics::{
     Diagnostic as SharedDiagnostic, DiagnosticCode as SharedDiagnosticCode, DiagnosticCodeError,
@@ -53,6 +53,7 @@ const MAX_OXC_SOURCE_BYTES: usize = {
 
 const DYNAMIC_FUNCTION_PARAMETERS_BODY_SEPARATOR: &str = "\n) {\n";
 const DYNAMIC_FUNCTION_SUFFIX: &str = "\n})";
+const MAX_FIXED_CALL_ARGUMENTS: usize = u16::MAX as usize;
 
 /// Oxc's underlying ECMAScript source mode.
 ///
@@ -1758,6 +1759,9 @@ pub enum FrontendDiagnosticCode {
     UnsupportedStringNamedReExport,
     /// A string-literal namespace export name.
     UnsupportedStringNamespaceExport,
+    /// A call or construction has more fixed prefix arguments than `QuickJS` can
+    /// encode before its first spread.
+    TooManyCallArguments,
 }
 
 impl FrontendDiagnosticCode {
@@ -1796,6 +1800,7 @@ impl FrontendDiagnosticCode {
             Self::UnsupportedStringNamespaceExport => {
                 "quickjs::frontend::profile::string_namespace_export"
             }
+            Self::TooManyCallArguments => "quickjs::frontend::profile::too_many_call_arguments",
         }
     }
 
@@ -1809,6 +1814,9 @@ impl FrontendDiagnosticCode {
             | Self::OxcParser
             | Self::OxcSemantic
             | Self::ModuleSyntaxLowering => None,
+            Self::TooManyCallArguments => Some(
+                "reduce the fixed argument prefix or introduce a spread before it reaches 65,535 arguments",
+            ),
             Self::UnsupportedUsingDeclaration
             | Self::UnsupportedAwaitUsingDeclaration
             | Self::UnsupportedImportSource
@@ -2377,6 +2385,12 @@ fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> 
                     message: "QuickJS 2026-06-04 does not support legacy import assertions; use import attributes with `with`",
                 });
             }
+            AstKind::CallExpression(expression) => {
+                push_call_argument_prefix_violation(&mut violations, &expression.arguments);
+            }
+            AstKind::NewExpression(expression) => {
+                push_call_argument_prefix_violation(&mut violations, &expression.arguments);
+            }
             _ => {}
         }
     }
@@ -2399,6 +2413,25 @@ fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> 
             }],
         })
         .collect()
+}
+
+fn push_call_argument_prefix_violation(
+    violations: &mut Vec<ProfileViolation>,
+    arguments: &[Argument<'_>],
+) {
+    for (fixed_arguments, argument) in arguments.iter().enumerate() {
+        if fixed_arguments == MAX_FIXED_CALL_ARGUMENTS {
+            violations.push(ProfileViolation {
+                span: argument.span(),
+                code: FrontendDiagnosticCode::TooManyCallArguments,
+                message: "Too many call arguments",
+            });
+            return;
+        }
+        if argument.is_spread() {
+            return;
+        }
+    }
 }
 
 fn push_import_phase_violation(

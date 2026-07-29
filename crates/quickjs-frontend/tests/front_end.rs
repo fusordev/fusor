@@ -500,6 +500,114 @@ fn assert_profile_rejection(source: &str, mode: ParseMode, expected_code: Fronte
     }));
 }
 
+const QUICKJS_MAX_FIXED_CALL_ARGUMENTS: usize = u16::MAX as usize;
+
+fn invocation_source(opening: &str, fixed_arguments: usize, tail: Option<&str>) -> String {
+    let estimated_arguments = fixed_arguments
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(tail.map_or(0, str::len)))
+        .expect("test source size");
+    let mut source = String::with_capacity(opening.len() + estimated_arguments + 3);
+    source.push_str(opening);
+    for index in 0..fixed_arguments {
+        if index != 0 {
+            source.push(',');
+        }
+        source.push('0');
+    }
+    if let Some(tail) = tail {
+        if fixed_arguments != 0 {
+            source.push(',');
+        }
+        source.push_str(tail);
+    }
+    source.push_str(");");
+    source
+}
+
+fn spread_first_invocation_source(opening: &str, trailing_arguments: usize) -> String {
+    let mut source = String::with_capacity(opening.len() + trailing_arguments * 2 + 12);
+    source.push_str(opening);
+    source.push_str("...values");
+    for _ in 0..trailing_arguments {
+        source.push_str(",0");
+    }
+    source.push_str(");");
+    source
+}
+
+fn assert_script_accepts(source: &str) {
+    with_parsed_program(source, FrontendOptions::new(ParseMode::Script), |_| ())
+        .expect("QuickJS-compatible invocation must be accepted");
+}
+
+fn assert_too_many_call_arguments(source: &str, offending_text: &str) {
+    let allocator = Allocator::new();
+    let Err(error) = parse(&allocator, source, FrontendOptions::new(ParseMode::Script)) else {
+        panic!("QuickJS fixed call-argument prefix must be bounded");
+    };
+
+    assert_eq!(error.stage(), DiagnosticStage::Profile);
+    let diagnostic = error
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == FrontendDiagnosticCode::TooManyCallArguments)
+        .expect("QuickJS-compatible call argument diagnostic");
+    assert_eq!(diagnostic.message, "Too many call arguments");
+    assert_eq!(diagnostic.labels.len(), 1);
+    let span = diagnostic.labels[0].span;
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        offending_text
+    );
+}
+
+#[test]
+fn quickjs_fixed_call_argument_prefix_limit_matches_spread_behavior() {
+    assert_script_accepts(&invocation_source(
+        "callee(",
+        QUICKJS_MAX_FIXED_CALL_ARGUMENTS,
+        None,
+    ));
+    assert_too_many_call_arguments(
+        &invocation_source(
+            "callee(",
+            QUICKJS_MAX_FIXED_CALL_ARGUMENTS,
+            Some("overflow"),
+        ),
+        "overflow",
+    );
+    assert_too_many_call_arguments(
+        &invocation_source(
+            "callee(",
+            QUICKJS_MAX_FIXED_CALL_ARGUMENTS,
+            Some("...values"),
+        ),
+        "...values",
+    );
+    assert_script_accepts(&spread_first_invocation_source(
+        "callee(",
+        QUICKJS_MAX_FIXED_CALL_ARGUMENTS + 1,
+    ));
+}
+
+#[test]
+fn quickjs_fixed_new_argument_prefix_uses_the_same_limit() {
+    assert_script_accepts(&invocation_source(
+        "new Constructor(",
+        QUICKJS_MAX_FIXED_CALL_ARGUMENTS,
+        None,
+    ));
+    assert_too_many_call_arguments(
+        &invocation_source(
+            "new Constructor(",
+            QUICKJS_MAX_FIXED_CALL_ARGUMENTS,
+            Some("overflow"),
+        ),
+        "overflow",
+    );
+}
+
 #[test]
 fn rejects_explicit_resource_management_outside_the_quickjs_profile() {
     for (source, mode, expected_code) in [
