@@ -1,5 +1,7 @@
 use quickjs_bytecode::{
-    CompilerCapturedBinding, CompilerConstantKind, FinalOpcode, Operands, VerificationLimits,
+    CompilerCapturedBinding, CompilerClosureSource as VerifiedClosureSource, CompilerConstantKind,
+    FinalOpcode, FunctionGraphVerificationErrorKind, FunctionGraphVerificationLimits,
+    FunctionTemplateId, Operands, VerificationLimits,
 };
 use quickjs_compiler::{
     CompilationContext, CompiledClosureSource, CompiledFunction, CompiledFunctionTree,
@@ -37,6 +39,32 @@ fn opcodes(function: &CompiledFunction) -> Vec<(FinalOpcode, Operands)> {
         .collect()
 }
 
+fn assert_three_level_function_graph(tree: &CompiledFunctionTree) {
+    let graph = tree.function_graph();
+    assert_eq!(graph.root_id(), FunctionTemplateId::new(0));
+    assert_ne!(tree.root_executable().index(), 0);
+    assert_eq!(graph.functions().len(), tree.functions().len());
+    assert_eq!(graph.root().constants(), [FunctionTemplateId::new(1)]);
+    assert_eq!(
+        graph
+            .function(FunctionTemplateId::new(1))
+            .expect("middle graph function")
+            .closure_sources(),
+        [VerifiedClosureSource::ParentVariableReference(0)]
+    );
+    assert_eq!(
+        graph
+            .function(FunctionTemplateId::new(2))
+            .expect("inner graph function")
+            .closure_sources(),
+        [VerifiedClosureSource::ParentClosure(0)]
+    );
+    let middle = tree
+        .function_by_template(FunctionTemplateId::new(1))
+        .expect("middle compiler function");
+    assert_ne!(middle.executable().index(), 1);
+}
+
 #[test]
 fn nested_function_constants_connect_forwarded_capture_cells() {
     fn assert_send_sync<T: Send + Sync>() {}
@@ -52,6 +80,7 @@ fn nested_function_constants_connect_forwarded_capture_cells() {
         "outer",
     );
     assert_eq!(tree.functions().len(), 3);
+    assert_three_level_function_graph(&tree);
 
     let outer = tree.root();
     assert_eq!(outer.executable(), tree.root_executable());
@@ -83,6 +112,10 @@ fn nested_function_constants_connect_forwarded_capture_cells() {
 
     let middle_id = outer.constants()[0].executable();
     let middle = tree.function(middle_id).expect("middle function");
+    assert_eq!(
+        tree.function_by_template(FunctionTemplateId::new(1)),
+        Some(middle)
+    );
     assert_eq!(middle.constants().len(), 1);
     assert_eq!(middle.closure_variables().len(), 1);
     assert_eq!(middle.closure_variables()[0].slot().index(), 0);
@@ -318,7 +351,25 @@ fn deeply_nested_function_templates_compile_with_an_explicit_work_stack() {
     }
     source.push('}');
 
-    let tree = compile_tree(&source, "outer");
+    let tree = with_parsed_program(
+        &source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning must succeed");
+            let outer = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some("outer"))
+                .expect("outer function");
+            context
+                .compile_tree_with_graph_limits(
+                    &outer,
+                    VerificationLimits::default(),
+                    FunctionGraphVerificationLimits::default().with_max_nesting_depth(257),
+                )
+                .expect("explicit graph limit accepts the iterative fixture")
+        },
+    )
+    .expect("front-end acceptance");
     assert_eq!(tree.functions().len(), depth + 1);
     assert!(
         tree.functions()
@@ -330,6 +381,114 @@ fn deeply_nested_function_templates_compile_with_an_explicit_work_stack() {
         tree.functions()
             .last()
             .is_some_and(|function| function.constants().is_empty())
+    );
+}
+
+#[test]
+fn default_graph_limit_rejects_function_depth_257() {
+    let depth = 256_usize;
+    let mut source = String::from("function outer(){");
+    for _ in 0..depth {
+        source.push_str("return function(){");
+    }
+    source.push_str("return 0;");
+    for _ in 0..depth {
+        source.push('}');
+    }
+    source.push('}');
+
+    let error = with_parsed_program(
+        &source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning must succeed");
+            let outer = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some("outer"))
+                .expect("outer function");
+            context
+                .compile_tree(&outer, VerificationLimits::default())
+                .expect_err("default graph depth is bounded")
+        },
+    )
+    .expect("front-end acceptance");
+    assert!(matches!(
+        error,
+        LeafCompilationError::FunctionGraphVerification { source, .. } if matches!(
+            source.kind(),
+            FunctionGraphVerificationErrorKind::LimitExceeded {
+                resource: quickjs_bytecode::FunctionGraphResource::NestingDepth,
+                limit: 256,
+                observed: 257,
+            }
+        )
+    ));
+}
+
+#[test]
+fn selected_nested_root_with_imports_requires_an_explicit_environment() {
+    let error = with_parsed_program(
+        "function outer(argument){ \
+             return function(){ return argument; }; \
+         }",
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning must succeed");
+            let outer = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some("outer"))
+                .expect("outer function");
+            let inner = context
+                .executables()
+                .find(|executable| executable.metadata().parent() == Some(outer.id()))
+                .expect("anonymous inner function");
+            context
+                .compile_tree(&inner, VerificationLimits::default())
+                .expect_err("standalone graph cannot import an omitted parent")
+        },
+    )
+    .expect("front-end acceptance");
+    assert!(matches!(
+        error,
+        LeafCompilationError::FunctionGraphVerification { source, .. }
+            if source.kind()
+                == &FunctionGraphVerificationErrorKind::RootRequiresEnvironment {
+                    closure_variables: 1,
+                }
+    ));
+}
+
+#[test]
+fn selected_closed_nested_root_has_a_standalone_graph_certificate() {
+    let tree = with_parsed_program(
+        "function outer(){ return function(){ return 1; }; }",
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning must succeed");
+            let outer = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some("outer"))
+                .expect("outer function");
+            let inner = context
+                .executables()
+                .find(|executable| executable.metadata().parent() == Some(outer.id()))
+                .expect("anonymous inner function");
+            context
+                .compile_tree(&inner, VerificationLimits::default())
+                .expect("capture-free nested root is self-contained")
+        },
+    )
+    .expect("front-end acceptance");
+
+    assert_eq!(tree.functions().len(), 1);
+    assert_eq!(tree.function_graph().root_id(), FunctionTemplateId::new(0));
+    assert_eq!(
+        tree.function_by_template(FunctionTemplateId::new(0)),
+        Some(tree.root())
+    );
+    assert!(
+        tree.function_by_template(FunctionTemplateId::new(1))
+            .is_none()
     );
 }
 

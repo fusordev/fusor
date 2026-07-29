@@ -125,7 +125,14 @@ uses no Rust call-stack recursion. Each parent's constant table contains its
 direct child templates in source order, and `fclosure8`/`fclosure` select the
 compact or full constant index encoding. Every child capture descriptor is
 normalized to either the immediate parent's own dense variable-reference cell
-or its imported closure environment. `compile_leaf` remains the explicit
+or its imported closure environment. The compiler explicitly remaps
+plan-global executable identities into a dense flat graph and stores an
+`Arc<VerifiedCompilerFunctionGraph>` with the tree. Whole-graph verification
+preflights aggregate byte, instruction, constant, closure, and transfer-work
+budgets; checks every function-constant target, graph cycle, reachable node,
+nesting depth, and capture source; and bounds capture checks across shared
+parent edges. A selected nested root with imported cells fails closed until an
+explicit verified root environment exists. `compile_leaf` remains the explicit
 pool-free API and rejects a selection with children. Value and atom constants,
 raw class/function stack entries, inferred anonymous-function names, labeled
 control, `for-in`, and `for-of` stay rejected until their owned records and
@@ -218,16 +225,20 @@ Only `VerifiedBytecode` may execute. Verification checks:
 Malformed serialized bytecode returns a structured verifier error. It never
 reaches unchecked indexing in the VM.
 
-The current staged implementation exposes only `VerifiedControlFlow`: a
-non-executable certificate for complete predecode, instruction boundaries,
-validated execution-header bits and counts, function-local operand bounds,
-secondary operand domains, static successors, suspension and return
-function-kind compatibility, and reachable ordinary-value stack heights.
-Compiler bodies may supply capture and constant-kind layouts for the narrow
-`close_loc`, `push_const*`, and `fclosure*` cases described above. Serialized
-constant opcodes and opcodes requiring raw function slots, handlers, finally
-return addresses, iterator markers, or packed stack offsets fail closed. The VM
-boundary continues to require the future whole-function `VerifiedBytecode`.
+The current staged implementation exposes `VerifiedControlFlow` for complete
+body predecode, instruction boundaries, validated execution-header bits and
+counts, function-local operand bounds, secondary operand domains, static
+successors, suspension and return function-kind compatibility, and reachable
+ordinary-value stack heights. Compiler bodies may supply capture and
+constant-kind layouts for the narrow `close_loc`, `push_const*`, and
+`fclosure*` cases described above. `VerifiedCompilerFunctionGraph` additionally
+cross-checks the compiler's actual flat function targets, normalized capture
+edges, topology, and aggregate budgets without recursive traversal. Both
+certificates remain non-executable. Serialized constant opcodes and opcodes
+requiring actual value/atom pools, raw function slots, complete runtime
+metadata, handlers, finally return addresses, iterator markers, or packed
+stack offsets fail closed. The VM boundary continues to require the future
+whole-function `VerifiedBytecode`.
 The symbolic assembler chooses the componentwise shortest valid final branch
 layout. This can differ from a conservative QuickJS peephole boundary while
 preserving the same signed displacement rules and JavaScript behavior.

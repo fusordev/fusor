@@ -19,6 +19,7 @@ use std::{error::Error, fmt};
 
 mod assembler;
 mod codec;
+mod compiler_graph;
 mod disassembly;
 mod function;
 mod verifier;
@@ -31,6 +32,13 @@ pub use codec::{
     AtomPoolIndex, BytecodeBuilder, BytecodePc, DecodeError, DecodedInstruction, EncodeError,
     EncodedOperands, Instruction, InstructionDecoder, InstructionError, MAX_ENCODED_OPERAND_BYTES,
     OperandDecodeError, OperandEncodeError, Operands, decode_instruction,
+};
+pub use compiler_graph::{
+    CompilerClosureSource, FunctionGraphResource, FunctionGraphUsage,
+    FunctionGraphVerificationError, FunctionGraphVerificationErrorKind,
+    FunctionGraphVerificationLimits, FunctionTemplateId, MAX_FUNCTION_GRAPH_NESTING_DEPTH,
+    MAX_FUNCTION_GRAPH_TEMPLATES, UnverifiedCompilerFunction, UnverifiedCompilerFunctionGraph,
+    VerifiedCompilerFunction, VerifiedCompilerFunctionGraph, verify_compiler_function_graph,
 };
 pub use disassembly::{
     DisassemblyError, DisassemblyLimits, DisassemblySummary, render_disassembly,

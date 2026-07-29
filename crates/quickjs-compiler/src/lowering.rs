@@ -18,10 +18,14 @@ use oxc_syntax::operator::{
 };
 use quickjs_bytecode::{
     AssemblerError, AssemblerLabel, AssemblerLimits, BranchKind, BytecodeAssembler, BytecodePc,
-    CompilerCaptureLayout, CompilerCapturedBinding, CompilerConstantKind, CompilerConstantLayout,
-    EncodeError, FinalOpcode, FunctionIndexDomains, MAX_FUNCTION_INDEX_ENTRIES, Operands,
-    UnverifiedCompilerFunctionBody, UnverifiedFunctionHeader, VerificationError,
-    VerificationErrorKind, VerificationLimits, VerifiedControlFlow, verify_compiler_control_flow,
+    CompilerCaptureLayout, CompilerCapturedBinding,
+    CompilerClosureSource as CompilerGraphClosureSource, CompilerConstantKind,
+    CompilerConstantLayout, EncodeError, FinalOpcode, FunctionGraphVerificationError,
+    FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId,
+    MAX_FUNCTION_INDEX_ENTRIES, Operands, UnverifiedCompilerFunction,
+    UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader,
+    VerificationError, VerificationErrorKind, VerificationLimits, VerifiedCompilerFunctionGraph,
+    VerifiedControlFlow, verify_compiler_control_flow, verify_compiler_function_graph,
 };
 use quickjs_frontend::{ParsedUnit, Span};
 
@@ -223,15 +227,15 @@ pub type CompiledLeafFunction = CompiledFunction;
 /// Failure-atomic output for one compiled ordinary-function subtree.
 ///
 /// Functions are stored in stable executable preorder. Every constant edge
-/// names one member of this same tree, while imported closure descriptors may
-/// reference the selected root's external parent when a nested executable is
-/// compiled as the root.
+/// names one member of this same tree. A selected nested root is accepted only
+/// when it imports no cells from its omitted external parent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompiledFunctionTree {
     root: ExecutableId,
     storage_plan: Arc<StoragePlan>,
     source_text: Arc<str>,
     functions: Arc<[CompiledFunction]>,
+    function_graph: Arc<VerifiedCompilerFunctionGraph>,
 }
 
 impl CompiledFunctionTree {
@@ -251,6 +255,23 @@ impl CompiledFunctionTree {
     #[must_use]
     pub fn functions(&self) -> &[CompiledFunction] {
         &self.functions
+    }
+
+    /// Returns the cross-function certificate for this complete tree.
+    ///
+    /// Graph-local template identities index the same order as [`Self::functions`].
+    /// The certificate remains non-executable until runtime metadata and actual
+    /// value/atom pools are verified.
+    #[must_use]
+    pub fn function_graph(&self) -> &VerifiedCompilerFunctionGraph {
+        &self.function_graph
+    }
+
+    /// Resolves one graph-local template identity to its compiler artifact.
+    #[must_use]
+    pub fn function_by_template(&self, template: FunctionTemplateId) -> Option<&CompiledFunction> {
+        let index = usize::try_from(template.get()).ok()?;
+        self.functions.get(index)
     }
 
     /// Resolves one compiled executable in the selected subtree.
@@ -411,6 +432,26 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         selection: &CompilationExecutable,
         limits: VerificationLimits,
     ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        self.compile_tree_with_graph_limits(
+            selection,
+            limits,
+            FunctionGraphVerificationLimits::default(),
+        )
+    }
+
+    /// Lowers and cross-checks an ordinary function subtree with explicit
+    /// aggregate graph limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::compile_tree`], plus a structured
+    /// graph-verification failure when an aggregate limit is exceeded.
+    pub fn compile_tree_with_graph_limits(
+        &self,
+        selection: &CompilationExecutable,
+        limits: VerificationLimits,
+        graph_limits: FunctionGraphVerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
         let root = self.resolve_selection(selection)?;
         let tree_layout = self.function_tree_layout()?;
         let subtree = tree_layout.subtree_preorder(root)?;
@@ -419,11 +460,18 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             functions.push(self.compile_function(executable, &tree_layout, limits)?);
         }
         functions.reverse();
+        let functions: Arc<[CompiledFunction]> = functions.into();
+        let function_graph = Arc::new(verify_compiled_function_graph(
+            root,
+            &functions,
+            graph_limits,
+        )?);
         Ok(CompiledFunctionTree {
             root,
             storage_plan: Arc::clone(&self.planned.plan),
             source_text: Arc::clone(&self.source_text),
-            functions: functions.into(),
+            functions,
+            function_graph,
         })
     }
 
@@ -2499,6 +2547,137 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     }
 }
 
+fn verify_compiled_function_graph(
+    root: ExecutableId,
+    functions: &[CompiledFunction],
+    limits: FunctionGraphVerificationLimits,
+) -> Result<VerifiedCompilerFunctionGraph, LeafCompilationError> {
+    if functions.first().map(CompiledFunction::executable) != Some(root) {
+        return Err(LeafCompilationError::SemanticInvariant {
+            invariant: "compiled subtree begins with its selected root",
+            span: None,
+        });
+    }
+    let mut identities = Vec::with_capacity(functions.len());
+    for (index, function) in functions.iter().enumerate() {
+        if identities
+            .last()
+            .is_some_and(|(previous, _)| *previous >= function.executable())
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "compiled subtree executables are strictly ordered",
+                span: None,
+            });
+        }
+        identities.push((function.executable(), checked_function_template_id(index)?));
+    }
+    let root = resolve_function_template_id(&identities, root)?;
+    let root_index =
+        usize::try_from(root.get()).map_err(|_| LeafCompilationError::SemanticInvariant {
+            invariant: "graph-local root identity fits usize",
+            span: None,
+        })?;
+
+    let mut records = Vec::with_capacity(functions.len());
+    let mut parent_counts = vec![0_u32; functions.len()];
+    for function in functions {
+        let mut constants = Vec::with_capacity(function.constants.len());
+        for constant in function.constants.iter().copied() {
+            let template = resolve_function_template_id(&identities, constant.executable())?;
+            let template_index = usize::try_from(template.get()).map_err(|_| {
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "graph-local template identity fits usize",
+                    span: None,
+                }
+            })?;
+            let count = parent_counts.get_mut(template_index).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "function constant has a graph parent-count slot",
+                    span: None,
+                },
+            )?;
+            *count = count
+                .checked_add(1)
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "compiler function parent edges",
+                })?;
+            constants.push(template);
+        }
+        let mut closure_sources = Vec::with_capacity(function.closure_variables.len());
+        for (index, closure) in function.closure_variables.iter().copied().enumerate() {
+            if closure.slot().index() != index {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "compiled closure slots are dense and ordered",
+                    span: None,
+                });
+            }
+            closure_sources.push(match closure.source() {
+                CompiledClosureSource::ParentVariableReference(index) => {
+                    CompilerGraphClosureSource::ParentVariableReference(u32::from(index))
+                }
+                CompiledClosureSource::ParentClosure(index) => {
+                    CompilerGraphClosureSource::ParentClosure(u32::from(index))
+                }
+            });
+        }
+        records.push(UnverifiedCompilerFunction::new(
+            Arc::clone(&function.control_flow),
+            constants.into(),
+            closure_sources.into(),
+        ));
+    }
+    for (index, &actual) in parent_counts.iter().enumerate() {
+        let expected = u32::from(index != root_index);
+        if actual != expected {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "compiled function subtree has exactly one parent per child",
+                span: None,
+            });
+        }
+    }
+
+    verify_compiler_function_graph(
+        UnverifiedCompilerFunctionGraph::new(root, records.into()),
+        limits,
+    )
+    .map_err(|source| {
+        let span = source
+            .function()
+            .and_then(|template| usize::try_from(template.get()).ok())
+            .and_then(|index| functions.get(index))
+            .and_then(|function| {
+                function
+                    .storage_plan
+                    .executable(function.executable)
+                    .map(Executable::span)
+            });
+        LeafCompilationError::FunctionGraphVerification { span, source }
+    })
+}
+
+fn checked_function_template_id(index: usize) -> Result<FunctionTemplateId, LeafCompilationError> {
+    u32::try_from(index)
+        .map(FunctionTemplateId::new)
+        .map_err(|_| LeafCompilationError::CapacityExceeded {
+            domain: "compiler function graph templates",
+        })
+}
+
+fn resolve_function_template_id(
+    identities: &[(ExecutableId, FunctionTemplateId)],
+    executable: ExecutableId,
+) -> Result<FunctionTemplateId, LeafCompilationError> {
+    identities
+        .binary_search_by_key(&executable, |(candidate, _)| *candidate)
+        .ok()
+        .and_then(|index| identities.get(index))
+        .map(|(_, template)| *template)
+        .ok_or(LeafCompilationError::SemanticInvariant {
+            invariant: "function constant belongs to the compiled subtree",
+            span: None,
+        })
+}
+
 fn is_object_method_or_accessor(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> bool {
     let AstKind::ObjectProperty(property) = unit.semantic().nodes().parent_kind(node_id) else {
         return false;
@@ -3817,6 +3996,13 @@ pub enum LeafCompilationError {
         /// Exact verifier failure.
         source: VerificationError,
     },
+    /// The complete compiler function graph failed cross-function checks.
+    FunctionGraphVerification {
+        /// Source function span for a graph-local failure, when available.
+        span: Option<Span>,
+        /// Exact aggregate or cross-function verifier failure.
+        source: FunctionGraphVerificationError,
+    },
 }
 
 impl fmt::Display for LeafCompilationError {
@@ -3880,6 +4066,13 @@ impl fmt::Display for LeafCompilationError {
                 }
                 Ok(())
             }
+            Self::FunctionGraphVerification { span, source } => {
+                source.fmt(formatter)?;
+                if let Some(span) = span {
+                    write!(formatter, " at source {span:?}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -3890,6 +4083,7 @@ impl Error for LeafCompilationError {
             Self::BytecodeEncoding { source, .. } => Some(source),
             Self::BytecodeAssembly { source, .. } => Some(source),
             Self::BytecodeVerification { source, .. } => Some(source),
+            Self::FunctionGraphVerification { source, .. } => Some(source),
             Self::ForeignExecutable { .. }
             | Self::InvalidExecutable { .. }
             | Self::Unsupported { .. }

@@ -623,6 +623,7 @@ pub struct VerifiedControlFlow {
     instructions: Vec<VerifiedInstruction>,
     instruction_start_bitmap: Vec<u64>,
     computed_stack_size: u32,
+    transfer_evaluations: u64,
     domains: FunctionIndexDomains,
     function_header: VerifiedFunctionHeader,
     compiler_capture_layout: Option<CompilerCaptureLayout>,
@@ -646,6 +647,15 @@ impl VerifiedControlFlow {
     #[must_use]
     pub const fn computed_stack_size(&self) -> u32 {
         self.computed_stack_size
+    }
+
+    /// Returns the number of reachable abstract transfer evaluations.
+    ///
+    /// Whole-function graph verification charges this retained count against
+    /// its aggregate work budget without rerunning body analysis.
+    #[must_use]
+    pub const fn transfer_evaluations(&self) -> u64 {
+        self.transfer_evaluations
     }
 
     /// Returns the structural index domains against which operands were
@@ -1636,7 +1646,7 @@ fn verify_control_flow_common(
         compiler_capture_layout.as_ref(),
         compiler_constant_layout.as_ref(),
     )?;
-    let computed_stack_size =
+    let (computed_stack_size, transfer_evaluations) =
         analyze_ordinary_stack(&mut instructions, limits, stack_mode.requires_empty_exits())?;
 
     Ok(VerifiedControlFlow {
@@ -1644,6 +1654,7 @@ fn verify_control_flow_common(
         instructions,
         instruction_start_bitmap,
         computed_stack_size,
+        transfer_evaluations,
         domains,
         function_header,
         compiler_capture_layout: compiler_capture_layout.map(|validated| validated.layout),
@@ -3061,7 +3072,7 @@ fn analyze_ordinary_stack(
     instructions: &mut [VerifiedInstruction],
     limits: VerificationLimits,
     require_empty_exits: bool,
-) -> Result<u32, VerificationError> {
+) -> Result<(u32, u64), VerificationError> {
     let Some(entry) = instructions.first_mut() else {
         return Err(VerificationError::root(
             VerificationErrorKind::EmptyBytecode,
@@ -3196,7 +3207,7 @@ fn analyze_ordinary_stack(
         }
     }
 
-    Ok(computed_max)
+    Ok((computed_max, evaluations))
 }
 
 fn propagate_stack_depth(

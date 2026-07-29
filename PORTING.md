@@ -192,6 +192,16 @@ A milestone is complete only when all of its checked items pass in CI.
         stacks. Labeled control, `for-in`, `for-of`, inferred anonymous-function
         names, ordinary value constants, and immutable-write throws remain
         fail-closed.
+  - [x] Cross-check compiler function trees as bounded flat graphs:
+        plan-global executable identities are explicitly remapped to dense
+        template identities; aggregate body and capture-edge work is charged
+        before detailed scans; function targets, cycles, reachability, depth,
+        and normalized capture sources are verified with iterative work
+        queues. The immutable `Arc<VerifiedCompilerFunctionGraph>` is retained
+        with `CompiledFunctionTree`, while selected roots needing an omitted
+        parent environment fail closed. This intermediate certificate is not
+        VM execution authority; runtime-visible metadata, actual value/atom
+        pools, and the complete typed-stack boundary remain pending.
 - [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
 - [ ] Deterministic debug/line tables.
 

@@ -46,7 +46,7 @@ Verification has five ordered phases:
 
 ### Implementation staging
 
-The first implemented slice returns `VerifiedControlFlow`, not
+The body-level implemented slice returns `VerifiedControlFlow`, not
 `VerifiedBytecode`. It completely predecodes the function, validates every
 static operand domain represented by its body-only input and every successor
 even in unreachable code, validates the serialized execution-header flag and
@@ -62,6 +62,21 @@ finally return addresses, or packed stack offsets. Its opaque certificate has
 no execution API and cannot cross the VM trust boundary. The complete
 typed-stack and whole-function rules below remain mandatory before
 `VerifiedBytecode` exists.
+
+The next compiler-only slice returns
+`VerifiedCompilerFunctionGraph`. It takes a flat `Arc`-backed graph, requires
+explicit body capture and constant layouts, owns the actual function-template
+target identities and normalized immediate-parent capture sources, rejects
+duplicate normalized sources within one compiler function, cycles, and
+unreachable records, validates every shared-parent edge, and charges aggregate
+body and edge-work budgets. Traversal and depth accounting are iterative; they
+never depend on Rust call-stack depth. A selected root with imported closure
+variables is rejected because no verified external environment was supplied.
+This certificate is still not `VerifiedBytecode`:
+it lacks actual ordinary-value and atom pools, vardef/name/policy metadata,
+typed handler/finally/iterator states, source/debug validation, and the runtime
+function metadata required for exact behavior. It exposes no VM execution
+entry point.
 
 Serialized bodies provide a stored maximum stack size, and
 `verify_control_flow` requires it to equal the recomputed reachable maximum.
@@ -257,7 +272,7 @@ fail-closed capability.
 | Operand family | Required validation |
 | --- | --- |
 | `const`, `const8` | index is below `cpool.len()`; staged compiler input additionally requires a value-kind entry, while serialized input remains unsupported |
-| `fclosure`, `fclosure8` | constant exists and is a bytecode-function constant; staged compiler input validates the declared function kind only, while the future graph verifier must verify the child |
+| `fclosure`, `fclosure8` | constant exists and is a bytecode-function constant; body-only compiler verification validates the declared kind, `VerifiedCompilerFunctionGraph` resolves and verifies the actual compiler child target, and serialized input remains pending the complete `VerifiedBytecode` graph |
 | atom-bearing formats | `AtomPoolIndex::get()` is below the enclosing function's atom-pool length; the referenced entry's namespace is valid for the opcode |
 | `loc`, `loc8`, `none_loc` | index is below `var_count` |
 | `arg`, `none_arg` | index is below `arg_count` |
@@ -554,9 +569,9 @@ or catch position at a join (`quickjs.c:35595-35618`).
 
 ## Mandatory resource limits
 
-Limits are charged before allocation and across the complete nested function
-graph. The verifier accepts an explicit `VerificationLimits`; untrusted APIs
-start with this **provisional** default profile:
+Limits are charged before per-entry validation and across the complete nested
+function graph. The body and graph verifiers accept explicit limit profiles;
+untrusted APIs start with this **provisional** default profile:
 
 | Resource | Provisional default maximum |
 | --- | ---: |
@@ -575,6 +590,7 @@ start with this **provisional** default profile:
 | `gosub` sites in one function | 65,534 |
 | compiler branch-relaxation instruction visits | 33,554,432 |
 | total transfer-function evaluations | 33,554,432 |
+| closure-source evaluations across parent edges | 33,554,432 |
 
 These values are **provisional Rust hardening policy**, not upstream QuickJS
 limits and not yet compatibility claims. Before the untrusted bytecode API is
@@ -590,8 +606,9 @@ graph work are bounded without sharing a mutable counter.
 A caller may lower the current profile. Raising it is available only through
 an explicit trusted configuration, never as an implicit retry after
 `LimitExceeded`. Structural maxima such as stack depth and 16-bit index
-domains remain unchanged. Shared child identities are charged once; cycles
-are rejected rather than recursively charged.
+domains remain unchanged. Shared child function bodies are charged once,
+while their capture sources are charged and checked separately for every
+parent edge. Cycles are rejected rather than recursively charged.
 
 ## Acceptance tests
 
