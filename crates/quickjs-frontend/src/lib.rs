@@ -8,10 +8,15 @@
 mod frontend;
 
 pub use frontend::{
-    Allocator, DiagnosticLabel, DiagnosticStage, FrontendDiagnostic, FrontendDiagnosticCode,
-    FrontendError, FrontendOptions, FrontendSourceError, ParseMode, Program,
-    RegisteredFrontendDiagnostics, RegisteredFrontendError, Span, parse, with_parsed_program,
-    with_registered_program,
+    Allocator, CompilationGoal, DEFAULT_MAX_SOURCE_BYTES, DiagnosticLabel, DiagnosticStage,
+    DirectEvalBinding, DirectEvalBindingKind, DirectEvalBindingLocation, DirectEvalCapabilities,
+    DirectEvalContext, DirectEvalPrivateName, DirectEvalPrivateNameKind, DirectEvalScopeFrame,
+    DirectEvalScopeKind, DirectEvalScopeSnapshot, DynamicFunctionKind, DynamicFunctionSource,
+    FrontendDiagnostic, FrontendDiagnosticCode, FrontendError, FrontendLimitError, FrontendLimits,
+    FrontendOptions, FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal, ParseMode,
+    ParsedUnit, PreparedDynamicFunctionSource, Program, RegisteredFrontendDiagnostics,
+    RegisteredFrontendError, SourceFragment, Span, UnsupportedCompilationGoal, parse,
+    with_dynamic_function_source, with_parsed_program, with_registered_program,
 };
 
 /// The official `QuickJS` release whose behavior this port targets.
@@ -23,7 +28,8 @@ pub const ECMASCRIPT_COMPATIBILITY_EDITION: &str = "ES2025";
 #[cfg(test)]
 mod tests {
     use super::{
-        ECMASCRIPT_COMPATIBILITY_EDITION, FrontendOptions, ParseMode, QUICKJS_COMPATIBILITY_RELEASE,
+        CompilationGoal, ECMASCRIPT_COMPATIBILITY_EDITION, FrontendOptions, GlobalScriptGoal,
+        ParseMode, QUICKJS_COMPATIBILITY_RELEASE,
     };
 
     #[test]
@@ -35,6 +41,9 @@ mod tests {
     #[test]
     fn script_is_the_safe_default_parse_goal() {
         assert_eq!(FrontendOptions::default().mode(), ParseMode::Script);
-        assert!(!FrontendOptions::default().allows_top_level_return());
+        assert_eq!(
+            FrontendOptions::default().goal(),
+            CompilationGoal::GlobalScript(GlobalScriptGoal::new())
+        );
     }
 }

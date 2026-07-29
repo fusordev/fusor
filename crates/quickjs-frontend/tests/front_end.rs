@@ -1,7 +1,14 @@
+use std::cell::Cell;
+
 use quickjs_diagnostics::{SourceError, SourceRegistry, render_pretty};
 use quickjs_frontend::{
-    Allocator, DiagnosticStage, FrontendDiagnosticCode, FrontendOptions, FrontendSourceError,
-    ParseMode, RegisteredFrontendError, Span, parse, with_parsed_program, with_registered_program,
+    Allocator, CompilationGoal, DiagnosticStage, DirectEvalBinding, DirectEvalBindingKind,
+    DirectEvalBindingLocation, DirectEvalCapabilities, DirectEvalContext, DirectEvalPrivateName,
+    DirectEvalPrivateNameKind, DirectEvalScopeFrame, DirectEvalScopeKind, DirectEvalScopeSnapshot,
+    DynamicFunctionKind, DynamicFunctionSource, FrontendDiagnosticCode, FrontendLimitError,
+    FrontendLimits, FrontendOptions, FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal,
+    ParseMode, RegisteredFrontendError, SourceFragment, Span, UnsupportedCompilationGoal, parse,
+    with_dynamic_function_source, with_parsed_program, with_registered_program,
 };
 
 #[test]
@@ -9,8 +16,9 @@ fn parses_javascript_scripts_and_preserves_utf8_byte_spans() {
     let source = "const π = 1;\nπ += 2;";
     let allocator = Allocator::new();
 
-    let program =
+    let unit =
         parse(&allocator, source, FrontendOptions::new(ParseMode::Script)).expect("valid script");
+    let program = unit.program();
 
     assert!(program.source_type.is_script());
     assert!(program.source_type.is_javascript());
@@ -21,6 +29,10 @@ fn parses_javascript_scripts_and_preserves_utf8_byte_spans() {
         Span::new(0, u32::try_from(source.len()).unwrap())
     );
     assert_eq!(program.body.len(), 2);
+    assert_eq!(
+        unit.goal(),
+        CompilationGoal::GlobalScript(GlobalScriptGoal::new())
+    );
 }
 
 #[test]
@@ -30,7 +42,8 @@ fn parses_modules_only_when_module_mode_is_explicit() {
 
     let module =
         parse(&allocator, source, FrontendOptions::new(ParseMode::Module)).expect("valid module");
-    assert!(module.source_type.is_module());
+    assert!(module.program().source_type.is_module());
+    assert_eq!(module.goal(), CompilationGoal::Module);
 
     let error = parse(&allocator, source, FrontendOptions::new(ParseMode::Script))
         .expect_err("module syntax must not be accepted as a script");
@@ -80,29 +93,295 @@ fn rejects_semantic_early_errors_and_retains_diagnostic_byte_spans() {
 }
 
 #[test]
-fn top_level_return_is_an_explicit_function_constructor_option() {
+fn compilation_goals_preserve_lossless_direct_eval_context() {
+    let bindings = [DirectEvalBinding::new(
+        "captured",
+        DirectEvalBindingKind::FunctionDeclaration,
+        true,
+        false,
+        DirectEvalBindingLocation::Closure { index: 3 },
+    )];
+    let private_names = [DirectEvalPrivateName::new(
+        "value",
+        DirectEvalPrivateNameKind::Field,
+        false,
+        true,
+        true,
+        DirectEvalBindingLocation::Local { index: 7 },
+    )];
+    let frames = [
+        DirectEvalScopeFrame::new(DirectEvalScopeKind::Class, &bindings, &private_names),
+        DirectEvalScopeFrame::new(DirectEvalScopeKind::Module, &[], &[]),
+        DirectEvalScopeFrame::new(DirectEvalScopeKind::Dynamic, &[], &[]),
+        DirectEvalScopeFrame::new(DirectEvalScopeKind::Pseudo, &[], &[]),
+    ];
+    let direct_eval = DirectEvalContext::new(
+        DirectEvalCapabilities::new()
+            .with_strict(true)
+            .with_new_target(true)
+            .with_super_property(true)
+            .with_arguments_allowed(true),
+        DirectEvalScopeSnapshot::new(&frames),
+    );
+
+    let goals = [
+        CompilationGoal::GlobalScript(GlobalScriptGoal::new()),
+        CompilationGoal::Module,
+        CompilationGoal::IndirectEval(IndirectEvalGoal::new()),
+        CompilationGoal::DirectEval(direct_eval),
+        CompilationGoal::DynamicFunction(DynamicFunctionKind::AsyncGeneratorFunction),
+    ];
+
+    assert_eq!(goals.len(), 5);
+    assert_eq!(
+        direct_eval.scope_snapshot().frames()[0].bindings()[0].name(),
+        "captured"
+    );
+    assert_eq!(
+        direct_eval.scope_snapshot().frames()[0].private_names()[0].name(),
+        "value"
+    );
+    let binding = direct_eval.scope_snapshot().frames()[0].bindings()[0];
+    assert_eq!(binding.kind(), DirectEvalBindingKind::FunctionDeclaration);
+    assert!(binding.is_lexical());
+    assert!(!binding.is_const());
+    assert_eq!(
+        binding.location(),
+        DirectEvalBindingLocation::Closure { index: 3 }
+    );
+    let private_name = direct_eval.scope_snapshot().frames()[0].private_names()[0];
+    assert_eq!(private_name.kind(), DirectEvalPrivateNameKind::Field);
+    assert!(private_name.is_lexical());
+    assert!(private_name.is_const());
+    assert_eq!(
+        private_name.location(),
+        DirectEvalBindingLocation::Local { index: 7 }
+    );
+    assert_eq!(
+        direct_eval.scope_snapshot().frames()[1].kind(),
+        DirectEvalScopeKind::Module
+    );
+    assert_eq!(
+        direct_eval.scope_snapshot().frames()[2].kind(),
+        DirectEvalScopeKind::Dynamic
+    );
+    assert_eq!(
+        direct_eval.scope_snapshot().frames()[3].kind(),
+        DirectEvalScopeKind::Pseudo
+    );
+    assert!(direct_eval.capabilities().is_strict());
+    assert!(direct_eval.capabilities().allows_new_target());
+    assert!(!direct_eval.capabilities().allows_super_call());
+    assert!(direct_eval.capabilities().allows_arguments());
+}
+
+#[test]
+fn global_and_eval_goals_reject_top_level_return() {
     let source = "return arguments[0] + 1;";
     let allocator = Allocator::new();
 
-    assert!(parse(&allocator, source, FrontendOptions::new(ParseMode::Script)).is_err());
+    for goal in [
+        CompilationGoal::GlobalScript(GlobalScriptGoal::new()),
+        CompilationGoal::IndirectEval(IndirectEvalGoal::new()),
+    ] {
+        let error = parse(&allocator, source, FrontendOptions::for_goal(goal))
+            .expect_err("top-level return is invalid for global and eval code");
+        assert_eq!(error.stage(), DiagnosticStage::Parser);
+        assert_eq!(error.unsupported_goal(), None);
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| { diagnostic.code == FrontendDiagnosticCode::OxcParser })
+        );
+    }
+}
 
-    let program = parse(
-        &allocator,
-        source,
-        FrontendOptions::new(ParseMode::Script).with_top_level_return(true),
-    )
-    .expect("Function constructor body mode");
-    assert_eq!(program.body.len(), 1);
+#[test]
+fn plain_indirect_eval_succeeds_without_losing_its_compilation_goal() {
+    let source = "var answer = 40 + 2;";
+    let allocator = Allocator::new();
+    let goal = CompilationGoal::IndirectEval(IndirectEvalGoal::new());
+    let unit = parse(&allocator, source, FrontendOptions::for_goal(goal))
+        .expect("plain indirect eval is supported");
 
-    assert!(
-        parse(
-            &allocator,
-            source,
-            FrontendOptions::new(ParseMode::Module).with_top_level_return(true),
-        )
-        .is_err(),
-        "Function constructor relaxation must not weaken Module grammar"
+    assert_eq!(unit.goal(), goal);
+    assert!(unit.program().source_type.is_script());
+    assert_eq!(unit.program().body.len(), 1);
+}
+
+#[test]
+fn contextual_goals_fail_before_oxc_until_their_adapters_are_faithful() {
+    let direct_capabilities = DirectEvalCapabilities::new()
+        .with_strict(true)
+        .with_new_target(true)
+        .with_super_call(true)
+        .with_arguments_allowed(true);
+    let direct_context =
+        DirectEvalContext::new(direct_capabilities, DirectEvalScopeSnapshot::default());
+    let cases = [
+        (
+            CompilationGoal::GlobalScript(GlobalScriptGoal::new().with_forced_strict(true)),
+            UnsupportedCompilationGoal::GlobalScript(
+                GlobalScriptGoal::new().with_forced_strict(true),
+            ),
+            "force_strict=true, allow_top_level_await=false",
+        ),
+        (
+            CompilationGoal::GlobalScript(GlobalScriptGoal::new().with_top_level_await(true)),
+            UnsupportedCompilationGoal::GlobalScript(
+                GlobalScriptGoal::new().with_top_level_await(true),
+            ),
+            "force_strict=false, allow_top_level_await=true",
+        ),
+        (
+            CompilationGoal::IndirectEval(IndirectEvalGoal::new().with_forced_strict(true)),
+            UnsupportedCompilationGoal::IndirectEval(
+                IndirectEvalGoal::new().with_forced_strict(true),
+            ),
+            "force_strict=true",
+        ),
+        (
+            CompilationGoal::DirectEval(direct_context),
+            UnsupportedCompilationGoal::DirectEval(direct_capabilities),
+            "strict=true, new_target=true, super_property=false, super_call=true, arguments_allowed=true",
+        ),
+    ];
+
+    for (goal, expected, requested_flags) in cases {
+        let allocator = Allocator::new();
+        let error = parse(&allocator, "function {", FrontendOptions::for_goal(goal))
+            .expect_err("contextual adapter is not implemented");
+
+        assert_eq!(error.stage(), DiagnosticStage::CompilationGoal);
+        assert_eq!(error.unsupported_goal(), Some(expected));
+        assert!(!error.parser_panicked());
+        assert_eq!(error.diagnostics().len(), 1);
+        assert_eq!(
+            error.diagnostics()[0].code,
+            FrontendDiagnosticCode::UnsupportedCompilationGoal
+        );
+        assert!(error.diagnostics()[0].labels.is_empty());
+        assert!(
+            error.diagnostics()[0].message.contains(requested_flags),
+            "{}",
+            error.diagnostics()[0].message
+        );
+        assert!(error.diagnostics()[0].message.contains("not implemented"));
+    }
+}
+
+#[test]
+fn source_byte_limits_reject_malformed_input_before_oxc_for_every_entry() {
+    let source = "function {";
+    let limits = FrontendLimits::new(source.len() - 1);
+    let options = FrontendOptions::new(ParseMode::Script).with_limits(limits);
+    let allocator = Allocator::new();
+
+    let error = parse(&allocator, source, options).expect_err("source limit");
+    assert_eq!(error.stage(), DiagnosticStage::ResourceLimit);
+    assert_eq!(
+        error.limit_error(),
+        Some(FrontendLimitError::SourceBytesExceeded {
+            actual: source.len(),
+            limit: source.len() - 1,
+        })
     );
+    assert_eq!(
+        error.diagnostics()[0].code,
+        FrontendDiagnosticCode::SourceBytesExceeded
+    );
+    assert!(!error.parser_panicked());
+    assert_eq!(error.unsupported_goal(), None);
+
+    let callback_called = Cell::new(false);
+    let error = with_parsed_program(source, options, |_| callback_called.set(true))
+        .expect_err("callback entry must enforce the same limit");
+    assert_eq!(error.stage(), DiagnosticStage::ResourceLimit);
+    assert!(!callback_called.get());
+
+    let mut sources = SourceRegistry::new();
+    let source_id = sources
+        .register("oversized.js", source)
+        .expect("registered source");
+    let callback_called = Cell::new(false);
+    let error = with_registered_program(&sources, &source_id, options, |_| {
+        callback_called.set(true);
+    })
+    .expect_err("registered entry must enforce the same limit");
+    assert!(!callback_called.get());
+    let RegisteredFrontendError::Diagnostics(diagnostics) = error else {
+        panic!("expected a registered limit diagnostic");
+    };
+    assert_eq!(diagnostics.stage(), DiagnosticStage::ResourceLimit);
+    assert_eq!(
+        diagnostics.limit_error(),
+        Some(FrontendLimitError::SourceBytesExceeded {
+            actual: source.len(),
+            limit: source.len() - 1,
+        })
+    );
+    assert_eq!(
+        diagnostics.diagnostics()[0].code().as_str(),
+        FrontendDiagnosticCode::SourceBytesExceeded.as_str()
+    );
+
+    let parameters = [SourceFragment::new("abc")];
+    let dynamic_source = DynamicFunctionSource::new(
+        DynamicFunctionKind::Function,
+        &parameters,
+        SourceFragment::new("def"),
+    );
+    let callback_called = Cell::new(false);
+    let error = with_dynamic_function_source(dynamic_source, FrontendLimits::new(5), |_, _| {
+        callback_called.set(true);
+    })
+    .expect_err("dynamic fragments must be limited before wrapper preparation");
+    assert!(!callback_called.get());
+    assert_eq!(
+        error.limit_error(),
+        Some(FrontendLimitError::SourceBytesExceeded {
+            actual: 6,
+            limit: 5,
+        })
+    );
+}
+
+#[test]
+fn dynamic_function_bodies_are_never_parsed_as_naked_programs() {
+    for kind in [
+        DynamicFunctionKind::Function,
+        DynamicFunctionKind::GeneratorFunction,
+        DynamicFunctionKind::AsyncFunction,
+        DynamicFunctionKind::AsyncGeneratorFunction,
+    ] {
+        let parameters = [SourceFragment::new("value")];
+        let dynamic_source =
+            DynamicFunctionSource::new(kind, &parameters, SourceFragment::new("function {"));
+        let error =
+            with_dynamic_function_source(dynamic_source, FrontendLimits::default(), |_, _| {
+                panic!("unsupported wrapper preparation must not invoke the callback")
+            })
+            .expect_err("constructor source requires an exact wrapper");
+
+        assert_eq!(error.stage(), DiagnosticStage::CompilationGoal);
+        assert_eq!(
+            error.unsupported_goal(),
+            Some(UnsupportedCompilationGoal::DynamicFunction(kind))
+        );
+        assert_eq!(
+            error.diagnostics()[0].code,
+            FrontendDiagnosticCode::UnsupportedCompilationGoal
+        );
+        assert!(
+            error.diagnostics()[0]
+                .message
+                .contains(&format!("kind={kind}"))
+        );
+        assert!(error.diagnostics()[0].message.contains("not implemented"));
+        assert_eq!(dynamic_source.parameters()[0].text(), "value");
+        assert_eq!(dynamic_source.body().text(), "function {");
+    }
 }
 
 #[test]
@@ -218,39 +497,39 @@ fn rejects_legacy_import_assertions_but_accepts_import_attributes() {
     );
 
     let allocator = Allocator::new();
-    let program = parse(
+    let unit = parse(
         &allocator,
         "import data from './data.json' with { type: 'json' }; export default data;",
         FrontendOptions::new(ParseMode::Module),
     )
     .expect("QuickJS supports import attributes using `with`");
-    assert_eq!(program.body.len(), 2);
+    assert_eq!(unit.program().body.len(), 2);
 }
 
 #[test]
 fn accepts_promise_try_from_the_quickjs_es2025_profile() {
     let allocator = Allocator::new();
-    let program = parse(
+    let unit = parse(
         &allocator,
         "const result = Promise.try(() => 42);",
         FrontendOptions::new(ParseMode::Script),
     )
     .expect("QuickJS 2026-06-04 supports Promise.try");
 
-    assert_eq!(program.body.len(), 1);
+    assert_eq!(unit.program().body.len(), 1);
 }
 
 #[test]
 fn leaves_regexp_pattern_validation_to_the_quickjs_runtime_layer() {
     let allocator = Allocator::new();
-    let program = parse(
+    let unit = parse(
         &allocator,
         "const pattern = /(/;",
         FrontendOptions::new(ParseMode::Script),
     )
     .expect("the front end only identifies the RegExp literal boundary");
 
-    assert_eq!(program.body.len(), 1);
+    assert_eq!(unit.program().body.len(), 1);
 
     for source in ["const pattern = /[/;", "const pattern = /unterminated;"] {
         let error = parse(&allocator, source, FrontendOptions::new(ParseMode::Script))
@@ -264,7 +543,13 @@ fn callback_api_keeps_arena_owned_ast_inside_the_allocator_lifetime() {
     let statement_count = with_parsed_program(
         "let first = 1; let second = 2;",
         FrontendOptions::new(ParseMode::Script),
-        |program| program.body.len(),
+        |unit| {
+            assert_eq!(
+                unit.goal(),
+                CompilationGoal::GlobalScript(GlobalScriptGoal::new())
+            );
+            unit.program().body.len()
+        },
     )
     .expect("callback parse");
 
@@ -282,7 +567,13 @@ fn registered_source_callback_keeps_the_ast_in_a_short_lived_arena() {
         &sources,
         &source_id,
         FrontendOptions::new(ParseMode::Script),
-        |program| program.body.len(),
+        |unit| {
+            assert_eq!(
+                unit.goal(),
+                CompilationGoal::GlobalScript(GlobalScriptGoal::new())
+            );
+            unit.program().body.len()
+        },
     )
     .expect("registered parse");
 
@@ -328,6 +619,50 @@ fn registered_source_errors_distinguish_foreign_ids_from_javascript_diagnostics(
     assert!(diagnostics.diagnostics().iter().all(|diagnostic| {
         diagnostic.code().as_str() == FrontendDiagnosticCode::OxcParser.as_str()
     }));
+}
+
+#[test]
+fn registered_diagnostics_preserve_the_structured_unsupported_goal() {
+    let mut sources = SourceRegistry::new();
+    let source_id = sources
+        .register("dynamic-function-body.js", "return 1;")
+        .expect("source");
+
+    let error = with_registered_program(
+        &sources,
+        &source_id,
+        FrontendOptions::for_goal(CompilationGoal::DynamicFunction(
+            DynamicFunctionKind::Function,
+        )),
+        |_| (),
+    )
+    .expect_err("dynamic Function parsing is not implemented");
+    let RegisteredFrontendError::Diagnostics(diagnostics) = error else {
+        panic!("expected goal diagnostics");
+    };
+
+    assert_eq!(diagnostics.stage(), DiagnosticStage::CompilationGoal);
+    assert_eq!(
+        diagnostics.unsupported_goal(),
+        Some(UnsupportedCompilationGoal::DynamicFunction(
+            DynamicFunctionKind::Function
+        ))
+    );
+    assert_eq!(
+        diagnostics.diagnostics()[0].code().as_str(),
+        FrontendDiagnosticCode::UnsupportedCompilationGoal.as_str()
+    );
+    assert!(diagnostics.diagnostics()[0].help().is_none());
+    assert!(
+        diagnostics.diagnostics()[0]
+            .message()
+            .contains("kind=function")
+    );
+    assert!(
+        diagnostics.diagnostics()[0]
+            .message()
+            .contains("not implemented")
+    );
 }
 
 #[test]
