@@ -150,6 +150,15 @@ A milestone is complete only when all of its checked items pass in CI.
         expressions and value-preserving `&&`/`||`/`??` lower iteratively,
         including shared natural left-chain joins and whole-path fail-closed
         validation.
+  - [x] Lower the first structured-statement family with no recursion guard:
+        exact Oxc creator scopes drive reverse-slot TDZ initialization at
+        function or lexical-block entry; paired scope and loop work items
+        lower blocks, `if`/`else`, `while`, `do`/`while`, and unlabeled
+        `break`/`continue`; loop-body lexicals reset on every re-entry; and
+        unreachable source paths are still validated and structurally
+        terminated before verification. Labeled control and `for` families
+        remain fail-closed until their cleanup and per-iteration environment
+        semantics are implemented.
 - [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
 - [ ] Deterministic debug/line tables.
 

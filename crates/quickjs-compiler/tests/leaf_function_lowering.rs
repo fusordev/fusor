@@ -179,16 +179,6 @@ fn unsupported_leaf_shapes_fail_closed_at_source_spans() {
             "missing",
         ),
         (
-            "function f(arg) { let local = arg; if (local) {} return local; }",
-            UnsupportedLeafFeature::UnsupportedBody,
-            "if (local) {}",
-        ),
-        (
-            "function f(arg) { let local = arg; return local; arg; }",
-            UnsupportedLeafFeature::UnsupportedBody,
-            "arg;",
-        ),
-        (
             "const holder = function f(arg) { let local = arg; return local; };",
             UnsupportedLeafFeature::NamedFunctionExpression,
             "function f(arg) { let local = arg; return local; }",

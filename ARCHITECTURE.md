@@ -94,12 +94,18 @@ expressions. Its pool-free body slice handles simple
 `var`/`let`/`const` declarations, TDZ setup, immediate Boolean/null/int32 and
 compact `BigInt` values, the empty string, resolved argument/local reads, unary
 and binary operators, short-circuit `&&`/`||`/`??`, conditional expressions,
-sequence and expression statements, and explicit or implicit returns. It
-lowers expressions with an iterative work list, validates the complete
-selected body into typed pseudo-instructions before byte emission, assigns
-typed frame slots, and immediately produces a non-executable
-`VerifiedControlFlow` certificate. Constants, atoms, and closures stay rejected
-until the compiled artifact owns their real pools.
+sequence and expression statements, lexical blocks, `if`/`else`, `while`,
+`do`/`while`, unlabeled `break`/`continue`, and explicit or implicit returns.
+It lowers expressions and statements with iterative work lists, validates the
+complete selected body into typed pseudo-instructions before byte emission,
+assigns typed frame slots, and immediately produces a non-executable
+`VerifiedControlFlow` certificate. Scope entry reads Oxc's creator
+`ScopeId` directly, checks its creator `NodeId`, and emits TDZ initialization
+only for bindings owned by that exact scope, in reverse local-slot order.
+Paired scope work items keep loop re-entry and future captured-local cleanup
+explicit without a recursion guard. Constants, atoms, closures, labeled
+control, and `for` families stay rejected until their owned records or full
+cleanup and per-iteration environment semantics exist.
 
 `BytecodeAssembler` keeps symbolic label handles provenance-bound to one
 assembler through immutable `Arc` identity. Labels never enter final operands.
