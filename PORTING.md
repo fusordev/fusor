@@ -75,6 +75,9 @@ A milestone is complete only when all of its checked items pass in CI.
       spans.
 - [x] Retain Oxc `ModuleRecord` and complete `Semantic` data on every successful
       parsed unit for compiler lowering.
+- [x] Lower static module requests into an arena-independent owned record with
+      source occurrence order, exact UTF-16 strings, import attributes,
+      typed request indices, and local/indirect/star linking roles.
 - [ ] Differentially test Oxc acceptance, early errors, strict mode, Annex B,
       and ES2025 syntax against the pinned QuickJS release.
   - [x] Differentially test all four dynamic Function-constructor families

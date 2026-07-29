@@ -50,7 +50,8 @@ The compilation pipeline is:
    and reject every diagnostic.
 6. Reject syntax accepted by the current Oxc release but outside the pinned
    QuickJS/ES2025 profile.
-7. Copy Oxc scope/symbol/reference information into an owned `BindingPlan`.
+7. Consume Oxc's retained semantic model directly while building
+   QuickJS-owned declaration, storage, and module-linking plans.
 8. Lower AST nodes into typed pseudo-instructions with copied source origins.
 9. Run QuickJS-derived variable resolution, label relaxation, peepholes, stack
    analysis, and debug-table construction.
@@ -63,6 +64,15 @@ without a self-referential Rust owner. No Oxc arena reference may survive
 compilation. Static Oxc resolution is only an input: `with`, direct eval,
 Annex B bindings, and global declaration instantiation require
 QuickJS-compatible dynamic handling.
+
+Every successful unit also owns a `ModuleSyntaxRecord` for the module data that
+must survive the Oxc allocator. Static requests remain in source occurrence
+order, so repeated specifiers retain distinct typed indices, literal spans, and
+per-occurrence import attributes. Import and local/indirect/star export entries
+retain their linking roles and actual export-site spans. Decoded module strings
+use immutable `Arc<[u16]>` backing so lone surrogates accepted by QuickJS are
+not collapsed into Rust replacement characters. This record deliberately does
+not copy Oxc scopes, symbols, references, or class semantics.
 
 Oxc acceptance, rejection, or diagnostic wording may intentionally differ from
 the pinned QuickJS parser. Every accepted difference must be narrow,

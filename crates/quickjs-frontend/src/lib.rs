@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod frontend;
+mod module_syntax;
 
 pub use frontend::{
     Allocator, CompilationGoal, DEFAULT_MAX_DYNAMIC_FUNCTION_FRAGMENTS,
@@ -22,6 +23,12 @@ pub use frontend::{
     PreparedDynamicFunctionSource, Program, RegisteredFrontendDiagnostics, RegisteredFrontendError,
     Scoping, Semantic, SourceFragment, Span, UnsupportedCompilationGoal, parse,
     with_dynamic_function_source, with_parsed_program, with_registered_program,
+};
+pub use module_syntax::{
+    ImportAttribute, ImportAttributeKeyword, ImportAttributes, ModuleExportEntry,
+    ModuleExportEntryRole, ModuleExportImportName, ModuleExportLocalName, ModuleExportName,
+    ModuleImportEntry, ModuleImportName, ModuleNameSpan, ModuleRequestIndex, ModuleRequestKind,
+    ModuleSyntaxRecord, StaticModuleRequest,
 };
 
 /// The official `QuickJS` release whose behavior this port targets.

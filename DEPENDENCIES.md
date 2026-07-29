@@ -38,6 +38,13 @@ analysis, scopes, symbols, and resolved/unresolved references directly. These
 are syntax-analysis inputs, not QuickJS runtime storage locations or
 declaration-instantiation semantics.
 
+The front end additionally lowers static module syntax into an
+arena-independent, QuickJS-owned record. Oxc supplies the parsed request and
+entry facts; the project-owned representation preserves source occurrence
+order, import attributes, linking roles, and exact UTF-16 string code units
+with immutable `Arc` backing. It does not duplicate or replace Oxc semantic
+tables.
+
 The selected compatibility policy permits narrow Oxc-vs-QuickJS parser
 differences. Such differences must be recorded and covered by differential or
 expectation fixtures; they do not authorize importing behavior from another

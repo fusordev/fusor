@@ -12,7 +12,7 @@ pub use oxc_allocator::Allocator;
 pub use oxc_ast::ast::Program;
 use oxc_ast::{
     AstKind,
-    ast::{ImportPhase, VariableDeclarationKind, WithClauseKeyword},
+    ast::{ImportPhase, ModuleExportName, VariableDeclarationKind, WithClauseKeyword},
 };
 use oxc_diagnostics::{Diagnostics, OxcDiagnostic};
 use oxc_parser::{ParseOptions as OxcParseOptions, Parser};
@@ -26,6 +26,8 @@ use quickjs_diagnostics::{
     DiagnosticLabel as SharedDiagnosticLabel, DiagnosticSeverity, SourceError, SourceId,
     SourceRegistry,
 };
+
+use crate::module_syntax::{ModuleSyntaxLoweringError, ModuleSyntaxRecord};
 
 /// The default maximum UTF-8 source size accepted by one front-end entry.
 ///
@@ -1695,6 +1697,9 @@ pub enum DiagnosticStage {
     Profile,
     /// Oxc's deferred ECMAScript early-error checks emitted a diagnostic.
     Semantic,
+    /// Copying Oxc module syntax into the arena-independent representation
+    /// detected an inconsistent upstream record.
+    ModuleSyntaxLowering,
 }
 
 impl fmt::Display for DiagnosticStage {
@@ -1705,6 +1710,7 @@ impl fmt::Display for DiagnosticStage {
             Self::Parser => formatter.write_str("parser"),
             Self::Profile => formatter.write_str("profile"),
             Self::Semantic => formatter.write_str("semantic"),
+            Self::ModuleSyntaxLowering => formatter.write_str("module-syntax-lowering"),
         }
     }
 }
@@ -1732,6 +1738,8 @@ pub enum FrontendDiagnosticCode {
     OxcParser,
     /// An Oxc semantic/early-error diagnostic.
     OxcSemantic,
+    /// Oxc's AST and module record were inconsistent during owned lowering.
+    ModuleSyntaxLowering,
     /// A `using` declaration unsupported by the pinned `QuickJS` profile.
     UnsupportedUsingDeclaration,
     /// An `await using` declaration unsupported by the pinned `QuickJS` profile.
@@ -1746,6 +1754,10 @@ pub enum FrontendDiagnosticCode {
     UnsupportedClassAccessor,
     /// A legacy `assert` import clause.
     UnsupportedLegacyImportAssertion,
+    /// A string-literal imported name in a named re-export.
+    UnsupportedStringNamedReExport,
+    /// A string-literal namespace export name.
+    UnsupportedStringNamespaceExport,
 }
 
 impl FrontendDiagnosticCode {
@@ -1766,6 +1778,7 @@ impl FrontendDiagnosticCode {
             Self::UnsupportedCompilationGoal => "quickjs::frontend::unsupported_compilation_goal",
             Self::OxcParser => "quickjs::frontend::oxc::parser",
             Self::OxcSemantic => "quickjs::frontend::oxc::semantic",
+            Self::ModuleSyntaxLowering => "quickjs::frontend::lowering::module_syntax",
             Self::UnsupportedUsingDeclaration => "quickjs::frontend::profile::using_declaration",
             Self::UnsupportedAwaitUsingDeclaration => {
                 "quickjs::frontend::profile::await_using_declaration"
@@ -1776,6 +1789,12 @@ impl FrontendDiagnosticCode {
             Self::UnsupportedClassAccessor => "quickjs::frontend::profile::class_accessor",
             Self::UnsupportedLegacyImportAssertion => {
                 "quickjs::frontend::profile::legacy_import_assertion"
+            }
+            Self::UnsupportedStringNamedReExport => {
+                "quickjs::frontend::profile::string_named_reexport"
+            }
+            Self::UnsupportedStringNamespaceExport => {
+                "quickjs::frontend::profile::string_namespace_export"
             }
         }
     }
@@ -1788,14 +1807,17 @@ impl FrontendDiagnosticCode {
             | Self::DynamicFunctionPreparationFailed
             | Self::UnsupportedCompilationGoal
             | Self::OxcParser
-            | Self::OxcSemantic => None,
+            | Self::OxcSemantic
+            | Self::ModuleSyntaxLowering => None,
             Self::UnsupportedUsingDeclaration
             | Self::UnsupportedAwaitUsingDeclaration
             | Self::UnsupportedImportSource
             | Self::UnsupportedImportDefer
             | Self::UnsupportedDecorator
             | Self::UnsupportedClassAccessor
-            | Self::UnsupportedLegacyImportAssertion => {
+            | Self::UnsupportedLegacyImportAssertion
+            | Self::UnsupportedStringNamedReExport
+            | Self::UnsupportedStringNamespaceExport => {
                 Some("rewrite this syntax for the QuickJS 2026-06-04 compatibility profile")
             }
         }
@@ -2050,6 +2072,23 @@ impl FrontendError {
         }
     }
 
+    fn from_module_syntax(error: ModuleSyntaxLoweringError) -> Self {
+        Self {
+            stage: DiagnosticStage::ModuleSyntaxLowering,
+            diagnostics: vec![FrontendDiagnostic {
+                code: FrontendDiagnosticCode::ModuleSyntaxLowering,
+                message: error.to_string(),
+                labels: vec![DiagnosticLabel {
+                    span: error.span(),
+                    message: Some("inconsistent Oxc module syntax".to_owned()),
+                }],
+            }],
+            parser_panicked: false,
+            unsupported_goal: None,
+            limit_error: None,
+        }
+    }
+
     /// Returns the phase that rejected the source.
     #[must_use]
     pub const fn stage(&self) -> DiagnosticStage {
@@ -2298,6 +2337,26 @@ fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> 
             AstKind::ImportDeclaration(declaration) => {
                 push_import_phase_violation(&mut violations, declaration.phase, declaration.span);
             }
+            AstKind::ExportNamedDeclaration(declaration) if declaration.source.is_some() => {
+                for specifier in &declaration.specifiers {
+                    if let ModuleExportName::StringLiteral(literal) = &specifier.local {
+                        violations.push(ProfileViolation {
+                            span: literal.span,
+                            code: FrontendDiagnosticCode::UnsupportedStringNamedReExport,
+                            message: "QuickJS 2026-06-04 requires an identifier before `as` in a named re-export",
+                        });
+                    }
+                }
+            }
+            AstKind::ExportAllDeclaration(declaration) => {
+                if let Some(ModuleExportName::StringLiteral(literal)) = &declaration.exported {
+                    violations.push(ProfileViolation {
+                        span: literal.span,
+                        code: FrontendDiagnosticCode::UnsupportedStringNamespaceExport,
+                        message: "QuickJS 2026-06-04 requires an identifier namespace export name",
+                    });
+                }
+            }
             AstKind::ImportExpression(expression) => {
                 push_import_phase_violation(&mut violations, expression.phase, expression.span);
             }
@@ -2537,6 +2596,7 @@ pub struct ParsedUnit<'arena, 'scope> {
     program: &'arena Program<'arena>,
     module_record: ModuleRecord<'arena>,
     semantic: Semantic<'arena>,
+    module_syntax: ModuleSyntaxRecord,
 }
 
 impl fmt::Debug for ParsedUnit<'_, '_> {
@@ -2549,6 +2609,7 @@ impl fmt::Debug for ParsedUnit<'_, '_> {
             .field("semantic_nodes", &self.semantic.nodes().len())
             .field("semantic_scopes", &self.semantic.scoping().scopes_len())
             .field("semantic_symbols", &self.semantic.scoping().symbols_len())
+            .field("module_syntax", &self.module_syntax)
             .finish()
     }
 }
@@ -2584,6 +2645,16 @@ impl<'arena, 'scope> ParsedUnit<'arena, 'scope> {
     #[must_use]
     pub const fn semantic(&self) -> &Semantic<'arena> {
         &self.semantic
+    }
+
+    /// Returns the QuickJS-owned, arena-independent static module syntax.
+    ///
+    /// Requests retain source occurrence order, attributes, and byte spans.
+    /// Import and export entries retain the roles required by later module
+    /// linking without copying Oxc's scope/symbol/reference model.
+    #[must_use]
+    pub const fn module_syntax(&self) -> &ModuleSyntaxRecord {
+        &self.module_syntax
     }
 
     /// Returns Oxc's owned scope, symbol, and reference tables.
@@ -2670,12 +2741,15 @@ fn parse_in_mode<'arena, 'scope>(
         ));
     }
     let semantic = semantic.semantic;
+    let module_syntax = ModuleSyntaxRecord::from_oxc(program, &module_record)
+        .map_err(FrontendError::from_module_syntax)?;
 
     Ok(ParsedUnit {
         goal,
         program,
         module_record,
         semantic,
+        module_syntax,
     })
 }
 
