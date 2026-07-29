@@ -18,9 +18,9 @@ pub use frontend::{
     DynamicFunctionMappedSource, DynamicFunctionPreparationResource, DynamicFunctionSource,
     DynamicFunctionSpanBias, DynamicFunctionSyntheticKind, FrontendDiagnostic,
     FrontendDiagnosticCode, FrontendError, FrontendLimitError, FrontendLimits, FrontendOptions,
-    FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal, ParseMode, ParsedUnit,
+    FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal, ModuleRecord, ParseMode, ParsedUnit,
     PreparedDynamicFunctionSource, Program, RegisteredFrontendDiagnostics, RegisteredFrontendError,
-    SourceFragment, Span, UnsupportedCompilationGoal, parse, with_dynamic_function_source,
+    Scoping, SourceFragment, Span, UnsupportedCompilationGoal, parse, with_dynamic_function_source,
     with_parsed_program, with_registered_program,
 };
 

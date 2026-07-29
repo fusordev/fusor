@@ -46,7 +46,8 @@ The compilation pipeline is:
 2. Select Script, Module, eval, or Function-constructor grammar explicitly.
 3. Parse JavaScript with Oxc. Oxc RegExp pattern parsing stays disabled.
 4. Reject every parser diagnostic, including recoverable diagnostics.
-5. Run Oxc semantic early-error checks and reject every diagnostic.
+5. Run Oxc semantic early-error checks, retain its owned scope/symbol/reference
+   model, and reject every diagnostic.
 6. Reject syntax accepted by the current Oxc release but outside the pinned
    QuickJS/ES2025 profile.
 7. Copy Oxc scope/symbol/reference information into an owned `BindingPlan`.
@@ -55,9 +56,10 @@ The compilation pipeline is:
    analysis, and debug-table construction.
 10. Verify and freeze the bytecode, then drop the Oxc allocator.
 
-No Oxc AST reference may survive compilation. Static Oxc resolution is only an
-input: `with`, direct eval, Annex B bindings, and global declaration
-instantiation require QuickJS-compatible dynamic handling.
+`ParsedUnit` keeps Oxc's arena-backed `Program` and `ModuleRecord` beside its
+owned `Scoping` result. No Oxc arena reference may survive compilation. Static
+Oxc resolution is only an input: `with`, direct eval, Annex B bindings, and
+global declaration instantiation require QuickJS-compatible dynamic handling.
 
 Oxc acceptance, rejection, or diagnostic wording may intentionally differ from
 the pinned QuickJS parser. Every accepted difference must be narrow,

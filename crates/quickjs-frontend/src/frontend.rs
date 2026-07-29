@@ -16,9 +16,11 @@ use oxc_ast::{
 };
 use oxc_diagnostics::{Diagnostics, OxcDiagnostic};
 use oxc_parser::{ParseOptions as OxcParseOptions, Parser};
+pub use oxc_semantic::Scoping;
 use oxc_semantic::{AstNodes, SemanticBuilder};
 use oxc_span::SourceType;
 pub use oxc_span::Span;
+pub use oxc_syntax::module_record::ModuleRecord;
 use quickjs_diagnostics::{
     Diagnostic as SharedDiagnostic, DiagnosticCode as SharedDiagnosticCode, DiagnosticCodeError,
     DiagnosticLabel as SharedDiagnosticLabel, DiagnosticSeverity, SourceError, SourceId,
@@ -2534,6 +2536,8 @@ impl Error for RegisteredFrontendError {
 pub struct ParsedUnit<'arena, 'scope> {
     goal: CompilationGoal<'scope>,
     program: Program<'arena>,
+    module_record: ModuleRecord<'arena>,
+    scoping: Scoping,
 }
 
 impl<'arena, 'scope> ParsedUnit<'arena, 'scope> {
@@ -2547,6 +2551,25 @@ impl<'arena, 'scope> ParsedUnit<'arena, 'scope> {
     #[must_use]
     pub const fn program(&self) -> &Program<'arena> {
         &self.program
+    }
+
+    /// Returns Oxc's parsed ECMAScript module record.
+    ///
+    /// Successful Script units retain dynamic-import entries; module-only
+    /// declarations and `import.meta` still reject in Script mode.
+    #[must_use]
+    pub const fn module_record(&self) -> &ModuleRecord<'arena> {
+        &self.module_record
+    }
+
+    /// Returns Oxc's owned semantic scope, symbol, and reference model.
+    ///
+    /// The compiler may consume this model as syntax analysis input, but
+    /// `QuickJS` runtime storage locations and declaration instantiation
+    /// remain project-owned.
+    #[must_use]
+    pub const fn scoping(&self) -> &Scoping {
+        &self.scoping
     }
 }
 
@@ -2609,6 +2632,7 @@ fn parse_in_mode<'arena, 'scope>(
         ));
     }
 
+    let module_record = parsed.module_record;
     let program = parsed.program;
     let semantic = SemanticBuilder::new_compiler()
         .with_build_nodes(true)
@@ -2625,9 +2649,14 @@ fn parse_in_mode<'arena, 'scope>(
             false,
         ));
     }
-    drop(semantic);
+    let scoping = semantic.semantic.into_scoping();
 
-    Ok(ParsedUnit { goal, program })
+    Ok(ParsedUnit {
+        goal,
+        program,
+        module_record,
+        scoping,
+    })
 }
 
 /// Parses and validates a source unit inside a short-lived arena.

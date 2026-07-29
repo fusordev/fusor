@@ -33,6 +33,9 @@ fn parses_javascript_scripts_and_preserves_utf8_byte_spans() {
         unit.goal(),
         CompilationGoal::GlobalScript(GlobalScriptGoal::new())
     );
+    assert!(!unit.module_record().has_module_syntax);
+    assert!(unit.module_record().requested_modules.is_empty());
+    assert_eq!(unit.scoping().symbol_names().collect::<Vec<_>>(), vec!["π"]);
 }
 
 #[test]
@@ -44,10 +47,52 @@ fn parses_modules_only_when_module_mode_is_explicit() {
         parse(&allocator, source, FrontendOptions::new(ParseMode::Module)).expect("valid module");
     assert!(module.program().source_type.is_module());
     assert_eq!(module.goal(), CompilationGoal::Module);
+    assert!(module.module_record().has_module_syntax);
+    assert_eq!(module.module_record().requested_modules.len(), 1);
+    assert_eq!(module.module_record().import_entries.len(), 1);
+    assert_eq!(module.module_record().exported_bindings.len(), 1);
+    assert_eq!(
+        module.scoping().symbol_names().collect::<Vec<_>>(),
+        vec!["value"]
+    );
 
     let error = parse(&allocator, source, FrontendOptions::new(ParseMode::Script))
         .expect_err("module syntax must not be accepted as a script");
     assert_eq!(error.stage(), DiagnosticStage::Semantic);
+}
+
+#[test]
+fn retains_oxc_semantic_scopes_symbols_and_unresolved_references() {
+    let source =
+        "let local = external; function add(argument) { return local + argument + missing; }";
+    let allocator = Allocator::new();
+    let unit =
+        parse(&allocator, source, FrontendOptions::new(ParseMode::Script)).expect("valid script");
+    let scoping = unit.scoping();
+
+    assert_eq!(scoping.scopes_len(), 2);
+    assert_eq!(
+        scoping.symbol_names().collect::<Vec<_>>(),
+        vec!["local", "add", "argument"]
+    );
+    assert_eq!(scoping.root_unresolved_references().len(), 2);
+    assert_eq!(scoping.references_len(), 4);
+}
+
+#[test]
+fn script_module_record_retains_dynamic_imports_without_changing_parse_goal() {
+    let source = "const pending = import('./dynamic.js');";
+    let allocator = Allocator::new();
+    let unit =
+        parse(&allocator, source, FrontendOptions::new(ParseMode::Script)).expect("valid script");
+
+    assert_eq!(
+        unit.goal(),
+        CompilationGoal::GlobalScript(GlobalScriptGoal::new())
+    );
+    assert!(!unit.module_record().has_module_syntax);
+    assert!(unit.module_record().requested_modules.is_empty());
+    assert_eq!(unit.module_record().dynamic_imports.len(), 1);
 }
 
 #[test]

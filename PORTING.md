@@ -73,6 +73,8 @@ A milestone is complete only when all of its checked items pass in CI.
         fragment map and fail-closed preparation limits.
 - [x] Reject parser and deferred semantic diagnostics with byte-accurate source
       spans.
+- [x] Retain Oxc `ModuleRecord` and owned semantic scope/symbol/reference data
+      on every successful parsed unit for compiler lowering.
 - [ ] Differentially test Oxc acceptance, early errors, strict mode, Annex B,
       and ES2025 syntax against the pinned QuickJS release.
   - [x] Differentially test all four dynamic Function-constructor families
