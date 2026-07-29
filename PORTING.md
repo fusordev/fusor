@@ -65,6 +65,8 @@ A milestone is complete only when all of its checked items pass in CI.
       widths, and fixed/dynamic stack-effect metadata from `quickjs-opcode.h`.
 - [x] Checked owned stack-bytecode codec with typed operands, deterministic
       encoding, bounded transactional construction, and a total decoder.
+- [x] Bounded human-readable disassembly with typed operands, resolved stack
+      effects, stable text, and structured malformed-input/limit failures.
 - [ ] Control-flow and abstract-stack verifier with computed maximum stack
       depth.
 - [ ] Instruction/function PC-to-source tables, source-map chaining, and
@@ -111,6 +113,8 @@ A milestone is complete only when all of its checked items pass in CI.
       Node defaults; preserve QuickJS relative/system module-name semantics.
 - [ ] `qjs` CLI, REPL, script/module detection, and documented options.
 - [ ] Rust-native `qjsc` artifact generation with no C compiler dependency.
+- [ ] Bytecode viewer CLI with verified function metadata, resolved atoms and
+      constants, control-flow targets, and source-map annotations.
 - [ ] Portable `std`/`os` modules with documented platform and safety policy.
 
 ### M6 — conformance and performance

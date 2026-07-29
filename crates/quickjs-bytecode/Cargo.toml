@@ -1,7 +1,7 @@
 [package]
 name = "quickjs-bytecode"
 version = "0.0.1"
-description = "Safe opcode schema for the pure-Rust QuickJS port"
+description = "Safe opcode schema, checked codec, and bounded disassembler for the pure-Rust QuickJS port"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
