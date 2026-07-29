@@ -19,6 +19,7 @@ use std::{error::Error, fmt};
 
 mod codec;
 mod disassembly;
+mod verifier;
 
 pub use codec::{
     AtomPoolIndex, BytecodeBuilder, BytecodePc, DecodeError, DecodedInstruction, EncodeError,
@@ -27,6 +28,14 @@ pub use codec::{
 };
 pub use disassembly::{
     DisassemblyError, DisassemblyLimits, DisassemblySummary, render_disassembly,
+};
+pub use verifier::{
+    ControlFlowEdge, FunctionCountDomain, FunctionIndexDomains, FunctionPath, InstructionIndex,
+    InvalidControlFlowTargetReason, MAX_FUNCTION_INDEX_ENTRIES, MAX_OPERAND_STACK_DEPTH,
+    OperandIndexDomain, SecondaryOperandField, UnsupportedVerifierFeature, UnverifiedFunctionBody,
+    VerificationError, VerificationErrorKind, VerificationLimits, VerificationResource,
+    VerifiedControlFlow, VerifiedInstruction, VerifiedSuccessorKind, VerifiedSuccessors,
+    verify_control_flow,
 };
 
 /// The official `QuickJS` release from which the opcode schema was translated.

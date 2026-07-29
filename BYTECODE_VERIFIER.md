@@ -44,6 +44,19 @@ Verification has five ordered phases:
 5. freeze decoded instructions, boundary tables, computed stack size, and
    verified children into `VerifiedBytecode`.
 
+### Implementation staging
+
+The first implemented slice returns `VerifiedControlFlow`, not
+`VerifiedBytecode`. It completely predecodes the function, validates every
+static operand domain represented by its body-only input and every successor
+even in unreachable code, and analyzes reachable ordinary JavaScript-value
+stack heights. It rejects 37 opcodes whose correct verification needs typed
+constants, raw function slots, handler or iterator markers, finally return
+addresses, function-kind metadata, or packed stack offsets. Its opaque
+certificate has no execution API and cannot cross the VM trust boundary. The
+complete typed-stack and whole-function rules below remain mandatory before
+`VerifiedBytecode` exists.
+
 ## Complete predecode and instruction boundaries
 
 **Upstream.** The final opcode table supplies fixed instruction sizes and fixed

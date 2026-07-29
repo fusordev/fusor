@@ -87,6 +87,10 @@ A milestone is complete only when all of its checked items pass in CI.
       effects, stable text, and structured malformed-input/limit failures.
 - [ ] Control-flow and abstract-stack verifier with computed maximum stack
       depth.
+  - [x] First fail-closed slice: complete predecode, all currently modeled
+        static target/index/secondary-operand checks, ordinary reachable
+        stack-height analysis, exact maximum comparison, and a deliberately
+        non-executable `VerifiedControlFlow` certificate.
 - [ ] Instruction/function PC-to-source tables, source-map chaining, and
       precise source lookup for diagnostics and stack frames.
 - [ ] Bindings, lexical environments, closures, calls, constructors, and

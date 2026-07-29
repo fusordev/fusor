@@ -77,6 +77,14 @@ Only `VerifiedBytecode` may execute. Verification checks:
 Malformed serialized bytecode returns a structured verifier error. It never
 reaches unchecked indexing in the VM.
 
+The current staged implementation exposes only `VerifiedControlFlow`: a
+non-executable certificate for complete predecode, instruction boundaries,
+function-local operand bounds, secondary operand domains, static successors,
+and reachable ordinary-value stack heights. Opcodes that require typed
+constants, raw function slots, handlers, finally return addresses, iterator
+markers, suspension metadata, or packed stack offsets fail closed. The VM
+boundary continues to require the future whole-function `VerifiedBytecode`.
+
 The complete trust boundary, typed abstract stack, control-flow rules,
 resource limits, and acceptance suite are normative in
 [BYTECODE_VERIFIER.md](BYTECODE_VERIFIER.md).
