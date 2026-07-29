@@ -3,27 +3,31 @@ use std::{error::Error, fmt, sync::Arc};
 use oxc_ast::{
     AstKind,
     ast::{
-        BindingPattern, ConditionalExpression, DoWhileStatement, Expression, Function,
-        FunctionBody, FunctionType, IfStatement, LogicalExpression, PropertyKind,
-        SequenceExpression, Statement, UnaryExpression, VariableDeclaration,
+        AssignmentExpression, AssignmentTarget, BindingPattern, ConditionalExpression,
+        DoWhileStatement, Expression, ForStatement, ForStatementInit, Function, FunctionBody,
+        FunctionType, IfStatement, LogicalExpression, PropertyKind, SequenceExpression,
+        SimpleAssignmentTarget, Statement, UnaryExpression, UpdateExpression, VariableDeclaration,
         VariableDeclarationKind, WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
 use oxc_span::GetSpan;
-use oxc_syntax::operator::{BinaryOperator, LogicalOperator, UnaryOperator};
+use oxc_syntax::operator::{
+    AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
+};
 use quickjs_bytecode::{
     AssemblerError, AssemblerLabel, AssemblerLimits, BranchKind, BytecodeAssembler, BytecodePc,
-    EncodeError, FinalOpcode, FunctionIndexDomains, Operands, UnverifiedCompilerFunctionBody,
-    UnverifiedFunctionHeader, VerificationError, VerificationErrorKind, VerificationLimits,
-    VerifiedControlFlow, verify_compiler_control_flow,
+    CompilerCaptureLayout, CompilerCapturedBinding, EncodeError, FinalOpcode, FunctionIndexDomains,
+    MAX_FUNCTION_INDEX_ENTRIES, Operands, UnverifiedCompilerFunctionBody, UnverifiedFunctionHeader,
+    VerificationError, VerificationErrorKind, VerificationLimits, VerifiedControlFlow,
+    verify_compiler_control_flow,
 };
 use quickjs_frontend::{ParsedUnit, Span};
 
 use crate::storage::{
     BindingId, CompilationUnitKind, CompilerError, DeclarationKind, Executable, ExecutableId,
-    ExecutableKind, InitializationPolicy, NativeReferenceId, PlannedStorage, StoragePlacement,
-    StoragePlan, build_planned_storage,
+    ExecutableKind, InitializationPolicy, NativeReferenceId, PlannedStorage, ResolvedReference,
+    StoragePlacement, StoragePlan, WritePolicy, build_planned_storage,
 };
 
 /// A validated function-local slot number.
@@ -218,11 +222,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     ///
     /// The accepted Script-only family is pool-free. It supports simple local
     /// declarations, immediate primitive values, resolved argument/local
-    /// reads, value operators including short-circuit and conditional
-    /// expressions, lexical blocks, `if`/`else`, `while`, `do`/`while`,
-    /// unlabeled `break`/`continue`, expression statements, and explicit or
-    /// implicit returns. The entire function is converted to typed symbolic
-    /// instructions before branch relaxation emits any bytes.
+    /// reads and mutable writes, value operators including short-circuit and
+    /// conditional expressions, lexical blocks, `if`/`else`, `while`,
+    /// `do`/`while`, classic `for`, unlabeled `break`/`continue`, expression
+    /// statements, and explicit or implicit returns. A leaf may read or write
+    /// frame cells captured from an ancestor. The entire function is converted
+    /// to typed symbolic instructions before branch relaxation emits any bytes.
     ///
     /// # Errors
     ///
@@ -240,14 +245,25 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             strict,
             argument_count,
             local_count,
+            capture_count,
+            capture_layout,
             locals,
             flow,
         } = validated;
-        let domains = FunctionIndexDomains::new(0, 0, argument_count, local_count, 0);
+        let domains = FunctionIndexDomains::new(0, 0, argument_count, local_count, capture_count);
+        let variable_reference_count = checked_function_entry_count(
+            capture_layout.bindings().len(),
+            "function variable references",
+        )?;
         let header =
-            UnverifiedFunctionHeader::stripped_ordinary_source_function(strict, argument_count);
+            UnverifiedFunctionHeader::stripped_ordinary_source_function_with_variable_references(
+                strict,
+                argument_count,
+                variable_reference_count,
+            );
         let finished = flow.finish()?;
-        let (source_instructions, control_flow) = finished.verify(domains, header, limits)?;
+        let (source_instructions, control_flow) =
+            finished.verify_with_capture_layout(domains, header, capture_layout, limits)?;
 
         Ok(CompiledLeafFunction {
             executable,
@@ -297,11 +313,20 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             })?;
         let mut flow = PlannedControlFlow::new(limits);
         self.validate_body(executable_id, function, body, &layout, &mut flow)?;
+        let function_scope = self.created_scope(
+            function.scope_id.get(),
+            function.node_id.get(),
+            function.span,
+        )?;
+        let capture_layout =
+            self.compiler_capture_layout(executable_id, function_scope, &layout)?;
 
         Ok(ValidatedLeaf {
             strict: executable.is_strict(),
             argument_count: executable.parameter_count(),
-            local_count: u32::from(layout.local_count),
+            local_count: layout.local_count,
+            capture_count: layout.capture_count,
+            capture_layout,
             locals: layout
                 .locals
                 .iter()
@@ -364,6 +389,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     state.active_scopes.push(scope);
                 }
                 StatementWork::PopScope(expected) => {
+                    if state.active_scopes.len() > 1 {
+                        self.plan_scope_exit(executable, expected, layout, flow)?;
+                    }
                     let actual = state.active_scopes.pop().ok_or(
                         LeafCompilationError::SemanticInvariant {
                             invariant: "statement scope stack is nonempty on exit",
@@ -377,6 +405,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         });
                     }
                 }
+                StatementWork::CloseScope(scope) => {
+                    self.plan_scope_exit(executable, scope, layout, flow)?;
+                }
                 StatementWork::PushLoop(control) => state.loop_controls.push(control),
                 StatementWork::PopLoop => {
                     state
@@ -389,6 +420,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 }
                 StatementWork::Expression(expression) => {
                     self.plan_expression(expression, layout, flow)?;
+                }
+                StatementWork::Declaration(declaration) => {
+                    self.validate_declaration(declaration, layout, flow)?;
                 }
                 StatementWork::Emit(instruction) => flow.emit(instruction)?,
                 StatementWork::Branch { kind, target, span } => {
@@ -481,21 +515,26 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     state.active_scopes.len(),
                 )?;
             }
+            Statement::ForStatement(statement) => {
+                self.plan_for_statement(statement, flow, state)?;
+            }
             Statement::BreakStatement(statement) => {
-                Self::plan_loop_jump(
+                self.plan_loop_jump(
                     statement.label.as_ref().map(|label| label.span),
                     statement.span,
                     LoopJump::Break,
                     state,
+                    layout,
                     flow,
                 )?;
             }
             Statement::ContinueStatement(statement) => {
-                Self::plan_loop_jump(
+                self.plan_loop_jump(
                     statement.label.as_ref().map(|label| label.span),
                     statement.span,
                     LoopJump::Continue,
                     state,
+                    layout,
                     flow,
                 )?;
             }
@@ -510,6 +549,26 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
         }
         Ok(())
+    }
+
+    fn plan_for_statement<'statement>(
+        &self,
+        statement: &'statement ForStatement<'arena>,
+        flow: &mut PlannedControlFlow,
+        state: &mut StatementPlanningState<'statement, 'arena>,
+    ) -> Result<(), LeafCompilationError> {
+        let scope = self.created_scope(
+            statement.scope_id.get(),
+            statement.node_id.get(),
+            statement.span,
+        )?;
+        Self::schedule_for_statement(
+            statement,
+            scope,
+            flow,
+            &mut state.work,
+            state.active_scopes.len(),
+        )
     }
 
     fn schedule_if_statement<'statement>(
@@ -609,11 +668,99 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    fn schedule_for_statement<'statement>(
+        statement: &'statement ForStatement<'arena>,
+        scope: ScopeId,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+        enclosing_scope_depth: usize,
+    ) -> Result<(), LeafCompilationError> {
+        let test = flow.new_statement_label(
+            statement
+                .test
+                .as_ref()
+                .map_or(statement.span, GetSpan::span),
+        )?;
+        let rotate = flow.new_statement_label(
+            statement
+                .update
+                .as_ref()
+                .map_or(statement.span, GetSpan::span),
+        )?;
+        let done = flow.new_statement_label(statement.span)?;
+        let loop_scope_depth =
+            enclosing_scope_depth
+                .checked_add(1)
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "statement scope depth",
+                })?;
+        let control = LoopControl {
+            break_target: done.clone(),
+            continue_target: rotate.clone(),
+            scope_depth: loop_scope_depth,
+        };
+
+        work.push(StatementWork::PopScope(scope));
+        work.push(StatementWork::Bind(done.clone()));
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Goto,
+            target: test.clone(),
+            span: statement.span,
+        });
+        if let Some(update) = &statement.update {
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                update.span(),
+            )));
+            work.push(StatementWork::Expression(update));
+        }
+        work.push(StatementWork::CloseScope(scope));
+        work.push(StatementWork::Bind(rotate));
+        work.push(StatementWork::PopLoop);
+        work.push(StatementWork::Visit(&statement.body));
+        work.push(StatementWork::PushLoop(control));
+        if let Some(test_expression) = &statement.test {
+            work.push(StatementWork::Branch {
+                kind: BranchKind::IfFalse,
+                target: done,
+                span: test_expression.span(),
+            });
+            work.push(StatementWork::Expression(test_expression));
+        }
+        work.push(StatementWork::Bind(test));
+        work.push(StatementWork::CloseScope(scope));
+        if let Some(initializer) = &statement.init {
+            match initializer {
+                ForStatementInit::VariableDeclaration(declaration) => {
+                    work.push(StatementWork::Declaration(declaration));
+                }
+                initializer => {
+                    let expression = initializer.to_expression();
+                    work.push(StatementWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Drop,
+                        Operands::None,
+                        expression.span(),
+                    )));
+                    work.push(StatementWork::Expression(expression));
+                }
+            }
+        }
+        work.push(StatementWork::PushScope {
+            scope,
+            creator: statement.node_id.get(),
+            span: statement.span,
+        });
+        Ok(())
+    }
+
     fn plan_loop_jump(
+        &self,
         label_span: Option<Span>,
         statement_span: Span,
         jump: LoopJump,
         state: &StatementPlanningState<'_, '_>,
+        layout: &FrameLayout,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         if let Some(label_span) = label_span {
@@ -632,6 +779,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 invariant: jump.scope_invariant(),
                 span: Some(statement_span),
             });
+        }
+        for scope in state.active_scopes[control.scope_depth..].iter().rev() {
+            self.plan_scope_exit(layout.executable, *scope, layout, flow)?;
         }
         flow.branch(BranchKind::Goto, jump.target(control), statement_span)
     }
@@ -728,6 +878,65 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         for (slot, declaration_span) in entries.into_iter().rev() {
             flow.emit(PlannedInstruction::new(
                 FinalOpcode::SetLocUninitialized,
+                Operands::Loc(slot.index()),
+                declaration_span,
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn plan_scope_exit(
+        &self,
+        executable: ExecutableId,
+        scope: ScopeId,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let scoping = self.unit.semantic().scoping();
+        let mut captured_locals = Vec::new();
+        for symbol in scoping.iter_bindings_in(scope) {
+            if scoping.symbol_scope_id(symbol) != scope {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "scope-exit exact-scope binding belongs to that scope",
+                    span: Some(scoping.symbol_span(symbol)),
+                });
+            }
+            let declaration_span = scoping.symbol_span(symbol);
+            let binding = self.binding_for_identifier(Some(symbol), declaration_span)?;
+            let storage = self.planned.plan.binding(binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "scope-exit compiler binding exists",
+                    span: Some(declaration_span),
+                },
+            )?;
+            if storage.executable() != executable {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "scope-exit binding belongs to the selected executable",
+                    span: Some(declaration_span),
+                });
+            }
+            if !storage.is_frame_captured() {
+                continue;
+            }
+            let FrameSlot::Local(slot) =
+                layout
+                    .slot(binding)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "captured scope-exit binding has a frame slot",
+                        span: Some(declaration_span),
+                    })?
+            else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "captured scope-exit binding uses a local slot",
+                    span: Some(declaration_span),
+                });
+            };
+            captured_locals.push((slot, declaration_span));
+        }
+        captured_locals.sort_unstable_by_key(|(slot, _)| slot.index());
+        for (slot, declaration_span) in captured_locals.into_iter().rev() {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::CloseLoc,
                 Operands::Loc(slot.index()),
                 declaration_span,
             ))?;
@@ -902,6 +1111,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         Expression::LogicalExpression(logical) => {
                             Self::plan_logical_expression(logical, flow, &mut work)?;
                         }
+                        Expression::AssignmentExpression(assignment) => {
+                            self.plan_assignment_expression(assignment, layout, flow, &mut work)?;
+                        }
+                        Expression::UpdateExpression(update) => {
+                            self.plan_update_expression(update, layout, &mut work)?;
+                        }
                         _ => {
                             return unsupported(
                                 UnsupportedLeafFeature::UnsupportedExpression,
@@ -912,6 +1127,148 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn plan_assignment_expression<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &assignment.left else {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                assignment.left.span(),
+            );
+        };
+        let reference = self.resolved_reference(identifier.reference_id.get(), identifier.span)?;
+        let needs_read = assignment.operator != AssignmentOperator::Assign;
+        self.validate_mutation_reference(reference, needs_read, identifier.span)?;
+        let binding = reference.binding();
+        let frame_slot = layout
+            .slot(binding)
+            .ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedBinding,
+                span: identifier.span,
+            })?;
+
+        match assignment.operator {
+            AssignmentOperator::Assign => {
+                self.push_slot_write(binding, frame_slot, true, identifier.span, work)?;
+                work.push(ExpressionWork::Visit(&assignment.right));
+            }
+            AssignmentOperator::LogicalOr
+            | AssignmentOperator::LogicalAnd
+            | AssignmentOperator::LogicalNullish => {
+                let done = flow.new_label(assignment.span)?;
+                let branch_kind = match assignment.operator {
+                    AssignmentOperator::LogicalOr => BranchKind::IfTrue,
+                    AssignmentOperator::LogicalAnd | AssignmentOperator::LogicalNullish => {
+                        BranchKind::IfFalse
+                    }
+                    _ => {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "logical assignment has a short-circuit branch",
+                            span: Some(assignment.span),
+                        });
+                    }
+                };
+                work.push(ExpressionWork::Bind(done.clone()));
+                self.push_slot_write(binding, frame_slot, true, identifier.span, work)?;
+                work.push(ExpressionWork::Visit(&assignment.right));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Branch {
+                    kind: branch_kind,
+                    target: done,
+                    span: assignment.span,
+                });
+                if assignment.operator == AssignmentOperator::LogicalNullish {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::IsUndefinedOrNull,
+                        Operands::None,
+                        identifier.span,
+                    )));
+                }
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Emit(self.plan_read_slot(
+                    binding,
+                    frame_slot,
+                    identifier.span,
+                )?));
+            }
+            operator => {
+                let binary = operator.to_binary_operator().ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "nonlogical compound assignment has a binary operator",
+                        span: Some(assignment.span),
+                    },
+                )?;
+                self.push_slot_write(binding, frame_slot, true, identifier.span, work)?;
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    binary_opcode(binary),
+                    Operands::None,
+                    assignment.span,
+                )));
+                work.push(ExpressionWork::Visit(&assignment.right));
+                work.push(ExpressionWork::Emit(self.plan_read_slot(
+                    binding,
+                    frame_slot,
+                    identifier.span,
+                )?));
+            }
+        }
+        Ok(())
+    }
+
+    fn plan_update_expression<'expression>(
+        &self,
+        update: &'expression UpdateExpression<'arena>,
+        layout: &FrameLayout,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) = &update.argument
+        else {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                update.argument.span(),
+            );
+        };
+        let reference = self.resolved_reference(identifier.reference_id.get(), identifier.span)?;
+        self.validate_mutation_reference(reference, true, identifier.span)?;
+        let binding = reference.binding();
+        let frame_slot = layout
+            .slot(binding)
+            .ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedBinding,
+                span: identifier.span,
+            })?;
+
+        self.push_slot_write(binding, frame_slot, update.prefix, identifier.span, work)?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            match (update.operator, update.prefix) {
+                (UpdateOperator::Increment, true) => FinalOpcode::Inc,
+                (UpdateOperator::Decrement, true) => FinalOpcode::Dec,
+                (UpdateOperator::Increment, false) => FinalOpcode::PostInc,
+                (UpdateOperator::Decrement, false) => FinalOpcode::PostDec,
+            },
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(self.plan_read_slot(
+            binding,
+            frame_slot,
+            identifier.span,
+        )?));
         Ok(())
     }
 
@@ -1094,7 +1451,179 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     Ok(PlannedInstruction::new(opcode, operands, span))
                 }
             }
+            FrameSlot::Capture(slot) => {
+                let storage = self.planned.plan.binding(binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "captured read compiler binding exists",
+                        span: Some(span),
+                    },
+                )?;
+                if storage.policy().has_temporal_dead_zone() {
+                    Ok(PlannedInstruction::new(
+                        FinalOpcode::GetVarRefCheck,
+                        Operands::VarRef(slot),
+                        span,
+                    ))
+                } else {
+                    let (opcode, operands) = compact_get_capture(slot);
+                    Ok(PlannedInstruction::new(opcode, operands, span))
+                }
+            }
         }
+    }
+
+    fn plan_write_slot(
+        &self,
+        binding: BindingId,
+        frame_slot: FrameSlot,
+        preserve_value: bool,
+        span: Span,
+    ) -> Result<Vec<PlannedInstruction>, LeafCompilationError> {
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "written compiler binding exists",
+                    span: Some(span),
+                })?;
+        if storage.policy().writes() != WritePolicy::Mutable {
+            return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
+        }
+
+        let mut instructions = Vec::with_capacity(2);
+        let instruction = match frame_slot {
+            FrameSlot::Argument(slot) => {
+                let (opcode, operands) = if preserve_value {
+                    compact_set_argument(slot)
+                } else {
+                    compact_put_argument(slot)
+                };
+                PlannedInstruction::new(opcode, operands, span)
+            }
+            FrameSlot::Local(slot) if storage.policy().has_temporal_dead_zone() => {
+                PlannedInstruction::new(
+                    if preserve_value {
+                        FinalOpcode::SetLocCheck
+                    } else {
+                        FinalOpcode::PutLocCheck
+                    },
+                    Operands::Loc(slot.index()),
+                    span,
+                )
+            }
+            FrameSlot::Local(slot) => {
+                let (opcode, operands) = if preserve_value {
+                    compact_set_local(slot)
+                } else {
+                    compact_put_local(slot)
+                };
+                PlannedInstruction::new(opcode, operands, span)
+            }
+            FrameSlot::Capture(slot)
+                if preserve_value && storage.policy().has_temporal_dead_zone() =>
+            {
+                instructions.push(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    span,
+                ));
+                PlannedInstruction::new(FinalOpcode::PutVarRefCheck, Operands::VarRef(slot), span)
+            }
+            FrameSlot::Capture(slot) if storage.policy().has_temporal_dead_zone() => {
+                PlannedInstruction::new(FinalOpcode::PutVarRefCheck, Operands::VarRef(slot), span)
+            }
+            FrameSlot::Capture(slot) => {
+                let (opcode, operands) = if preserve_value {
+                    compact_set_capture(slot)
+                } else {
+                    compact_put_capture(slot)
+                };
+                PlannedInstruction::new(opcode, operands, span)
+            }
+        };
+        instructions.push(instruction);
+        Ok(instructions)
+    }
+
+    fn push_slot_write<'expression>(
+        &self,
+        binding: BindingId,
+        frame_slot: FrameSlot,
+        preserve_value: bool,
+        span: Span,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        for instruction in self
+            .plan_write_slot(binding, frame_slot, preserve_value, span)?
+            .into_iter()
+            .rev()
+        {
+            work.push(ExpressionWork::Emit(instruction));
+        }
+        Ok(())
+    }
+
+    fn compiler_capture_layout(
+        &self,
+        executable: ExecutableId,
+        function_scope: ScopeId,
+        layout: &FrameLayout,
+    ) -> Result<CompilerCaptureLayout, LeafCompilationError> {
+        let bindings = self
+            .planned
+            .plan
+            .bindings_for(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let mut captured = Vec::new();
+        for binding in bindings {
+            if !binding.is_frame_captured() {
+                continue;
+            }
+            let frame_slot =
+                layout
+                    .slot(binding.id())
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "captured owner binding has a frame slot",
+                        span: binding.declaration_spans().first().copied(),
+                    })?;
+            let captured_binding = match frame_slot {
+                FrameSlot::Argument(slot) => CompilerCapturedBinding::Argument(u32::from(slot.0)),
+                FrameSlot::Local(slot) => {
+                    let scope = self.scope_for_binding(binding.id())?;
+                    if scope == function_scope {
+                        CompilerCapturedBinding::FunctionLocal(u32::from(slot.index()))
+                    } else {
+                        CompilerCapturedBinding::ScopedLocal(u32::from(slot.index()))
+                    }
+                }
+                FrameSlot::Capture(_) => {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "captured owner binding is not an imported capture",
+                        span: binding.declaration_spans().first().copied(),
+                    });
+                }
+            };
+            captured.push(captured_binding);
+        }
+        Ok(CompilerCaptureLayout::new(Arc::from(captured)))
+    }
+
+    fn scope_for_binding(&self, binding: BindingId) -> Result<ScopeId, LeafCompilationError> {
+        self.planned
+            .identities
+            .scope_by_binding
+            .get(binding.index())
+            .copied()
+            .flatten()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "compiler binding has an Oxc scope identity",
+                span: self
+                    .planned
+                    .plan
+                    .binding(binding)
+                    .and_then(|storage| storage.declaration_spans().first().copied()),
+            })
     }
 
     fn selected_ordinary_leaf(
@@ -1227,6 +1756,18 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         reference_id: Option<ReferenceId>,
         span: Span,
     ) -> Result<BindingId, LeafCompilationError> {
+        let reference = self.resolved_reference(reference_id, span)?;
+        if !reference.access().reads() || reference.access().writes() {
+            return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
+        }
+        Ok(reference.binding())
+    }
+
+    fn resolved_reference(
+        &self,
+        reference_id: Option<ReferenceId>,
+        span: Span,
+    ) -> Result<&ResolvedReference, LeafCompilationError> {
         let reference_id = reference_id.ok_or(LeafCompilationError::SemanticInvariant {
             invariant: "identifier reference has Oxc reference identity",
             span: Some(span),
@@ -1275,10 +1816,28 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 span: Some(span),
             });
         }
-        if !reference.access().reads() || reference.access().writes() {
+        Ok(reference)
+    }
+
+    fn validate_mutation_reference(
+        &self,
+        reference: &ResolvedReference,
+        needs_read: bool,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        if !reference.access().writes() || reference.access().reads() != needs_read {
             return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
         }
-        Ok(reference.binding())
+        let storage = self.planned.plan.binding(reference.binding()).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "written compiler binding exists",
+                span: Some(span),
+            },
+        )?;
+        if storage.policy().writes() != WritePolicy::Mutable {
+            return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
+        }
+        Ok(())
     }
 }
 
@@ -1356,8 +1915,10 @@ enum StatementWork<'statement, 'arena> {
         span: Span,
     },
     PopScope(ScopeId),
+    CloseScope(ScopeId),
     PushLoop(LoopControl),
     PopLoop,
+    Declaration(&'statement VariableDeclaration<'arena>),
     Expression(&'statement Expression<'arena>),
     Emit(PlannedInstruction),
     Branch {
@@ -1410,6 +1971,33 @@ impl LoopJump {
     }
 }
 
+fn checked_function_entry_count<T>(
+    count: T,
+    domain: &'static str,
+) -> Result<u32, LeafCompilationError>
+where
+    u32: TryFrom<T>,
+{
+    let count =
+        u32::try_from(count).map_err(|_| LeafCompilationError::CapacityExceeded { domain })?;
+    if count > MAX_FUNCTION_INDEX_ENTRIES {
+        return Err(LeafCompilationError::CapacityExceeded { domain });
+    }
+    Ok(count)
+}
+
+fn checked_function_index<T>(index: T, domain: &'static str) -> Result<u16, LeafCompilationError>
+where
+    u32: TryFrom<T>,
+{
+    let index =
+        u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded { domain })?;
+    if index >= MAX_FUNCTION_INDEX_ENTRIES {
+        return Err(LeafCompilationError::CapacityExceeded { domain });
+    }
+    u16::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded { domain })
+}
+
 #[derive(Clone, Copy)]
 struct ArgumentSlot(u16);
 
@@ -1417,6 +2005,7 @@ struct ArgumentSlot(u16);
 enum FrameSlot {
     Argument(ArgumentSlot),
     Local(LocalSlot),
+    Capture(u16),
 }
 
 struct FrameLocal {
@@ -1425,36 +2014,39 @@ struct FrameLocal {
 }
 
 struct FrameLayout {
+    executable: ExecutableId,
     slots: Vec<Option<FrameSlot>>,
     locals: Vec<FrameLocal>,
-    local_count: u16,
+    local_count: u32,
+    capture_count: u32,
 }
 
 impl FrameLayout {
     fn new(plan: &StoragePlan, executable: ExecutableId) -> Result<Self, LeafCompilationError> {
         let mut slots = vec![None; plan.bindings().len()];
         let mut locals = Vec::new();
-        let mut local_count = 0_u16;
+        let mut local_count = 0_u32;
         let bindings = plan
             .bindings_for(executable)
             .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let executable_metadata = plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        checked_function_entry_count(
+            executable_metadata.parameter_count(),
+            "function argument slots",
+        )?;
         for binding in bindings {
             let slot = match binding.placement() {
                 StoragePlacement::Argument { parameter_index } => {
-                    let parameter_index = u16::try_from(parameter_index).map_err(|_| {
-                        LeafCompilationError::CapacityExceeded {
-                            domain: "function argument slots",
-                        }
-                    })?;
+                    let parameter_index =
+                        checked_function_index(parameter_index, "function argument slots")?;
                     FrameSlot::Argument(ArgumentSlot(parameter_index))
                 }
                 StoragePlacement::Local => {
-                    let slot = LocalSlot(local_count);
-                    local_count = local_count.checked_add(1).ok_or(
-                        LeafCompilationError::CapacityExceeded {
-                            domain: "function local slots",
-                        },
-                    )?;
+                    let slot =
+                        LocalSlot(checked_function_index(local_count, "function local slots")?);
+                    local_count += 1;
                     locals.push(FrameLocal {
                         binding: binding.id(),
                         slot,
@@ -1486,10 +2078,42 @@ impl FrameLayout {
                 });
             }
         }
+        let captures = plan
+            .frame_captures_for(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let capture_count = checked_function_entry_count(captures.len(), "function capture slots")?;
+        for (expected_capture_index, capture) in captures.iter().enumerate() {
+            let capture_index =
+                checked_function_index(capture.slot().index(), "function capture slots")?;
+            if capture.slot().index() != expected_capture_index {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "function capture slots are dense and ordered",
+                    span: plan
+                        .binding(capture.binding())
+                        .and_then(|binding| binding.declaration_spans().first().copied()),
+                });
+            }
+            let target = slots.get_mut(capture.binding().index()).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "captured binding identity indexes frame layout",
+                    span: None,
+                },
+            )?;
+            if target.replace(FrameSlot::Capture(capture_index)).is_some() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "one frame or capture slot per compiler binding",
+                    span: plan
+                        .binding(capture.binding())
+                        .and_then(|binding| binding.declaration_spans().first().copied()),
+                });
+            }
+        }
         Ok(Self {
+            executable,
             slots,
             locals,
             local_count,
+            capture_count,
         })
     }
 
@@ -1502,6 +2126,8 @@ struct ValidatedLeaf {
     strict: bool,
     argument_count: u32,
     local_count: u32,
+    capture_count: u32,
+    capture_layout: CompilerCaptureLayout,
     locals: Vec<LoweredLocal>,
     flow: PlannedControlFlow,
 }
@@ -1715,10 +2341,21 @@ impl PlannedControlFlow {
 }
 
 impl FinishedControlFlow {
+    #[cfg(test)]
     fn verify(
         self,
         domains: FunctionIndexDomains,
         header: UnverifiedFunctionHeader,
+        limits: VerificationLimits,
+    ) -> Result<(Vec<SourceInstruction>, VerifiedControlFlow), LeafCompilationError> {
+        self.verify_with_capture_layout(domains, header, CompilerCaptureLayout::default(), limits)
+    }
+
+    fn verify_with_capture_layout(
+        self,
+        domains: FunctionIndexDomains,
+        header: UnverifiedFunctionHeader,
+        capture_layout: CompilerCaptureLayout,
         limits: VerificationLimits,
     ) -> Result<(Vec<SourceInstruction>, VerifiedControlFlow), LeafCompilationError> {
         let Self {
@@ -1727,7 +2364,8 @@ impl FinishedControlFlow {
             stack_anchors,
         } = self;
         let control_flow = match verify_compiler_control_flow(
-            UnverifiedCompilerFunctionBody::new(bytecode, domains, header),
+            UnverifiedCompilerFunctionBody::new(bytecode, domains, header)
+                .with_capture_layout(capture_layout),
             limits,
         ) {
             Ok(control_flow) => control_flow,
@@ -1819,6 +2457,16 @@ fn compact_put_argument(slot: ArgumentSlot) -> (FinalOpcode, Operands) {
     }
 }
 
+fn compact_set_argument(slot: ArgumentSlot) -> (FinalOpcode, Operands) {
+    match slot.0 {
+        0 => (FinalOpcode::SetArg0, Operands::NoneArg),
+        1 => (FinalOpcode::SetArg1, Operands::NoneArg),
+        2 => (FinalOpcode::SetArg2, Operands::NoneArg),
+        3 => (FinalOpcode::SetArg3, Operands::NoneArg),
+        index => (FinalOpcode::SetArg, Operands::Arg(index)),
+    }
+}
+
 fn compact_get_local(slot: LocalSlot) -> (FinalOpcode, Operands) {
     match slot.0 {
         0 => (FinalOpcode::GetLoc0, Operands::NoneLoc),
@@ -1845,10 +2493,54 @@ fn compact_put_local(slot: LocalSlot) -> (FinalOpcode, Operands) {
     }
 }
 
+fn compact_set_local(slot: LocalSlot) -> (FinalOpcode, Operands) {
+    match slot.0 {
+        0 => (FinalOpcode::SetLoc0, Operands::NoneLoc),
+        1 => (FinalOpcode::SetLoc1, Operands::NoneLoc),
+        2 => (FinalOpcode::SetLoc2, Operands::NoneLoc),
+        3 => (FinalOpcode::SetLoc3, Operands::NoneLoc),
+        index => match u8::try_from(index) {
+            Ok(short) => (FinalOpcode::SetLoc8, Operands::Loc8(short)),
+            Err(_) => (FinalOpcode::SetLoc, Operands::Loc(index)),
+        },
+    }
+}
+
+fn compact_get_capture(slot: u16) -> (FinalOpcode, Operands) {
+    match slot {
+        0 => (FinalOpcode::GetVarRef0, Operands::NoneVarRef),
+        1 => (FinalOpcode::GetVarRef1, Operands::NoneVarRef),
+        2 => (FinalOpcode::GetVarRef2, Operands::NoneVarRef),
+        3 => (FinalOpcode::GetVarRef3, Operands::NoneVarRef),
+        index => (FinalOpcode::GetVarRef, Operands::VarRef(index)),
+    }
+}
+
+fn compact_put_capture(slot: u16) -> (FinalOpcode, Operands) {
+    match slot {
+        0 => (FinalOpcode::PutVarRef0, Operands::NoneVarRef),
+        1 => (FinalOpcode::PutVarRef1, Operands::NoneVarRef),
+        2 => (FinalOpcode::PutVarRef2, Operands::NoneVarRef),
+        3 => (FinalOpcode::PutVarRef3, Operands::NoneVarRef),
+        index => (FinalOpcode::PutVarRef, Operands::VarRef(index)),
+    }
+}
+
+fn compact_set_capture(slot: u16) -> (FinalOpcode, Operands) {
+    match slot {
+        0 => (FinalOpcode::SetVarRef0, Operands::NoneVarRef),
+        1 => (FinalOpcode::SetVarRef1, Operands::NoneVarRef),
+        2 => (FinalOpcode::SetVarRef2, Operands::NoneVarRef),
+        3 => (FinalOpcode::SetVarRef3, Operands::NoneVarRef),
+        index => (FinalOpcode::SetVarRef, Operands::VarRef(index)),
+    }
+}
+
 fn plan_put_slot(slot: FrameSlot, span: Span) -> PlannedInstruction {
     let (opcode, operands) = match slot {
         FrameSlot::Argument(slot) => compact_put_argument(slot),
         FrameSlot::Local(slot) => compact_put_local(slot),
+        FrameSlot::Capture(slot) => compact_put_capture(slot),
     };
     PlannedInstruction::new(opcode, operands, span)
 }
@@ -2008,14 +2700,14 @@ pub enum UnsupportedLeafFeature {
     UnsupportedBody,
     /// A declaration is not a simple `var`, `let`, or `const` binding.
     UnsupportedDeclaration,
-    /// An expression requires calls, properties, mutation, or another
-    /// unsupported semantic family.
+    /// An expression requires calls, properties, non-identifier mutation, or
+    /// another unsupported semantic family.
     UnsupportedExpression,
     /// A literal requires a constant, atom, `BigInt`, or `RegExp` pool entry.
     UnsupportedLiteral,
     /// A binding cannot be represented by this frame layout.
     UnsupportedBinding,
-    /// A reference is not a pure read.
+    /// A reference access or binding write policy is not supported.
     UnsupportedReference,
     /// An identifier remained unresolved after Oxc semantics.
     UnresolvedReference,
@@ -2173,6 +2865,580 @@ impl Error for LeafCompilationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quickjs_frontend::{
+        CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program,
+    };
+
+    #[test]
+    fn function_index_capacity_checks_count_and_index_boundaries() {
+        assert_eq!(
+            checked_function_entry_count(MAX_FUNCTION_INDEX_ENTRIES, "test count"),
+            Ok(MAX_FUNCTION_INDEX_ENTRIES)
+        );
+        assert_eq!(
+            checked_function_index(MAX_FUNCTION_INDEX_ENTRIES - 1, "test index"),
+            Ok(u16::try_from(MAX_FUNCTION_INDEX_ENTRIES - 1).expect("u16 index"))
+        );
+        assert!(matches!(
+            checked_function_entry_count(u64::from(MAX_FUNCTION_INDEX_ENTRIES) + 1, "test count"),
+            Err(LeafCompilationError::CapacityExceeded {
+                domain: "test count"
+            })
+        ));
+        assert!(matches!(
+            checked_function_index(MAX_FUNCTION_INDEX_ENTRIES, "test index"),
+            Err(LeafCompilationError::CapacityExceeded {
+                domain: "test index"
+            })
+        ));
+    }
+
+    #[test]
+    fn own_capture_layout_distinguishes_argument_function_and_scoped_cells() {
+        let source = "function outer(arg){ var functionLocal=1; { let scoped=2; \
+                      const capture=function(){ return arg+functionLocal+scoped; }; } }";
+        with_parsed_program(
+            source,
+            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+            |unit| {
+                let context = CompilationContext::new(unit).expect("storage plan");
+                let executable = context
+                    .executables()
+                    .find(|candidate| candidate.metadata().name() == Some("outer"))
+                    .expect("outer executable");
+                let Statement::FunctionDeclaration(function) = &unit.program().body[0] else {
+                    panic!("function declaration");
+                };
+                let layout = FrameLayout::new(context.storage_plan(), executable.id())
+                    .expect("frame layout");
+                let capture_layout = context
+                    .compiler_capture_layout(
+                        executable.id(),
+                        function.scope_id.get().expect("function scope"),
+                        &layout,
+                    )
+                    .expect("capture layout");
+
+                assert_eq!(
+                    capture_layout.bindings(),
+                    [
+                        CompilerCapturedBinding::Argument(0),
+                        CompilerCapturedBinding::FunctionLocal(0),
+                        CompilerCapturedBinding::ScopedLocal(1),
+                    ]
+                );
+            },
+        )
+        .expect("front-end acceptance");
+    }
+
+    #[test]
+    fn captured_block_exit_closes_exact_scope_locals_in_reverse_slot_order() {
+        let source = "function outer(){ { let first=1; let second=2; \
+                      const capture=function(){ return first+second; }; } }";
+        with_parsed_program(
+            source,
+            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+            |unit| {
+                let context = CompilationContext::new(unit).expect("storage plan");
+                let executable = context
+                    .executables()
+                    .find(|candidate| candidate.metadata().name() == Some("outer"))
+                    .expect("outer executable");
+                let Statement::FunctionDeclaration(function) = &unit.program().body[0] else {
+                    panic!("function declaration");
+                };
+                let body = function.body.as_ref().expect("function body");
+                let Statement::BlockStatement(block) = &body.statements[0] else {
+                    panic!("captured block");
+                };
+                let block_scope = context
+                    .created_scope(block.scope_id.get(), block.node_id.get(), block.span)
+                    .expect("block scope");
+                let function_scope = context
+                    .created_scope(function.scope_id.get(), function.node_id.get(), function.span)
+                    .expect("function scope");
+                let layout =
+                    FrameLayout::new(context.storage_plan(), executable.id()).expect("frame layout");
+                let capture_layout = context
+                    .compiler_capture_layout(executable.id(), function_scope, &layout)
+                    .expect("capture layout");
+                assert_eq!(
+                    capture_layout.bindings(),
+                    [
+                        CompilerCapturedBinding::ScopedLocal(0),
+                        CompilerCapturedBinding::ScopedLocal(1),
+                    ]
+                );
+
+                let mut flow = PlannedControlFlow::new(VerificationLimits::default());
+                context
+                    .plan_scope_exit(executable.id(), block_scope, &layout, &mut flow)
+                    .expect("scope exit");
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::ReturnUndef,
+                    Operands::None,
+                    block.span,
+                ))
+                .expect("terminal");
+                let header =
+                    UnverifiedFunctionHeader::stripped_ordinary_source_function_with_variable_references(
+                        false,
+                        0,
+                        2,
+                    );
+                let (_, verified) = flow
+                    .finish()
+                    .expect("assembly")
+                    .verify_with_capture_layout(
+                        FunctionIndexDomains::new(0, 0, 0, layout.local_count, 0),
+                        header,
+                        capture_layout,
+                        VerificationLimits::default(),
+                    )
+                    .expect("verified close_loc");
+                assert_eq!(
+                    verified
+                        .instructions()
+                        .iter()
+                        .map(|instruction| {
+                            let instruction = instruction.decoded().instruction();
+                            (instruction.opcode(), instruction.operands())
+                        })
+                        .collect::<Vec<_>>(),
+                    [
+                        (FinalOpcode::CloseLoc, Operands::Loc(1)),
+                        (FinalOpcode::CloseLoc, Operands::Loc(0)),
+                        (FinalOpcode::ReturnUndef, Operands::None),
+                    ]
+                );
+            },
+        )
+        .expect("front-end acceptance");
+    }
+
+    fn abrupt_cleanup_fixture(
+        source: &str,
+    ) -> (
+        Vec<SourceInstruction>,
+        VerifiedControlFlow,
+        Vec<CompilerCapturedBinding>,
+        Span,
+        Span,
+    ) {
+        with_parsed_program(
+            source,
+            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+            |unit| {
+                let context = CompilationContext::new(unit).expect("storage plan");
+                let executable = context
+                    .executables()
+                    .find(|candidate| candidate.metadata().name() == Some("outer"))
+                    .expect("outer executable");
+                let Statement::FunctionDeclaration(function) = &unit.program().body[0] else {
+                    panic!("function declaration");
+                };
+                let body = function.body.as_ref().expect("function body");
+                let Statement::WhileStatement(loop_statement) = &body.statements[0] else {
+                    panic!("while statement");
+                };
+                let Statement::BlockStatement(loop_body) = &loop_statement.body else {
+                    panic!("loop body");
+                };
+                let Statement::BlockStatement(inner) = &loop_body.body[2] else {
+                    panic!("inner block");
+                };
+                let Statement::BreakStatement(break_statement) = &inner.body[2] else {
+                    panic!("break statement");
+                };
+                let function_scope = function.scope_id.get().expect("function scope");
+                let loop_scope = loop_body.scope_id.get().expect("loop body scope");
+                let inner_scope = inner.scope_id.get().expect("inner scope");
+                let layout =
+                    FrameLayout::new(context.storage_plan(), executable.id()).expect("frame layout");
+                let capture_layout = context
+                    .compiler_capture_layout(executable.id(), function_scope, &layout)
+                    .expect("capture layout");
+                let captured_bindings = capture_layout.bindings().to_vec();
+
+                let mut flow = PlannedControlFlow::new(VerificationLimits::default());
+                let done = flow
+                    .new_statement_label(loop_statement.span)
+                    .expect("done label");
+                let state = StatementPlanningState {
+                    work: Vec::new(),
+                    active_scopes: vec![function_scope, loop_scope, inner_scope],
+                    loop_controls: vec![LoopControl {
+                        break_target: done.clone(),
+                        continue_target: done.clone(),
+                        scope_depth: 1,
+                    }],
+                };
+                context
+                    .plan_loop_jump(
+                        None,
+                        break_statement.span,
+                        LoopJump::Break,
+                        &state,
+                        &layout,
+                        &mut flow,
+                    )
+                    .expect("abrupt cleanup");
+                flow.bind(&done).expect("done binding");
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::ReturnUndef,
+                    Operands::None,
+                    loop_statement.span,
+                ))
+                .expect("terminal");
+                let header =
+                    UnverifiedFunctionHeader::stripped_ordinary_source_function_with_variable_references(
+                        false,
+                        0,
+                        2,
+                    );
+                let (source_instructions, verified) = flow
+                    .finish()
+                    .expect("assembly")
+                    .verify_with_capture_layout(
+                        FunctionIndexDomains::new(0, 0, 0, layout.local_count, 0),
+                        header,
+                        capture_layout,
+                        VerificationLimits::default(),
+                    )
+                    .expect("verified abrupt cleanup");
+                let inner_binding_span = unit.semantic().scoping().symbol_span(
+                    unit.semantic()
+                        .scoping()
+                        .iter_bindings_in(inner_scope)
+                        .next()
+                        .expect("inner binding"),
+                );
+                (
+                    source_instructions,
+                    verified,
+                    captured_bindings,
+                    inner_binding_span,
+                    break_statement.span,
+                )
+            },
+        )
+        .expect("front-end acceptance")
+    }
+
+    #[test]
+    fn abrupt_loop_exit_closes_captured_scope_suffix_from_inner_to_outer() {
+        let source = "function outer(){ while(true){ let outerValue=1; \
+                      const outerCapture=function(){return outerValue;}; \
+                      { let innerValue=2; \
+                      const innerCapture=function(){return innerValue;}; break; } } }";
+        let (source_instructions, verified, captured, inner_span, break_span) =
+            abrupt_cleanup_fixture(source);
+
+        assert_eq!(
+            captured,
+            [
+                CompilerCapturedBinding::ScopedLocal(0),
+                CompilerCapturedBinding::ScopedLocal(2),
+            ]
+        );
+        assert_eq!(
+            verified
+                .instructions()
+                .iter()
+                .map(|instruction| {
+                    let instruction = instruction.decoded().instruction();
+                    (instruction.opcode(), instruction.operands())
+                })
+                .collect::<Vec<_>>(),
+            [
+                (FinalOpcode::CloseLoc, Operands::Loc(2)),
+                (FinalOpcode::CloseLoc, Operands::Loc(0)),
+                (FinalOpcode::Goto8, Operands::Label8(1)),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ]
+        );
+        assert_eq!(
+            exact_source_span(&source_instructions, BytecodePc::new(0)),
+            Some(inner_span)
+        );
+        assert_eq!(
+            exact_source_span(&source_instructions, BytecodePc::new(6)),
+            Some(break_span)
+        );
+    }
+
+    #[test]
+    fn classic_for_schedule_places_rotation_before_test_update_and_final_exit() {
+        let source = "function f(){ for(let i=0;i<2;i++){} }";
+        with_parsed_program(
+            source,
+            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+            |unit| {
+                let Statement::FunctionDeclaration(function) = &unit.program().body[0] else {
+                    panic!("function declaration");
+                };
+                let body = function.body.as_ref().expect("function body");
+                let Statement::ForStatement(statement) = &body.statements[0] else {
+                    panic!("classic for");
+                };
+                let scope = statement.scope_id.get().expect("for scope");
+                let mut flow = PlannedControlFlow::new(VerificationLimits::default());
+                let mut work = Vec::new();
+                CompilationContext::schedule_for_statement(
+                    statement, scope, &mut flow, &mut work, 1,
+                )
+                .expect("iterative for schedule");
+                let execution = work.iter().rev().collect::<Vec<_>>();
+                let close_positions = execution
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, task)| {
+                        matches!(task, StatementWork::CloseScope(found) if *found == scope)
+                            .then_some(position)
+                    })
+                    .collect::<Vec<_>>();
+                let test_position = execution
+                    .iter()
+                    .position(|task| {
+                        matches!(
+                            task,
+                            StatementWork::Bind(label)
+                                if label.owner_span == statement.test.as_ref().expect("test").span()
+                        )
+                    })
+                    .expect("test label");
+                let rotate_position = execution
+                    .iter()
+                    .position(|task| {
+                        matches!(
+                            task,
+                            StatementWork::Bind(label)
+                                if label.owner_span
+                                    == statement.update.as_ref().expect("update").span()
+                        )
+                    })
+                    .expect("rotation label");
+                let update_position = execution
+                    .iter()
+                    .position(|task| {
+                        matches!(
+                            task,
+                            StatementWork::Expression(expression)
+                                if expression.span()
+                                    == statement.update.as_ref().expect("update").span()
+                        )
+                    })
+                    .expect("update expression");
+                let control = execution
+                    .iter()
+                    .find_map(|task| match task {
+                        StatementWork::PushLoop(control) => Some(control),
+                        _ => None,
+                    })
+                    .expect("loop control");
+
+                assert_eq!(close_positions.len(), 2);
+                assert!(close_positions[0] < test_position);
+                assert!(rotate_position < close_positions[1]);
+                assert!(close_positions[1] < update_position);
+                assert_eq!(
+                    control.continue_target.owner_span,
+                    statement.update.as_ref().expect("update").span()
+                );
+                assert_eq!(control.scope_depth, 2);
+                assert_eq!(
+                    execution
+                        .iter()
+                        .filter(|task| {
+                            matches!(task, StatementWork::PopScope(found) if *found == scope)
+                        })
+                        .count(),
+                    1
+                );
+            },
+        )
+        .expect("front-end acceptance");
+    }
+
+    fn scheduled_statement_label(work: &[StatementWork<'_, '_>], span: Span) -> CompilerLabel {
+        work.iter()
+            .find_map(|task| match task {
+                StatementWork::Bind(label) if label.owner_span == span => Some(label.clone()),
+                _ => None,
+            })
+            .expect("scheduled label")
+    }
+
+    fn verify_capture_fixture(
+        flow: PlannedControlFlow,
+        local_count: u32,
+        capture_layout: CompilerCaptureLayout,
+        variable_reference_count: u32,
+    ) -> (Vec<SourceInstruction>, VerifiedControlFlow) {
+        let header =
+            UnverifiedFunctionHeader::stripped_ordinary_source_function_with_variable_references(
+                false,
+                0,
+                variable_reference_count,
+            );
+        flow.finish()
+            .expect("assembly")
+            .verify_with_capture_layout(
+                FunctionIndexDomains::new(0, 0, 0, local_count, 0),
+                header,
+                capture_layout,
+                VerificationLimits::default(),
+            )
+            .expect("verified capture fixture")
+    }
+
+    const CAPTURED_FOR_CONTINUE_SOURCE: &str = "function outer(){ for(let i=0;i<2;i++){ \
+        const capture=function(){return i;}; continue; } }";
+
+    fn captured_for_continue_fixture() -> (Vec<SourceInstruction>, VerifiedControlFlow) {
+        with_parsed_program(
+            CAPTURED_FOR_CONTINUE_SOURCE,
+            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+            |unit| {
+                let context = CompilationContext::new(unit).expect("storage plan");
+                let executable = context
+                    .executables()
+                    .find(|candidate| candidate.metadata().name() == Some("outer"))
+                    .expect("outer executable");
+                let Statement::FunctionDeclaration(function) = &unit.program().body[0] else {
+                    panic!("function declaration");
+                };
+                let body = function.body.as_ref().expect("function body");
+                let Statement::ForStatement(statement) = &body.statements[0] else {
+                    panic!("classic for");
+                };
+                let Statement::BlockStatement(loop_body) = &statement.body else {
+                    panic!("loop body");
+                };
+                let Statement::ContinueStatement(continue_statement) = &loop_body.body[1] else {
+                    panic!("continue statement");
+                };
+                let scope = statement.scope_id.get().expect("for scope");
+                let layout = FrameLayout::new(context.storage_plan(), executable.id())
+                    .expect("frame layout");
+                let capture_layout = context
+                    .compiler_capture_layout(
+                        executable.id(),
+                        function.scope_id.get().expect("function scope"),
+                        &layout,
+                    )
+                    .expect("capture layout");
+
+                let mut flow = PlannedControlFlow::new(VerificationLimits::default());
+                let mut work = Vec::new();
+                CompilationContext::schedule_for_statement(
+                    statement, scope, &mut flow, &mut work, 1,
+                )
+                .expect("for schedule");
+                let control = work
+                    .iter()
+                    .find_map(|task| match task {
+                        StatementWork::PushLoop(control) => Some(control.clone()),
+                        _ => None,
+                    })
+                    .expect("loop control");
+                let test =
+                    scheduled_statement_label(&work, statement.test.as_ref().expect("test").span());
+                let done = scheduled_statement_label(&work, statement.span);
+
+                flow.branch(
+                    BranchKind::Goto,
+                    &control.continue_target,
+                    continue_statement.span,
+                )
+                .expect("continue branch");
+                flow.bind(&test).expect("test label");
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Nop,
+                    Operands::None,
+                    statement.test.as_ref().expect("test").span(),
+                ))
+                .expect("unreachable test");
+                flow.branch(
+                    BranchKind::Goto,
+                    &control.continue_target,
+                    statement.test.as_ref().expect("test").span(),
+                )
+                .expect("test-to-rotation branch");
+                flow.bind(&control.continue_target).expect("rotation label");
+                context
+                    .plan_scope_exit(executable.id(), scope, &layout, &mut flow)
+                    .expect("loop-head rotation");
+                let update = statement.update.as_ref().expect("update");
+                context
+                    .plan_expression(update, &layout, &mut flow)
+                    .expect("update");
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    update.span(),
+                ))
+                .expect("drop update");
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::ReturnUndef,
+                    Operands::None,
+                    statement.span,
+                ))
+                .expect("rotation terminal");
+                flow.bind(&done).expect("done label");
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::ReturnUndef,
+                    Operands::None,
+                    statement.span,
+                ))
+                .expect("done terminal");
+                verify_capture_fixture(flow, layout.local_count, capture_layout, 1)
+            },
+        )
+        .expect("front-end acceptance")
+    }
+
+    #[test]
+    fn captured_classic_for_continue_targets_close_loc_before_update() {
+        let source = CAPTURED_FOR_CONTINUE_SOURCE;
+        let (source_instructions, verified) = captured_for_continue_fixture();
+        let continue_instruction = verified
+            .instructions()
+            .iter()
+            .find(|instruction| {
+                let pc = instruction.decoded().pc();
+                exact_source_span(&source_instructions, pc).is_some_and(|span| {
+                    &source[span.start as usize..span.end as usize] == "continue;"
+                })
+            })
+            .expect("continue instruction");
+        let target = continue_instruction
+            .successors()
+            .jump_target()
+            .and_then(|target| verified.instruction(target))
+            .expect("continue target");
+        assert_eq!(
+            target.decoded().instruction().opcode(),
+            FinalOpcode::CloseLoc
+        );
+        let target_position = verified
+            .instructions()
+            .iter()
+            .position(|instruction| instruction.decoded().pc() == target.decoded().pc())
+            .expect("target position");
+        let update = &verified.instructions()[target_position + 1];
+        assert_eq!(
+            update.decoded().instruction().opcode(),
+            FinalOpcode::GetLocCheck
+        );
+        let update_span =
+            exact_source_span(&source_instructions, update.decoded().pc()).expect("update span");
+        assert_eq!(
+            &source[update_span.start as usize..update_span.end as usize],
+            "i"
+        );
+    }
 
     #[test]
     fn compiler_labels_retain_owner_spans_for_bind_and_finish_failures() {

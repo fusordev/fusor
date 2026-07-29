@@ -74,13 +74,17 @@ boundary, and the Oxc semantic graph is neither cloned nor retained. Every
 resolved source reference records its native binding ID, using executable,
 copied span, and read/write access; unresolved globals remain a separate native
 reference domain. Executable preorder and per-executable source ordering are
-deterministic. This initial total slice fails with typed errors for eval,
-`with`, non-simple parameters, Annex B block functions, classes, synthetic
-function bindings (including Oxc-resolved `arguments` collisions), and
-cross-executable captures rather than emitting a partial plan. Namespace
-imports remain module-owned declaration cells, named/default imports remain
-import cells, and expression or anonymous-function default exports receive a
-distinct synthetic module-local `*default*` cell with the appropriate
+deterministic. Cross-executable argument/local captures are propagated
+iteratively through every intermediate executable. Each immutable
+`FrameCapture` names its original binding, its dense slot in the capturing
+executable, and either the immediate parent's binding or forwarded capture
+slot. Global and module cells never enter this frame-capture domain. The slice
+still fails with typed errors for eval, `with`, non-simple parameters, Annex B
+block functions, classes, and synthetic function bindings (including
+Oxc-resolved `arguments` collisions) rather than emitting a partial plan.
+Namespace imports remain module-owned declaration cells, named/default imports
+remain import cells, and expression or anonymous-function default exports
+receive a distinct synthetic module-local `*default*` cell with the appropriate
 initialization policy. The asterisks are part of QuickJS's internal atom, so a
 source identifier named `_default_` cannot collide with it.
 
@@ -94,18 +98,24 @@ expressions. Its pool-free body slice handles simple
 `var`/`let`/`const` declarations, TDZ setup, immediate Boolean/null/int32 and
 compact `BigInt` values, the empty string, resolved argument/local reads, unary
 and binary operators, short-circuit `&&`/`||`/`??`, conditional expressions,
-sequence and expression statements, lexical blocks, `if`/`else`, `while`,
-`do`/`while`, unlabeled `break`/`continue`, and explicit or implicit returns.
-It lowers expressions and statements with iterative work lists, validates the
+sequence and expression statements, mutable identifier assignment and update,
+lexical blocks, `if`/`else`, `while`, `do`/`while`, classic `for`, unlabeled
+`break`/`continue`, and explicit or implicit returns. A deepest leaf may read
+or write argument/local cells forwarded through ancestor capture slots. It
+lowers expressions and statements with iterative work lists, validates the
 complete selected body into typed pseudo-instructions before byte emission,
-assigns typed frame slots, and immediately produces a non-executable
-`VerifiedControlFlow` certificate. Scope entry reads Oxc's creator
-`ScopeId` directly, checks its creator `NodeId`, and emits TDZ initialization
-only for bindings owned by that exact scope, in reverse local-slot order.
-Paired scope work items keep loop re-entry and future captured-local cleanup
-explicit without a recursion guard. Constants, atoms, closures, labeled
-control, and `for` families stay rejected until their owned records or full
-cleanup and per-iteration environment semantics exist.
+assigns typed frame and imported-capture slots, and immediately produces a
+non-executable `VerifiedControlFlow` certificate. Scope entry reads Oxc's
+creator `ScopeId` directly, checks its creator `NodeId`, and emits TDZ
+initialization only for bindings owned by that exact scope, in reverse
+local-slot order. Scope exit and abrupt loop edges emit reverse-order
+`close_loc` for captured scoped locals; returns rely on whole-frame teardown.
+Classic `for` has one explicit loop-head scope and rotates its captured cells
+after initialization and on every natural or `continue` edge before update,
+without re-running TDZ initialization. All scheduling remains iterative, with
+no recursion guard. Constants, atoms, nested closure objects, labeled control,
+`for-in`, and `for-of` stay rejected until their owned records and semantics
+exist.
 
 `BytecodeAssembler` keeps symbolic label handles provenance-bound to one
 assembler through immutable `Arc` identity. Labels never enter final operands.
@@ -125,6 +135,12 @@ are final. The compiler verifier entry independently derives reachable stack
 maxima and equal-depth joins and requires reachable terminals to empty the
 ordinary value stack; the serialized-bytecode entry separately retains its
 exact stored-versus-computed stack-size comparison and QuickJS exit semantics.
+Compiler bodies may attach an immutable capture layout whose dense order is
+the frame's variable-reference index. Verification checks its declared count,
+argument/local bounds, and binding uniqueness before conditionally admitting
+`close_loc` for scoped locals. Missing and explicitly empty layouts remain
+distinct. Serialized `close_loc` and all reference-construction opcodes remain
+fail-closed until whole-function vardef and closure metadata is verified.
 
 Module functions, object methods/accessors, and named function expressions fail
 closed until their distinct surrounding-storage, header, and self-binding
@@ -132,8 +148,9 @@ behavior is implemented. The compiled artifact keeps the exact source text,
 storage plan, local layout, source table, and certificate in immutable `Arc`
 storage after the Oxc arena is dropped. Lowering accepts only an opaque
 executable selection issued by that context, so a same-index selection from
-another context is rejected. Unsupported bodies, unresolved names, captures,
-nested executables, and async/generator functions fail before byte emission.
+another context is rejected. Unsupported bodies, unresolved names,
+global/module references requiring atom-backed operations, nested executable
+constants, and async/generator functions fail before byte emission.
 
 Every successful unit also owns a `ModuleSyntaxRecord` for the module data that
 must survive the Oxc allocator. Static requests remain in source occurrence

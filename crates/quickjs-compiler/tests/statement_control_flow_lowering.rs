@@ -342,6 +342,96 @@ fn do_while_continue_targets_the_trailing_test_and_break_targets_the_exit() {
 }
 
 #[test]
+fn classic_for_uses_one_iterative_test_body_rotation_update_cycle() {
+    let source = "function f(n){ for(let i=0;i<n;i++){ if(i) continue; } return n; }";
+    let compiled = compile(source, "f");
+    let opcodes = decoded(&compiled)
+        .into_iter()
+        .map(|(_, opcode, _)| opcode)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        opcodes,
+        [
+            FinalOpcode::SetLocUninitialized,
+            FinalOpcode::Push0,
+            FinalOpcode::PutLoc0,
+            FinalOpcode::GetLocCheck,
+            FinalOpcode::GetArg0,
+            FinalOpcode::Lt,
+            FinalOpcode::IfFalse8,
+            FinalOpcode::GetLocCheck,
+            FinalOpcode::IfFalse8,
+            FinalOpcode::Goto8,
+            FinalOpcode::GetLocCheck,
+            FinalOpcode::PostInc,
+            FinalOpcode::PutLocCheck,
+            FinalOpcode::Drop,
+            FinalOpcode::Goto8,
+            FinalOpcode::GetArg0,
+            FinalOpcode::Return,
+        ]
+    );
+
+    let continue_jump = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .find(|instruction| {
+            instruction.decoded().instruction().opcode() == FinalOpcode::Goto8
+                && source_slice_at(&compiled, source, instruction.decoded().pc()) == "continue;"
+        })
+        .expect("continue jump");
+    let update = continue_jump
+        .successors()
+        .jump_target()
+        .and_then(|target| compiled.control_flow().instruction(target))
+        .expect("continue reaches the shared update");
+    assert_eq!(
+        update.decoded().instruction().opcode(),
+        FinalOpcode::GetLocCheck
+    );
+    assert_eq!(
+        source_slice_at(&compiled, source, update.decoded().pc()),
+        "i"
+    );
+}
+
+#[test]
+fn classic_for_supports_omitted_clauses_and_break() {
+    let source = "function f(){ let i=0; for(;;i++){ if(i) break; } return i; }";
+    let compiled = compile(source, "f");
+    let instructions = compiled.control_flow().instructions();
+
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::PostInc
+            })
+            .count(),
+        1
+    );
+    let break_jump = instructions
+        .iter()
+        .find(|instruction| {
+            instruction.decoded().instruction().opcode() == FinalOpcode::Goto8
+                && source_slice_at(&compiled, source, instruction.decoded().pc()) == "break;"
+        })
+        .expect("break jump");
+    let exit = break_jump
+        .successors()
+        .jump_target()
+        .and_then(|target| compiled.control_flow().instruction(target))
+        .expect("break reaches the loop exit");
+    assert_eq!(
+        exit.decoded().instruction().opcode(),
+        FinalOpcode::GetLocCheck
+    );
+    assert_eq!(source_slice_at(&compiled, source, exit.decoded().pc()), "i");
+}
+
+#[test]
 fn nested_loops_select_the_nearest_break_and_continue_targets() {
     let source = "function f(a,b){ while(a){ while(b){ break; } continue; } return a; }";
     let compiled = compile(source, "f");

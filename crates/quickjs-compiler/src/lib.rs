@@ -15,8 +15,9 @@ pub use lowering::{
     LocalSlot, LoweredLocal, SourceInstruction, UnsupportedLeafFeature,
 };
 pub use storage::{
-    BindingId, BindingStorage, CompilationUnitKind, CompilerError, DeclarationKind,
-    DeclarationPolicy, Executable, ExecutableId, ExecutableKind, InitializationPolicy,
-    ReferenceAccess, ResolvedReference, ResolvedReferenceId, StoragePlacement, StoragePlan,
-    UnresolvedGlobal, UnresolvedGlobalId, UnsupportedFeature, WritePolicy, build_storage_plan,
+    BindingId, BindingStorage, CaptureSlot, CaptureSource, CompilationUnitKind, CompilerError,
+    DeclarationKind, DeclarationPolicy, Executable, ExecutableId, ExecutableKind, FrameCapture,
+    InitializationPolicy, ReferenceAccess, ResolvedReference, ResolvedReferenceId,
+    StoragePlacement, StoragePlan, UnresolvedGlobal, UnresolvedGlobalId, UnsupportedFeature,
+    WritePolicy, build_storage_plan,
 };

@@ -39,6 +39,18 @@ impl BindingId {
     }
 }
 
+/// Dense zero-based capture slot local to one executable.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CaptureSlot(u32);
+
+impl CaptureSlot {
+    /// Returns the dense zero-based index within the capturing executable.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// Dense plan-local compiler identity of one unresolved global reference.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct UnresolvedGlobalId(u32);
@@ -114,6 +126,8 @@ pub struct Executable {
     resolved_end: u32,
     unresolved_start: u32,
     unresolved_end: u32,
+    capture_start: u32,
+    capture_end: u32,
 }
 
 impl Executable {
@@ -291,6 +305,7 @@ pub struct BindingStorage {
     declaration_spans: Arc<[Span]>,
     placement: StoragePlacement,
     policy: DeclarationPolicy,
+    frame_captured: bool,
 }
 
 impl BindingStorage {
@@ -328,6 +343,15 @@ impl BindingStorage {
     #[must_use]
     pub const fn policy(&self) -> DeclarationPolicy {
         self.policy
+    }
+
+    /// Returns whether a descendant executable captures this frame binding.
+    ///
+    /// Only argument and local placements can be frame-captured. Global and
+    /// module cells remain reachable through their own storage domains.
+    #[must_use]
+    pub const fn is_frame_captured(&self) -> bool {
+        self.frame_captured
     }
 }
 
@@ -436,6 +460,50 @@ impl ResolvedReference {
     }
 }
 
+/// Where one executable obtains the value cell for a capture slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaptureSource {
+    /// The immediate parent owns the argument or local binding.
+    ParentBinding(BindingId),
+    /// The immediate parent forwards one of its own capture slots.
+    ParentCapture(CaptureSlot),
+}
+
+/// One binding cell captured or forwarded by an executable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrameCapture {
+    executable: ExecutableId,
+    binding: BindingId,
+    slot: CaptureSlot,
+    source: CaptureSource,
+}
+
+impl FrameCapture {
+    /// Returns the executable that owns this capture slot.
+    #[must_use]
+    pub const fn executable(&self) -> ExecutableId {
+        self.executable
+    }
+
+    /// Returns the original frame binding represented by the slot.
+    #[must_use]
+    pub const fn binding(&self) -> BindingId {
+        self.binding
+    }
+
+    /// Returns the dense slot local to the capturing executable.
+    #[must_use]
+    pub const fn slot(&self) -> CaptureSlot {
+        self.slot
+    }
+
+    /// Returns whether the immediate parent owns or forwards the cell.
+    #[must_use]
+    pub const fn source(&self) -> CaptureSource {
+        self.source
+    }
+}
+
 /// Fully owned storage metadata for one accepted source unit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoragePlan {
@@ -444,6 +512,7 @@ pub struct StoragePlan {
     bindings: Arc<[BindingStorage]>,
     resolved_references: Arc<[ResolvedReference]>,
     unresolved_globals: Arc<[UnresolvedGlobal]>,
+    frame_captures: Arc<[FrameCapture]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -456,6 +525,7 @@ pub(crate) struct OxcIdentityMap {
     pub(crate) executable_by_node: Box<[Option<ExecutableId>]>,
     pub(crate) node_by_executable: Box<[NodeId]>,
     pub(crate) binding_by_symbol: Box<[Option<BindingId>]>,
+    pub(crate) scope_by_binding: Box<[Option<ScopeId>]>,
     pub(crate) reference_by_id: Box<[Option<NativeReferenceId>]>,
 }
 
@@ -552,6 +622,23 @@ impl StoragePlan {
         self.unresolved_globals
             .get(executable.unresolved_start as usize..executable.unresolved_end as usize)
     }
+
+    /// Returns every frame capture grouped by capturing executable.
+    #[must_use]
+    pub fn frame_captures(&self) -> &[FrameCapture] {
+        &self.frame_captures
+    }
+
+    /// Returns capture slots owned by one executable, or `None` if its dense
+    /// index is out of range.
+    ///
+    /// Slots are dense and ordered by the original binding identity.
+    #[must_use]
+    pub fn frame_captures_for(&self, executable: ExecutableId) -> Option<&[FrameCapture]> {
+        let executable = self.executables.get(executable.index())?;
+        self.frame_captures
+            .get(executable.capture_start as usize..executable.capture_end as usize)
+    }
 }
 
 /// Semantic cases intentionally rejected by this first complete slice.
@@ -575,8 +662,6 @@ pub enum UnsupportedFeature {
     AnnexBBlockFunction,
     /// Class-created functions, private names, and synthetic slots.
     ClassSyntheticSlots,
-    /// A reference whose binding is owned by another executable.
-    CapturePropagation,
     /// A synthesized `arguments` binding in a function or an enclosed arrow.
     ArgumentsBinding,
     /// A synthesized `this`, `new.target`, or `super` binding.
@@ -790,9 +875,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.assign_scope_owners()?;
         self.reject_synthetic_binding_uses()?;
 
-        let symbol_owners = self.symbol_owners()?;
-        self.reject_capture_propagation(&symbol_owners)?;
-
         let mut binding_drafts = self.binding_drafts()?;
         self.add_synthetic_default_binding(&mut binding_drafts)?;
         binding_drafts.sort_by_key(|binding| {
@@ -809,10 +891,11 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 binding.name.clone(),
             )
         });
-        let (bindings, symbol_bindings) =
+        let (mut bindings, symbol_bindings) =
             freeze_bindings(binding_drafts, self.unit.semantic().scoping().symbols_len())?;
+        let scope_by_binding = self.binding_scope_map(&symbol_bindings, bindings.len())?;
 
-        let mut resolved_drafts = self.resolved_drafts(&bindings, &symbol_bindings)?;
+        let mut resolved_drafts = self.resolved_drafts(&symbol_bindings)?;
         resolved_drafts.sort_by_key(|reference| {
             (
                 reference.executable.index(),
@@ -822,6 +905,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 reference.reference_id.index(),
             )
         });
+        let frame_captures =
+            plan_frame_captures(&self.executable_drafts, &mut bindings, &resolved_drafts)?;
 
         let mut unresolved_drafts = self.unresolved_drafts()?;
         unresolved_drafts.sort_by_key(|reference| {
@@ -858,6 +943,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &bindings,
             &resolved_references,
             &unresolved_globals,
+            &frame_captures,
         )?;
 
         let plan = StoragePlan {
@@ -866,6 +952,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             bindings: bindings.into(),
             resolved_references: resolved_references.into(),
             unresolved_globals: unresolved_globals.into(),
+            frame_captures: frame_captures.into(),
         };
         Ok(PlannedStorage {
             plan: Arc::new(plan),
@@ -873,9 +960,30 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 executable_by_node: self.node_executables.into_boxed_slice(),
                 node_by_executable: node_by_executable.into_boxed_slice(),
                 binding_by_symbol: symbol_bindings.into_boxed_slice(),
+                scope_by_binding: scope_by_binding.into_boxed_slice(),
                 reference_by_id: reference_by_id.into_boxed_slice(),
             },
         })
+    }
+
+    fn binding_scope_map(
+        &self,
+        symbol_bindings: &[Option<BindingId>],
+        binding_count: usize,
+    ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
+        let scoping = self.unit.semantic().scoping();
+        reverse_binding_scopes(
+            symbol_bindings,
+            binding_count,
+            scoping.scopes_len(),
+            scoping.symbol_ids().map(|symbol| {
+                (
+                    symbol,
+                    scoping.symbol_scope_id(symbol),
+                    scoping.symbol_span(symbol),
+                )
+            }),
+        )
     }
 
     fn reject_preflight_features(&self) -> Result<(), CompilerError> {
@@ -1014,6 +1122,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 resolved_end: 0,
                 unresolved_start: 0,
                 unresolved_end: 0,
+                capture_start: 0,
+                capture_end: 0,
             };
             self.node_executables[node_id.index()] = Some(id);
             self.exact_scope_executables[scope_id.index()] = Some(id);
@@ -1122,42 +1232,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             let owner = self.scope_owner(node.scope_id(), Some(span))?;
             if owner != ExecutableId(0) {
                 return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
-            }
-        }
-        Ok(())
-    }
-
-    fn symbol_owners(&self) -> Result<Vec<ExecutableId>, CompilerError> {
-        let scoping = self.unit.semantic().scoping();
-        let mut owners = vec![ExecutableId(0); scoping.symbols_len()];
-        for symbol_id in scoping.symbol_ids() {
-            owners[symbol_id.index()] = self.scope_owner(
-                scoping.symbol_scope_id(symbol_id),
-                Some(scoping.symbol_span(symbol_id)),
-            )?;
-        }
-        Ok(owners)
-    }
-
-    fn reject_capture_propagation(
-        &self,
-        symbol_owners: &[ExecutableId],
-    ) -> Result<(), CompilerError> {
-        let semantic = self.unit.semantic();
-        let scoping = semantic.scoping();
-        for symbol_id in scoping.symbol_ids() {
-            let binding_owner = symbol_owners[symbol_id.index()];
-            for reference in scoping.get_resolved_references(symbol_id) {
-                let reference_owner = self.scope_owner(
-                    reference.scope_id(),
-                    Some(semantic.reference_span(reference)),
-                )?;
-                if reference_owner != binding_owner {
-                    return unsupported(
-                        UnsupportedFeature::CapturePropagation,
-                        semantic.reference_span(reference),
-                    );
-                }
             }
         }
         Ok(())
@@ -1494,7 +1568,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
 
     fn resolved_drafts(
         &self,
-        bindings: &[BindingStorage],
         symbol_bindings: &[Option<BindingId>],
     ) -> Result<Vec<ResolvedDraft>, CompilerError> {
         let semantic = self.unit.semantic();
@@ -1508,23 +1581,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     invariant: "semantic symbol has compiler binding",
                     span: Some(scoping.symbol_span(symbol_id)),
                 })?;
-            let binding_storage =
-                bindings
-                    .get(binding.index())
-                    .ok_or(CompilerError::SemanticInvariant {
-                        invariant: "resolved compiler binding exists",
-                        span: Some(scoping.symbol_span(symbol_id)),
-                    })?;
             for &reference_id in scoping.get_resolved_reference_ids(symbol_id) {
                 let reference = scoping.get_reference(reference_id);
                 let span = semantic.reference_span(reference);
                 let executable = self.scope_owner(reference.scope_id(), Some(span))?;
-                if executable != binding_storage.executable {
-                    return Err(CompilerError::SemanticInvariant {
-                        invariant: "capture propagation rejected before reference freezing",
-                        span: Some(span),
-                    });
-                }
                 drafts.push(ResolvedDraft {
                     reference_id,
                     executable,
@@ -1746,6 +1806,7 @@ fn freeze_bindings(
             declaration_spans: draft.declaration_spans,
             placement: draft.placement,
             policy: draft.policy,
+            frame_captured: false,
         });
     }
     if symbol_bindings.iter().any(Option::is_none) {
@@ -1755,6 +1816,205 @@ fn freeze_bindings(
         });
     }
     Ok((bindings, symbol_bindings))
+}
+
+fn reverse_binding_scopes(
+    symbol_bindings: &[Option<BindingId>],
+    binding_count: usize,
+    scope_count: usize,
+    symbols: impl IntoIterator<Item = (SymbolId, ScopeId, Span)>,
+) -> Result<Vec<Option<ScopeId>>, CompilerError> {
+    let mut scope_by_binding = vec![None; binding_count];
+    for (symbol, scope, span) in symbols {
+        let binding = symbol_bindings
+            .get(symbol.index())
+            .copied()
+            .flatten()
+            .ok_or(CompilerError::SemanticInvariant {
+                invariant: "binding-scope semantic symbol index is in range",
+                span: Some(span),
+            })?;
+        if scope.index() >= scope_count {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "binding semantic scope index is in range",
+                span: Some(span),
+            });
+        }
+        let target =
+            scope_by_binding
+                .get_mut(binding.index())
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "binding-scope compiler binding index is in range",
+                    span: Some(span),
+                })?;
+        if target.replace(scope).is_some() {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "one semantic scope per compiler binding",
+                span: Some(span),
+            });
+        }
+    }
+    Ok(scope_by_binding)
+}
+
+fn plan_frame_captures(
+    executables: &[ExecutableDraft],
+    bindings: &mut [BindingStorage],
+    resolved: &[ResolvedDraft],
+) -> Result<Vec<FrameCapture>, CompilerError> {
+    let capture_keys = collect_capture_keys(executables, bindings, resolved)?;
+    let slots = assign_capture_slots(&capture_keys, bindings)?;
+    freeze_frame_captures(executables, bindings, capture_keys, &slots)
+}
+
+type CaptureKey = (ExecutableId, BindingId);
+
+fn collect_capture_keys(
+    executables: &[ExecutableDraft],
+    bindings: &[BindingStorage],
+    resolved: &[ResolvedDraft],
+) -> Result<Vec<CaptureKey>, CompilerError> {
+    let mut capture_keys = HashSet::new();
+    for reference in resolved {
+        let binding =
+            bindings
+                .get(reference.binding.index())
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "resolved compiler binding exists",
+                    span: Some(reference.span),
+                })?;
+        if reference.executable == binding.executable
+            || !matches!(
+                binding.placement,
+                StoragePlacement::Argument { .. } | StoragePlacement::Local
+            )
+        {
+            continue;
+        }
+
+        let owner = binding.executable;
+        let mut current = reference.executable;
+        while current != owner {
+            if !capture_keys.insert((current, reference.binding)) {
+                break;
+            }
+            let executable =
+                executables
+                    .get(current.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "capturing executable exists",
+                        span: Some(reference.span),
+                    })?;
+            let parent = executable
+                .executable
+                .parent
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "frame binding owner is an executable ancestor",
+                    span: Some(reference.span),
+                })?;
+            if parent >= current {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "executable parent precedes child",
+                    span: Some(reference.span),
+                });
+            }
+            current = parent;
+        }
+    }
+
+    let mut capture_keys = capture_keys.into_iter().collect::<Vec<_>>();
+    capture_keys.sort_unstable();
+    Ok(capture_keys)
+}
+
+fn assign_capture_slots(
+    capture_keys: &[CaptureKey],
+    bindings: &mut [BindingStorage],
+) -> Result<HashMap<CaptureKey, CaptureSlot>, CompilerError> {
+    let mut slots = HashMap::with_capacity(capture_keys.len());
+    let mut active_executable = None;
+    let mut next_slot = 0_u32;
+    for &(executable, binding) in capture_keys {
+        if active_executable != Some(executable) {
+            active_executable = Some(executable);
+            next_slot = 0;
+        }
+        let slot = CaptureSlot(next_slot);
+        next_slot = next_slot
+            .checked_add(1)
+            .ok_or(CompilerError::CapacityExceeded {
+                domain: "frame capture slots",
+            })?;
+        slots.insert((executable, binding), slot);
+        let binding_storage =
+            bindings
+                .get_mut(binding.index())
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "captured compiler binding exists",
+                    span: None,
+                })?;
+        binding_storage.frame_captured = true;
+    }
+    Ok(slots)
+}
+
+fn freeze_frame_captures(
+    executables: &[ExecutableDraft],
+    bindings: &[BindingStorage],
+    capture_keys: Vec<CaptureKey>,
+    slots: &HashMap<CaptureKey, CaptureSlot>,
+) -> Result<Vec<FrameCapture>, CompilerError> {
+    capture_keys
+        .into_iter()
+        .map(|(executable, binding)| {
+            let slot = slots.get(&(executable, binding)).copied().ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "capture slot assigned",
+                    span: None,
+                },
+            )?;
+            Ok(FrameCapture {
+                executable,
+                binding,
+                slot,
+                source: capture_source(executables, bindings, slots, executable, binding)?,
+            })
+        })
+        .collect()
+}
+
+fn capture_source(
+    executables: &[ExecutableDraft],
+    bindings: &[BindingStorage],
+    slots: &HashMap<CaptureKey, CaptureSlot>,
+    executable: ExecutableId,
+    binding: BindingId,
+) -> Result<CaptureSource, CompilerError> {
+    let owner = bindings
+        .get(binding.index())
+        .ok_or(CompilerError::SemanticInvariant {
+            invariant: "captured compiler binding exists",
+            span: None,
+        })?;
+    let parent = executables
+        .get(executable.index())
+        .and_then(|draft| draft.executable.parent)
+        .ok_or(CompilerError::SemanticInvariant {
+            invariant: "capturing executable has parent",
+            span: None,
+        })?;
+    if parent == owner.executable {
+        Ok(CaptureSource::ParentBinding(binding))
+    } else {
+        slots
+            .get(&(parent, binding))
+            .copied()
+            .map(CaptureSource::ParentCapture)
+            .ok_or(CompilerError::SemanticInvariant {
+                invariant: "intermediate executable forwards capture",
+                span: None,
+            })
+    }
 }
 
 fn freeze_resolved(
@@ -1840,6 +2100,7 @@ fn assign_ranges(
     bindings: &[BindingStorage],
     resolved: &[ResolvedReference],
     unresolved: &[UnresolvedGlobal],
+    captures: &[FrameCapture],
 ) -> Result<(), CompilerError> {
     for executable in executables {
         let binding_start = bindings.partition_point(|binding| binding.executable < executable.id);
@@ -1878,6 +2139,93 @@ fn assign_ranges(
             u32::try_from(unresolved_end).map_err(|_| CompilerError::CapacityExceeded {
                 domain: "unresolved-global ranges",
             })?;
+
+        let capture_start = captures.partition_point(|capture| capture.executable < executable.id);
+        let capture_end = captures.partition_point(|capture| capture.executable <= executable.id);
+        executable.capture_start =
+            u32::try_from(capture_start).map_err(|_| CompilerError::CapacityExceeded {
+                domain: "frame-capture ranges",
+            })?;
+        executable.capture_end =
+            u32::try_from(capture_end).map_err(|_| CompilerError::CapacityExceeded {
+                domain: "frame-capture ranges",
+            })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binding_scope_reverse_map_uses_dense_binding_identity() {
+        let scopes = reverse_binding_scopes(
+            &[Some(BindingId(1)), Some(BindingId(0))],
+            2,
+            3,
+            [
+                (SymbolId::new(0), ScopeId::new(2), Span::new(0, 1)),
+                (SymbolId::new(1), ScopeId::new(1), Span::new(2, 3)),
+            ],
+        )
+        .expect("reverse scope map");
+
+        assert_eq!(scopes, [Some(ScopeId::new(1)), Some(ScopeId::new(2))]);
+    }
+
+    #[test]
+    fn binding_scope_reverse_map_rejects_duplicate_binding_identity() {
+        let error = reverse_binding_scopes(
+            &[Some(BindingId(0)), Some(BindingId(0))],
+            1,
+            2,
+            [
+                (SymbolId::new(0), ScopeId::new(0), Span::new(0, 1)),
+                (SymbolId::new(1), ScopeId::new(1), Span::new(2, 3)),
+            ],
+        )
+        .expect_err("duplicate binding scope");
+
+        assert!(matches!(
+            error,
+            CompilerError::SemanticInvariant {
+                invariant: "one semantic scope per compiler binding",
+                span: Some(span),
+            } if span == Span::new(2, 3)
+        ));
+    }
+
+    #[test]
+    fn binding_scope_reverse_map_rejects_out_of_range_identities() {
+        let binding_error = reverse_binding_scopes(
+            &[Some(BindingId(1))],
+            1,
+            1,
+            [(SymbolId::new(0), ScopeId::new(0), Span::new(0, 1))],
+        )
+        .expect_err("out-of-range binding");
+        assert!(matches!(
+            binding_error,
+            CompilerError::SemanticInvariant {
+                invariant: "binding-scope compiler binding index is in range",
+                ..
+            }
+        ));
+
+        let scope_error = reverse_binding_scopes(
+            &[Some(BindingId(0))],
+            1,
+            1,
+            [(SymbolId::new(0), ScopeId::new(1), Span::new(0, 1))],
+        )
+        .expect_err("out-of-range scope");
+        assert!(matches!(
+            scope_error,
+            CompilerError::SemanticInvariant {
+                invariant: "binding semantic scope index is in range",
+                ..
+            }
+        ));
+    }
 }

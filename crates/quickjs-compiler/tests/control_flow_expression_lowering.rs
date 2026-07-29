@@ -85,6 +85,119 @@ fn source_slice_at<'source>(
 }
 
 #[test]
+fn mutable_identifier_assignment_compound_and_update_preserve_values() {
+    let compiled = compile("function f(a){ let i=0; i=a; i+=2; ++i; return i++; }", "f");
+
+    assert_eq!(
+        opcodes(&compiled),
+        [
+            FinalOpcode::SetLocUninitialized,
+            FinalOpcode::Push0,
+            FinalOpcode::PutLoc0,
+            FinalOpcode::GetArg0,
+            FinalOpcode::SetLocCheck,
+            FinalOpcode::Drop,
+            FinalOpcode::GetLocCheck,
+            FinalOpcode::Push2,
+            FinalOpcode::Add,
+            FinalOpcode::SetLocCheck,
+            FinalOpcode::Drop,
+            FinalOpcode::GetLocCheck,
+            FinalOpcode::Inc,
+            FinalOpcode::SetLocCheck,
+            FinalOpcode::Drop,
+            FinalOpcode::GetLocCheck,
+            FinalOpcode::PostInc,
+            FinalOpcode::PutLocCheck,
+            FinalOpcode::Return,
+        ]
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 2);
+}
+
+#[test]
+fn logical_assignment_uses_one_value_preserving_join() {
+    let compiled = compile("function f(a,b){ a ||= b; return a; }", "f");
+    let instructions = compiled.control_flow().instructions();
+    let branch = instructions
+        .iter()
+        .find(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::IfTrue8)
+        .expect("logical assignment branch");
+    let target = branch
+        .successors()
+        .branch_target()
+        .expect("taken short-circuit target");
+    let target = compiled
+        .control_flow()
+        .instruction(target)
+        .expect("verified logical assignment target");
+
+    assert_eq!(
+        opcodes(&compiled),
+        [
+            FinalOpcode::GetArg0,
+            FinalOpcode::Dup,
+            FinalOpcode::IfTrue8,
+            FinalOpcode::Drop,
+            FinalOpcode::GetArg1,
+            FinalOpcode::SetArg0,
+            FinalOpcode::Drop,
+            FinalOpcode::GetArg0,
+            FinalOpcode::Return,
+        ]
+    );
+    assert_eq!(target.decoded().instruction().opcode(), FinalOpcode::Drop);
+}
+
+#[test]
+fn and_and_nullish_assignment_use_their_distinct_short_circuit_tests() {
+    let and = compile("function and(a,b){ a &&= b; return a; }", "and");
+    assert_eq!(
+        opcodes(&and),
+        [
+            FinalOpcode::GetArg0,
+            FinalOpcode::Dup,
+            FinalOpcode::IfFalse8,
+            FinalOpcode::Drop,
+            FinalOpcode::GetArg1,
+            FinalOpcode::SetArg0,
+            FinalOpcode::Drop,
+            FinalOpcode::GetArg0,
+            FinalOpcode::Return,
+        ]
+    );
+
+    let nullish = compile("function nullish(a,b){ a ??= b; return a; }", "nullish");
+    assert_eq!(
+        opcodes(&nullish),
+        [
+            FinalOpcode::GetArg0,
+            FinalOpcode::Dup,
+            FinalOpcode::IsUndefinedOrNull,
+            FinalOpcode::IfFalse8,
+            FinalOpcode::Drop,
+            FinalOpcode::GetArg1,
+            FinalOpcode::SetArg0,
+            FinalOpcode::Drop,
+            FinalOpcode::GetArg0,
+            FinalOpcode::Return,
+        ]
+    );
+}
+
+#[test]
+fn immutable_identifier_mutation_fails_closed_at_the_target() {
+    let source = "function f(){ const x=1; x++; }";
+    let error = compile_error(source, "f");
+    let LeafCompilationError::Unsupported { feature, span } = error else {
+        panic!("const mutation must fail closed");
+    };
+
+    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedReference);
+    assert_eq!(&source[span.start as usize..span.end as usize], "x");
+}
+
+#[test]
 fn conditional_expression_matches_the_quickjs_final_branch_oracle() {
     let compiled = compile("function f(a,b,c){ let x = a ? b : c; return x; }", "f");
 

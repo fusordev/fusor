@@ -123,6 +123,114 @@ fn lexical_identifier_leaf_matches_the_quickjs_final_opcode_oracle() {
 }
 
 #[test]
+fn deepest_leaf_reads_forwarded_parent_cells_through_capture_slots() {
+    let compiled = compile(
+        "function outer(arg){ let local=1; function middle(){ function inner(){ return arg+local; } } }",
+        "inner",
+    );
+    let flow = compiled.control_flow();
+    let instructions = flow
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        instructions,
+        [
+            (FinalOpcode::GetVarRef0, Operands::NoneVarRef),
+            (FinalOpcode::GetVarRefCheck, Operands::VarRef(1),),
+            (FinalOpcode::Add, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(flow.domains(), FunctionIndexDomains::new(0, 0, 0, 0, 2));
+    assert_eq!(flow.function_header().variable_reference_count(), 0);
+    assert_eq!(
+        flow.compiler_capture_layout()
+            .expect("compiler capture layout")
+            .bindings(),
+        []
+    );
+}
+
+#[test]
+fn deepest_leaf_checked_capture_writes_keep_assignment_and_postfix_stack_order() {
+    let compiled = compile(
+        "function outer(){ let value=0; function inner(){ value=1; value+=2; return value++; } }",
+        "inner",
+    );
+    let flow = compiled.control_flow();
+    let instructions = flow
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        instructions,
+        [
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::Dup, Operands::None),
+            (FinalOpcode::PutVarRefCheck, Operands::VarRef(0)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::GetVarRefCheck, Operands::VarRef(0)),
+            (FinalOpcode::Push2, Operands::NoneInt),
+            (FinalOpcode::Add, Operands::None),
+            (FinalOpcode::Dup, Operands::None),
+            (FinalOpcode::PutVarRefCheck, Operands::VarRef(0)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::GetVarRefCheck, Operands::VarRef(0)),
+            (FinalOpcode::PostInc, Operands::None),
+            (FinalOpcode::PutVarRefCheck, Operands::VarRef(0)),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(flow.domains(), FunctionIndexDomains::new(0, 0, 0, 0, 1));
+    assert_eq!(flow.computed_stack_size(), 2);
+}
+
+#[test]
+fn deepest_leaf_non_tdz_capture_uses_value_preserving_set_and_postfix_put() {
+    let compiled = compile(
+        "function outer(){ var value=0; function inner(){ value=1; return value++; } }",
+        "inner",
+    );
+    let instructions = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        instructions,
+        [
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::SetVarRef0, Operands::NoneVarRef),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::GetVarRef0, Operands::NoneVarRef),
+            (FinalOpcode::PostInc, Operands::None),
+            (FinalOpcode::PutVarRef0, Operands::NoneVarRef),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(
+        compiled.control_flow().domains(),
+        FunctionIndexDomains::new(0, 0, 0, 0, 1)
+    );
+}
+
+#[test]
 fn oxc_reference_identity_selects_the_exact_argument_slot() {
     let compiled = compile(
         "let unrelated; function f(first, selected) { let local = selected; return local; }",

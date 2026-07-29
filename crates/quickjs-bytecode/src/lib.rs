@@ -40,13 +40,13 @@ pub use function::{
     FunctionKindRequirement, FunctionMode, UnverifiedFunctionHeader, VerifiedFunctionHeader,
 };
 pub use verifier::{
-    ControlFlowEdge, FunctionCountDomain, FunctionIndexDomains, FunctionPath, InstructionIndex,
-    InvalidControlFlowTargetReason, MAX_FUNCTION_INDEX_ENTRIES, MAX_OPERAND_STACK_DEPTH,
-    OperandIndexDomain, SecondaryOperandField, UnsupportedVerifierFeature,
-    UnverifiedCompilerFunctionBody, UnverifiedFunctionBody, VerificationError,
-    VerificationErrorKind, VerificationLimits, VerificationResource, VerifiedControlFlow,
-    VerifiedInstruction, VerifiedSuccessorKind, VerifiedSuccessors, verify_compiler_control_flow,
-    verify_control_flow,
+    CompilerCaptureLayout, CompilerCapturedBinding, ControlFlowEdge, FunctionCountDomain,
+    FunctionIndexDomains, FunctionPath, InstructionIndex, InvalidControlFlowTargetReason,
+    MAX_FUNCTION_INDEX_ENTRIES, MAX_OPERAND_STACK_DEPTH, OperandIndexDomain, SecondaryOperandField,
+    UnsupportedVerifierFeature, UnverifiedCompilerFunctionBody, UnverifiedFunctionBody,
+    VerificationError, VerificationErrorKind, VerificationLimits, VerificationResource,
+    VerifiedControlFlow, VerifiedInstruction, VerifiedSuccessorKind, VerifiedSuccessors,
+    verify_compiler_control_flow, verify_control_flow,
 };
 
 /// The official `QuickJS` release from which the opcode schema was translated.

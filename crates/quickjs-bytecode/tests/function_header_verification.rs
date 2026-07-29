@@ -100,6 +100,18 @@ fn stripped_ordinary_source_function_header_has_the_quickjs_flag_contract() {
 }
 
 #[test]
+fn stripped_compiler_header_can_declare_typed_variable_references() {
+    let raw = UnverifiedFunctionHeader::stripped_ordinary_source_function_with_variable_references(
+        true, 2, 3,
+    );
+
+    assert_eq!(raw.serialized_flags(), 0x0243);
+    assert_eq!(raw.js_mode(), 0x01);
+    assert_eq!(raw.defined_argument_count(), 2);
+    assert_eq!(raw.variable_reference_count(), 3);
+}
+
+#[test]
 fn each_defined_boolean_header_flag_has_a_typed_getter() {
     for bit in [0, 1, 2, 3, 6, 7, 8, 9, 10, 11] {
         let verified = verify(

@@ -31,7 +31,12 @@
 //! nested functions, handlers, iterator markers, finally return addresses,
 //! debug payloads, and source tables still require later verification.
 
-use std::{collections::VecDeque, error::Error, fmt};
+use std::{
+    collections::{HashMap, VecDeque},
+    error::Error,
+    fmt,
+    sync::Arc,
+};
 
 use crate::{
     BytecodePc, DecodeError, DecodedInstruction, FinalOpcode, InstructionDecoder, OperandFormat,
@@ -115,6 +120,72 @@ impl FunctionIndexDomains {
     }
 }
 
+/// One function-owned binding backed by a variable-reference cell.
+///
+/// The binding's position in [`CompilerCaptureLayout`] is its dense
+/// variable-reference index. Local lifetime is explicit because only a
+/// block-scoped local may be targeted by `close_loc`; arguments and
+/// function-lifetime locals are closed by frame teardown.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CompilerCapturedBinding {
+    /// A captured function argument.
+    Argument(u32),
+    /// A captured local whose lifetime is the complete function frame.
+    FunctionLocal(u32),
+    /// A captured local whose lexical scope may end before frame teardown.
+    ScopedLocal(u32),
+}
+
+impl CompilerCapturedBinding {
+    const fn identity(self) -> CompilerCapturedBindingIdentity {
+        match self {
+            Self::Argument(index) => CompilerCapturedBindingIdentity::Argument(index),
+            Self::FunctionLocal(index) | Self::ScopedLocal(index) => {
+                CompilerCapturedBindingIdentity::Local(index)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum CompilerCapturedBindingIdentity {
+    Argument(u32),
+    Local(u32),
+}
+
+/// Immutable compiler-owned capture metadata for one function frame.
+///
+/// Entries are ordered by dense variable-reference index: entry zero
+/// describes variable-reference cell zero, and so on. Verification checks
+/// the count, frame-domain bounds, and binding uniqueness before any
+/// `close_loc` instruction can be authorized.
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct CompilerCaptureLayout {
+    bindings: Arc<[CompilerCapturedBinding]>,
+}
+
+impl CompilerCaptureLayout {
+    /// Creates a capture layout with variable-reference indices defined by
+    /// `bindings` order.
+    #[must_use]
+    pub const fn new(bindings: Arc<[CompilerCapturedBinding]>) -> Self {
+        Self { bindings }
+    }
+
+    /// Returns the dense variable-reference binding table.
+    #[must_use]
+    pub fn bindings(&self) -> &[CompilerCapturedBinding] {
+        &self.bindings
+    }
+
+    /// Resolves one dense variable-reference index.
+    #[must_use]
+    pub fn binding_for_variable_reference(&self, index: u32) -> Option<CompilerCapturedBinding> {
+        let index = usize::try_from(index).ok()?;
+        self.bindings.get(index).copied()
+    }
+}
+
 /// Owned bytecode and structural counts that have not been verified.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnverifiedFunctionBody {
@@ -179,6 +250,7 @@ pub struct UnverifiedCompilerFunctionBody {
     bytecode: Vec<u8>,
     domains: FunctionIndexDomains,
     function_header: UnverifiedFunctionHeader,
+    capture_layout: Option<CompilerCaptureLayout>,
 }
 
 impl UnverifiedCompilerFunctionBody {
@@ -193,7 +265,15 @@ impl UnverifiedCompilerFunctionBody {
             bytecode,
             domains,
             function_header,
+            capture_layout: None,
         }
+    }
+
+    /// Attaches the compiler-owned capture layout.
+    #[must_use]
+    pub fn with_capture_layout(mut self, capture_layout: CompilerCaptureLayout) -> Self {
+        self.capture_layout = Some(capture_layout);
+        self
     }
 
     /// Returns the raw final-bytecode bytes.
@@ -212,6 +292,12 @@ impl UnverifiedCompilerFunctionBody {
     #[must_use]
     pub const fn function_header(&self) -> UnverifiedFunctionHeader {
         self.function_header
+    }
+
+    /// Returns the compiler-owned capture layout.
+    #[must_use]
+    pub const fn capture_layout(&self) -> Option<&CompilerCaptureLayout> {
+        self.capture_layout.as_ref()
     }
 }
 
@@ -479,6 +565,7 @@ pub struct VerifiedControlFlow {
     computed_stack_size: u32,
     domains: FunctionIndexDomains,
     function_header: VerifiedFunctionHeader,
+    compiler_capture_layout: Option<CompilerCaptureLayout>,
 }
 
 impl VerifiedControlFlow {
@@ -511,6 +598,15 @@ impl VerifiedControlFlow {
     #[must_use]
     pub const fn function_header(&self) -> &VerifiedFunctionHeader {
         &self.function_header
+    }
+
+    /// Returns the validated compiler capture layout.
+    ///
+    /// Serialized control-flow certificates return `None` because this
+    /// verifier does not yet accept serialized capture metadata.
+    #[must_use]
+    pub const fn compiler_capture_layout(&self) -> Option<&CompilerCaptureLayout> {
+        self.compiler_capture_layout.as_ref()
     }
 
     /// Returns whether `pc` starts an instruction.
@@ -557,6 +653,8 @@ pub enum VerificationResource {
     InstructionBoundaryWords,
     /// Worklist entries.
     WorklistEntries,
+    /// Compiler capture-layout entries.
+    CompilerCaptures,
 }
 
 /// A function metadata count subject to a structural maximum.
@@ -719,6 +817,38 @@ pub enum VerificationErrorKind {
         argument_count: u32,
         /// Function local count.
         local_count: u32,
+    },
+    /// The compiler capture table does not define every declared
+    /// variable-reference cell exactly once.
+    CompilerCaptureCountMismatch {
+        /// Variable-reference cells declared by the function header.
+        variable_references: u32,
+        /// Entries supplied by the compiler capture layout.
+        captures: u64,
+    },
+    /// Compiler output declared variable-reference cells without supplying
+    /// their typed capture layout.
+    MissingCompilerCaptureLayout {
+        /// Variable-reference cells declared by the function header.
+        variable_references: u32,
+    },
+    /// A compiler capture names a binding outside its frame domain.
+    CompilerCaptureIndexOutOfBounds {
+        /// Rejected binding.
+        binding: CompilerCapturedBinding,
+        /// Length of the binding's argument or local domain.
+        len: u32,
+    },
+    /// Two variable-reference cells name the same frame binding.
+    DuplicateCompilerCapture {
+        /// Repeated binding. Function-local and scoped-local variants with the
+        /// same index identify the same frame binding.
+        binding: CompilerCapturedBinding,
+    },
+    /// `close_loc` does not name an explicitly scoped captured local.
+    CloseLocRequiresScopedCapture {
+        /// Rejected local index.
+        local: u32,
     },
     /// A packed flag is invalid for the decoded function kind.
     FunctionFlagNotAllowedForKind {
@@ -985,6 +1115,33 @@ impl fmt::Display for VerificationErrorKind {
                 formatter,
                 "variable-reference count {variable_references} exceeds {argument_count} arguments plus {local_count} locals"
             ),
+            Self::CompilerCaptureCountMismatch {
+                variable_references,
+                captures,
+            } => write!(
+                formatter,
+                "compiler capture count {captures} does not equal declared variable-reference count {variable_references}"
+            ),
+            Self::MissingCompilerCaptureLayout {
+                variable_references,
+            } => write!(
+                formatter,
+                "compiler function declares {variable_references} variable-reference cells without a capture layout"
+            ),
+            Self::CompilerCaptureIndexOutOfBounds { binding, len } => write!(
+                formatter,
+                "compiler capture {binding} is outside its frame domain length {len}"
+            ),
+            Self::DuplicateCompilerCapture { binding } => {
+                write!(
+                    formatter,
+                    "compiler capture {binding} names a duplicate frame binding"
+                )
+            }
+            Self::CloseLocRequiresScopedCapture { local } => write!(
+                formatter,
+                "close_loc local {local} is not an explicitly scoped compiler capture"
+            ),
             Self::FunctionFlagNotAllowedForKind {
                 flag,
                 kind,
@@ -1092,7 +1249,18 @@ impl fmt::Display for VerificationResource {
             Self::StackDepth => "stack entries",
             Self::InstructionBoundaryWords => "instruction-boundary words",
             Self::WorklistEntries => "worklist entries",
+            Self::CompilerCaptures => "compiler capture entries",
         })
+    }
+}
+
+impl fmt::Display for CompilerCapturedBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Argument(index) => write!(formatter, "argument {index}"),
+            Self::FunctionLocal(index) => write!(formatter, "function local {index}"),
+            Self::ScopedLocal(index) => write!(formatter, "scoped local {index}"),
+        }
     }
 }
 
@@ -1211,6 +1379,7 @@ pub fn verify_control_flow(
         StackVerificationMode::Serialized {
             expected_stack_size,
         },
+        None,
         limits,
     )?;
 
@@ -1250,6 +1419,7 @@ pub fn verify_compiler_control_flow(
         body.domains,
         body.function_header,
         StackVerificationMode::CompilerGenerated,
+        body.capture_layout,
         limits,
     )
 }
@@ -1280,6 +1450,7 @@ fn verify_control_flow_common(
     domains: FunctionIndexDomains,
     function_header: UnverifiedFunctionHeader,
     stack_mode: StackVerificationMode,
+    compiler_capture_layout: Option<CompilerCaptureLayout>,
     limits: VerificationLimits,
 ) -> Result<VerifiedControlFlow, VerificationError> {
     validate_limits_and_counts(
@@ -1303,12 +1474,26 @@ fn verify_control_flow_common(
         limits.max_instructions_per_function,
     )?;
     let function_header = validate_function_header(function_header, domains)?;
+    if stack_mode.requires_empty_exits()
+        && compiler_capture_layout.is_none()
+        && function_header.variable_reference_count() != 0
+    {
+        return Err(VerificationError::root(
+            VerificationErrorKind::MissingCompilerCaptureLayout {
+                variable_references: function_header.variable_reference_count(),
+            },
+        ));
+    }
+    let compiler_capture_layout = compiler_capture_layout
+        .map(|layout| validate_compiler_capture_layout(layout, domains, &function_header))
+        .transpose()?;
     let mut instructions = validate_static_semantics(
         &decoded,
         &instruction_start_bitmap,
         bytecode.len(),
         domains,
         function_header.kind(),
+        compiler_capture_layout.as_ref(),
     )?;
     let computed_stack_size =
         analyze_ordinary_stack(&mut instructions, limits, stack_mode.requires_empty_exits())?;
@@ -1320,6 +1505,77 @@ fn verify_control_flow_common(
         computed_stack_size,
         domains,
         function_header,
+        compiler_capture_layout: compiler_capture_layout.map(|validated| validated.layout),
+    })
+}
+
+#[derive(Debug)]
+struct ValidatedCompilerCaptureLayout {
+    layout: CompilerCaptureLayout,
+    bindings_by_identity: HashMap<CompilerCapturedBindingIdentity, CompilerCapturedBinding>,
+}
+
+impl ValidatedCompilerCaptureLayout {
+    fn is_scoped_local(&self, local: u32) -> bool {
+        matches!(
+            self.bindings_by_identity
+                .get(&CompilerCapturedBindingIdentity::Local(local)),
+            Some(CompilerCapturedBinding::ScopedLocal(_))
+        )
+    }
+}
+
+fn validate_compiler_capture_layout(
+    layout: CompilerCaptureLayout,
+    domains: FunctionIndexDomains,
+    function_header: &VerifiedFunctionHeader,
+) -> Result<ValidatedCompilerCaptureLayout, VerificationError> {
+    let capture_count = usize_to_u64(layout.bindings.len());
+    if capture_count != u64::from(function_header.variable_reference_count()) {
+        return Err(VerificationError::root(
+            VerificationErrorKind::CompilerCaptureCountMismatch {
+                variable_references: function_header.variable_reference_count(),
+                captures: capture_count,
+            },
+        ));
+    }
+
+    for &binding in layout.bindings.iter() {
+        let (index, len) = match binding {
+            CompilerCapturedBinding::Argument(index) => (index, domains.argument_count),
+            CompilerCapturedBinding::FunctionLocal(index)
+            | CompilerCapturedBinding::ScopedLocal(index) => (index, domains.local_count),
+        };
+        if index >= len {
+            return Err(VerificationError::root(
+                VerificationErrorKind::CompilerCaptureIndexOutOfBounds { binding, len },
+            ));
+        }
+    }
+
+    let mut bindings_by_identity = HashMap::new();
+    bindings_by_identity
+        .try_reserve(layout.bindings.len())
+        .map_err(|_| {
+            VerificationError::root(VerificationErrorKind::AllocationFailed {
+                resource: VerificationResource::CompilerCaptures,
+                requested: capture_count,
+            })
+        })?;
+    for &binding in layout.bindings.iter() {
+        if bindings_by_identity
+            .insert(binding.identity(), binding)
+            .is_some()
+        {
+            return Err(VerificationError::root(
+                VerificationErrorKind::DuplicateCompilerCapture { binding },
+            ));
+        }
+    }
+
+    Ok(ValidatedCompilerCaptureLayout {
+        layout,
+        bindings_by_identity,
     })
 }
 
@@ -1562,6 +1818,7 @@ fn validate_static_semantics(
     bytecode_len: usize,
     domains: FunctionIndexDomains,
     function_kind: FunctionKind,
+    compiler_capture_layout: Option<&ValidatedCompilerCaptureLayout>,
 ) -> Result<Vec<VerifiedInstruction>, VerificationError> {
     let mut verified = Vec::new();
     verified.try_reserve_exact(decoded.len()).map_err(|_| {
@@ -1601,15 +1858,48 @@ fn validate_static_semantics(
         if let OpcodeSemantics::Unsupported(feature, _) =
             opcode_semantics(decoded.instruction().opcode())
         {
-            return Err(VerificationError::at_instruction(
-                decoded,
-                VerificationErrorKind::UnsupportedOpcodeSemantics { feature },
-            ));
+            if decoded.instruction().opcode() == FinalOpcode::CloseLoc {
+                if let Some(capture_layout) = compiler_capture_layout {
+                    validate_compiler_close_loc(decoded, capture_layout)?;
+                } else {
+                    return Err(VerificationError::at_instruction(
+                        decoded,
+                        VerificationErrorKind::UnsupportedOpcodeSemantics { feature },
+                    ));
+                }
+            } else {
+                return Err(VerificationError::at_instruction(
+                    decoded,
+                    VerificationErrorKind::UnsupportedOpcodeSemantics { feature },
+                ));
+            }
         }
         validate_function_kind_opcode(decoded, function_kind)?;
     }
 
     Ok(verified)
+}
+
+fn validate_compiler_close_loc(
+    decoded: DecodedInstruction,
+    capture_layout: &ValidatedCompilerCaptureLayout,
+) -> Result<(), VerificationError> {
+    let Operands::Loc(local) = decoded.instruction().operands() else {
+        return Err(VerificationError::at_instruction(
+            decoded,
+            VerificationErrorKind::MissingControlFlowOperand {
+                expected: OperandFormat::Loc,
+            },
+        ));
+    };
+    let local = u32::from(local);
+    if !capture_layout.is_scoped_local(local) {
+        return Err(VerificationError::at_instruction(
+            decoded,
+            VerificationErrorKind::CloseLocRequiresScopedCapture { local },
+        ));
+    }
+    Ok(())
 }
 
 fn validate_function_kind_opcode(

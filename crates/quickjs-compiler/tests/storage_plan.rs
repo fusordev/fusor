@@ -1,6 +1,6 @@
 use quickjs_compiler::{
-    CompilationUnitKind, CompilerError, DeclarationKind, ExecutableKind, InitializationPolicy,
-    StoragePlacement, UnsupportedFeature, WritePolicy, build_storage_plan,
+    CaptureSource, CompilationUnitKind, CompilerError, DeclarationKind, ExecutableKind,
+    InitializationPolicy, StoragePlacement, UnsupportedFeature, WritePolicy, build_storage_plan,
 };
 use quickjs_frontend::{
     Allocator, CompilationGoal, FrontendOptions, GlobalScriptGoal, ParseMode, parse,
@@ -373,6 +373,302 @@ fn resolved_reference_ids_are_checked_at_plan_boundaries() {
 }
 
 #[test]
+fn nested_frame_captures_are_forwarded_through_intermediate_executables() {
+    let plan = script(
+        "function outer(argument) { \
+             let local = 1; \
+             function middle() { \
+                 return function inner() { return argument + local; }; \
+             } \
+         }",
+    );
+    let outer = plan.executables()[1].id();
+    let middle = plan.executables()[2].id();
+    let inner = plan.executables()[3].id();
+    let outer_bindings = plan.bindings_for(outer).unwrap();
+    let argument = outer_bindings
+        .iter()
+        .find(|binding| binding.name() == "argument")
+        .unwrap();
+    let local = outer_bindings
+        .iter()
+        .find(|binding| binding.name() == "local")
+        .unwrap();
+
+    assert!(argument.is_frame_captured());
+    assert!(local.is_frame_captured());
+    assert!(
+        outer_bindings
+            .iter()
+            .find(|binding| binding.name() == "middle")
+            .is_some_and(|binding| !binding.is_frame_captured())
+    );
+    assert!(plan.frame_captures_for(outer).unwrap().is_empty());
+
+    let middle_captures = plan.frame_captures_for(middle).unwrap();
+    assert_eq!(middle_captures.len(), 2);
+    assert_eq!(
+        middle_captures
+            .iter()
+            .map(|capture| (capture.binding(), capture.slot().index(), capture.source()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                argument.id(),
+                0,
+                CaptureSource::ParentBinding(argument.id())
+            ),
+            (local.id(), 1, CaptureSource::ParentBinding(local.id())),
+        ]
+    );
+
+    let inner_captures = plan.frame_captures_for(inner).unwrap();
+    assert_eq!(inner_captures.len(), 2);
+    assert_eq!(
+        inner_captures
+            .iter()
+            .map(|capture| (capture.binding(), capture.slot().index(), capture.source()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                argument.id(),
+                0,
+                CaptureSource::ParentCapture(middle_captures[0].slot())
+            ),
+            (
+                local.id(),
+                1,
+                CaptureSource::ParentCapture(middle_captures[1].slot())
+            ),
+        ]
+    );
+    assert_eq!(plan.frame_captures().len(), 4);
+}
+
+#[test]
+fn sibling_captures_are_deduplicated_per_executable() {
+    let plan = script(
+        "function outer(value) { \
+             function middle() { \
+                 const left = () => value + value; \
+                 const right = () => value; \
+             } \
+         }",
+    );
+    let outer = plan.executables()[1].id();
+    let middle = plan.executables()[2].id();
+    let left = plan.executables()[3].id();
+    let right = plan.executables()[4].id();
+    let value = plan
+        .bindings_for(outer)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.name() == "value")
+        .unwrap();
+
+    assert!(value.is_frame_captured());
+    assert!(plan.frame_captures_for(outer).unwrap().is_empty());
+    let middle_captures = plan.frame_captures_for(middle).unwrap();
+    assert_eq!(middle_captures.len(), 1);
+    assert_eq!(middle_captures[0].binding(), value.id());
+    assert_eq!(middle_captures[0].slot().index(), 0);
+    assert_eq!(
+        middle_captures[0].source(),
+        CaptureSource::ParentBinding(value.id())
+    );
+    for executable in [left, right] {
+        let captures = plan.frame_captures_for(executable).unwrap();
+        assert_eq!(captures.len(), 1);
+        assert_eq!(captures[0].executable(), executable);
+        assert_eq!(captures[0].binding(), value.id());
+        assert_eq!(captures[0].slot().index(), 0);
+        assert_eq!(
+            captures[0].source(),
+            CaptureSource::ParentCapture(middle_captures[0].slot())
+        );
+    }
+    assert_eq!(plan.frame_captures().len(), 3);
+}
+
+#[test]
+fn global_and_module_cells_do_not_become_frame_captures() {
+    let script_plan = script(
+        "var object_cell = 1; \
+         let lexical_cell = 2; \
+         function read() { return object_cell + lexical_cell; }",
+    );
+    let script_function = script_plan.executables()[1].id();
+    assert!(
+        script_plan
+            .frame_captures_for(script_function)
+            .unwrap()
+            .is_empty()
+    );
+    for name in ["object_cell", "lexical_cell"] {
+        assert!(
+            script_plan
+                .bindings()
+                .iter()
+                .find(|binding| binding.name() == name)
+                .is_some_and(|binding| !binding.is_frame_captured())
+        );
+    }
+    assert_eq!(
+        script_plan
+            .resolved_references_for(script_function)
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let module_plan = module(
+        "import { imported } from './dep.js'; \
+         const local = 1; \
+         export function read() { return imported + local; }",
+    );
+    let module_function = module_plan.executables()[1].id();
+    assert!(
+        module_plan
+            .frame_captures_for(module_function)
+            .unwrap()
+            .is_empty()
+    );
+    for name in ["imported", "local"] {
+        assert!(
+            module_plan
+                .bindings()
+                .iter()
+                .find(|binding| binding.name() == name)
+                .is_some_and(|binding| !binding.is_frame_captured())
+        );
+    }
+    assert_eq!(
+        module_plan
+            .resolved_references_for(module_function)
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn root_block_local_is_captured_but_root_global_cells_are_not() {
+    let plan = script(
+        "var object_cell = 1; \
+         let lexical_cell = 2; \
+         { \
+             let block_local = 3; \
+             const read = () => object_cell + lexical_cell + block_local; \
+         }",
+    );
+    let root = plan.executables()[0].id();
+    let arrow = plan.executables()[1].id();
+    let root_bindings = plan.bindings_for(root).unwrap();
+    let binding = |name: &str| {
+        root_bindings
+            .iter()
+            .find(|binding| binding.name() == name)
+            .unwrap()
+    };
+
+    assert!(!binding("object_cell").is_frame_captured());
+    assert!(!binding("lexical_cell").is_frame_captured());
+    assert!(binding("block_local").is_frame_captured());
+
+    let captures = plan.frame_captures_for(arrow).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].binding(), binding("block_local").id());
+    assert_eq!(
+        captures[0].source(),
+        CaptureSource::ParentBinding(binding("block_local").id())
+    );
+    assert_eq!(plan.resolved_references_for(arrow).unwrap().len(), 3);
+}
+
+#[test]
+fn one_executable_can_mix_parent_owned_and_forwarded_captures() {
+    let plan = script(
+        "function outer(outer_value) { \
+             function middle(middle_value) { \
+                 return () => outer_value + middle_value; \
+             } \
+         }",
+    );
+    let outer = plan.executables()[1].id();
+    let middle = plan.executables()[2].id();
+    let arrow = plan.executables()[3].id();
+    let outer_value = plan
+        .bindings_for(outer)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.name() == "outer_value")
+        .unwrap();
+    let middle_value = plan
+        .bindings_for(middle)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.name() == "middle_value")
+        .unwrap();
+
+    let middle_captures = plan.frame_captures_for(middle).unwrap();
+    assert_eq!(middle_captures.len(), 1);
+    assert_eq!(middle_captures[0].binding(), outer_value.id());
+    assert_eq!(
+        middle_captures[0].source(),
+        CaptureSource::ParentBinding(outer_value.id())
+    );
+
+    let arrow_captures = plan.frame_captures_for(arrow).unwrap();
+    assert_eq!(arrow_captures.len(), 2);
+    let forwarded = arrow_captures
+        .iter()
+        .find(|capture| capture.binding() == outer_value.id())
+        .unwrap();
+    assert_eq!(
+        forwarded.source(),
+        CaptureSource::ParentCapture(middle_captures[0].slot())
+    );
+    let parent_owned = arrow_captures
+        .iter()
+        .find(|capture| capture.binding() == middle_value.id())
+        .unwrap();
+    assert_eq!(
+        parent_owned.source(),
+        CaptureSource::ParentBinding(middle_value.id())
+    );
+}
+
+#[test]
+fn write_only_reference_still_captures_its_frame_binding() {
+    let plan = script(
+        "function outer(value) { \
+             return function inner() { value = 1; }; \
+         }",
+    );
+    let outer = plan.executables()[1].id();
+    let inner = plan.executables()[2].id();
+    let value = plan
+        .bindings_for(outer)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.name() == "value")
+        .unwrap();
+    let references = plan.resolved_references_for(inner).unwrap();
+
+    assert_eq!(references.len(), 1);
+    assert!(!references[0].access().reads());
+    assert!(references[0].access().writes());
+    assert!(value.is_frame_captured());
+    let captures = plan.frame_captures_for(inner).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].binding(), value.id());
+    assert_eq!(
+        captures[0].source(),
+        CaptureSource::ParentBinding(value.id())
+    );
+}
+
+#[test]
 fn root_arguments_is_an_unresolved_global_and_out_of_range_ids_are_checked() {
     let root_plan = script("arguments;");
     let root = root_plan.executables()[0].id();
@@ -386,6 +682,7 @@ fn root_arguments_is_an_unresolved_global_and_out_of_range_ids_are_checked() {
     assert!(root_plan.bindings_for(foreign_nested).is_none());
     assert!(root_plan.resolved_references_for(foreign_nested).is_none());
     assert!(root_plan.unresolved_globals_for(foreign_nested).is_none());
+    assert!(root_plan.frame_captures_for(foreign_nested).is_none());
 }
 
 #[test]
@@ -480,10 +777,6 @@ fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
             UnsupportedFeature::DuplicateParameters,
         ),
         ("with (object) value;", UnsupportedFeature::WithStatement),
-        (
-            "function outer() { let value; return () => value; }",
-            UnsupportedFeature::CapturePropagation,
-        ),
         (
             "function f() { return arguments; }",
             UnsupportedFeature::ArgumentsBinding,

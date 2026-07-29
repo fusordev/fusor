@@ -53,7 +53,7 @@ even in unreachable code, validates the serialized execution-header flag and
 mode domains, retains its typed function kind and counts, and analyzes
 reachable ordinary JavaScript-value stack heights. The six suspension opcodes
 are accepted only for their compatible function-kind families, while ordinary
-and tail returns are limited to normal functions. The slice still rejects 31
+and tail returns are limited to normal functions. The slice still rejects
 opcodes whose correct verification needs typed constants, raw function slots,
 handler or iterator markers, finally return
 addresses, or packed stack offsets. Its opaque certificate has no execution
@@ -71,6 +71,17 @@ semantics and do not impose that compiler-only invariant. Both entries
 otherwise share the same complete predecode, metadata, target, successor,
 reachability, join-depth, and resource checks; neither returns execution
 authority.
+
+Compiler-generated bodies may explicitly attach an immutable
+`CompilerCaptureLayout`. Its dense entry order defines this frame's
+variable-reference indices, and each entry identifies a captured argument,
+function-lifetime local, or scoped local. A nonzero declared
+`variable_reference_count` requires this metadata; absence is distinct from an
+explicitly validated empty layout. Verification checks count equality,
+argument/local bounds, and unique frame-binding identities. Only compiler
+bytecode with a matching scoped-local entry may use `close_loc`. Serialized
+`close_loc` and every `make_*_ref` opcode remain fail-closed until the complete
+vardef and closure descriptors are available.
 
 **Rust hardening.** The compiler applies one further source-language invariant
 to the returned certificate: each reachable structured-statement label must
@@ -238,7 +249,7 @@ fail-closed capability.
 | `make_loc_ref` | atom-pool index and namespace are valid, local index is below `var_count`, and its vardef is captured |
 | `make_arg_ref` | atom-pool index and namespace are valid, argument index is below `arg_count`, and its vardef is captured |
 | `make_var_ref_ref` | atom-pool index and namespace are valid and index is below `closure_var_count` |
-| `close_loc` | local index is below `var_count`; captured-state requirements are checked |
+| `close_loc` | local index is below `var_count`; staged compiler input additionally requires an explicit matching scoped-local capture, while serialized input remains unsupported |
 | `rest` | first argument index is at most `arg_count` |
 | `eval`, `apply_eval` | decoded scope start is -2, -1, or a local index and its `scope_next` chain is valid |
 

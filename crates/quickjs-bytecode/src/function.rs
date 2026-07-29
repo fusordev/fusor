@@ -185,18 +185,37 @@ impl UnverifiedFunctionHeader {
     ///
     /// The function has a prototype and permits `new.target` and `arguments`,
     /// while `super`, eval, and debug-payload flags remain clear. Closure
-    /// references are absent because this constructor is for compiler output
-    /// whose capture layout has not yet been implemented.
+    /// references are absent because this is the zero-capture convenience
+    /// constructor.
     #[must_use]
     pub const fn stripped_ordinary_source_function(
         strict: bool,
         defined_argument_count: u32,
     ) -> Self {
+        Self::stripped_ordinary_source_function_with_variable_references(
+            strict,
+            defined_argument_count,
+            0,
+        )
+    }
+
+    /// Creates the stripped header for compiler output with a typed capture
+    /// layout.
+    ///
+    /// `variable_reference_count` is checked against both the frame domains
+    /// and the compiler-owned capture layout before the bytecode can receive a
+    /// control-flow certificate.
+    #[must_use]
+    pub const fn stripped_ordinary_source_function_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
         Self::new(
             Self::STRIPPED_ORDINARY_SOURCE_FLAGS,
             if strict { 1 } else { 0 },
             defined_argument_count,
-            0,
+            variable_reference_count,
         )
     }
 

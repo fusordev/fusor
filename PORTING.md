@@ -127,7 +127,10 @@ A milestone is complete only when all of its checked items pass in CI.
         resolved-reference-to-binding edges, deterministic owned `Arc` slices,
         Script/Module/import/default-export placement, declaration
         initialization/write/TDZ policy, and typed fail-closed rejection for
-        semantic cases not yet lowered.
+        semantic cases not yet lowered. Descendant frame captures now
+        propagate iteratively through every intermediate executable as
+        deterministic parent-binding or parent-capture edges; global and
+        module cells remain in their distinct storage domains.
   - [x] First verified ordinary leaf-function vertical: an arena-borrowing
         `CompilationContext` retains private Oxc node/symbol/reference identity
         maps and issues context-provenant executable selections. Function
@@ -162,9 +165,21 @@ A milestone is complete only when all of its checked items pass in CI.
         unreachable source paths are still validated and structurally
         terminated before verification. Compiler-owned labels retain their
         source spans, and every reachable statement anchor is independently
-        checked at verified stack depth zero after branch relocation. Labeled
-        control and `for` families remain fail-closed until their cleanup and
-        per-iteration environment semantics are implemented.
+        checked at verified stack depth zero after branch relocation.
+  - [x] Add the captured-cell and classic-`for` substrate: compiler-owned
+        capture layouts distinguish arguments, function-lifetime locals, and
+        scoped locals; the staged verifier admits `close_loc` only for an
+        explicitly declared scoped capture while serialized bodies and
+        reference-construction opcodes remain fail-closed. Deepest leaf
+        functions read and write forwarded cells through checked `var_ref`
+        opcodes. Mutable identifier assignment, compound/logical assignment,
+        and prefix/postfix update preserve JavaScript expression values.
+        Classic `for` uses the iterative statement queue for
+        initializer/test/body/update flow, rotates captured loop-head cells
+        after initialization and before every update including `continue`,
+        and closes the final cell on exit. Labeled control, `for-in`, `for-of`,
+        nested function constants, and immutable-write throws remain
+        fail-closed.
 - [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
 - [ ] Deterministic debug/line tables.
 
