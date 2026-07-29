@@ -32,7 +32,7 @@
 //! releases their descriptions.
 //!
 //! Growable collection storage and compact string copies use fallible reserve
-//! operations. Allocation of `Rc` and `sdd` control blocks follows Rust's global
+//! operations. Allocation of `Rc` and `Arc` control blocks follows Rust's global
 //! allocator policy.
 
 use std::{

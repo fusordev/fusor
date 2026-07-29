@@ -47,40 +47,29 @@ project-owned APIs. Miette output is presentation rather than a compatibility
 surface. The source-map dependency supplies the standard interchange codec; it
 does not supply JavaScript parser, compiler, VM, runtime, or RegExp semantics.
 
-### Immutable shared backing storage
+### Immutable string ownership
 
-The runtime exactly pins `sdd` 4.8.8 (Apache-2.0), with default features
-disabled, for reference-counted immutable string leaves and rope nodes. Its
-transitive `saa` 5.6.0 dependency is also Apache-2.0. JavaScript strings have
-no observable destructor, so delayed physical reclamation cannot run user code
-or change JavaScript liveness, weak-reference, or finalizer semantics. Retained
-physical allocations can still affect resource limits and out-of-memory
-behavior.
+Immutable JavaScript string leaves and rope nodes use the standard library's
+thread-safe `Arc`. Immutable `JsString` handles remain `Send + Sync` for host
+integration without making a JavaScript runtime, context, or heap transferable
+between threads. A process-wide empty-string node and cloned string handles
+share the same immutable backing representation.
 
-The published `sdd` crate is vendored from checksum
-`1836bad8bdc9c6d665b63202da3d9c6d60ed1e597cae63620e21ebf89a3595a9`
-(VCS revision `abfa4308c24062fa91a571658a35a6c69cc8cf7b`) because five raw
-allocation sites in 4.8.8 could write through a null allocator result. The
-local patch replaces those sites with RAII `Box<MaybeUninit<_>>` allocations,
-preserves allocation ownership if construction unwinds, and returns a
-non-null collector-arena handle. The private collector's one remaining raw
-allocation is immediately checked and retains its intentional
-panic-to-backup-bag recovery behavior. The exact delta is recorded in
-`vendor/sdd-4.8.8/QUICKJS-PATCH.md`.
-
-`sdd` is infrastructure, not the runtime's reachability algorithm. It must not
-decide JavaScript object liveness, weak-reference visibility, finalizer
-ordering, cycle removal, or ECMAScript job ordering. The object heap retains
-QuickJS-derived logical reference counts and explicit cycle deletion. Runtime
-memory accounting must keep retired backing bytes charged until a non-
-JavaScript reclamation hook observes their actual destruction, or
-conservatively bound and drain reclamation before releasing that charge. The
-last logical `Shared` release alone is not proof that memory has been reclaimed.
+`Arc` is backing-storage infrastructure, not the runtime's reachability
+algorithm. It does not decide JavaScript object liveness, weak-reference
+visibility, finalizer ordering, cycle removal, or ECMAScript job ordering. The
+object heap retains QuickJS-derived logical reference counts and explicit cycle
+deletion. Future runtime memory accounting must charge backing bytes at node
+creation and release them from the node's synchronous destruction path. `Arc`
+control-block allocation follows Rust's global allocator policy.
 
 ## Approved planned dependencies
 
 - Tokio is required for host async I/O, timers, wakeups, and event-loop
   integration. It must not determine ECMAScript job ordering.
+- `parking_lot` is required for shared mutable host-side state. It is not used
+  to make runtimes, contexts, heaps, or JavaScript value handles cross-thread,
+  and immutable string backing remains lock-free.
 
 Dependency additions and upgrades require current official documentation,
 license review, complete workspace gates, and focused compatibility tests.

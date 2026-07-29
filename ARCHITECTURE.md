@@ -33,9 +33,9 @@ host completions to the runtime owner; it never accesses the JavaScript heap.
 
 Core engine, compiler, runtime, host, and tool crates forbid `unsafe` Rust.
 The optional N-API ABI adapter is the sole planned project exception, limited
-to documented foreign-pointer operations. Oxc, Tokio, `sdd`, and other
-dependencies are audited separately; workspace linting cannot make transitive
-claims about their internals.
+to documented foreign-pointer operations. Oxc, Tokio, and other dependencies
+are audited separately; workspace linting cannot make transitive claims about
+their internals.
 
 ## Compilation boundary
 
@@ -122,12 +122,19 @@ Public values own root slots. Dropping the last root records a deferred release
 without borrowing the heap. Runtime safe points drain those releases after
 callbacks and other borrows end.
 
-Immutable string leaves and rope nodes use `sdd::Shared`. Their destructors
-cannot run JavaScript, so delayed physical reclamation cannot determine object
-liveness, finalizer timing, weak visibility, or cycle removal. Physical
-retention can still affect limits and out-of-memory behavior: retired backing
-bytes stay charged until an allocation-ledger hook observes actual destruction,
-or until a conservatively bounded collector drain proves reclamation.
+Immutable string leaves and rope nodes use standard-library `Arc` ownership.
+This keeps immutable `JsString` handles safe to move through host integration
+queues without making a JavaScript runtime, context, or heap transferable
+between threads. A backing node is destroyed synchronously when its last strong
+handle is dropped. String-node destruction cannot run JavaScript and cannot
+determine object liveness, finalizer timing, weak visibility, or cycle removal.
+A backing allocation ledger must charge bytes when a node is created and
+release them from that node's destruction path; dropping a public value root
+is not by itself proof that shared string storage was reclaimed.
+
+Shared mutable host-side state uses `parking_lot` locks. Locks must never guard
+or make cross-thread access possible for a JavaScript runtime, context, heap, or
+value handle, and immutable `Arc<Repr>` string backing has no lock.
 
 ## Reference counting and cycles
 
