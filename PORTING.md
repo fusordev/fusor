@@ -145,9 +145,9 @@ A milestone is complete only when all of its checked items pass in CI.
         string, exact argument/local reads and writes, all value-only unary and
         binary operators needing no pools, sequence/expression statements, and
         explicit or implicit returns. Expression lowering uses an iterative
-        work list and validates the whole body before emitting bytes; atom,
-        constant, and closure pools remain fail-closed until their owned
-        records exist.
+        work list and validates the whole body before emitting bytes; atom and
+        ordinary value pools remain fail-closed until their owned records
+        exist.
   - [x] Add compiler-owned control flow without recursion guards: provenance-
         checked symbolic labels, duplicate/unbound/end-target rejection,
         shortest-upward QuickJS-width branch relaxation with bounded
@@ -177,8 +177,20 @@ A milestone is complete only when all of its checked items pass in CI.
         Classic `for` uses the iterative statement queue for
         initializer/test/body/update flow, rotates captured loop-head cells
         after initialization and before every update including `continue`,
-        and closes the final cell on exit. Labeled control, `for-in`, `for-of`,
-        nested function constants, and immutable-write throws remain
+        and closes the final cell on exit.
+  - [x] Add typed nested-function constants and iterative tree compilation:
+        compiler bodies declare exact value/function constant kinds, and the
+        staged verifier conditionally admits `push_const*`/`fclosure*` while
+        serialized constant operations remain fail-closed. `compile_tree`
+        freezes a flat immutable executable-preorder tree, keeps direct child
+        constants in source order, normalizes each capture to a parent-owned
+        variable-reference cell or parent closure slot, and crosses the compact
+        `fclosure8` boundary exactly. Body function declarations instantiate
+        before user code with last-declaration-wins semantics, including
+        argument redeclarations; strict block declarations instantiate on
+        every scope entry. All compiler traversal uses explicit iterative work
+        stacks. Labeled control, `for-in`, `for-of`, inferred anonymous-function
+        names, ordinary value constants, and immutable-write throws remain
         fail-closed.
 - [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
 - [ ] Deterministic debug/line tables.

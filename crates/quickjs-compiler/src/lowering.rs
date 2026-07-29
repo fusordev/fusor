@@ -1,13 +1,14 @@
-use std::{error::Error, fmt, sync::Arc};
+use std::{error::Error, fmt, ops::Range, sync::Arc};
 
 use oxc_ast::{
     AstKind,
     ast::{
-        AssignmentExpression, AssignmentTarget, BindingPattern, ConditionalExpression,
-        DoWhileStatement, Expression, ForStatement, ForStatementInit, Function, FunctionBody,
-        FunctionType, IfStatement, LogicalExpression, PropertyKind, SequenceExpression,
-        SimpleAssignmentTarget, Statement, UnaryExpression, UpdateExpression, VariableDeclaration,
-        VariableDeclarationKind, WhileStatement,
+        AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement,
+        ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForStatement,
+        ForStatementInit, Function, FunctionBody, FunctionType, IfStatement, LogicalExpression,
+        PropertyKind, ReturnStatement, SequenceExpression, SimpleAssignmentTarget, Statement,
+        UnaryExpression, UpdateExpression, VariableDeclaration, VariableDeclarationKind,
+        WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
@@ -17,17 +18,18 @@ use oxc_syntax::operator::{
 };
 use quickjs_bytecode::{
     AssemblerError, AssemblerLabel, AssemblerLimits, BranchKind, BytecodeAssembler, BytecodePc,
-    CompilerCaptureLayout, CompilerCapturedBinding, EncodeError, FinalOpcode, FunctionIndexDomains,
-    MAX_FUNCTION_INDEX_ENTRIES, Operands, UnverifiedCompilerFunctionBody, UnverifiedFunctionHeader,
-    VerificationError, VerificationErrorKind, VerificationLimits, VerifiedControlFlow,
-    verify_compiler_control_flow,
+    CompilerCaptureLayout, CompilerCapturedBinding, CompilerConstantKind, CompilerConstantLayout,
+    EncodeError, FinalOpcode, FunctionIndexDomains, MAX_FUNCTION_INDEX_ENTRIES, Operands,
+    UnverifiedCompilerFunctionBody, UnverifiedFunctionHeader, VerificationError,
+    VerificationErrorKind, VerificationLimits, VerifiedControlFlow, verify_compiler_control_flow,
 };
 use quickjs_frontend::{ParsedUnit, Span};
 
 use crate::storage::{
-    BindingId, CompilationUnitKind, CompilerError, DeclarationKind, Executable, ExecutableId,
-    ExecutableKind, InitializationPolicy, NativeReferenceId, PlannedStorage, ResolvedReference,
-    StoragePlacement, StoragePlan, WritePolicy, build_planned_storage,
+    BindingId, CaptureSlot, CaptureSource, CompilationUnitKind, CompilerError, DeclarationKind,
+    DeclarationPolicy, Executable, ExecutableId, ExecutableKind, InitializationPolicy,
+    NativeReferenceId, PlannedStorage, ResolvedReference, StoragePlacement, StoragePlan,
+    WritePolicy, build_planned_storage,
 };
 
 /// A validated function-local slot number.
@@ -85,21 +87,86 @@ impl SourceInstruction {
     }
 }
 
-/// Owned output from the validated ordinary leaf-function lowering family.
+/// One nested-function template stored in a compiled function's constant pool.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CompiledFunctionConstant {
+    executable: ExecutableId,
+}
+
+impl CompiledFunctionConstant {
+    /// Returns the exact child executable represented by this pool entry.
+    #[must_use]
+    pub const fn executable(self) -> ExecutableId {
+        self.executable
+    }
+}
+
+/// Verified source of one imported closure cell.
+///
+/// Compiler output normalizes `QuickJS`'s parent argument/local descriptors to
+/// the parent's dense own-variable-reference table. This lets runtime closure
+/// construction address cells directly while the retained parent capture
+/// layout still identifies the underlying argument or local slot.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CompiledClosureSource {
+    /// A cell owned by the immediately enclosing activation.
+    ParentVariableReference(u16),
+    /// A cell imported by the immediately enclosing function object.
+    ParentClosure(u16),
+}
+
+/// One dense imported-closure descriptor for a compiled function.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompiledClosureVariable {
+    binding: BindingId,
+    slot: CaptureSlot,
+    source: CompiledClosureSource,
+    policy: DeclarationPolicy,
+}
+
+impl CompiledClosureVariable {
+    /// Returns the original compiler binding represented by this cell.
+    #[must_use]
+    pub const fn binding(self) -> BindingId {
+        self.binding
+    }
+
+    /// Returns the dense closure-variable slot in the child function.
+    #[must_use]
+    pub const fn slot(self) -> CaptureSlot {
+        self.slot
+    }
+
+    /// Returns where the immediate parent provides the cell.
+    #[must_use]
+    pub const fn source(self) -> CompiledClosureSource {
+        self.source
+    }
+
+    /// Returns the original binding's initialization and write policy.
+    #[must_use]
+    pub const fn policy(self) -> DeclarationPolicy {
+        self.policy
+    }
+}
+
+/// Owned output from validated ordinary-function lowering.
 ///
 /// This artifact is deliberately not execution authority. Its control-flow
 /// certificate still requires the future whole-function verifier.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CompiledLeafFunction {
+pub struct CompiledFunction {
     executable: ExecutableId,
     storage_plan: Arc<StoragePlan>,
     source_text: Arc<str>,
     locals: Arc<[LoweredLocal]>,
+    constants: Arc<[CompiledFunctionConstant]>,
+    closure_variables: Arc<[CompiledClosureVariable]>,
     source_instructions: Arc<[SourceInstruction]>,
     control_flow: Arc<VerifiedControlFlow>,
 }
 
-impl CompiledLeafFunction {
+impl CompiledFunction {
     /// Returns the selected compiler-owned executable identity.
     #[must_use]
     pub const fn executable(&self) -> ExecutableId {
@@ -124,6 +191,18 @@ impl CompiledLeafFunction {
         &self.locals
     }
 
+    /// Returns the typed function-template constant pool.
+    #[must_use]
+    pub fn constants(&self) -> &[CompiledFunctionConstant] {
+        &self.constants
+    }
+
+    /// Returns imported closure cells in dense child slot order.
+    #[must_use]
+    pub fn closure_variables(&self) -> &[CompiledClosureVariable] {
+        &self.closure_variables
+    }
+
     /// Returns source spans for final instructions in bytecode order.
     #[must_use]
     pub fn source_instructions(&self) -> &[SourceInstruction] {
@@ -134,6 +213,66 @@ impl CompiledLeafFunction {
     #[must_use]
     pub fn control_flow(&self) -> &VerifiedControlFlow {
         &self.control_flow
+    }
+}
+
+/// Backward-compatible name for the pool-free [`CompilationContext::compile_leaf`]
+/// result.
+pub type CompiledLeafFunction = CompiledFunction;
+
+/// Failure-atomic output for one compiled ordinary-function subtree.
+///
+/// Functions are stored in stable executable preorder. Every constant edge
+/// names one member of this same tree, while imported closure descriptors may
+/// reference the selected root's external parent when a nested executable is
+/// compiled as the root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompiledFunctionTree {
+    root: ExecutableId,
+    storage_plan: Arc<StoragePlan>,
+    source_text: Arc<str>,
+    functions: Arc<[CompiledFunction]>,
+}
+
+impl CompiledFunctionTree {
+    /// Returns the selected root executable.
+    #[must_use]
+    pub const fn root_executable(&self) -> ExecutableId {
+        self.root
+    }
+
+    /// Returns the selected root function.
+    #[must_use]
+    pub fn root(&self) -> &CompiledFunction {
+        &self.functions[0]
+    }
+
+    /// Returns all compiled functions in stable executable preorder.
+    #[must_use]
+    pub fn functions(&self) -> &[CompiledFunction] {
+        &self.functions
+    }
+
+    /// Resolves one compiled executable in the selected subtree.
+    #[must_use]
+    pub fn function(&self, executable: ExecutableId) -> Option<&CompiledFunction> {
+        let index = self
+            .functions
+            .binary_search_by_key(&executable, CompiledFunction::executable)
+            .ok()?;
+        self.functions.get(index)
+    }
+
+    /// Returns the immutable storage plan shared by every function.
+    #[must_use]
+    pub fn storage_plan(&self) -> &StoragePlan {
+        &self.storage_plan
+    }
+
+    /// Returns the exact retained source text.
+    #[must_use]
+    pub fn source_text(&self) -> &str {
+        &self.source_text
     }
 }
 
@@ -240,17 +379,83 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         limits: VerificationLimits,
     ) -> Result<CompiledLeafFunction, LeafCompilationError> {
         let executable = self.resolve_selection(selection)?;
-        let validated = self.validate_leaf(executable, limits)?;
-        let ValidatedLeaf {
+        let tree_layout = self.function_tree_layout()?;
+        if let Some(child) = tree_layout.children(executable)?.first() {
+            let child = self
+                .planned
+                .plan
+                .executable(*child)
+                .ok_or(LeafCompilationError::InvalidExecutable { executable: *child })?;
+            return unsupported(UnsupportedLeafFeature::NestedExecutable, child.span());
+        }
+        self.compile_function(executable, &tree_layout, limits)
+    }
+
+    /// Lowers an ordinary function and every nested ordinary function template.
+    ///
+    /// Compilation is child-first and iterative. The returned flat tree is in
+    /// stable executable preorder, while each parent constant pool contains
+    /// only its direct children in source order. Function expressions emit
+    /// `fclosure8` for indices below 256 and `fclosure` otherwise. Imported
+    /// closure descriptors are normalized to the parent's own cell table or
+    /// imported environment.
+    ///
+    /// # Errors
+    ///
+    /// Rejects foreign selections, unsupported executable kinds or nested
+    /// syntax, inconsistent semantic identities or closure edges, resource
+    /// limits, assembly failures, and staged verifier failures. No partial tree
+    /// escapes on failure.
+    pub fn compile_tree(
+        &self,
+        selection: &CompilationExecutable,
+        limits: VerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        let root = self.resolve_selection(selection)?;
+        let tree_layout = self.function_tree_layout()?;
+        let subtree = tree_layout.subtree_preorder(root)?;
+        let mut functions = Vec::with_capacity(subtree.len());
+        for executable in subtree.iter().rev().copied() {
+            functions.push(self.compile_function(executable, &tree_layout, limits)?);
+        }
+        functions.reverse();
+        Ok(CompiledFunctionTree {
+            root,
+            storage_plan: Arc::clone(&self.planned.plan),
+            source_text: Arc::clone(&self.source_text),
+            functions: functions.into(),
+        })
+    }
+
+    fn compile_function(
+        &self,
+        executable: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        limits: VerificationLimits,
+    ) -> Result<CompiledFunction, LeafCompilationError> {
+        let validated = self.validate_function(executable, tree_layout, limits)?;
+        let ValidatedFunction {
             strict,
             argument_count,
             local_count,
             capture_count,
             capture_layout,
             locals,
+            constants,
+            closure_variables,
             flow,
         } = validated;
-        let domains = FunctionIndexDomains::new(0, 0, argument_count, local_count, capture_count);
+        let constant_count =
+            u32::try_from(constants.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "function constants",
+            })?;
+        let domains = FunctionIndexDomains::new(
+            0,
+            constant_count,
+            argument_count,
+            local_count,
+            capture_count,
+        );
         let variable_reference_count = checked_function_entry_count(
             capture_layout.bindings().len(),
             "function variable references",
@@ -261,15 +466,26 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 argument_count,
                 variable_reference_count,
             );
+        let constant_layout = CompilerConstantLayout::new(Arc::from(vec![
+                CompilerConstantKind::Function;
+                constants.len()
+            ]));
         let finished = flow.finish()?;
-        let (source_instructions, control_flow) =
-            finished.verify_with_capture_layout(domains, header, capture_layout, limits)?;
+        let (source_instructions, control_flow) = finished.verify_with_layouts(
+            domains,
+            header,
+            capture_layout,
+            constant_layout,
+            limits,
+        )?;
 
-        Ok(CompiledLeafFunction {
+        Ok(CompiledFunction {
             executable,
             storage_plan: Arc::clone(&self.planned.plan),
             source_text: Arc::clone(&self.source_text),
             locals: locals.into(),
+            constants: constants.into(),
+            closure_variables: closure_variables.into(),
             source_instructions: source_instructions.into(),
             control_flow: Arc::new(control_flow),
         })
@@ -297,12 +513,54 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(executable)
     }
 
-    fn validate_leaf(
+    fn function_tree_layout(&self) -> Result<FunctionTreeLayout, LeafCompilationError> {
+        let mut layout = FunctionTreeLayout::new(&self.planned.plan)?;
+        for executable in self.planned.plan.executables() {
+            let node_id = self
+                .planned
+                .identities
+                .node_by_executable
+                .get(executable.id().index())
+                .copied()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "executable has an Oxc node identity",
+                    span: Some(executable.span()),
+                })?;
+            let AstKind::Function(function) = self.unit.semantic().nodes().kind(node_id) else {
+                continue;
+            };
+            if function.r#type != FunctionType::FunctionDeclaration {
+                continue;
+            }
+            let Some(identifier) = &function.id else {
+                continue;
+            };
+            let binding =
+                self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+            let storage = self.planned.plan.binding(binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "function declaration has compiler storage",
+                    span: Some(identifier.span),
+                },
+            )?;
+            if executable.parent() != Some(storage.executable()) {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "function declaration binding belongs to its parent executable",
+                    span: Some(identifier.span),
+                });
+            }
+            layout.record_function_declaration(binding, executable.id())?;
+        }
+        Ok(layout)
+    }
+
+    fn validate_function(
         &self,
         executable_id: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
         limits: VerificationLimits,
-    ) -> Result<ValidatedLeaf, LeafCompilationError> {
-        let (executable, function) = self.selected_ordinary_leaf(executable_id)?;
+    ) -> Result<ValidatedFunction, LeafCompilationError> {
+        let (executable, function) = self.selected_ordinary_function(executable_id)?;
         let layout = FrameLayout::new(&self.planned.plan, executable_id)?;
         let body = function
             .body
@@ -312,16 +570,30 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 span: function.span,
             })?;
         let mut flow = PlannedControlFlow::new(limits);
-        self.validate_body(executable_id, function, body, &layout, &mut flow)?;
+        self.validate_body(
+            executable_id,
+            function,
+            body,
+            &layout,
+            tree_layout,
+            &mut flow,
+        )?;
         let function_scope = self.created_scope(
             function.scope_id.get(),
             function.node_id.get(),
             function.span,
         )?;
         let capture_layout =
-            self.compiler_capture_layout(executable_id, function_scope, &layout)?;
+            self.compiler_capture_layout(executable_id, function_scope, &layout, tree_layout)?;
+        let constants = tree_layout
+            .children(executable_id)?
+            .iter()
+            .copied()
+            .map(|executable| CompiledFunctionConstant { executable })
+            .collect();
+        let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
 
-        Ok(ValidatedLeaf {
+        Ok(ValidatedFunction {
             strict: executable.is_strict(),
             argument_count: executable.parameter_count(),
             local_count: layout.local_count,
@@ -335,6 +607,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     slot: local.slot,
                 })
                 .collect(),
+            constants,
+            closure_variables,
             flow,
         })
     }
@@ -345,6 +619,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         function: &'statement Function<'arena>,
         body: &'statement FunctionBody<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let function_scope = self.created_scope(
@@ -385,7 +660,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     creator,
                     span,
                 } => {
-                    self.plan_scope_entry(executable, scope, creator, span, layout, flow)?;
+                    self.plan_scope_entry(scope, creator, span, layout, tree_layout, flow)?;
                     state.active_scopes.push(scope);
                 }
                 StatementWork::PopScope(expected) => {
@@ -419,10 +694,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         })?;
                 }
                 StatementWork::Expression(expression) => {
-                    self.plan_expression(expression, layout, flow)?;
+                    self.plan_expression(expression, layout, tree_layout, flow)?;
                 }
                 StatementWork::Declaration(declaration) => {
-                    self.validate_declaration(declaration, layout, flow)?;
+                    self.validate_declaration(declaration, layout, tree_layout, flow)?;
                 }
                 StatementWork::Emit(instruction) => flow.emit(instruction)?,
                 StatementWork::Branch { kind, target, span } => {
@@ -430,7 +705,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 }
                 StatementWork::Bind(label) => flow.bind(&label)?,
                 StatementWork::Visit(statement) => {
-                    self.plan_statement(statement, layout, flow, &mut state)?;
+                    self.plan_statement(statement, layout, tree_layout, flow, &mut state)?;
                 }
             }
         }
@@ -448,53 +723,31 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         &self,
         statement: &'statement Statement<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         flow: &mut PlannedControlFlow,
         state: &mut StatementPlanningState<'statement, 'arena>,
     ) -> Result<(), LeafCompilationError> {
         match statement {
             Statement::BlockStatement(block) => {
-                let scope =
-                    self.created_scope(block.scope_id.get(), block.node_id.get(), block.span)?;
-                state.work.push(StatementWork::PopScope(scope));
-                state.work.push(StatementWork::VisitList {
-                    statements: &block.body,
-                    next: 0,
-                });
-                state.work.push(StatementWork::PushScope {
-                    scope,
-                    creator: block.node_id.get(),
-                    span: block.span,
-                });
+                self.schedule_block_statement(block, state)?;
+            }
+            Statement::FunctionDeclaration(function) => {
+                self.validate_function_declaration(
+                    function,
+                    layout.executable,
+                    tree_layout,
+                    state.active_scopes.last().copied(),
+                )?;
             }
             Statement::VariableDeclaration(declaration) => {
-                self.validate_declaration(declaration, layout, flow)?;
+                self.validate_declaration(declaration, layout, tree_layout, flow)?;
             }
             Statement::ExpressionStatement(statement) => {
-                state.work.push(StatementWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::Drop,
-                    Operands::None,
-                    statement.expression.span(),
-                )));
-                state
-                    .work
-                    .push(StatementWork::Expression(&statement.expression));
+                Self::schedule_expression_statement(statement, &mut state.work);
             }
             Statement::EmptyStatement(_) => {}
             Statement::ReturnStatement(statement) => {
-                if let Some(argument) = &statement.argument {
-                    state.work.push(StatementWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::Return,
-                        Operands::None,
-                        statement.span,
-                    )));
-                    state.work.push(StatementWork::Expression(argument));
-                } else {
-                    flow.emit(PlannedInstruction::new(
-                        FinalOpcode::ReturnUndef,
-                        Operands::None,
-                        statement.span,
-                    ))?;
-                }
+                Self::schedule_return_statement(statement, flow, &mut state.work)?;
             }
             Statement::IfStatement(statement) => {
                 Self::schedule_if_statement(statement, flow, &mut state.work)?;
@@ -547,6 +800,59 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             _ => {
                 return unsupported(UnsupportedLeafFeature::UnsupportedBody, statement.span());
             }
+        }
+        Ok(())
+    }
+
+    fn schedule_block_statement<'statement>(
+        &self,
+        block: &'statement BlockStatement<'arena>,
+        state: &mut StatementPlanningState<'statement, 'arena>,
+    ) -> Result<(), LeafCompilationError> {
+        let scope = self.created_scope(block.scope_id.get(), block.node_id.get(), block.span)?;
+        state.work.push(StatementWork::PopScope(scope));
+        state.work.push(StatementWork::VisitList {
+            statements: &block.body,
+            next: 0,
+        });
+        state.work.push(StatementWork::PushScope {
+            scope,
+            creator: block.node_id.get(),
+            span: block.span,
+        });
+        Ok(())
+    }
+
+    fn schedule_expression_statement<'statement>(
+        statement: &'statement ExpressionStatement<'arena>,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) {
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            statement.expression.span(),
+        )));
+        work.push(StatementWork::Expression(&statement.expression));
+    }
+
+    fn schedule_return_statement<'statement>(
+        statement: &'statement ReturnStatement<'arena>,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if let Some(argument) = &statement.argument {
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Return,
+                Operands::None,
+                statement.span,
+            )));
+            work.push(StatementWork::Expression(argument));
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::ReturnUndef,
+                Operands::None,
+                statement.span,
+            ))?;
         }
         Ok(())
     }
@@ -814,11 +1120,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     fn plan_scope_entry(
         &self,
-        executable: ExecutableId,
         scope: ScopeId,
         creator: NodeId,
         span: Span,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let scoping = self.unit.semantic().scoping();
@@ -828,6 +1134,53 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 span: Some(span),
             });
         }
+        let executable = layout.executable;
+        let function_creator = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(executable.index())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "scope-entry executable has an Oxc node identity",
+                span: Some(span),
+            })?;
+        let function_scope = creator == function_creator;
+        let mut entries =
+            self.scope_entry_initializations(executable, scope, layout, tree_layout)?;
+        entries.sort_unstable_by_key(ScopeEntryInitialization::order_key);
+        if function_scope {
+            for entry in entries
+                .iter()
+                .copied()
+                .filter(|entry| matches!(entry, ScopeEntryInitialization::Function { .. }))
+            {
+                self.emit_scope_entry_initialization(executable, entry, tree_layout, flow)?;
+            }
+            for entry in entries
+                .iter()
+                .rev()
+                .copied()
+                .filter(|entry| matches!(entry, ScopeEntryInitialization::Uninitialized { .. }))
+            {
+                self.emit_scope_entry_initialization(executable, entry, tree_layout, flow)?;
+            }
+        } else {
+            for entry in entries.into_iter().rev() {
+                self.emit_scope_entry_initialization(executable, entry, tree_layout, flow)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn scope_entry_initializations(
+        &self,
+        executable: ExecutableId,
+        scope: ScopeId,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<Vec<ScopeEntryInitialization>, LeafCompilationError> {
+        let scoping = self.unit.semantic().scoping();
         let mut entries = Vec::new();
         for symbol in scoping.iter_bindings_in(scope) {
             if scoping.symbol_scope_id(symbol) != scope {
@@ -850,37 +1203,97 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     span: Some(declaration_span),
                 });
             }
-            if !storage.policy().has_temporal_dead_zone() {
-                continue;
-            }
-            if storage.policy().initialization() != InitializationPolicy::AtDeclaration {
-                return unsupported(
-                    UnsupportedLeafFeature::UnsupportedDeclaration,
-                    declaration_span,
-                );
-            }
-            let FrameSlot::Local(slot) =
+            let frame_slot =
                 layout
                     .slot(binding)
                     .ok_or(LeafCompilationError::SemanticInvariant {
                         invariant: "scope-entry binding has a frame slot",
                         span: Some(declaration_span),
-                    })?
-            else {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "scope-entry lexical binding uses a local slot",
-                    span: Some(declaration_span),
-                });
-            };
-            entries.push((slot, declaration_span));
+                    })?;
+            match storage.policy().initialization() {
+                InitializationPolicy::AtDeclaration
+                    if storage.policy().has_temporal_dead_zone() =>
+                {
+                    let FrameSlot::Local(slot) = frame_slot else {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "scope-entry lexical binding uses a local slot",
+                            span: Some(declaration_span),
+                        });
+                    };
+                    entries.push(ScopeEntryInitialization::Uninitialized {
+                        slot,
+                        span: declaration_span,
+                    });
+                }
+                InitializationPolicy::FunctionAtInstantiation
+                | InitializationPolicy::FunctionAtScopeEntry => {
+                    if storage.policy().kind() != DeclarationKind::Function
+                        || storage.policy().has_temporal_dead_zone()
+                        || matches!(frame_slot, FrameSlot::Capture(_))
+                    {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "scope-entry function declaration has writable frame storage",
+                            span: Some(declaration_span),
+                        });
+                    }
+                    let child = tree_layout.function_declaration(binding).ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "scope-entry function binding has a declaration executable",
+                            span: Some(declaration_span),
+                        },
+                    )?;
+                    let child_span = self
+                        .planned
+                        .plan
+                        .executable(child)
+                        .map_or(declaration_span, Executable::span);
+                    entries.push(ScopeEntryInitialization::Function {
+                        slot: frame_slot,
+                        child,
+                        span: child_span,
+                    });
+                }
+                InitializationPolicy::AtDeclaration => {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedDeclaration,
+                        declaration_span,
+                    );
+                }
+                InitializationPolicy::Argument
+                | InitializationPolicy::UndefinedAtInstantiation
+                | InitializationPolicy::FunctionName
+                | InitializationPolicy::Catch
+                | InitializationPolicy::ModuleImport
+                | InitializationPolicy::ModuleNamespace => {}
+            }
         }
-        entries.sort_unstable_by_key(|(slot, _)| slot.index());
-        for (slot, declaration_span) in entries.into_iter().rev() {
-            flow.emit(PlannedInstruction::new(
-                FinalOpcode::SetLocUninitialized,
-                Operands::Loc(slot.index()),
-                declaration_span,
-            ))?;
+        Ok(entries)
+    }
+
+    fn emit_scope_entry_initialization(
+        &self,
+        executable: ExecutableId,
+        entry: ScopeEntryInitialization,
+        tree_layout: &FunctionTreeLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        match entry {
+            ScopeEntryInitialization::Uninitialized { slot, span } => {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::SetLocUninitialized,
+                    Operands::Loc(slot.index()),
+                    span,
+                ))?;
+            }
+            ScopeEntryInitialization::Function { slot, child, span } => {
+                flow.emit(self.plan_child_function_closure(
+                    child,
+                    executable,
+                    span,
+                    tree_layout,
+                )?)?;
+                flow.emit(plan_put_slot(slot, span))?;
+            }
         }
         Ok(())
     }
@@ -944,10 +1357,78 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    fn validate_function_declaration(
+        &self,
+        function: &Function<'arena>,
+        parent: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        active_scope: Option<ScopeId>,
+    ) -> Result<(), LeafCompilationError> {
+        if function.r#type != FunctionType::FunctionDeclaration {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "function-declaration statement has declaration function type",
+                span: Some(function.span),
+            });
+        }
+        let identifier = function
+            .id
+            .as_ref()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "Script function declaration has a binding identifier",
+                span: Some(function.span),
+            })?;
+        let binding = self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "function declaration binding has compiler storage",
+                    span: Some(identifier.span),
+                })?;
+        if storage.executable() != parent
+            || storage.policy().kind() != DeclarationKind::Function
+            || !matches!(
+                storage.policy().initialization(),
+                InitializationPolicy::FunctionAtInstantiation
+                    | InitializationPolicy::FunctionAtScopeEntry
+            )
+        {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedDeclaration,
+                identifier.span,
+            );
+        }
+        let binding_scope = self.scope_for_binding(binding)?;
+        if active_scope != Some(binding_scope) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "function declaration executes in its binding scope",
+                span: Some(identifier.span),
+            });
+        }
+        let child = self.executable_for_function(function)?;
+        let child_metadata = self
+            .planned
+            .plan
+            .executable(child)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable: child })?;
+        if child_metadata.parent() != Some(parent)
+            || tree_layout.constant_index(child).is_none()
+            || child_metadata.name_span() != Some(identifier.span)
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "function declaration has one typed direct-child constant",
+                span: Some(function.span),
+            });
+        }
+        Ok(())
+    }
+
     fn validate_declaration(
         &self,
         declaration: &VariableDeclaration<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         if declaration.declare
@@ -988,7 +1469,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
             match &declarator.init {
                 Some(initializer) => {
-                    self.plan_expression(initializer, layout, flow)?;
+                    if let Some(span) = anonymous_function_definition_span(initializer) {
+                        return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+                    }
+                    self.plan_expression(initializer, layout, tree_layout, flow)?;
                     flow.emit(plan_put_slot(frame_slot, identifier.span))?;
                 }
                 None if declaration.kind == VariableDeclarationKind::Let => {
@@ -1055,6 +1539,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         &self,
         expression: &'expression Expression<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let mut work = vec![ExpressionWork::Visit(expression)];
@@ -1117,6 +1602,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         Expression::UpdateExpression(update) => {
                             self.plan_update_expression(update, layout, &mut work)?;
                         }
+                        Expression::FunctionExpression(function) => {
+                            flow.emit(self.plan_function_closure(
+                                function,
+                                layout.executable,
+                                tree_layout,
+                            )?)?;
+                        }
                         _ => {
                             return unsupported(
                                 UnsupportedLeafFeature::UnsupportedExpression,
@@ -1130,6 +1622,65 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    fn plan_function_closure(
+        &self,
+        function: &Function<'arena>,
+        parent: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        let child = self.executable_for_function(function)?;
+        self.plan_child_function_closure(child, parent, function.span, tree_layout)
+    }
+
+    fn executable_for_function(
+        &self,
+        function: &Function<'arena>,
+    ) -> Result<ExecutableId, LeafCompilationError> {
+        let node_id = function.node_id.get();
+        self.planned
+            .identities
+            .executable_by_node
+            .get(node_id.index())
+            .copied()
+            .flatten()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "nested function node has a compiler executable identity",
+                span: Some(function.span),
+            })
+    }
+
+    fn plan_child_function_closure(
+        &self,
+        child: ExecutableId,
+        parent: ExecutableId,
+        span: Span,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        let child_metadata = self
+            .planned
+            .plan
+            .executable(child)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable: child })?;
+        if child_metadata.parent() != Some(parent) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "nested function constant names a direct child executable",
+                span: Some(span),
+            });
+        }
+        let constant_index =
+            tree_layout
+                .constant_index(child)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "direct child executable has a parent constant index",
+                    span: Some(span),
+                })?;
+        let (opcode, operands) = match u8::try_from(constant_index) {
+            Ok(index) => (FinalOpcode::FClosure8, Operands::Const8(index)),
+            Err(_) => (FinalOpcode::FClosure, Operands::Const(constant_index)),
+        };
+        Ok(PlannedInstruction::new(opcode, operands, span))
+    }
+
     fn plan_assignment_expression<'expression>(
         &self,
         assignment: &'expression AssignmentExpression<'arena>,
@@ -1137,6 +1688,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
+        if let Some(span) = anonymous_function_definition_span(&assignment.right) {
+            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+        }
         let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &assignment.left else {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedExpression,
@@ -1569,6 +2123,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         executable: ExecutableId,
         function_scope: ScopeId,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
     ) -> Result<CompilerCaptureLayout, LeafCompilationError> {
         let bindings = self
             .planned
@@ -1579,6 +2134,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         for binding in bindings {
             if !binding.is_frame_captured() {
                 continue;
+            }
+            let expected_index =
+                checked_function_index(captured.len(), "function variable references")?;
+            if tree_layout.variable_reference(binding.id()) != Some(expected_index) {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "captured owner binding has its dense variable-reference index",
+                    span: binding.declaration_spans().first().copied(),
+                });
             }
             let frame_slot =
                 layout
@@ -1609,6 +2172,110 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(CompilerCaptureLayout::new(Arc::from(captured)))
     }
 
+    fn compiled_closure_variables(
+        &self,
+        executable: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<Vec<CompiledClosureVariable>, LeafCompilationError> {
+        let metadata = self
+            .planned
+            .plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let captures = self
+            .planned
+            .plan
+            .frame_captures_for(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        if captures.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parent = metadata
+            .parent()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "capturing executable has an immediate parent",
+                span: Some(metadata.span()),
+            })?;
+        let parent_captures = self
+            .planned
+            .plan
+            .frame_captures_for(parent)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable: parent })?;
+        let mut variables = Vec::with_capacity(captures.len());
+        let mut sources = Vec::with_capacity(captures.len());
+        for (expected_slot, capture) in captures.iter().enumerate() {
+            if capture.slot().index() != expected_slot {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "compiled closure-variable slots are dense and ordered",
+                    span: self
+                        .planned
+                        .plan
+                        .binding(capture.binding())
+                        .and_then(|binding| binding.declaration_spans().first().copied()),
+                });
+            }
+            let binding = self.planned.plan.binding(capture.binding()).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "compiled closure variable has an original binding",
+                    span: None,
+                },
+            )?;
+            let source = match capture.source() {
+                CaptureSource::ParentBinding(source_binding) => {
+                    if source_binding != capture.binding() || binding.executable() != parent {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "parent-binding closure source names the captured parent binding",
+                            span: binding.declaration_spans().first().copied(),
+                        });
+                    }
+                    let index = tree_layout.variable_reference(source_binding).ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant:
+                                "parent-binding closure source has a variable-reference cell",
+                            span: binding.declaration_spans().first().copied(),
+                        },
+                    )?;
+                    CompiledClosureSource::ParentVariableReference(index)
+                }
+                CaptureSource::ParentCapture(source_slot) => {
+                    let source_capture = parent_captures.get(source_slot.index()).ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "forwarded closure source indexes the parent environment",
+                            span: binding.declaration_spans().first().copied(),
+                        },
+                    )?;
+                    if source_capture.slot() != source_slot
+                        || source_capture.binding() != capture.binding()
+                    {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "forwarded closure source preserves the original binding identity",
+                            span: binding.declaration_spans().first().copied(),
+                        });
+                    }
+                    CompiledClosureSource::ParentClosure(checked_function_index(
+                        source_slot.index(),
+                        "parent closure variables",
+                    )?)
+                }
+            };
+            sources.push(source);
+            variables.push(CompiledClosureVariable {
+                binding: capture.binding(),
+                slot: capture.slot(),
+                source,
+                policy: binding.policy(),
+            });
+        }
+        sources.sort_unstable();
+        if sources.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "compiled closure sources are unique within one child",
+                span: Some(metadata.span()),
+            });
+        }
+        Ok(variables)
+    }
+
     fn scope_for_binding(&self, binding: BindingId) -> Result<ScopeId, LeafCompilationError> {
         self.planned
             .identities
@@ -1626,7 +2293,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             })
     }
 
-    fn selected_ordinary_leaf(
+    fn selected_ordinary_function(
         &self,
         executable_id: ExecutableId,
     ) -> Result<(&Executable, &Function<'arena>), LeafCompilationError> {
@@ -1706,15 +2373,6 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 UnsupportedLeafFeature::UnsupportedCompilationUnit,
                 function.span,
             );
-        }
-        if let Some(child) = self
-            .planned
-            .plan
-            .executables()
-            .iter()
-            .find(|candidate| candidate.parent() == Some(executable_id))
-        {
-            return unsupported(UnsupportedLeafFeature::NestedExecutable, child.span());
         }
         if let Some(reference) = self
             .planned
@@ -2008,14 +2666,359 @@ enum FrameSlot {
     Capture(u16),
 }
 
+#[derive(Clone, Copy)]
+enum ScopeEntryInitialization {
+    Uninitialized {
+        slot: LocalSlot,
+        span: Span,
+    },
+    Function {
+        slot: FrameSlot,
+        child: ExecutableId,
+        span: Span,
+    },
+}
+
+impl ScopeEntryInitialization {
+    const fn order_key(&self) -> (u8, u16) {
+        match self {
+            Self::Function {
+                slot: FrameSlot::Argument(slot),
+                ..
+            } => (0, slot.0),
+            Self::Uninitialized { slot, .. }
+            | Self::Function {
+                slot: FrameSlot::Local(slot),
+                ..
+            } => (1, slot.index()),
+            Self::Function {
+                slot: FrameSlot::Capture(slot),
+                ..
+            } => (2, *slot),
+        }
+    }
+}
+
+struct FunctionTreeLayout {
+    child_ranges: Box<[Range<usize>]>,
+    children: Box<[ExecutableId]>,
+    constant_indices: Box<[Option<u32>]>,
+    variable_references: Box<[Option<u16>]>,
+    function_declarations: Box<[Option<ExecutableId>]>,
+}
+
+struct FunctionChildLayout {
+    child_ranges: Box<[Range<usize>]>,
+    children: Box<[ExecutableId]>,
+    constant_indices: Box<[Option<u32>]>,
+}
+
+struct FunctionChildTables {
+    children: Box<[ExecutableId]>,
+    constant_indices: Box<[Option<u32>]>,
+}
+
+impl FunctionTreeLayout {
+    fn new(plan: &StoragePlan) -> Result<Self, LeafCompilationError> {
+        let executables = plan.executables();
+        let FunctionChildLayout {
+            child_ranges,
+            children,
+            constant_indices,
+        } = Self::build_child_layout(executables)?;
+        let variable_references = Self::build_variable_references(plan, executables)?;
+        Ok(Self {
+            child_ranges,
+            children,
+            constant_indices,
+            variable_references,
+            function_declarations: vec![None; plan.bindings().len()].into_boxed_slice(),
+        })
+    }
+
+    fn build_child_layout(
+        executables: &[Executable],
+    ) -> Result<FunctionChildLayout, LeafCompilationError> {
+        let child_counts = Self::count_children(executables)?;
+        let (child_ranges, child_total) = Self::build_child_ranges(child_counts)?;
+        let FunctionChildTables {
+            children,
+            constant_indices,
+        } = Self::populate_child_tables(executables, &child_ranges, child_total)?;
+        Ok(FunctionChildLayout {
+            child_ranges: child_ranges.into_boxed_slice(),
+            children,
+            constant_indices,
+        })
+    }
+
+    fn count_children(executables: &[Executable]) -> Result<Vec<usize>, LeafCompilationError> {
+        let mut child_counts = vec![0_usize; executables.len()];
+        for (expected_index, executable) in executables.iter().enumerate() {
+            if executable.id().index() != expected_index {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "executable identities are dense and ordered",
+                    span: Some(executable.span()),
+                });
+            }
+            let Some(parent) = executable.parent() else {
+                continue;
+            };
+            if parent.index() >= expected_index {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "executable parent precedes its child",
+                    span: Some(executable.span()),
+                });
+            }
+            let count = child_counts
+                .get_mut(parent.index())
+                .ok_or(LeafCompilationError::InvalidExecutable { executable: parent })?;
+            *count = count
+                .checked_add(1)
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "function constants",
+                })?;
+        }
+        Ok(child_counts)
+    }
+
+    fn build_child_ranges(
+        child_counts: Vec<usize>,
+    ) -> Result<(Vec<Range<usize>>, usize), LeafCompilationError> {
+        let mut child_ranges = Vec::with_capacity(child_counts.len());
+        let mut child_total = 0_usize;
+        for count in child_counts {
+            let start = child_total;
+            child_total =
+                child_total
+                    .checked_add(count)
+                    .ok_or(LeafCompilationError::CapacityExceeded {
+                        domain: "function constants",
+                    })?;
+            child_ranges.push(start..child_total);
+        }
+        Ok((child_ranges, child_total))
+    }
+
+    fn populate_child_tables(
+        executables: &[Executable],
+        child_ranges: &[Range<usize>],
+        child_total: usize,
+    ) -> Result<FunctionChildTables, LeafCompilationError> {
+        let mut children = vec![None; child_total];
+        let mut child_cursors = child_ranges
+            .iter()
+            .map(|range| range.start)
+            .collect::<Vec<_>>();
+        let mut constant_indices = vec![None; executables.len()];
+        for executable in executables {
+            let Some(parent) = executable.parent() else {
+                continue;
+            };
+            let cursor = child_cursors
+                .get_mut(parent.index())
+                .ok_or(LeafCompilationError::InvalidExecutable { executable: parent })?;
+            let range = child_ranges
+                .get(parent.index())
+                .ok_or(LeafCompilationError::InvalidExecutable { executable: parent })?;
+            let constant_index = u32::try_from(cursor.checked_sub(range.start).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "child cursor remains inside its parent range",
+                    span: Some(executable.span()),
+                },
+            )?)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "function constants",
+            })?;
+            let target =
+                children
+                    .get_mut(*cursor)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "child cursor indexes the flat child table",
+                        span: Some(executable.span()),
+                    })?;
+            if target.replace(executable.id()).is_some() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "child executable has one flat table position",
+                    span: Some(executable.span()),
+                });
+            }
+            *cursor = cursor
+                .checked_add(1)
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "function constants",
+                })?;
+            let slot = constant_indices.get_mut(executable.id().index()).ok_or(
+                LeafCompilationError::InvalidExecutable {
+                    executable: executable.id(),
+                },
+            )?;
+            if slot.replace(constant_index).is_some() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "child executable has one parent constant index",
+                    span: Some(executable.span()),
+                });
+            }
+        }
+        let children = children
+            .into_iter()
+            .enumerate()
+            .map(|(index, child)| {
+                child.ok_or_else(|| LeafCompilationError::SemanticInvariant {
+                    invariant: "flat child table is completely populated",
+                    span: Self::child_owner_span(executables, child_ranges, index),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FunctionChildTables {
+            children: children.into_boxed_slice(),
+            constant_indices: constant_indices.into_boxed_slice(),
+        })
+    }
+
+    fn child_owner_span(
+        executables: &[Executable],
+        child_ranges: &[Range<usize>],
+        child_index: usize,
+    ) -> Option<Span> {
+        let owner_index = child_ranges.partition_point(|range| range.end <= child_index);
+        child_ranges
+            .get(owner_index)
+            .filter(|range| range.contains(&child_index))?;
+        executables.get(owner_index).map(Executable::span)
+    }
+
+    fn build_variable_references(
+        plan: &StoragePlan,
+        executables: &[Executable],
+    ) -> Result<Box<[Option<u16>]>, LeafCompilationError> {
+        let mut variable_references = vec![None; plan.bindings().len()];
+        for executable in executables {
+            let bindings = plan.bindings_for(executable.id()).ok_or(
+                LeafCompilationError::InvalidExecutable {
+                    executable: executable.id(),
+                },
+            )?;
+            let mut capture_count = 0_usize;
+            for binding in bindings {
+                if !binding.is_frame_captured() {
+                    continue;
+                }
+                let index = checked_function_index(capture_count, "function variable references")?;
+                let slot = variable_references.get_mut(binding.id().index()).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "captured binding indexes variable-reference layout",
+                        span: binding.declaration_spans().first().copied(),
+                    },
+                )?;
+                if slot.replace(index).is_some() {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "captured binding has one variable-reference index",
+                        span: binding.declaration_spans().first().copied(),
+                    });
+                }
+                capture_count =
+                    capture_count
+                        .checked_add(1)
+                        .ok_or(LeafCompilationError::CapacityExceeded {
+                            domain: "function variable references",
+                        })?;
+            }
+            checked_function_entry_count(capture_count, "function variable references")?;
+        }
+        Ok(variable_references.into_boxed_slice())
+    }
+
+    fn children(&self, executable: ExecutableId) -> Result<&[ExecutableId], LeafCompilationError> {
+        let range = self
+            .child_ranges
+            .get(executable.index())
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        self.children
+            .get(range.clone())
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "executable child range indexes the flat child table",
+                span: None,
+            })
+    }
+
+    fn constant_index(&self, executable: ExecutableId) -> Option<u32> {
+        self.constant_indices
+            .get(executable.index())
+            .copied()
+            .flatten()
+    }
+
+    fn variable_reference(&self, binding: BindingId) -> Option<u16> {
+        self.variable_references
+            .get(binding.index())
+            .copied()
+            .flatten()
+    }
+
+    fn record_function_declaration(
+        &mut self,
+        binding: BindingId,
+        executable: ExecutableId,
+    ) -> Result<(), LeafCompilationError> {
+        let target = self.function_declarations.get_mut(binding.index()).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "function declaration binding indexes instantiation layout",
+                span: None,
+            },
+        )?;
+        *target = Some(executable);
+        Ok(())
+    }
+
+    fn function_declaration(&self, binding: BindingId) -> Option<ExecutableId> {
+        self.function_declarations
+            .get(binding.index())
+            .copied()
+            .flatten()
+    }
+
+    fn subtree_preorder(
+        &self,
+        root: ExecutableId,
+    ) -> Result<Vec<ExecutableId>, LeafCompilationError> {
+        self.children(root)?;
+        let mut visited = vec![false; self.child_ranges.len()];
+        let mut preorder = Vec::new();
+        let mut work = vec![root];
+        while let Some(executable) = work.pop() {
+            let seen = visited
+                .get_mut(executable.index())
+                .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+            if std::mem::replace(seen, true) {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "function subtree has one acyclic parent path",
+                    span: None,
+                });
+            }
+            preorder.push(executable);
+            for child in self.children(executable)?.iter().rev() {
+                work.push(*child);
+            }
+        }
+        Ok(preorder)
+    }
+}
+
 struct FrameLocal {
     binding: BindingId,
     slot: LocalSlot,
 }
 
+#[derive(Clone, Copy)]
+struct FrameBindingSlot {
+    binding: BindingId,
+    slot: FrameSlot,
+}
+
 struct FrameLayout {
     executable: ExecutableId,
-    slots: Vec<Option<FrameSlot>>,
+    slots: Vec<FrameBindingSlot>,
     locals: Vec<FrameLocal>,
     local_count: u32,
     capture_count: u32,
@@ -2023,12 +3026,20 @@ struct FrameLayout {
 
 impl FrameLayout {
     fn new(plan: &StoragePlan, executable: ExecutableId) -> Result<Self, LeafCompilationError> {
-        let mut slots = vec![None; plan.bindings().len()];
-        let mut locals = Vec::new();
-        let mut local_count = 0_u32;
         let bindings = plan
             .bindings_for(executable)
             .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let captures = plan
+            .frame_captures_for(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let slot_capacity = bindings.len().checked_add(captures.len()).ok_or(
+            LeafCompilationError::CapacityExceeded {
+                domain: "function frame bindings",
+            },
+        )?;
+        let mut slots = Vec::with_capacity(slot_capacity);
+        let mut locals = Vec::new();
+        let mut local_count = 0_u32;
         let executable_metadata = plan
             .executable(executable)
             .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
@@ -2065,22 +3076,11 @@ impl FrameLayout {
                     return unsupported(UnsupportedLeafFeature::UnsupportedBinding, span);
                 }
             };
-            let target = slots.get_mut(binding.id().index()).ok_or(
-                LeafCompilationError::SemanticInvariant {
-                    invariant: "binding identity indexes frame layout",
-                    span: binding.declaration_spans().first().copied(),
-                },
-            )?;
-            if target.replace(slot).is_some() {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "one frame slot per compiler binding",
-                    span: binding.declaration_spans().first().copied(),
-                });
-            }
+            slots.push(FrameBindingSlot {
+                binding: binding.id(),
+                slot,
+            });
         }
-        let captures = plan
-            .frame_captures_for(executable)
-            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
         let capture_count = checked_function_entry_count(captures.len(), "function capture slots")?;
         for (expected_capture_index, capture) in captures.iter().enumerate() {
             let capture_index =
@@ -2093,17 +3093,18 @@ impl FrameLayout {
                         .and_then(|binding| binding.declaration_spans().first().copied()),
                 });
             }
-            let target = slots.get_mut(capture.binding().index()).ok_or(
-                LeafCompilationError::SemanticInvariant {
-                    invariant: "captured binding identity indexes frame layout",
-                    span: None,
-                },
-            )?;
-            if target.replace(FrameSlot::Capture(capture_index)).is_some() {
+            slots.push(FrameBindingSlot {
+                binding: capture.binding(),
+                slot: FrameSlot::Capture(capture_index),
+            });
+        }
+        slots.sort_unstable_by_key(|entry| entry.binding);
+        for duplicate in slots.windows(2) {
+            if duplicate[0].binding == duplicate[1].binding {
                 return Err(LeafCompilationError::SemanticInvariant {
                     invariant: "one frame or capture slot per compiler binding",
                     span: plan
-                        .binding(capture.binding())
+                        .binding(duplicate[0].binding)
                         .and_then(|binding| binding.declaration_spans().first().copied()),
                 });
             }
@@ -2118,17 +3119,23 @@ impl FrameLayout {
     }
 
     fn slot(&self, binding: BindingId) -> Option<FrameSlot> {
-        self.slots.get(binding.index()).copied().flatten()
+        let index = self
+            .slots
+            .binary_search_by_key(&binding, |entry| entry.binding)
+            .ok()?;
+        Some(self.slots[index].slot)
     }
 }
 
-struct ValidatedLeaf {
+struct ValidatedFunction {
     strict: bool,
     argument_count: u32,
     local_count: u32,
     capture_count: u32,
     capture_layout: CompilerCaptureLayout,
     locals: Vec<LoweredLocal>,
+    constants: Vec<CompiledFunctionConstant>,
+    closure_variables: Vec<CompiledClosureVariable>,
     flow: PlannedControlFlow,
 }
 
@@ -2351,11 +3358,29 @@ impl FinishedControlFlow {
         self.verify_with_capture_layout(domains, header, CompilerCaptureLayout::default(), limits)
     }
 
+    #[cfg(test)]
     fn verify_with_capture_layout(
         self,
         domains: FunctionIndexDomains,
         header: UnverifiedFunctionHeader,
         capture_layout: CompilerCaptureLayout,
+        limits: VerificationLimits,
+    ) -> Result<(Vec<SourceInstruction>, VerifiedControlFlow), LeafCompilationError> {
+        self.verify_with_layouts(
+            domains,
+            header,
+            capture_layout,
+            CompilerConstantLayout::default(),
+            limits,
+        )
+    }
+
+    fn verify_with_layouts(
+        self,
+        domains: FunctionIndexDomains,
+        header: UnverifiedFunctionHeader,
+        capture_layout: CompilerCaptureLayout,
+        constant_layout: CompilerConstantLayout,
         limits: VerificationLimits,
     ) -> Result<(Vec<SourceInstruction>, VerifiedControlFlow), LeafCompilationError> {
         let Self {
@@ -2365,7 +3390,8 @@ impl FinishedControlFlow {
         } = self;
         let control_flow = match verify_compiler_control_flow(
             UnverifiedCompilerFunctionBody::new(bytecode, domains, header)
-                .with_capture_layout(capture_layout),
+                .with_capture_layout(capture_layout)
+                .with_constant_layout(constant_layout),
             limits,
         ) {
             Ok(control_flow) => control_flow,
@@ -2545,6 +3571,16 @@ fn plan_put_slot(slot: FrameSlot, span: Span) -> PlannedInstruction {
     PlannedInstruction::new(opcode, operands, span)
 }
 
+fn anonymous_function_definition_span(mut expression: &Expression<'_>) -> Option<Span> {
+    while let Expression::ParenthesizedExpression(parenthesized) = expression {
+        expression = &parenthesized.expression;
+    }
+    match expression {
+        Expression::FunctionExpression(function) if function.id.is_none() => Some(function.span),
+        _ => None,
+    }
+}
+
 fn plan_literal(
     expression: &Expression<'_>,
 ) -> Option<Result<PlannedInstruction, LeafCompilationError>> {
@@ -2688,6 +3724,8 @@ pub enum UnsupportedLeafFeature {
     NonOrdinaryFunction,
     /// A named function expression requires its immutable self binding.
     NamedFunctionExpression,
+    /// An anonymous function needs exact inferred-name initialization.
+    InferredFunctionName,
     /// The Oxc function form is neither a declaration nor function expression.
     UnsupportedFunctionForm,
     /// Object methods and accessors need distinct prototype/home-object flags.
@@ -2911,11 +3949,15 @@ mod tests {
                 };
                 let layout = FrameLayout::new(context.storage_plan(), executable.id())
                     .expect("frame layout");
+                let tree_layout = context
+                    .function_tree_layout()
+                    .expect("function tree layout");
                 let capture_layout = context
                     .compiler_capture_layout(
                         executable.id(),
                         function.scope_id.get().expect("function scope"),
                         &layout,
+                        &tree_layout,
                     )
                     .expect("capture layout");
 
@@ -2960,8 +4002,14 @@ mod tests {
                     .expect("function scope");
                 let layout =
                     FrameLayout::new(context.storage_plan(), executable.id()).expect("frame layout");
+                let tree_layout = context.function_tree_layout().expect("function tree layout");
                 let capture_layout = context
-                    .compiler_capture_layout(executable.id(), function_scope, &layout)
+                    .compiler_capture_layout(
+                        executable.id(),
+                        function_scope,
+                        &layout,
+                        &tree_layout,
+                    )
                     .expect("capture layout");
                 assert_eq!(
                     capture_layout.bindings(),
@@ -3056,8 +4104,14 @@ mod tests {
                 let inner_scope = inner.scope_id.get().expect("inner scope");
                 let layout =
                     FrameLayout::new(context.storage_plan(), executable.id()).expect("frame layout");
+                let tree_layout = context.function_tree_layout().expect("function tree layout");
                 let capture_layout = context
-                    .compiler_capture_layout(executable.id(), function_scope, &layout)
+                    .compiler_capture_layout(
+                        executable.id(),
+                        function_scope,
+                        &layout,
+                        &tree_layout,
+                    )
                     .expect("capture layout");
                 let captured_bindings = capture_layout.bindings().to_vec();
 
@@ -3085,12 +4139,7 @@ mod tests {
                     )
                     .expect("abrupt cleanup");
                 flow.bind(&done).expect("done binding");
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::ReturnUndef,
-                    Operands::None,
-                    loop_statement.span,
-                ))
-                .expect("terminal");
+                emit_return_undefined(&mut flow, loop_statement.span, "terminal");
                 let header =
                     UnverifiedFunctionHeader::stripped_ordinary_source_function_with_variable_references(
                         false,
@@ -3293,6 +4342,15 @@ mod tests {
             .expect("verified capture fixture")
     }
 
+    fn emit_return_undefined(flow: &mut PlannedControlFlow, span: Span, expectation: &str) {
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::ReturnUndef,
+            Operands::None,
+            span,
+        ))
+        .expect(expectation);
+    }
+
     const CAPTURED_FOR_CONTINUE_SOURCE: &str = "function outer(){ for(let i=0;i<2;i++){ \
         const capture=function(){return i;}; continue; } }";
 
@@ -3322,11 +4380,15 @@ mod tests {
                 let scope = statement.scope_id.get().expect("for scope");
                 let layout = FrameLayout::new(context.storage_plan(), executable.id())
                     .expect("frame layout");
+                let tree_layout = context
+                    .function_tree_layout()
+                    .expect("function tree layout");
                 let capture_layout = context
                     .compiler_capture_layout(
                         executable.id(),
                         function.scope_id.get().expect("function scope"),
                         &layout,
+                        &tree_layout,
                     )
                     .expect("capture layout");
 
@@ -3372,7 +4434,7 @@ mod tests {
                     .expect("loop-head rotation");
                 let update = statement.update.as_ref().expect("update");
                 context
-                    .plan_expression(update, &layout, &mut flow)
+                    .plan_expression(update, &layout, &tree_layout, &mut flow)
                     .expect("update");
                 flow.emit(PlannedInstruction::new(
                     FinalOpcode::Drop,
@@ -3380,19 +4442,9 @@ mod tests {
                     update.span(),
                 ))
                 .expect("drop update");
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::ReturnUndef,
-                    Operands::None,
-                    statement.span,
-                ))
-                .expect("rotation terminal");
+                emit_return_undefined(&mut flow, statement.span, "rotation terminal");
                 flow.bind(&done).expect("done label");
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::ReturnUndef,
-                    Operands::None,
-                    statement.span,
-                ))
-                .expect("done terminal");
+                emit_return_undefined(&mut flow, statement.span, "done terminal");
                 verify_capture_fixture(flow, layout.local_count, capture_layout, 1)
             },
         )

@@ -186,6 +186,51 @@ impl CompilerCaptureLayout {
     }
 }
 
+/// Compiler-known runtime kind of one constant-pool entry.
+///
+/// This metadata is deliberately narrower than an actual constant value. It
+/// lets staged control-flow verification distinguish a value loaded by
+/// `push_const` from a nested function template instantiated by `fclosure`
+/// without granting execution authority to the certificate.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CompilerConstantKind {
+    /// An ordinary JavaScript value.
+    Value,
+    /// A compiler-declared nested bytecode-function template.
+    Function,
+}
+
+/// Immutable compiler-owned type layout for one function's constant pool.
+///
+/// Entries are ordered by constant-pool index. Actual values and nested
+/// function bodies remain the responsibility of the later whole-function
+/// verifier.
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct CompilerConstantLayout {
+    kinds: Arc<[CompilerConstantKind]>,
+}
+
+impl CompilerConstantLayout {
+    /// Creates a constant layout indexed by `kinds` order.
+    #[must_use]
+    pub const fn new(kinds: Arc<[CompilerConstantKind]>) -> Self {
+        Self { kinds }
+    }
+
+    /// Returns the complete constant-kind table.
+    #[must_use]
+    pub fn kinds(&self) -> &[CompilerConstantKind] {
+        &self.kinds
+    }
+
+    /// Resolves one constant-pool index.
+    #[must_use]
+    pub fn kind(&self, index: u32) -> Option<CompilerConstantKind> {
+        let index = usize::try_from(index).ok()?;
+        self.kinds.get(index).copied()
+    }
+}
+
 /// Owned bytecode and structural counts that have not been verified.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnverifiedFunctionBody {
@@ -251,6 +296,7 @@ pub struct UnverifiedCompilerFunctionBody {
     domains: FunctionIndexDomains,
     function_header: UnverifiedFunctionHeader,
     capture_layout: Option<CompilerCaptureLayout>,
+    constant_layout: Option<CompilerConstantLayout>,
 }
 
 impl UnverifiedCompilerFunctionBody {
@@ -266,6 +312,7 @@ impl UnverifiedCompilerFunctionBody {
             domains,
             function_header,
             capture_layout: None,
+            constant_layout: None,
         }
     }
 
@@ -273,6 +320,13 @@ impl UnverifiedCompilerFunctionBody {
     #[must_use]
     pub fn with_capture_layout(mut self, capture_layout: CompilerCaptureLayout) -> Self {
         self.capture_layout = Some(capture_layout);
+        self
+    }
+
+    /// Attaches the compiler-owned constant-pool type layout.
+    #[must_use]
+    pub fn with_constant_layout(mut self, constant_layout: CompilerConstantLayout) -> Self {
+        self.constant_layout = Some(constant_layout);
         self
     }
 
@@ -298,6 +352,12 @@ impl UnverifiedCompilerFunctionBody {
     #[must_use]
     pub const fn capture_layout(&self) -> Option<&CompilerCaptureLayout> {
         self.capture_layout.as_ref()
+    }
+
+    /// Returns the compiler-owned constant-pool type layout.
+    #[must_use]
+    pub const fn constant_layout(&self) -> Option<&CompilerConstantLayout> {
+        self.constant_layout.as_ref()
     }
 }
 
@@ -566,6 +626,7 @@ pub struct VerifiedControlFlow {
     domains: FunctionIndexDomains,
     function_header: VerifiedFunctionHeader,
     compiler_capture_layout: Option<CompilerCaptureLayout>,
+    compiler_constant_layout: Option<CompilerConstantLayout>,
 }
 
 impl VerifiedControlFlow {
@@ -607,6 +668,15 @@ impl VerifiedControlFlow {
     #[must_use]
     pub const fn compiler_capture_layout(&self) -> Option<&CompilerCaptureLayout> {
         self.compiler_capture_layout.as_ref()
+    }
+
+    /// Returns the validated compiler constant-pool type layout.
+    ///
+    /// Serialized control-flow certificates return `None` because actual
+    /// serialized constants require later whole-function verification.
+    #[must_use]
+    pub const fn compiler_constant_layout(&self) -> Option<&CompilerConstantLayout> {
+        self.compiler_constant_layout.as_ref()
     }
 
     /// Returns whether `pc` starts an instruction.
@@ -831,6 +901,28 @@ pub enum VerificationErrorKind {
     MissingCompilerCaptureLayout {
         /// Variable-reference cells declared by the function header.
         variable_references: u32,
+    },
+    /// The compiler constant layout does not define every declared
+    /// constant-pool entry exactly once.
+    CompilerConstantCountMismatch {
+        /// Constant-pool length declared by the function domains.
+        declared: u32,
+        /// Entries supplied by the compiler constant layout.
+        entries: u64,
+    },
+    /// Compiler output declared constants without supplying their type layout.
+    MissingCompilerConstantLayout {
+        /// Constant-pool length declared by the function domains.
+        constants: u32,
+    },
+    /// A constant-consuming opcode does not match the compiler-declared kind.
+    CompilerConstantKindMismatch {
+        /// Rejected constant-pool index.
+        index: u32,
+        /// Kind required by the opcode.
+        expected: CompilerConstantKind,
+        /// Kind supplied by the compiler layout.
+        actual: CompilerConstantKind,
     },
     /// A compiler capture names a binding outside its frame domain.
     CompilerCaptureIndexOutOfBounds {
@@ -1128,6 +1220,22 @@ impl fmt::Display for VerificationErrorKind {
                 formatter,
                 "compiler function declares {variable_references} variable-reference cells without a capture layout"
             ),
+            Self::CompilerConstantCountMismatch { declared, entries } => write!(
+                formatter,
+                "compiler constant-layout count {entries} does not equal declared constant-pool length {declared}"
+            ),
+            Self::MissingCompilerConstantLayout { constants } => write!(
+                formatter,
+                "compiler function declares {constants} constants without a constant-pool type layout"
+            ),
+            Self::CompilerConstantKindMismatch {
+                index,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "compiler constant {index} has kind {actual}, but the opcode requires {expected}"
+            ),
             Self::CompilerCaptureIndexOutOfBounds { binding, len } => write!(
                 formatter,
                 "compiler capture {binding} is outside its frame domain length {len}"
@@ -1264,6 +1372,15 @@ impl fmt::Display for CompilerCapturedBinding {
     }
 }
 
+impl fmt::Display for CompilerConstantKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Value => "value",
+            Self::Function => "function",
+        })
+    }
+}
+
 impl fmt::Display for FunctionCountDomain {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -1380,6 +1497,7 @@ pub fn verify_control_flow(
             expected_stack_size,
         },
         None,
+        None,
         limits,
     )?;
 
@@ -1414,12 +1532,20 @@ pub fn verify_compiler_control_flow(
     body: UnverifiedCompilerFunctionBody,
     limits: VerificationLimits,
 ) -> Result<VerifiedControlFlow, VerificationError> {
+    let UnverifiedCompilerFunctionBody {
+        bytecode,
+        domains,
+        function_header,
+        capture_layout,
+        constant_layout,
+    } = body;
     verify_control_flow_common(
-        body.bytecode,
-        body.domains,
-        body.function_header,
+        bytecode,
+        domains,
+        function_header,
         StackVerificationMode::CompilerGenerated,
-        body.capture_layout,
+        capture_layout,
+        constant_layout,
         limits,
     )
 }
@@ -1451,6 +1577,7 @@ fn verify_control_flow_common(
     function_header: UnverifiedFunctionHeader,
     stack_mode: StackVerificationMode,
     compiler_capture_layout: Option<CompilerCaptureLayout>,
+    compiler_constant_layout: Option<CompilerConstantLayout>,
     limits: VerificationLimits,
 ) -> Result<VerifiedControlFlow, VerificationError> {
     validate_limits_and_counts(
@@ -1487,6 +1614,19 @@ fn verify_control_flow_common(
     let compiler_capture_layout = compiler_capture_layout
         .map(|layout| validate_compiler_capture_layout(layout, domains, &function_header))
         .transpose()?;
+    if stack_mode.requires_empty_exits()
+        && compiler_constant_layout.is_none()
+        && domains.constant_pool_len != 0
+    {
+        return Err(VerificationError::root(
+            VerificationErrorKind::MissingCompilerConstantLayout {
+                constants: domains.constant_pool_len,
+            },
+        ));
+    }
+    let compiler_constant_layout = compiler_constant_layout
+        .map(|layout| validate_compiler_constant_layout(layout, domains))
+        .transpose()?;
     let mut instructions = validate_static_semantics(
         &decoded,
         &instruction_start_bitmap,
@@ -1494,6 +1634,7 @@ fn verify_control_flow_common(
         domains,
         function_header.kind(),
         compiler_capture_layout.as_ref(),
+        compiler_constant_layout.as_ref(),
     )?;
     let computed_stack_size =
         analyze_ordinary_stack(&mut instructions, limits, stack_mode.requires_empty_exits())?;
@@ -1506,7 +1647,24 @@ fn verify_control_flow_common(
         domains,
         function_header,
         compiler_capture_layout: compiler_capture_layout.map(|validated| validated.layout),
+        compiler_constant_layout,
     })
+}
+
+fn validate_compiler_constant_layout(
+    layout: CompilerConstantLayout,
+    domains: FunctionIndexDomains,
+) -> Result<CompilerConstantLayout, VerificationError> {
+    let entries = usize_to_u64(layout.kinds.len());
+    if entries != u64::from(domains.constant_pool_len) {
+        return Err(VerificationError::root(
+            VerificationErrorKind::CompilerConstantCountMismatch {
+                declared: domains.constant_pool_len,
+                entries,
+            },
+        ));
+    }
+    Ok(layout)
 }
 
 #[derive(Debug)]
@@ -1819,6 +1977,7 @@ fn validate_static_semantics(
     domains: FunctionIndexDomains,
     function_kind: FunctionKind,
     compiler_capture_layout: Option<&ValidatedCompilerCaptureLayout>,
+    compiler_constant_layout: Option<&CompilerConstantLayout>,
 ) -> Result<Vec<VerifiedInstruction>, VerificationError> {
     let mut verified = Vec::new();
     verified.try_reserve_exact(decoded.len()).map_err(|_| {
@@ -1867,6 +2026,21 @@ fn validate_static_semantics(
                         VerificationErrorKind::UnsupportedOpcodeSemantics { feature },
                     ));
                 }
+            } else if matches!(
+                decoded.instruction().opcode(),
+                FinalOpcode::PushConst
+                    | FinalOpcode::FClosure
+                    | FinalOpcode::PushConst8
+                    | FinalOpcode::FClosure8
+            ) {
+                if let Some(constant_layout) = compiler_constant_layout {
+                    validate_compiler_constant_kind(decoded, constant_layout)?;
+                } else {
+                    return Err(VerificationError::at_instruction(
+                        decoded,
+                        VerificationErrorKind::UnsupportedOpcodeSemantics { feature },
+                    ));
+                }
             } else {
                 return Err(VerificationError::at_instruction(
                     decoded,
@@ -1878,6 +2052,60 @@ fn validate_static_semantics(
     }
 
     Ok(verified)
+}
+
+fn validate_compiler_constant_kind(
+    decoded: DecodedInstruction,
+    constant_layout: &CompilerConstantLayout,
+) -> Result<(), VerificationError> {
+    let instruction = decoded.instruction();
+    let (index, expected) = match (instruction.opcode(), instruction.operands()) {
+        (FinalOpcode::PushConst, Operands::Const(index)) => (index, CompilerConstantKind::Value),
+        (FinalOpcode::PushConst8, Operands::Const8(index)) => {
+            (u32::from(index), CompilerConstantKind::Value)
+        }
+        (FinalOpcode::FClosure, Operands::Const(index)) => (index, CompilerConstantKind::Function),
+        (FinalOpcode::FClosure8, Operands::Const8(index)) => {
+            (u32::from(index), CompilerConstantKind::Function)
+        }
+        _ => {
+            return Err(VerificationError::at_instruction(
+                decoded,
+                VerificationErrorKind::MissingControlFlowOperand {
+                    expected: instruction.opcode().metadata().operand_format(),
+                },
+            ));
+        }
+    };
+    let actual = constant_layout.kind(index).ok_or_else(|| {
+        VerificationError::at_instruction(
+            decoded,
+            VerificationErrorKind::IndexOutOfBounds {
+                domain: OperandIndexDomain::ConstantPool,
+                index,
+                len: u32::try_from(constant_layout.kinds.len()).unwrap_or(u32::MAX),
+            },
+        )
+    })?;
+    if expected == CompilerConstantKind::Value && actual == CompilerConstantKind::Function {
+        return Err(VerificationError::at_instruction(
+            decoded,
+            VerificationErrorKind::UnsupportedOpcodeSemantics {
+                feature: UnsupportedVerifierFeature::RawFunctionStack,
+            },
+        ));
+    }
+    if actual != expected {
+        return Err(VerificationError::at_instruction(
+            decoded,
+            VerificationErrorKind::CompilerConstantKindMismatch {
+                index,
+                expected,
+                actual,
+            },
+        ));
+    }
+    Ok(())
 }
 
 fn validate_compiler_close_loc(

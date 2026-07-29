@@ -107,23 +107,11 @@ control-block allocation follows Rust's global allocator policy.
   to make runtimes, contexts, heaps, or JavaScript value handles cross-thread,
   and immutable string backing remains lock-free.
 
-## Evaluated external engine components
+## JavaScript semantic provenance
 
-Nova was inspected only at the user's explicit request to understand its Oxc
-frontend integration and dependency choices. Its source is not an
-implementation reference for this port: Nova is MPL-2.0, uses an
-engine-specific unsafe self-referential arena, and some runtime paths carry
-provenance from other JavaScript engines.
-
-The following Nova-associated components are not eligible dependencies:
-
-- Nova-owned `ecmascript_atomics`, `soavec`, and `small_string`;
-- Boa-owned `ryu-js` and `temporal_rs`;
-- Rust `regex` as an ECMAScript RegExp executor;
-- Nova's WTF-8 heap interner, garbage collector, JSON implementation, and
-  built-in implementations.
-
-The corresponding project boundaries remain QuickJS-derived:
+No alternate JavaScript runtime, compiler, garbage collector, built-in
+implementation, or RegExp executor is an eligible implementation reference or
+dependency. The project boundaries remain QuickJS-derived:
 
 - `Arc`-owned Latin-1/UTF-16 strings and a distinct atom table;
 - safe shared-memory/Atomics storage with `parking_lot` synchronization;
@@ -132,9 +120,8 @@ The corresponding project boundaries remain QuickJS-derived:
 - QuickJS-compatible RegExp bytecode and execution;
 - QuickJS's precise-sum accumulator.
 
-General-purpose crates such as `fast-float`, `num-bigint`, `num-traits`,
-`hashbrown`, and `ahash` may be evaluated independently as narrow
-infrastructure. None may be added until a project-owned semantic wrapper and
+General-purpose crates may be evaluated independently as narrow
+infrastructure. None may be added until a project-owned semantic wrapper and a
 QuickJS-oracle differential suite prove that the fast path is observationally
 equivalent and the fallback remains QuickJS-derived.
 

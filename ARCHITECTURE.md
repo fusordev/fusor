@@ -92,9 +92,9 @@ source identifier named `_default_` cannot collide with it.
 `SymbolId → BindingId`, and `ReferenceId → native reference` tables beside an
 `Arc<StoragePlan>` only while the arena is alive. Lowering never reconstructs
 identity from names or spans and never treats a unit-global `BindingId` as an
-argument or local slot. The first end-to-end ordinary leaf-function family is
+argument or local slot. The first end-to-end ordinary function-tree family is
 Script-only and accepts function declarations and anonymous `function`
-expressions. Its pool-free body slice handles simple
+expressions. Each function body's value-producing slice handles simple
 `var`/`let`/`const` declarations, TDZ setup, immediate Boolean/null/int32 and
 compact `BigInt` values, the empty string, resolved argument/local reads, unary
 and binary operators, short-circuit `&&`/`||`/`??`, conditional expressions,
@@ -106,16 +106,30 @@ lowers expressions and statements with iterative work lists, validates the
 complete selected body into typed pseudo-instructions before byte emission,
 assigns typed frame and imported-capture slots, and immediately produces a
 non-executable `VerifiedControlFlow` certificate. Scope entry reads Oxc's
-creator `ScopeId` directly, checks its creator `NodeId`, and emits TDZ
-initialization only for bindings owned by that exact scope, in reverse
-local-slot order. Scope exit and abrupt loop edges emit reverse-order
-`close_loc` for captured scoped locals; returns rely on whole-frame teardown.
-Classic `for` has one explicit loop-head scope and rotates its captured cells
-after initialization and on every natural or `continue` edge before update,
-without re-running TDZ initialization. All scheduling remains iterative, with
-no recursion guard. Constants, atoms, nested closure objects, labeled control,
-`for-in`, and `for-of` stay rejected until their owned records and semantics
-exist.
+creator `ScopeId` directly, checks its creator `NodeId`, instantiates body
+function declarations before user instructions, recreates block function
+declarations on every scope entry, and emits TDZ initialization only for
+ordinary lexical bindings owned by that exact scope. Duplicate body
+declarations retain every child template but only the last declaration
+initializes the shared argument/local slot. Scope exit and abrupt loop edges
+emit reverse-order `close_loc` for captured scoped locals; returns rely on
+whole-frame teardown. Classic `for` has one explicit loop-head scope and
+rotates its captured cells after initialization and on every natural or
+`continue` edge before update, without re-running TDZ initialization. All
+scheduling remains iterative and uses explicit work stacks; there is no
+recursion guard.
+
+`compile_tree` freezes the selected subtree as a flat immutable
+`CompiledFunctionTree` in executable preorder. Compilation is child-first, but
+uses no Rust call-stack recursion. Each parent's constant table contains its
+direct child templates in source order, and `fclosure8`/`fclosure` select the
+compact or full constant index encoding. Every child capture descriptor is
+normalized to either the immediate parent's own dense variable-reference cell
+or its imported closure environment. `compile_leaf` remains the explicit
+pool-free API and rejects a selection with children. Value and atom constants,
+raw class/function stack entries, inferred anonymous-function names, labeled
+control, `for-in`, and `for-of` stay rejected until their owned records and
+semantics exist.
 
 `BytecodeAssembler` keeps symbolic label handles provenance-bound to one
 assembler through immutable `Arc` identity. Labels never enter final operands.
@@ -139,18 +153,26 @@ Compiler bodies may attach an immutable capture layout whose dense order is
 the frame's variable-reference index. Verification checks its declared count,
 argument/local bounds, and binding uniqueness before conditionally admitting
 `close_loc` for scoped locals. Missing and explicitly empty layouts remain
-distinct. Serialized `close_loc` and all reference-construction opcodes remain
-fail-closed until whole-function vardef and closure metadata is verified.
+distinct. They may also attach an immutable constant-kind layout. The staged
+verifier admits `fclosure8`/`fclosure` only for compiler-declared function
+entries and admits `push_const8`/`push_const` only for ordinary value entries;
+using a function entry as a raw pushed value remains fail-closed. Constant
+bounds are checked before kinds, and complete predecode/static operand
+validation still precedes reachable stack analysis. Serialized constant
+opcodes, serialized `close_loc`, and all reference-construction opcodes remain
+fail-closed until whole-function constant, vardef, child, and closure metadata
+is verified.
 
 Module functions, object methods/accessors, and named function expressions fail
 closed until their distinct surrounding-storage, header, and self-binding
 behavior is implemented. The compiled artifact keeps the exact source text,
-storage plan, local layout, source table, and certificate in immutable `Arc`
-storage after the Oxc arena is dropped. Lowering accepts only an opaque
-executable selection issued by that context, so a same-index selection from
-another context is rejected. Unsupported bodies, unresolved names,
-global/module references requiring atom-backed operations, nested executable
-constants, and async/generator functions fail before byte emission.
+storage plan, local layout, direct-child constants, normalized capture
+descriptors, source table, and certificate in immutable `Arc` storage after the
+Oxc arena is dropped. Lowering accepts only an opaque executable selection
+issued by that context, so a same-index selection from another context is
+rejected. Unsupported bodies, unresolved names, global/module references
+requiring atom-backed operations, and async/generator functions fail before
+byte emission.
 
 Every successful unit also owns a `ModuleSyntaxRecord` for the module data that
 must survive the Oxc allocator. Static requests remain in source occurrence
@@ -201,7 +223,9 @@ non-executable certificate for complete predecode, instruction boundaries,
 validated execution-header bits and counts, function-local operand bounds,
 secondary operand domains, static successors, suspension and return
 function-kind compatibility, and reachable ordinary-value stack heights.
-Opcodes that require typed constants, raw function slots, handlers, finally
+Compiler bodies may supply capture and constant-kind layouts for the narrow
+`close_loc`, `push_const*`, and `fclosure*` cases described above. Serialized
+constant opcodes and opcodes requiring raw function slots, handlers, finally
 return addresses, iterator markers, or packed stack offsets fail closed. The VM
 boundary continues to require the future whole-function `VerifiedBytecode`.
 The symbolic assembler chooses the componentwise shortest valid final branch

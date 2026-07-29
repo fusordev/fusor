@@ -53,12 +53,15 @@ even in unreachable code, validates the serialized execution-header flag and
 mode domains, retains its typed function kind and counts, and analyzes
 reachable ordinary JavaScript-value stack heights. The six suspension opcodes
 are accepted only for their compatible function-kind families, while ordinary
-and tail returns are limited to normal functions. The slice still rejects
-opcodes whose correct verification needs typed constants, raw function slots,
-handler or iterator markers, finally return
-addresses, or packed stack offsets. Its opaque certificate has no execution
-API and cannot cross the VM trust boundary. The complete typed-stack and
-whole-function rules below remain mandatory before `VerifiedBytecode` exists.
+and tail returns are limited to normal functions. Compiler bodies may attach a
+constant-kind layout that conditionally admits ordinary value loads and nested
+closure creation; serialized bodies still reject every constant opcode. The
+slice rejects opcodes whose correct verification needs actual constant values,
+verified child bodies, raw function slots, handler or iterator markers,
+finally return addresses, or packed stack offsets. Its opaque certificate has
+no execution API and cannot cross the VM trust boundary. The complete
+typed-stack and whole-function rules below remain mandatory before
+`VerifiedBytecode` exists.
 
 Serialized bodies provide a stored maximum stack size, and
 `verify_control_flow` requires it to equal the recomputed reachable maximum.
@@ -82,6 +85,19 @@ argument/local bounds, and unique frame-binding identities. Only compiler
 bytecode with a matching scoped-local entry may use `close_loc`. Serialized
 `close_loc` and every `make_*_ref` opcode remain fail-closed until the complete
 vardef and closure descriptors are available.
+
+Compiler-generated bodies may also explicitly attach an immutable
+`CompilerConstantLayout`. Its dense entries classify each declared
+constant-pool position as an ordinary value or a nested function template.
+Absence is distinct from an explicitly validated empty layout, and its length
+must exactly equal the declared constant count. Complete predecode and
+constant-index bounds validation precede kind checks. `push_const8` and
+`push_const` require a value entry; `fclosure8` and `fclosure` require a
+function entry. Pushing a function entry remains rejected as a raw function
+stack value. The layout does not contain actual values or child bodies and
+therefore grants no execution authority. Serialized constant operations remain
+fail-closed until the whole-function graph verifier owns and validates the
+actual pool.
 
 **Rust hardening.** The compiler applies one further source-language invariant
 to the returned certificate: each reachable structured-statement label must
@@ -240,8 +256,8 @@ fail-closed capability.
 
 | Operand family | Required validation |
 | --- | --- |
-| `const`, `const8` | index is below `cpool.len()` |
-| `fclosure`, `fclosure8` | constant exists, is a bytecode-function constant, and that child verifies |
+| `const`, `const8` | index is below `cpool.len()`; staged compiler input additionally requires a value-kind entry, while serialized input remains unsupported |
+| `fclosure`, `fclosure8` | constant exists and is a bytecode-function constant; staged compiler input validates the declared function kind only, while the future graph verifier must verify the child |
 | atom-bearing formats | `AtomPoolIndex::get()` is below the enclosing function's atom-pool length; the referenced entry's namespace is valid for the opcode |
 | `loc`, `loc8`, `none_loc` | index is below `var_count` |
 | `arg`, `none_arg` | index is below `arg_count` |

@@ -11,8 +11,9 @@ mod lowering;
 mod storage;
 
 pub use lowering::{
-    CompilationContext, CompilationExecutable, CompiledLeafFunction, LeafCompilationError,
-    LocalSlot, LoweredLocal, SourceInstruction, UnsupportedLeafFeature,
+    CompilationContext, CompilationExecutable, CompiledClosureSource, CompiledClosureVariable,
+    CompiledFunction, CompiledFunctionConstant, CompiledFunctionTree, CompiledLeafFunction,
+    LeafCompilationError, LocalSlot, LoweredLocal, SourceInstruction, UnsupportedLeafFeature,
 };
 pub use storage::{
     BindingId, BindingStorage, CaptureSlot, CaptureSource, CompilationUnitKind, CompilerError,
