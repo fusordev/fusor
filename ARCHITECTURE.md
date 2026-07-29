@@ -84,6 +84,24 @@ distinct synthetic module-local `*default*` cell with the appropriate
 initialization policy. The asterisks are part of QuickJS's internal atom, so a
 source identifier named `_default_` cannot collide with it.
 
+`CompilationContext` keeps the transient Oxc `NodeId → ExecutableId`,
+`SymbolId → BindingId`, and `ReferenceId → native reference` tables beside an
+`Arc<StoragePlan>` only while the arena is alive. Lowering never reconstructs
+identity from names or spans and never treats a unit-global `BindingId` as an
+argument or local slot. Its first end-to-end ordinary leaf-function slice
+is Script-only, accepts function declarations and anonymous `function`
+expressions, validates the complete selected body, assigns typed frame slots,
+emits final QuickJS opcodes with owned PC-to-source spans, and immediately
+produces a non-executable `VerifiedControlFlow` certificate. Module functions,
+object methods/accessors, and named function expressions fail closed until
+their distinct surrounding-storage, header, and self-binding behavior is
+implemented. The compiled artifact keeps the exact source text, storage plan,
+local layout, source table, and certificate in immutable `Arc` storage after
+the Oxc arena is dropped. Lowering accepts only an opaque executable selection
+issued by that context, so a same-index selection from another context is
+rejected. Unsupported bodies, unresolved names, captures, nested executables,
+and async/generator functions fail before byte emission.
+
 Every successful unit also owns a `ModuleSyntaxRecord` for the module data that
 must survive the Oxc allocator. Static requests remain in source occurrence
 order, so repeated specifiers retain distinct typed indices, literal spans, and

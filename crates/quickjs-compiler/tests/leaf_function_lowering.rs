@@ -1,0 +1,407 @@
+use quickjs_bytecode::{
+    BytecodePc, FinalOpcode, FunctionIndexDomains, FunctionKind, Operands, VerificationLimits,
+};
+use quickjs_compiler::{
+    CompilationContext, CompilationExecutable, CompiledLeafFunction, LeafCompilationError,
+    UnsupportedLeafFeature,
+};
+use quickjs_frontend::{
+    CompilationGoal, FrontendOptions, GlobalScriptGoal, Span, with_parsed_program,
+};
+
+const SOURCE: &str = "function f(arg) { let local = arg; return local; }";
+
+fn compile(source: &str, name: &str) -> CompiledLeafFunction {
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning must succeed");
+            let executable = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some(name))
+                .expect("named function executable");
+            context
+                .compile_leaf(&executable, VerificationLimits::default())
+                .expect("leaf compilation must succeed")
+        },
+    )
+    .expect("front-end acceptance")
+}
+
+fn compile_error(source: &str, name: &str) -> LeafCompilationError {
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning must succeed");
+            let executable = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some(name))
+                .expect("named function executable");
+            context
+                .compile_leaf(&executable, VerificationLimits::default())
+                .expect_err("unsupported leaf must fail closed")
+        },
+    )
+    .expect("front-end acceptance")
+}
+
+#[test]
+fn lexical_identifier_leaf_matches_the_quickjs_final_opcode_oracle() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<CompilationExecutable>();
+    assert_send_sync::<CompiledLeafFunction>();
+
+    let compiled = compile(SOURCE, "f");
+    let flow = compiled.control_flow();
+    let instructions = flow
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let decoded = instruction.decoded();
+            (
+                decoded.pc(),
+                decoded.instruction().opcode(),
+                decoded.instruction().operands(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        instructions,
+        [
+            (
+                BytecodePc::new(0),
+                FinalOpcode::SetLocUninitialized,
+                Operands::Loc(0),
+            ),
+            (BytecodePc::new(3), FinalOpcode::GetArg0, Operands::NoneArg,),
+            (BytecodePc::new(4), FinalOpcode::PutLoc0, Operands::NoneLoc,),
+            (
+                BytecodePc::new(5),
+                FinalOpcode::GetLocCheck,
+                Operands::Loc(0),
+            ),
+            (BytecodePc::new(8), FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(flow.domains(), FunctionIndexDomains::new(0, 0, 1, 1, 0));
+    assert_eq!(flow.computed_stack_size(), 1);
+
+    let header = flow.function_header();
+    assert_eq!(header.kind(), FunctionKind::Normal);
+    assert_eq!(header.flags().bits(), 0x0243);
+    assert_eq!(header.defined_argument_count(), 1);
+    assert_eq!(header.variable_reference_count(), 0);
+    assert!(!header.mode().is_strict());
+
+    assert_eq!(compiled.executable().index(), 1);
+    assert_eq!(compiled.storage_plan().executables()[1].name(), Some("f"));
+    assert_eq!(compiled.source_text(), SOURCE);
+    assert_eq!(compiled.locals().len(), 1);
+    assert_eq!(compiled.locals()[0].slot().index(), 0);
+    assert_ne!(
+        compiled.locals()[0].binding().index(),
+        usize::from(compiled.locals()[0].slot().index()),
+        "unit-global binding identity must not be encoded as a local slot"
+    );
+    assert_eq!(
+        compiled
+            .source_instructions()
+            .iter()
+            .map(|entry| entry.pc())
+            .collect::<Vec<_>>(),
+        [
+            BytecodePc::new(0),
+            BytecodePc::new(3),
+            BytecodePc::new(4),
+            BytecodePc::new(5),
+            BytecodePc::new(8),
+        ]
+    );
+}
+
+#[test]
+fn oxc_reference_identity_selects_the_exact_argument_slot() {
+    let compiled = compile(
+        "let unrelated; function f(first, selected) { let local = selected; return local; }",
+        "f",
+    );
+    let instructions = compiled.control_flow().instructions();
+
+    assert_eq!(
+        instructions[1].decoded().instruction().opcode(),
+        FinalOpcode::GetArg1
+    );
+    assert_eq!(
+        instructions[1].decoded().instruction().operands(),
+        Operands::NoneArg
+    );
+    assert_eq!(compiled.control_flow().domains().argument_count(), 2);
+    assert_eq!(compiled.locals()[0].slot().index(), 0);
+}
+
+#[test]
+fn strictness_is_retained_without_debug_or_eval_header_bits() {
+    let compiled = compile(
+        "function f(arg) { \"use strict\"; let local = arg; return local; }",
+        "f",
+    );
+    let header = compiled.control_flow().function_header();
+
+    assert!(header.mode().is_strict());
+    assert!(!header.flags().has_debug());
+    assert!(!header.flags().is_eval());
+}
+
+#[test]
+fn unsupported_leaf_shapes_fail_closed_at_source_spans() {
+    let cases = [
+        (
+            "async function f(arg) { let local = arg; return local; }",
+            UnsupportedLeafFeature::NonOrdinaryFunction,
+            "async function f(arg) { let local = arg; return local; }",
+        ),
+        (
+            "function *f(arg) { let local = arg; return local; }",
+            UnsupportedLeafFeature::NonOrdinaryFunction,
+            "function *f(arg) { let local = arg; return local; }",
+        ),
+        (
+            "function f(arg) { function nested() {} let local = arg; return local; }",
+            UnsupportedLeafFeature::NestedExecutable,
+            "function nested() {}",
+        ),
+        (
+            "function f(arg) { let local = missing; return local; }",
+            UnsupportedLeafFeature::UnresolvedReference,
+            "missing",
+        ),
+        (
+            "function f(arg) { let local = arg; local; return local; }",
+            UnsupportedLeafFeature::UnsupportedBody,
+            "local;",
+        ),
+        (
+            "function f(arg) { let local = arg; return local; arg; }",
+            UnsupportedLeafFeature::UnsupportedBody,
+            "arg;",
+        ),
+        (
+            "const holder = function f(arg) { let local = arg; return local; };",
+            UnsupportedLeafFeature::NamedFunctionExpression,
+            "function f(arg) { let local = arg; return local; }",
+        ),
+    ];
+
+    for (source, expected_feature, expected_source) in cases {
+        let error = compile_error(source, "f");
+        let LeafCompilationError::Unsupported { feature, span } = error else {
+            panic!("expected unsupported feature for {source}");
+        };
+
+        assert_eq!(feature, expected_feature, "{source}");
+        assert_eq!(
+            &source[span.start as usize..span.end as usize],
+            expected_source,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn anonymous_ordinary_function_expression_uses_the_same_owned_boundary() {
+    let source = "const holder = function (arg) { const local = arg; return local; };";
+    let compiled = with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning");
+            let executable = context
+                .executables()
+                .nth(1)
+                .expect("anonymous function executable");
+            context
+                .compile_leaf(&executable, VerificationLimits::default())
+                .expect("anonymous ordinary leaf")
+        },
+    )
+    .expect("front-end acceptance");
+
+    assert_eq!(compiled.source_text(), source);
+    assert_eq!(
+        compiled.control_flow().function_header().flags().bits(),
+        0x0243
+    );
+}
+
+#[test]
+fn object_function_value_is_ordinary_but_method_form_fails_closed() {
+    let value_source = "const object = { f: function (arg) { let local = arg; return local; } };";
+    let compiled = with_parsed_program(
+        value_source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning");
+            let executable = context
+                .executables()
+                .nth(1)
+                .expect("function value executable");
+            context
+                .compile_leaf(&executable, VerificationLimits::default())
+                .expect("ordinary object-property function value")
+        },
+    )
+    .expect("front-end acceptance");
+    assert_eq!(
+        compiled.control_flow().function_header().flags().bits(),
+        0x0243
+    );
+
+    let method_source = "const object = { f(arg) { let local = arg; return local; } };";
+    let error = with_parsed_program(
+        method_source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning");
+            let executable = context
+                .executables()
+                .nth(1)
+                .expect("object method executable");
+            context
+                .compile_leaf(&executable, VerificationLimits::default())
+                .expect_err("method header policy is not implemented")
+        },
+    )
+    .expect("front-end acceptance");
+    let LeafCompilationError::Unsupported { feature, .. } = error else {
+        panic!("object method must fail as unsupported");
+    };
+    assert_eq!(feature, UnsupportedLeafFeature::ObjectMethodOrAccessor);
+}
+
+#[test]
+fn module_function_fails_closed_at_the_script_only_boundary() {
+    let source = "export function f(arg) { let local = arg; return local; }";
+    let error = with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::Module),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("module storage planning");
+            let executable = context
+                .executables()
+                .find(|candidate| candidate.metadata().name() == Some("f"))
+                .expect("module function executable");
+            context
+                .compile_leaf(&executable, VerificationLimits::default())
+                .expect_err("the first lowering slice is Script-only")
+        },
+    )
+    .expect("front-end acceptance");
+    let LeafCompilationError::Unsupported { feature, span } = error else {
+        panic!("module function must fail as unsupported");
+    };
+
+    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedCompilationUnit);
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        "function f(arg) { let local = arg; return local; }"
+    );
+}
+
+#[test]
+fn same_index_executable_from_another_context_is_rejected() {
+    let foreign = with_parsed_program(
+        SOURCE,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            CompilationContext::new(unit)
+                .expect("foreign storage planning")
+                .executables()
+                .nth(1)
+                .expect("foreign function executable")
+        },
+    )
+    .expect("front-end acceptance");
+    assert_eq!(foreign.id().index(), 1);
+
+    let error = with_parsed_program(
+        "function local(arg) { let value = arg; return value; }",
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning");
+            assert_eq!(
+                context
+                    .executables()
+                    .nth(1)
+                    .expect("local function executable")
+                    .id()
+                    .index(),
+                foreign.id().index()
+            );
+            context
+                .compile_leaf(&foreign, VerificationLimits::default())
+                .expect_err("same-index foreign executable must be rejected")
+        },
+    )
+    .expect("front-end acceptance");
+
+    assert_eq!(
+        error,
+        LeafCompilationError::ForeignExecutable {
+            executable: foreign.id()
+        }
+    );
+}
+
+#[test]
+fn source_instruction_spans_retain_owned_frontend_coordinates() {
+    let compiled = compile(SOURCE, "f");
+    let spans = compiled
+        .source_instructions()
+        .iter()
+        .map(|entry| entry.span())
+        .collect::<Vec<Span>>();
+
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| &SOURCE[span.start as usize..span.end as usize])
+            .collect::<Vec<_>>(),
+        ["local", "arg", "local", "local", "return local;"]
+    );
+}
+
+#[test]
+fn multibyte_prefix_and_repeated_lowering_keep_deterministic_owned_provenance() {
+    let source = "const π = 0;\nfunction f(arg) { let local = arg; return local; }";
+    let first = compile(source, "f");
+    let second = compile(source, "f");
+
+    assert_eq!(first, second);
+    assert_eq!(first.source_text(), source);
+    assert!(
+        first
+            .source_instructions()
+            .iter()
+            .all(|entry| first.control_flow().is_instruction_start(entry.pc()))
+    );
+    assert!(
+        first
+            .source_instructions()
+            .windows(2)
+            .all(|pair| pair[0].pc() < pair[1].pc())
+    );
+    assert_eq!(
+        first
+            .source_instructions()
+            .iter()
+            .map(|entry| {
+                let span = entry.span();
+                &source[span.start as usize..span.end as usize]
+            })
+            .collect::<Vec<_>>(),
+        ["local", "arg", "local", "local", "return local;"]
+    );
+}

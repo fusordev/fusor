@@ -12,7 +12,7 @@ use oxc_ast::{
         VariableDeclarationKind,
     },
 };
-use oxc_semantic::{NodeId, ScopeId, SymbolFlags, SymbolId};
+use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolFlags, SymbolId};
 use quickjs_frontend::{CompilationGoal, ModuleExportLocalName, ParsedUnit, Span};
 
 /// Dense plan-local compiler identity of one executable body.
@@ -446,6 +446,24 @@ pub struct StoragePlan {
     unresolved_globals: Arc<[UnresolvedGlobal]>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeReferenceId {
+    Resolved(ResolvedReferenceId),
+    Unresolved(UnresolvedGlobalId),
+}
+
+pub(crate) struct OxcIdentityMap {
+    pub(crate) executable_by_node: Box<[Option<ExecutableId>]>,
+    pub(crate) node_by_executable: Box<[NodeId]>,
+    pub(crate) binding_by_symbol: Box<[Option<BindingId>]>,
+    pub(crate) reference_by_id: Box<[Option<NativeReferenceId>]>,
+}
+
+pub(crate) struct PlannedStorage {
+    pub(crate) plan: Arc<StoragePlan>,
+    pub(crate) identities: OxcIdentityMap,
+}
+
 impl StoragePlan {
     /// Returns whether the root is a Script or Module.
     #[must_use]
@@ -621,6 +639,12 @@ impl Error for CompilerError {}
 /// Returns a typed error for semantic cases not yet modeled by this total
 /// slice or if the retained Oxc model violates a required invariant.
 pub fn build_storage_plan(unit: &ParsedUnit<'_, '_>) -> Result<StoragePlan, CompilerError> {
+    build_planned_storage(unit).map(|planned| (*planned.plan).clone())
+}
+
+pub(crate) fn build_planned_storage(
+    unit: &ParsedUnit<'_, '_>,
+) -> Result<PlannedStorage, CompilerError> {
     Planner::new(unit)?.build()
 }
 
@@ -645,6 +669,7 @@ struct BindingDraft {
 }
 
 struct ResolvedDraft {
+    reference_id: ReferenceId,
     executable: ExecutableId,
     binding: BindingId,
     span: Span,
@@ -652,6 +677,7 @@ struct ResolvedDraft {
 }
 
 struct UnresolvedDraft {
+    reference_id: ReferenceId,
     executable: ExecutableId,
     name: Arc<str>,
     span: Span,
@@ -758,7 +784,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         })
     }
 
-    fn build(mut self) -> Result<StoragePlan, CompilerError> {
+    fn build(mut self) -> Result<PlannedStorage, CompilerError> {
         self.reject_preflight_features()?;
         self.inventory_executables()?;
         self.assign_scope_owners()?;
@@ -793,9 +819,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 reference.span.start,
                 reference.span.end,
                 reference.binding.index(),
+                reference.reference_id.index(),
             )
         });
-        let resolved_references = freeze_resolved(resolved_drafts)?;
 
         let mut unresolved_drafts = self.unresolved_drafts()?;
         unresolved_drafts.sort_by_key(|reference| {
@@ -804,10 +830,24 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 reference.span.start,
                 reference.span.end,
                 reference.name.clone(),
+                reference.reference_id.index(),
             )
         });
-        let unresolved_globals = freeze_unresolved(unresolved_drafts)?;
+        let mut reference_by_id = vec![None; self.unit.semantic().scoping().references_len()];
+        let resolved_references = freeze_resolved(resolved_drafts, &mut reference_by_id)?;
+        let unresolved_globals = freeze_unresolved(unresolved_drafts, &mut reference_by_id)?;
+        if reference_by_id.iter().any(Option::is_none) {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "every semantic reference has compiler identity",
+                span: None,
+            });
+        }
 
+        let node_by_executable = self
+            .executable_drafts
+            .iter()
+            .map(|draft| draft.node_id)
+            .collect::<Vec<_>>();
         let mut executables = self
             .executable_drafts
             .into_iter()
@@ -820,12 +860,21 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &unresolved_globals,
         )?;
 
-        Ok(StoragePlan {
+        let plan = StoragePlan {
             kind: self.kind,
             executables: executables.into(),
             bindings: bindings.into(),
             resolved_references: resolved_references.into(),
             unresolved_globals: unresolved_globals.into(),
+        };
+        Ok(PlannedStorage {
+            plan: Arc::new(plan),
+            identities: OxcIdentityMap {
+                executable_by_node: self.node_executables.into_boxed_slice(),
+                node_by_executable: node_by_executable.into_boxed_slice(),
+                binding_by_symbol: symbol_bindings.into_boxed_slice(),
+                reference_by_id: reference_by_id.into_boxed_slice(),
+            },
         })
     }
 
@@ -1466,7 +1515,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         invariant: "resolved compiler binding exists",
                         span: Some(scoping.symbol_span(symbol_id)),
                     })?;
-            for reference in scoping.get_resolved_references(symbol_id) {
+            for &reference_id in scoping.get_resolved_reference_ids(symbol_id) {
+                let reference = scoping.get_reference(reference_id);
                 let span = semantic.reference_span(reference);
                 let executable = self.scope_owner(reference.scope_id(), Some(span))?;
                 if executable != binding_storage.executable {
@@ -1476,6 +1526,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     });
                 }
                 drafts.push(ResolvedDraft {
+                    reference_id,
                     executable,
                     binding,
                     span,
@@ -1509,6 +1560,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 return unsupported(UnsupportedFeature::ArgumentsBinding, span);
             }
             drafts.push(UnresolvedDraft {
+                reference_id,
                 executable,
                 name: Arc::from(name),
                 span,
@@ -1705,46 +1757,82 @@ fn freeze_bindings(
     Ok((bindings, symbol_bindings))
 }
 
-fn freeze_resolved(drafts: Vec<ResolvedDraft>) -> Result<Vec<ResolvedReference>, CompilerError> {
-    drafts
-        .into_iter()
-        .enumerate()
-        .map(|(index, draft)| {
-            let id = u32::try_from(index).map(ResolvedReferenceId).map_err(|_| {
-                CompilerError::CapacityExceeded {
-                    domain: "resolved references",
-                }
-            })?;
-            Ok(ResolvedReference {
-                id,
-                executable: draft.executable,
-                binding: draft.binding,
-                span: draft.span,
-                access: draft.access,
-            })
-        })
-        .collect()
+fn freeze_resolved(
+    drafts: Vec<ResolvedDraft>,
+    reference_by_id: &mut [Option<NativeReferenceId>],
+) -> Result<Vec<ResolvedReference>, CompilerError> {
+    let mut references = Vec::with_capacity(drafts.len());
+    for (index, draft) in drafts.into_iter().enumerate() {
+        let id = u32::try_from(index).map(ResolvedReferenceId).map_err(|_| {
+            CompilerError::CapacityExceeded {
+                domain: "resolved references",
+            }
+        })?;
+        freeze_native_reference(
+            reference_by_id,
+            draft.reference_id,
+            NativeReferenceId::Resolved(id),
+            draft.span,
+        )?;
+        references.push(ResolvedReference {
+            id,
+            executable: draft.executable,
+            binding: draft.binding,
+            span: draft.span,
+            access: draft.access,
+        });
+    }
+    Ok(references)
 }
 
-fn freeze_unresolved(drafts: Vec<UnresolvedDraft>) -> Result<Vec<UnresolvedGlobal>, CompilerError> {
-    drafts
-        .into_iter()
-        .enumerate()
-        .map(|(index, draft)| {
-            let id = u32::try_from(index).map(UnresolvedGlobalId).map_err(|_| {
-                CompilerError::CapacityExceeded {
-                    domain: "unresolved globals",
-                }
+fn freeze_unresolved(
+    drafts: Vec<UnresolvedDraft>,
+    reference_by_id: &mut [Option<NativeReferenceId>],
+) -> Result<Vec<UnresolvedGlobal>, CompilerError> {
+    let mut references = Vec::with_capacity(drafts.len());
+    for (index, draft) in drafts.into_iter().enumerate() {
+        let id = u32::try_from(index).map(UnresolvedGlobalId).map_err(|_| {
+            CompilerError::CapacityExceeded {
+                domain: "unresolved globals",
+            }
+        })?;
+        freeze_native_reference(
+            reference_by_id,
+            draft.reference_id,
+            NativeReferenceId::Unresolved(id),
+            draft.span,
+        )?;
+        references.push(UnresolvedGlobal {
+            id,
+            executable: draft.executable,
+            name: draft.name,
+            span: draft.span,
+            access: draft.access,
+        });
+    }
+    Ok(references)
+}
+
+fn freeze_native_reference(
+    reference_by_id: &mut [Option<NativeReferenceId>],
+    reference_id: ReferenceId,
+    native: NativeReferenceId,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let slot =
+        reference_by_id
+            .get_mut(reference_id.index())
+            .ok_or(CompilerError::SemanticInvariant {
+                invariant: "semantic reference index is in range",
+                span: Some(span),
             })?;
-            Ok(UnresolvedGlobal {
-                id,
-                executable: draft.executable,
-                name: draft.name,
-                span: draft.span,
-                access: draft.access,
-            })
-        })
-        .collect()
+    if slot.replace(native).is_some() {
+        return Err(CompilerError::SemanticInvariant {
+            invariant: "one compiler identity per semantic reference",
+            span: Some(span),
+        });
+    }
+    Ok(())
 }
 
 fn assign_ranges(

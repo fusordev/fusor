@@ -72,6 +72,34 @@ fn verified_header_retains_typed_metadata() {
 }
 
 #[test]
+fn stripped_ordinary_source_function_header_has_the_quickjs_flag_contract() {
+    let raw = UnverifiedFunctionHeader::stripped_ordinary_source_function(true, 2);
+
+    assert_eq!(raw.serialized_flags(), 0x0243);
+    assert_eq!(raw.js_mode(), 0x01);
+    assert_eq!(raw.defined_argument_count(), 2);
+    assert_eq!(raw.variable_reference_count(), 0);
+
+    let verified = verify(
+        ordinary_body(),
+        0,
+        FunctionIndexDomains::new(0, 0, 2, 0, 0),
+        raw,
+    )
+    .expect("compiler-owned ordinary header must verify");
+    let header = verified.function_header();
+
+    assert_eq!(header.kind(), FunctionKind::Normal);
+    assert!(header.flags().has_prototype());
+    assert!(header.flags().has_simple_parameter_list());
+    assert!(header.flags().new_target_allowed());
+    assert!(header.flags().arguments_allowed());
+    assert!(!header.flags().has_debug());
+    assert!(!header.flags().is_eval());
+    assert!(header.mode().is_strict());
+}
+
+#[test]
 fn each_defined_boolean_header_flag_has_a_typed_getter() {
     for bit in [0, 1, 2, 3, 6, 7, 8, 9, 10, 11] {
         let verified = verify(

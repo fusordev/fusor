@@ -162,6 +162,8 @@ pub struct UnverifiedFunctionHeader {
 }
 
 impl UnverifiedFunctionHeader {
+    const STRIPPED_ORDINARY_SOURCE_FLAGS: u16 = (1 << 0) | (1 << 1) | (1 << 6) | (1 << 9);
+
     /// Creates an unverified function header.
     #[must_use]
     pub const fn new(
@@ -176,6 +178,26 @@ impl UnverifiedFunctionHeader {
             defined_argument_count,
             variable_reference_count,
         }
+    }
+
+    /// Creates the stripped header for an ordinary source function with a
+    /// simple parameter list.
+    ///
+    /// The function has a prototype and permits `new.target` and `arguments`,
+    /// while `super`, eval, and debug-payload flags remain clear. Closure
+    /// references are absent because this constructor is for compiler output
+    /// whose capture layout has not yet been implemented.
+    #[must_use]
+    pub const fn stripped_ordinary_source_function(
+        strict: bool,
+        defined_argument_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::STRIPPED_ORDINARY_SOURCE_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            0,
+        )
     }
 
     /// Returns the raw packed function flags.

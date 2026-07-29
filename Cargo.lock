@@ -674,6 +674,8 @@ version = "0.0.1"
 dependencies = [
  "oxc_ast",
  "oxc_semantic",
+ "oxc_span",
+ "quickjs-bytecode",
  "quickjs-frontend",
 ]
 

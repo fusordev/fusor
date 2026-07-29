@@ -113,6 +113,9 @@ A milestone is complete only when all of its checked items pass in CI.
         return-opcode kind compatibility.
 - [ ] Instruction/function PC-to-source tables, source-map chaining, and
       precise source lookup for diagnostics and stack frames.
+  - [x] First final-instruction source table: strictly ordered instruction PCs
+        retain byte-exact Oxc spans and owned source text across arena teardown
+        for the ordinary leaf-function lowering slice.
 - [ ] Bindings, lexical environments, closures, calls, constructors, and
       direct/indirect `eval`.
   - [x] First arena-independent binding-storage plan: direct Oxc semantic
@@ -121,6 +124,14 @@ A milestone is complete only when all of its checked items pass in CI.
         Script/Module/import/default-export placement, declaration
         initialization/write/TDZ policy, and typed fail-closed rejection for
         semantic cases not yet lowered.
+  - [x] First verified ordinary leaf-function vertical: an arena-borrowing
+        `CompilationContext` retains private Oxc node/symbol/reference identity
+        maps and issues context-provenant executable selections. Function
+        declarations and anonymous `function` expressions in Script units
+        assign typed argument/local slots, emit the exact final
+        `set_loc_uninitialized; get_arg; put_loc; get_loc_check; return`
+        family, track stack depth, and return only an owned non-executable
+        `VerifiedControlFlow` certificate.
 - [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
 - [ ] Deterministic debug/line tables.
 

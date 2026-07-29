@@ -1,12 +1,19 @@
-//! Arena-independent compiler metadata for the pure-Rust `QuickJS` port.
+//! Compiler planning and staged bytecode lowering for the pure-Rust `QuickJS`
+//! port.
 //!
-//! This crate consumes the Oxc semantic model retained by
-//! `quickjs-frontend`, but never copies or exports Oxc's semantic graph.
+//! [`CompilationContext`] borrows the Oxc model retained by
+//! `quickjs-frontend` while keeping Oxc identities private. Storage plans and
+//! compiled artifacts are owned and never copy or export Oxc's semantic graph.
 
 #![forbid(unsafe_code)]
 
+mod lowering;
 mod storage;
 
+pub use lowering::{
+    CompilationContext, CompilationExecutable, CompiledLeafFunction, LeafCompilationError,
+    LocalSlot, LoweredLocal, SourceInstruction, UnsupportedLeafFeature,
+};
 pub use storage::{
     BindingId, BindingStorage, CompilationUnitKind, CompilerError, DeclarationKind,
     DeclarationPolicy, Executable, ExecutableId, ExecutableKind, InitializationPolicy,
