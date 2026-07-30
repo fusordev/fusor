@@ -19,11 +19,13 @@
 //! no recursion guard.
 //!
 //! [`VerifiedBytecode`] is code-and-metadata authority, not a materialized
-//! runtime function or closure. A future VM must additionally supply a
-//! same-runtime realm and the exact closure environment. Serialized bytecode,
-//! the full exceptional typed-stack proof, direct eval, and incoming source-map
-//! chaining remain deferred and fail closed. Retained source structure is
-//! checked, but source authenticity remains a compiler-trusted invariant.
+//! runtime function or closure. The current `quickjs-runtime` interpreter can
+//! install its first fail-closed opcode profile into a same-runtime realm and
+//! derives child environments only from this authority. Serialized bytecode,
+//! the full exceptional typed-stack proof, direct eval, and incoming
+//! source-map chaining remain deferred and fail closed. Retained source
+//! structure is checked, but source authenticity remains a compiler-trusted
+//! invariant.
 
 #![forbid(unsafe_code)]
 

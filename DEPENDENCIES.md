@@ -108,10 +108,11 @@ share the same immutable backing representation.
 `Arc` is backing-storage infrastructure, not the runtime's reachability
 algorithm. It does not decide JavaScript object liveness, weak-reference
 visibility, finalizer ordering, cycle removal, or ECMAScript job ordering. The
-object heap retains QuickJS-derived logical reference counts and explicit cycle
-deletion. Future runtime memory accounting must charge backing bytes at node
-creation and release them from the node's synchronous destruction path. `Arc`
-control-block allocation follows Rust's global allocator policy.
+future complete object heap will retain QuickJS-derived logical reference
+counts and explicit cycle deletion. Future runtime memory accounting must
+charge backing bytes at node creation and release them from the node's
+synchronous destruction path. `Arc` control-block allocation follows Rust's
+global allocator policy.
 
 Runtime atom entries and their owning table also use `Arc`. Their accounting
 remains `Cell`-backed, deliberately keeping atom handles and the runtime-local

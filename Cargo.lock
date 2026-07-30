@@ -740,6 +740,11 @@ dependencies = [
 [[package]]
 name = "quickjs-runtime"
 version = "0.0.1"
+dependencies = [
+ "quickjs-bytecode",
+ "quickjs-compiler",
+ "quickjs-frontend",
+]
 
 [[package]]
 name = "quote"

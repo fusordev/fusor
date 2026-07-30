@@ -5,16 +5,21 @@ This repository is a source-level port of
 target is the official **2026-06-04** release and its ES2025 language surface.
 
 > [!IMPORTANT]
-> The port is in its bootstrap phase. It is not yet a JavaScript engine and is
-> not a drop-in replacement for QuickJS.
+> The port is in its bootstrap phase. Its first verified interpreter profile is
+> executable, but it is not yet a complete JavaScript engine or a drop-in
+> replacement for QuickJS.
 
 The current ordinary-function compiler profile now freezes its staged
 function graph, exact binding/closure metadata, and retained source snapshots
-as immutable, `Arc`-backed `VerifiedBytecode`. That type is code-and-metadata
-authority only: the project does not yet materialize it into a runtime
-realm/function/closure or execute it. Serialized bytecode, full exceptional
-typed-stack verification, direct eval, and incoming source-map chaining remain
-deferred and fail closed.
+as immutable, `Arc`-backed `VerifiedBytecode`. A runtime context can
+transactionally install that authority into a same-runtime realm and host-call
+the resulting function. The admitted profile executes primitive constants,
+arguments, locals, captured cells, nested closures, TDZ checks, cell rotation,
+branches, returns, truthiness, `typeof`, strict equality, and nullish tests.
+Installation scans every instruction in every template before mutation;
+BigInt, coercive numeric operations, object/dynamic operations, JavaScript
+call/construct opcodes, serialized bytecode, direct eval, and the exceptional
+typed-stack model remain deferred and fail closed.
 
 ## Contract
 

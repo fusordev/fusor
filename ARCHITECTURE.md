@@ -231,10 +231,12 @@ allocation, so neither Rust call-stack depth nor a recursion guard is part of
 the trust boundary.
 
 `VerifiedBytecode` is the code-and-metadata authority for this current ordinary
-Oxc compiler profile. It is not yet a runtime function, realm, or closure.
-Materialization must additionally prove the destination runtime/realm identity
-and provide the exact root or parent closure environment. The immutable
-authority needs no lock. Serialized bytecode, the full exceptional typed-stack
+Oxc compiler profile. It remains runtime-independent and immutable, so one
+`Arc<VerifiedBytecode>` may be installed independently into multiple runtimes
+without a lock. `Context::instantiate` binds one installation to a validated
+same-runtime realm; the selected root must have an empty external closure
+environment. Child environments are subsequently derived only from verified
+parent capture metadata. Serialized bytecode, the full exceptional typed-stack
 model, handlers/finally/iterators, direct eval, and the remaining compiler
 profiles still fail closed.
 
@@ -346,12 +348,27 @@ proves declaration-closure initialization against the emitted
 `fclosure*; put_*` pairs, runs iterative binding-value/cell-state analysis over
 the CFG, freezes conservative `ExecutionRequirement` families, and returns
 `VerifiedBytecode`. This is the complete code-and-metadata authority for the
-currently admitted ordinary compiler profile, but the repository has no VM
-materialization path yet. A future VM must combine it with a same-runtime realm
-and an exact closure environment. Serialized input and opcodes requiring
-non-string atom namespaces, other value families, raw function slots,
-handlers, finally return addresses, iterator markers, or packed stack offsets
-remain fail-closed pending the full exceptional typed-stack verifier.
+currently admitted ordinary compiler profile.
+
+The first interpreter profile transactionally materializes that authority into
+a same-runtime realm. Before interning atoms or creating heap nodes, it scans
+every instruction in every template—including unreachable instructions and
+unused children—against an exact opcode allowlist. It installs immutable
+templates, constants, and atoms, then creates runtime-local function and
+binding-cell nodes. Dispatch begins only at verified instruction zero, checks
+the certified entry stack depth at every step, and follows only
+`VerifiedSuccessors`; branch offsets are never decoded again. Host calls and
+control-flow traversal use explicit frame/work vectors and do not consume the
+Rust call stack.
+
+The admitted execution families are primitive Number/String/Boolean/nullish
+values, stack operations, arguments and locals, imported captures, closure
+creation, TDZ checks, `close_loc` cell rotation, branches, returns, truthiness,
+`typeof`, strict equality, and the nullish predicate, including their compact
+and full-width encodings. JavaScript call/construct opcodes, BigInt, coercive
+numeric operations, object/dynamic operators, serialized input, non-string
+atom namespaces, raw function slots, handlers, finally return addresses,
+iterator markers, and packed exceptional-stack values remain fail-closed.
 
 The symbolic assembler chooses the componentwise shortest valid final branch
 layout. This can differ from a conservative QuickJS peephole boundary while
@@ -363,11 +380,13 @@ resource limits, and acceptance suite are normative in
 
 ## Runtime ownership
 
-A runtime owns one object heap. Contexts/realms inside that runtime may share
-objects. Runtime, context, and value handles are `!Send + !Sync`; separate
+The target architecture gives each runtime one object heap, shared by its
+contexts/realms. The current executable slice owns realm records plus
+function/binding-cell arenas; ordinary objects are not implemented yet.
+Runtime, context, realm, and value handles are `!Send + !Sync`, and separate
 runtimes cannot exchange JavaScript values.
 
-Heap objects use generational typed IDs:
+Runtime-local nodes use generational typed IDs:
 
 ```text
 Id<K> {
@@ -381,9 +400,11 @@ Every access validates runtime identity, generation, expected kind, and live
 state. Internal nodes hold IDs and stored values, never public rooted `Value`
 handles or an owning reference back to the runtime.
 
-Public values own root slots. Dropping the last root records a deferred release
-without borrowing the heap. Runtime safe points drain those releases after
-callbacks and other borrows end.
+Public function values use immutable `Arc` root headers. Cloning a handle does
+not create another logical root; dropping the last clone records one
+allocation-free deferred release without borrowing the heap. Mutable runtime
+boundaries drain those releases at a safe point before creating any new heap
+borrow; still-live public headers remain represented by their root counts.
 
 Immutable string leaves and rope nodes use standard-library `Arc` ownership.
 This keeps immutable `JsString` handles safe to move through host integration
@@ -395,31 +416,32 @@ A backing allocation ledger must charge bytes when a node is created and
 release them from that node's destruction path; dropping a public value root
 is not by itself proof that shared string storage was reclaimed.
 
-Shared mutable host-side state uses `parking_lot` locks. Locks must never guard
-or make cross-thread access possible for a JavaScript runtime, context, heap, or
-value handle, and immutable `Arc<Repr>` string backing has no lock.
+When the first genuine shared mutable host-side owner is added, it will use
+`parking_lot` locks. No such owner or lock exists in the current runtime slice.
+Locks must never guard or make cross-thread access possible for a JavaScript
+runtime, context, heap, or value handle, and immutable `Arc<Repr>` string
+backing has no lock.
 
 ## Reference counting and cycles
 
-Memory management preserves QuickJS's two layers:
+The current executable slice owns function and binding-cell nodes in private
+generational arenas. A dirty safe point drains deferred public roots and
+iteratively traces the function/cell graph from remaining public roots before
+the next host call or installation; an explicit collection API exposes the
+same pass. This reclaims both transient acyclic closures and self/mutual capture
+cycles, and installed code/atoms are released when their last function
+disappears. Collection preallocates all scratch state before mutation.
 
-1. Logical strong counts release acyclic objects deterministically. Zero-count
-   nodes enter a non-recursive free queue.
-2. A trial-deletion pass removes unreachable cycles:
-   - copy real counts to trial counts;
-   - subtract all internal strong edges;
-   - mark candidates reachable from positive trial roots;
-   - mark the remainder as zombies before callbacks;
-   - detach their outgoing edges;
-   - perform weak cleanup and restricted finalization with no arena borrow;
-   - release detached edges and reclaim slots.
-
-One exhaustive edge visitor powers counting, trial deletion, destruction, and
-debug consistency checks. Weak IDs never contribute to strong counts.
+This is a foundational collector for the currently admitted graph, not the
+complete QuickJS ownership model. Deterministic logical strong counts,
+non-recursive zero-count release, trial deletion across the future object
+graph, weak visibility, finalization ordering, and collection while active
+frames are live remain M3 work. Until that work lands, a single host call can
+temporarily retain discarded closures until the next safe boundary.
 
 No getter, proxy trap, host function, loader, interrupt callback, promise
-tracker, or finalizer runs while an arena/node borrow is live. Finalizers
-cannot resurrect zombie nodes.
+tracker, or finalizer may run while an arena/node borrow is live. Finalizers
+will not be admitted until zombie-state and resurrection rules are complete.
 
 ## Values and objects
 
@@ -465,19 +487,21 @@ cannot resurrect zombie nodes.
 
 ## Exceptions and failures
 
-The implementation keeps distinct domains:
+The current implementation keeps distinct domains:
 
-- `JsAbrupt`: catchable JavaScript throws and internal return/break/continue
-  control flow;
+- public-handle errors: orphaned, foreign, stale, or wrong-kind handles;
+- the admitted JavaScript exception record: a TDZ `ReferenceError` with an
+  exact UTF-16 message, function, bytecode PC, source name, and source span;
 - compile diagnostics: stable code, canonical message, severity, source span,
   labels, notes, and help;
 - verifier errors: function, bytecode PC, opcode, and violated invariant;
 - host errors: I/O, loader, timeout, cancellation, channel, and task failures;
-- engine faults: stale/cross-runtime handles or violated internal invariants.
+- engine faults: contradictions between verified authority and runtime state.
 
-JavaScript throws remain rooted JavaScript values. Compiler, verifier, host, or
-engine failures are converted to a JS error only at an explicit API boundary.
-Miette is presentation, not semantic truth.
+General `throw`, catch/finally, error objects, and internal abrupt-completion
+transport are not admitted yet. Their target representation will keep thrown
+JavaScript values rooted and separate from compiler, verifier, handle, host,
+and engine failures. Miette remains presentation, not semantic truth.
 
 The leaf compiler maps instruction-local verifier failures back through its
 strictly ordered final-PC table with exact `BytecodePc` lookup. It never treats
@@ -509,60 +533,63 @@ Generated instructions carry a primary origin and may carry a synthetic parent
 origin. Peepholes and label relaxation preserve or deliberately merge those
 origins. Final bytecode records sorted PC-to-source transitions.
 
-Stack traces and diagnostics resolve:
+The target stack-trace resolver will follow:
 
 ```text
 bytecode PC → generated source span → incoming source-map chain → original
 ```
 
-Source-map chaining has depth and cycle guards and retains the generated
-location as a fallback. QuickJS's compressed `pc2line` representation is
-implemented at bytecode serialization boundaries; the runtime may keep richer
-span data in memory.
+Source-map chaining, its depth/cycle guards, stack traces, and the compressed
+serialized `pc2line` representation remain pending. The current TDZ exception
+uses the exact retained generated bytecode PC and source span directly.
 
-## Tokio host loop
+## Planned Tokio host loop
 
-Tokio supplies timers, I/O readiness, task wakeups, bounded channels, and
-worker plumbing. It never executes JavaScript or resolves promises directly.
+The planned host adapter will use Tokio for timers, I/O readiness, task
+wakeups, bounded channels, and worker plumbing. Tokio will never execute
+JavaScript or resolve promises directly.
 
-Host tasks return owned `Send` completions identified by operation ID and
-generation. The runtime owner consumes them, updates promise capabilities, and
-enqueues JavaScript jobs.
+Host tasks will return owned `Send` completions identified by operation ID and
+generation. The runtime owner will consume them, update promise capabilities,
+and enqueue JavaScript jobs.
 
-One event-loop turn is:
+One planned event-loop turn is:
 
 1. process one top-level command, timer, or observed host completion;
 2. drain the QuickJS-derived FIFO job queue to a fixed point;
 3. drain deferred heap releases;
 4. repeat or await one Tokio wakeup.
 
-Completions arriving during a microtask checkpoint remain buffered until that
-checkpoint ends. Timer ties use engine-owned creation IDs rather than Tokio
-scheduler order. Tests inject completions and a virtual clock.
+Completions arriving during a microtask checkpoint will remain buffered until
+that checkpoint ends. Timer ties will use engine-owned creation IDs rather than
+Tokio scheduler order. Tests will inject completions and a virtual clock.
 
-Standalone execution uses a current-thread Tokio runtime and `LocalSet`.
-Embedded execution runs at the top level of a caller-provided `LocalSet` or on
-a dedicated engine thread. It never nests `block_on` inside async code.
+Standalone execution will use a current-thread Tokio runtime and `LocalSet`.
+Embedded execution will run at the top level of a caller-provided `LocalSet` or
+on a dedicated engine thread. It will never nest `block_on` inside async code.
 
-Cancellation invalidates an operation generation, aborts cancellable host
-work, and ignores stale completions. No heap borrow crosses `.await`.
+Cancellation will invalidate an operation generation, abort cancellable host
+work, and ignore stale completions. No heap borrow may cross `.await`.
 
 ## First vertical slices
 
-The first executable slice evaluates:
+The first executable slice compiles, installs, and host-invokes code such as:
 
 ```js
-let o = {};
-o.self = o;
-o.answer = 40;
-o.answer + 2;
+function outer(value) {
+    function inner() {
+        return value;
+    }
+    return inner;
+}
 ```
 
-It must return integer `42`, produce verified source-mapped bytecode, create
-atom/shape transitions, keep the self-cycle alive under immediate RC, and
-return live heap counts to baseline after roots are dropped and a cycle pass
-runs. A `throw 7` regression verifies stack cleanup and PC-to-source lookup.
+It proves runtime-local realm installation, host calls, forwarded closure
+cells, TDZ diagnostics, `close_loc` rotation, compact/full operand forms,
+allocation-free public-root release, and safe-point collection of transient and
+cyclic function/cell graphs. Object allocation, property assignment, coercive
+`+`, and general `throw` remain later slices.
 
-The next slice creates a host timer Promise. A Tokio wakeup must be observed on
-the runtime owner, the FIFO job queue must drain deterministically, and a
-cancelled operation's late completion must be ignored.
+The planned asynchronous slice creates a host timer Promise. A Tokio wakeup
+must be observed on the runtime owner, the FIFO job queue must drain
+deterministically, and a cancelled operation's late completion must be ignored.

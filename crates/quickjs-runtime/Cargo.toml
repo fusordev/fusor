@@ -7,5 +7,12 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[dependencies]
+quickjs-bytecode = { path = "../quickjs-bytecode" }
+
+[dev-dependencies]
+quickjs-compiler = { path = "../quickjs-compiler" }
+quickjs-frontend = { path = "../quickjs-frontend" }
+
 [lints]
 workspace = true

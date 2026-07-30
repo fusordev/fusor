@@ -254,16 +254,32 @@ A milestone is complete only when all of its checked items pass in CI.
         descriptors, retained source, source mappings, frame-state cells, and
         policy-transfer work. The authority retains sorted conservative
         runtime requirement families and exact source snapshots after Oxc
-        teardown. It is code/metadata authority only: same-runtime realm and
-        exact closure-environment materialization, serialized bytecode, full
-        exceptional typed-stack verification, incoming source-map chaining,
-        and direct eval remain pending.
+        teardown. The authority remains runtime-independent; the first
+        same-runtime materialization profile is tracked separately below.
+        Serialized bytecode, full exceptional typed-stack verification,
+        incoming source-map chaining, and direct eval remain pending.
   - [x] Normalize strict block-function initialization in two private phases:
         activate the lexical/captured cell, then install the declaration
         closure in a verifier-isolated linear group before user code. This
         preserves successful JavaScript behavior while making cell lifetime
         explicit. Annex B remains rejected rather than approximated.
-- [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
+  - [x] Add the first runtime-installed verified interpreter profile:
+        `Context::instantiate` scans every opcode in every template before a
+        failure-atomic code/root-function commit in an existing validated
+        realm; `Context::call` starts only at verified instruction zero, checks
+        certified entry stack depths, and follows only verified successors.
+        The profile executes primitive
+        constants, arguments/locals/captures, nested and forwarded closures,
+        TDZ checks, `close_loc` rotation, branches, returns, truthiness,
+        `typeof`, strict equality, and nullish tests across compact/full
+        encodings. Frames and all traversals use explicit vectors. BigInt,
+        coercive numeric operations, object/dynamic operations, and
+        JavaScript call/construct opcodes remain fail-closed.
+- [ ] General abrupt completion, catch/throw/finally, rooted exception values,
+      stack traces, iterators, and generators.
+  - [x] First escaping exception path: local/captured TDZ access returns a
+        structured `ReferenceError` with the exact QuickJS message, function
+        template, verified bytecode PC, source name, and retained source span.
 - [ ] Deterministic debug/line tables.
 
 ### M3 — values and object model
@@ -279,6 +295,13 @@ A milestone is complete only when all of its checked items pass in CI.
 - [x] Opaque generic/data/accessor descriptor classification with exact field
       presence, new-property completion defaults, and value-independent
       ordinary data/accessor layouts.
+- [x] Add the runtime ownership foundation: immutable `Arc` public root
+      headers, allocation-free deferred release, runtime-identified typed
+      generational arenas, runtime-local functions/cells, exact logical
+      resource ceilings, and iterative safe-point tracing that reclaims
+      transient closures and function/cell cycles. Deterministic strong-count
+      release, the complete object graph, weak visibility, and finalization
+      remain pending below.
 - [ ] ECMAScript primitive conversions, parsing/printing, and remaining numeric
       edge cases.
 - [ ] Property descriptors, shapes, prototypes, and exotic objects.
@@ -303,7 +326,11 @@ A milestone is complete only when all of its checked items pass in CI.
 
 ### M5 — modules, embedding, and tools
 
-- [ ] Realm/context API and Rust-native host functions/classes/modules.
+- [x] First runtime/realm/context foundation with bounded realm creation,
+      same-runtime handle validation, verified function installation,
+      primitive value constructors, and host invocation.
+- [ ] Full embedding API with Rust-native host functions, classes, modules,
+      callbacks, and exception conversion.
 - [ ] Module linking, cyclic graphs, dynamic import, and top-level await.
 - [ ] Evaluate Oxc Resolver as an implementation aid without inheriting its
       Node defaults; preserve QuickJS relative/system module-name semantics.

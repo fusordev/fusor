@@ -572,10 +572,11 @@ impl<'graph> VerifiedBytecodeFunction<'graph> {
 
 /// Immutable execution authority for the current compiler-bytecode profile.
 ///
-/// This type has no public constructor. A future VM must accept this as its
+/// This type has no public constructor. A VM must accept this as its
 /// code-and-metadata boundary, never raw bytes, decoded instructions, or either
-/// staged certificate alone. Runtime installation must additionally supply a
-/// same-runtime realm and the exact verified closure environment.
+/// staged certificate alone. The current runtime installs a fail-closed opcode
+/// subset into a same-runtime realm and derives exact child closure
+/// environments from the verified metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedBytecode {
     graph: Arc<VerifiedCompilerFunctionGraph>,
@@ -1329,7 +1330,7 @@ impl fmt::Display for BytecodeVerificationErrorKind {
     }
 }
 
-/// Verifies complete compiler metadata and freezes the future VM's immutable
+/// Verifies complete compiler metadata and freezes the VM's immutable
 /// code-and-metadata input.
 ///
 /// # Errors
