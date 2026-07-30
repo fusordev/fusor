@@ -286,11 +286,6 @@ fn unsupported_leaf_shapes_fail_closed_at_source_spans() {
             UnsupportedLeafFeature::UnresolvedReference,
             "missing",
         ),
-        (
-            "const holder = function f(arg) { let local = arg; return local; };",
-            UnsupportedLeafFeature::NamedFunctionExpression,
-            "function f(arg) { let local = arg; return local; }",
-        ),
     ];
 
     for (source, expected_feature, expected_source) in cases {

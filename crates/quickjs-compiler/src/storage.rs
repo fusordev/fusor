@@ -13,7 +13,9 @@ use oxc_ast::{
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolFlags, SymbolId};
-use quickjs_frontend::{CompilationGoal, ModuleExportLocalName, ParsedUnit, Span};
+use quickjs_frontend::{
+    CompilationGoal, DynamicFunctionKind, ModuleExportLocalName, ParsedUnit, Span,
+};
 
 /// Dense plan-local compiler identity of one executable body.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -646,8 +648,8 @@ impl StoragePlan {
 pub enum UnsupportedFeature {
     /// Any eval compilation goal.
     EvalCompilationGoal,
-    /// A dynamic Function-constructor compilation goal.
-    DynamicFunctionCompilationGoal,
+    /// A nonordinary dynamic-function constructor family.
+    DynamicFunctionKind(DynamicFunctionKind),
     /// A syntactic bare `eval(...)` call.
     DirectEval,
     /// A `with` statement.
@@ -848,9 +850,15 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     span: root_span,
                 });
             }
-            CompilationGoal::DynamicFunction(_) => {
+            CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) => (
+                CompilationUnitKind::Script,
+                ExecutableKind::Script {
+                    asynchronous: false,
+                },
+            ),
+            CompilationGoal::DynamicFunction(kind) => {
                 return Err(CompilerError::Unsupported {
-                    feature: UnsupportedFeature::DynamicFunctionCompilationGoal,
+                    feature: UnsupportedFeature::DynamicFunctionKind(kind),
                     span: root_span,
                 });
             }

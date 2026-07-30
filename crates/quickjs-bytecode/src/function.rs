@@ -164,6 +164,7 @@ pub struct UnverifiedFunctionHeader {
 impl UnverifiedFunctionHeader {
     const STRIPPED_ORDINARY_SOURCE_FLAGS: u16 = (1 << 0) | (1 << 1) | (1 << 6) | (1 << 9);
     const ORDINARY_SOURCE_FLAGS: u16 = Self::STRIPPED_ORDINARY_SOURCE_FLAGS | (1 << 10);
+    const DYNAMIC_FUNCTION_SCRIPT_FLAGS: u16 = 1 << 10;
 
     /// Creates an unverified function header.
     #[must_use]
@@ -238,6 +239,22 @@ impl UnverifiedFunctionHeader {
             Self::ORDINARY_SOURCE_FLAGS,
             if strict { 1 } else { 0 },
             defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates the non-eval Script header used by a dynamic `Function` body.
+    ///
+    /// The record retains debug source, has no call arguments, executes in
+    /// normal mode, and deliberately leaves the eval flag clear. The supplied
+    /// variable-reference count is checked against the compiler capture layout
+    /// before the body can receive a control-flow certificate.
+    #[must_use]
+    pub const fn dynamic_function_script(variable_reference_count: u32) -> Self {
+        Self::new(
+            Self::DYNAMIC_FUNCTION_SCRIPT_FLAGS,
+            0,
+            0,
             variable_reference_count,
         )
     }

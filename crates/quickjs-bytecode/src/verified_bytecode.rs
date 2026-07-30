@@ -171,7 +171,30 @@ impl CompilerBindingPolicy {
                 ) && matches!(self.writes, CompilerWritePolicy::Mutable)
                     && !self.temporal_dead_zone
             }
-            CompilerBindingKind::FunctionName | CompilerBindingKind::Catch => false,
+            CompilerBindingKind::FunctionName => {
+                matches!(
+                    self.initialization,
+                    CompilerInitializationPolicy::FunctionName
+                ) && matches!(
+                    self.writes,
+                    CompilerWritePolicy::Immutable | CompilerWritePolicy::ImmutableInStrictCode
+                ) && !self.temporal_dead_zone
+            }
+            CompilerBindingKind::Catch => false,
+        }
+    }
+
+    const fn is_valid_for_function(self, strict: bool) -> bool {
+        if !self.is_valid() {
+            return false;
+        }
+        match self.kind {
+            CompilerBindingKind::FunctionName => matches!(
+                (strict, self.writes),
+                (true, CompilerWritePolicy::Immutable)
+                    | (false, CompilerWritePolicy::ImmutableInStrictCode)
+            ),
+            _ => true,
         }
     }
 }
@@ -394,9 +417,20 @@ impl CompilerSource {
     }
 }
 
+/// Compiler-owned execution role assigned to one function-graph record.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum CompilerExecutableKind {
+    /// An ordinary callable JavaScript function.
+    #[default]
+    OrdinaryFunction,
+    /// The constructor-realm global Script produced for dynamic `Function`.
+    DynamicFunctionScript,
+}
+
 /// One complete function metadata record awaiting final verification.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnverifiedFunctionMetadata {
+    executable_kind: CompilerExecutableKind,
     function_name: Option<AtomPoolIndex>,
     variables: Arc<[VariableDefinition]>,
     closures: Arc<[ClosureVariableDefinition]>,
@@ -413,11 +447,25 @@ impl UnverifiedFunctionMetadata {
         source: CompilerSource,
     ) -> Self {
         Self {
+            executable_kind: CompilerExecutableKind::OrdinaryFunction,
             function_name,
             variables,
             closures,
             source,
         }
+    }
+
+    /// Selects the compiler-owned execution role for this record.
+    #[must_use]
+    pub const fn with_executable_kind(mut self, executable_kind: CompilerExecutableKind) -> Self {
+        self.executable_kind = executable_kind;
+        self
+    }
+
+    /// Returns the requested compiler-owned execution role.
+    #[must_use]
+    pub const fn executable_kind(&self) -> CompilerExecutableKind {
+        self.executable_kind
     }
 }
 
@@ -504,6 +552,7 @@ impl VerifiedCompilerSource {
 /// Complete immutable runtime metadata for one verified function template.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedFunctionMetadata {
+    executable_kind: CompilerExecutableKind,
     function_name: Option<AtomPoolIndex>,
     variables: Arc<[VariableDefinition]>,
     closures: Arc<[ClosureVariableDefinition]>,
@@ -511,6 +560,12 @@ pub struct VerifiedFunctionMetadata {
 }
 
 impl VerifiedFunctionMetadata {
+    /// Returns the verified compiler-owned execution role.
+    #[must_use]
+    pub const fn executable_kind(&self) -> CompilerExecutableKind {
+        self.executable_kind
+    }
+
     /// Returns the optional function-name atom.
     #[must_use]
     pub const fn function_name(&self) -> Option<AtomPoolIndex> {
@@ -990,7 +1045,19 @@ pub enum BytecodeVerificationErrorKind {
         /// Requested entries.
         requested: u64,
     },
-    /// Function flags or mode are outside the current ordinary profile.
+    /// A dynamic-Function Script record is not the graph root.
+    DynamicFunctionScriptNotRoot,
+    /// A dynamic-Function Script record declares a call-argument domain.
+    DynamicFunctionScriptHasArguments {
+        /// Header-defined arguments.
+        defined: u32,
+        /// Frame argument slots.
+        arguments: u32,
+    },
+    /// A dynamic-Function Script record carries function-name metadata or a
+    /// named-function self binding.
+    DynamicFunctionScriptHasFunctionName,
+    /// Function flags or mode are outside the selected compiler profile.
     UnsupportedFunctionHeader,
     /// Source-defined arguments do not equal simple parameter positions.
     DefinedArgumentCountMismatch {
@@ -1201,8 +1268,18 @@ impl fmt::Display for BytecodeVerificationErrorKind {
                 formatter,
                 "could not allocate {requested} entries for {resource}"
             ),
+            Self::DynamicFunctionScriptNotRoot => {
+                formatter.write_str("dynamic-Function Script executable is not the graph root")
+            }
+            Self::DynamicFunctionScriptHasArguments { defined, arguments } => write!(
+                formatter,
+                "dynamic-Function Script declares {defined} defined arguments and {arguments} frame arguments"
+            ),
+            Self::DynamicFunctionScriptHasFunctionName => formatter.write_str(
+                "dynamic-Function Script carries function-name metadata or a self binding",
+            ),
             Self::UnsupportedFunctionHeader => {
-                formatter.write_str("function header is outside the ordinary compiler profile")
+                formatter.write_str("function header is outside its compiler executable profile")
             }
             Self::DefinedArgumentCountMismatch { defined, arguments } => write!(
                 formatter,
@@ -1452,11 +1529,7 @@ fn preflight_usage(
         let tracked = metadata
             .variables
             .iter()
-            .filter(|definition| {
-                definition.policy.temporal_dead_zone
-                    || (definition.has_scope && definition.variable_reference.is_some())
-                    || definition.function_initializer.is_some()
-            })
+            .filter(|definition| requires_binding_state(definition))
             .count();
         let state_entries = usize_to_u64(function.control_flow().instructions().len())
             .checked_mul(usize_to_u64(tracked))
@@ -1612,7 +1685,8 @@ fn verify_function_metadata(
     usage: &mut BytecodeGraphUsage,
 ) -> Result<VerifiedFunctionMetadata, BytecodeVerificationError> {
     let flow = function.control_flow();
-    verify_header(id, flow)?;
+    verify_executable_kind(id, graph.root_id(), metadata)?;
+    verify_header(id, metadata.executable_kind, flow)?;
     let domains = flow.domains();
     let declared_variables = u64::from(domains.argument_count()) + u64::from(domains.local_count());
     if usize_to_u64(metadata.variables.len()) != declared_variables {
@@ -1653,7 +1727,7 @@ fn verify_function_metadata(
     let initializer_sites = verify_function_initializers(id, function, &metadata.variables)?;
     verify_closures(id, function, &metadata.closures)?;
     verify_source(id, flow, metadata)?;
-    verify_supported_opcodes(id, flow)?;
+    verify_supported_opcodes(id, flow, metadata.executable_kind)?;
     verify_binding_opcodes(id, flow, &metadata.variables, &metadata.closures)?;
     usage.policy_transfers = usage
         .policy_transfers
@@ -1674,6 +1748,7 @@ fn verify_function_metadata(
             })
         })?;
     Ok(VerifiedFunctionMetadata {
+        executable_kind: metadata.executable_kind,
         function_name: metadata.function_name,
         variables: Arc::clone(&metadata.variables),
         closures: Arc::clone(&metadata.closures),
@@ -1687,29 +1762,85 @@ fn verify_function_metadata(
     })
 }
 
+fn verify_executable_kind(
+    id: FunctionTemplateId,
+    root: FunctionTemplateId,
+    metadata: &UnverifiedFunctionMetadata,
+) -> Result<(), BytecodeVerificationError> {
+    match metadata.executable_kind {
+        CompilerExecutableKind::OrdinaryFunction => Ok(()),
+        CompilerExecutableKind::DynamicFunctionScript => {
+            if id != root {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DynamicFunctionScriptNotRoot,
+                ));
+            }
+            let has_function_name_binding =
+                metadata.variables.iter().any(|definition| {
+                    definition.policy.kind() == CompilerBindingKind::FunctionName
+                }) || metadata.closures.iter().any(|definition| {
+                    definition.policy.kind() == CompilerBindingKind::FunctionName
+                });
+            if metadata.function_name.is_some() || has_function_name_binding {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DynamicFunctionScriptHasFunctionName,
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 fn verify_header(
     id: FunctionTemplateId,
+    executable_kind: CompilerExecutableKind,
     flow: &VerifiedControlFlow,
 ) -> Result<(), BytecodeVerificationError> {
     let header = *flow.function_header();
-    if header.kind() != FunctionKind::Normal
-        || header.flags().bits() != 0x0643
-        || header.mode().bits() & !1 != 0
-    {
-        return Err(BytecodeVerificationError::function(
-            id,
-            BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
-        ));
-    }
     let arguments = flow.domains().argument_count();
-    if header.defined_argument_count() != arguments {
-        return Err(BytecodeVerificationError::function(
-            id,
-            BytecodeVerificationErrorKind::DefinedArgumentCountMismatch {
-                defined: header.defined_argument_count(),
-                arguments,
-            },
-        ));
+    match executable_kind {
+        CompilerExecutableKind::OrdinaryFunction => {
+            if header.kind() != FunctionKind::Normal
+                || header.flags().bits() != 0x0643
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() != arguments {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DefinedArgumentCountMismatch {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::DynamicFunctionScript => {
+            if header.kind() != FunctionKind::Normal
+                || header.flags().bits() != 0x0400
+                || header.mode().bits() != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() != 0 || arguments != 0 {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DynamicFunctionScriptHasArguments {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1731,6 +1862,7 @@ fn verify_variables(
         )
     })?;
     let locals = domains.local_count();
+    let strict = function.control_flow().function_header().mode().is_strict();
     let variable_references = function
         .control_flow()
         .function_header()
@@ -1766,7 +1898,7 @@ fn verify_variables(
             MetadataAtomField::VariableName(definition_index),
             function,
         )?;
-        if !definition.policy.is_valid() {
+        if !definition.policy.is_valid_for_function(strict) {
             return Err(policy_error(
                 id,
                 slot,
@@ -2731,12 +2863,15 @@ fn atom_contents(
 fn verify_supported_opcodes(
     id: FunctionTemplateId,
     flow: &VerifiedControlFlow,
+    executable_kind: CompilerExecutableKind,
 ) -> Result<(), BytecodeVerificationError> {
     for instruction in flow.instructions() {
         let decoded = instruction.decoded();
         let opcode = decoded.instruction().opcode();
         if !supported_compiler_opcode(opcode)
-            || (opcode == FinalOpcode::PushThis && !flow.function_header().mode().is_strict())
+            || (opcode == FinalOpcode::PushThis
+                && !flow.function_header().mode().is_strict()
+                && executable_kind != CompilerExecutableKind::DynamicFunctionScript)
         {
             return Err(BytecodeVerificationError::function(
                 id,
@@ -3071,10 +3206,7 @@ fn verify_binding_states(
             .iter()
             .enumerate()
             .filter_map(|(local, definition)| {
-                (definition.policy.temporal_dead_zone
-                    || (definition.has_scope && definition.variable_reference.is_some())
-                    || definition.function_initializer.is_some())
-                .then_some((local, definition))
+                requires_binding_state(definition).then_some((local, definition))
             }),
     );
     if tracked.is_empty() {
@@ -3109,7 +3241,9 @@ fn verify_binding_states(
         0_u8,
         BytecodeGraphResource::FrameStateEntries,
     )?;
-    entries[..tracked.len()].fill(BindingState::ENTRY);
+    for (entry, (_, definition)) in entries[..tracked.len()].iter_mut().zip(&tracked) {
+        *entry = initial_binding_state(definition);
+    }
     let mut entry_present = try_filled_vec(
         id,
         instructions.len(),
@@ -3284,6 +3418,26 @@ impl BindingState {
     const CELL_ACTIVE: u8 = 16;
     const CELL_MASK: u8 = Self::CELL_CLOSED | Self::CELL_ACTIVE;
     const ENTRY: u8 = Self::VALUE_INACTIVE | Self::CELL_CLOSED;
+}
+
+fn requires_binding_state(definition: &VariableDefinition) -> bool {
+    definition.policy.temporal_dead_zone
+        || (definition.has_scope && definition.variable_reference.is_some())
+        || definition.function_initializer.is_some()
+        || definition.policy.initialization == CompilerInitializationPolicy::FunctionName
+}
+
+fn initial_binding_state(definition: &VariableDefinition) -> u8 {
+    if definition.policy.initialization == CompilerInitializationPolicy::FunctionName {
+        let cell = if definition.variable_reference.is_some() {
+            BindingState::CELL_ACTIVE
+        } else {
+            BindingState::CELL_CLOSED
+        };
+        BindingState::VALUE_INITIALIZED | cell
+    } else {
+        BindingState::ENTRY
+    }
 }
 
 fn transfer_local_state(

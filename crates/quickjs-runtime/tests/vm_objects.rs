@@ -604,7 +604,7 @@ fn thrown_object_remains_rooted_until_the_last_exception_value_clone_drops() {
 #[test]
 fn aggregate_object_limit_failure_is_atomic_and_runtime_is_reusable() {
     let authority = compile("function make(){return {};}", "make");
-    let mut runtime = runtime(RuntimeLimits::default().with_max_heap_objects(2));
+    let mut runtime = runtime(RuntimeLimits::default().with_max_heap_objects(3));
     let realm = runtime.create_realm().expect("realm");
     let (_make, baseline) = with_context(&mut runtime, &realm, |context| {
         let make = context.instantiate(authority).expect("make");
@@ -620,8 +620,8 @@ fn aggregate_object_limit_failure_is_atomic_and_runtime_is_reusable() {
             context.call(&make, &[], ExecutionLimits::default()),
             Err(ExecutionError::LimitExceeded {
                 resource: RuntimeResource::HeapObjects,
-                limit: 2,
-                observed: 3,
+                limit: 3,
+                observed: 4,
             })
         ));
         assert_eq!(

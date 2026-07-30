@@ -3267,6 +3267,34 @@ pub fn with_dynamic_function_source<R>(
 where
     R: Send,
 {
+    with_dynamic_function_source_and_prepared(source, limits, callback)
+        .map(|(result, _prepared)| result)
+}
+
+/// Parses one exactly wrapped dynamic-function Script and returns its owner.
+///
+/// This ownership-preserving form lets a compiler return arena-independent
+/// output together with the exact generated wrapper and fragment map without
+/// cloning either allocation. Oxc identities remain confined to the callback
+/// and isolated parser thread.
+///
+/// # Errors
+///
+/// Returns the same structured preparation, parser, profile, and semantic
+/// failures as [`with_dynamic_function_source`].
+#[allow(
+    clippy::result_large_err,
+    reason = "the error intentionally owns the prepared wrapper without another infallible allocation"
+)]
+pub fn with_dynamic_function_source_and_prepared<R>(
+    source: DynamicFunctionSource<'_>,
+    limits: FrontendLimits,
+    callback: impl for<'arena> FnOnce(&ParsedUnit<'arena, 'static>, &PreparedDynamicFunctionSource) -> R
+    + Send,
+) -> Result<(R, PreparedDynamicFunctionSource), DynamicFunctionError>
+where
+    R: Send,
+{
     std::thread::scope(|scope| {
         let worker = std::thread::Builder::new()
             .name("quickjs-dynamic-frontend".to_owned())
@@ -3283,7 +3311,10 @@ where
                     ParseMode::Script,
                     limits,
                 ) {
-                    Ok(unit) => Ok(callback(&unit, &prepared)),
+                    Ok(unit) => {
+                        let result = callback(&unit, &prepared);
+                        Ok((result, prepared))
+                    }
                     Err(error) => Err(DynamicFunctionError::generated(error, prepared)),
                 }
             })

@@ -3,6 +3,7 @@ use quickjs_frontend::{
     DynamicFunctionMapError, DynamicFunctionMappedSource, DynamicFunctionSource,
     DynamicFunctionSpanBias, DynamicFunctionSyntheticKind, FrontendDiagnosticCode,
     FrontendLimitError, FrontendLimits, SourceFragment, Span, with_dynamic_function_source,
+    with_dynamic_function_source_and_prepared,
 };
 
 const KINDS_AND_PREFIXES: [(DynamicFunctionKind, &str); 4] = [
@@ -20,6 +21,35 @@ const KINDS_AND_PREFIXES: [(DynamicFunctionKind, &str); 4] = [
         "(async function* anonymous(",
     ),
 ];
+
+#[test]
+fn ownership_preserving_entry_returns_the_exact_prepared_wrapper() {
+    let parameters = [SourceFragment::new("value").with_origin("parameter")];
+    let source = DynamicFunctionSource::new(
+        DynamicFunctionKind::Function,
+        &parameters,
+        SourceFragment::new("return value;").with_origin("body"),
+    );
+
+    let (generated_len, prepared) = with_dynamic_function_source_and_prepared(
+        source,
+        FrontendLimits::default(),
+        |unit, map| {
+            assert_eq!(
+                unit.goal(),
+                CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
+            );
+            map.fragment_map().generated_len()
+        },
+    )
+    .expect("the complete generated Script parses");
+
+    assert_eq!(prepared.fragment_map().generated_len(), generated_len);
+    assert_eq!(
+        prepared.generated_source(),
+        "(function anonymous(value\n) {\nreturn value;\n})"
+    );
+}
 
 #[test]
 fn constructs_the_exact_quickjs_wrapper_for_all_four_families() {

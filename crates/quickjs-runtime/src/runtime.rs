@@ -29,13 +29,14 @@ use std::{
 };
 
 use quickjs_bytecode::{
-    CompilerCapturedBinding, CompilerConstant, CompilerConstantValue, FinalOpcode,
-    FunctionTemplateId, VerifiedBytecode,
+    CompilerCapturedBinding, CompilerConstant, CompilerConstantValue, CompilerExecutableKind,
+    FinalOpcode, FunctionTemplateId, VerifiedBytecode,
 };
 
 use crate::{
-    Atom, AtomLimits, AtomTable, AtomUsage, Function, HandleError, HandleKind, InstallError,
-    JsNumber, JsString, JsValue, PropertyKey, PropertyLayout, RuntimeError, RuntimeResource,
+    Atom, AtomLimits, AtomTable, AtomUsage, DynamicFunctionScriptError, ExecutionLimits, Function,
+    HandleError, HandleKind, InstallError, JsNumber, JsString, JsValue, PropertyKey,
+    PropertyLayout, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmId},
     object::{HeapObject, ObjectRecord},
@@ -280,6 +281,7 @@ impl RuntimeUsage {
 
 struct RealmState {
     object_prototype: ObjectId,
+    global_object: ObjectId,
 }
 
 struct RealmHandle {
@@ -431,7 +433,7 @@ impl Runtime {
         check_limit(
             RuntimeResource::HeapObjects,
             self.limits.max_heap_objects,
-            usize_to_u64(self.objects.len()).saturating_add(1),
+            usize_to_u64(self.objects.len()).saturating_add(2),
         )?;
         self.realms
             .try_reserve(1)
@@ -440,10 +442,10 @@ impl Runtime {
                 additional: 1,
             })?;
         self.objects
-            .try_reserve(1)
+            .try_reserve(2)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
-                additional: 1,
+                additional: 2,
             })?;
         let object_prototype = self
             .objects
@@ -455,7 +457,23 @@ impl Runtime {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
             })?;
-        let Ok(id) = self.realms.try_insert(RealmState { object_prototype }) else {
+        let Ok(global_object) = self.objects.try_insert(HeapObject {
+            record: ObjectRecord::empty(Some(HeapReference::Object(object_prototype))),
+            public_roots: 0,
+        }) else {
+            let removed = self.objects.remove(object_prototype);
+            debug_assert!(removed.is_some());
+            return Err(RuntimeError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            });
+        };
+        let Ok(id) = self.realms.try_insert(RealmState {
+            object_prototype,
+            global_object,
+        }) else {
+            let removed = self.objects.remove(global_object);
+            debug_assert!(removed.is_some());
             let removed = self.objects.remove(object_prototype);
             debug_assert!(removed.is_some());
             return Err(RuntimeError::AllocationFailed {
@@ -599,6 +617,12 @@ impl Runtime {
         for (_, realm) in self.realms.iter() {
             mark_heap_reference(
                 HeapReference::Object(realm.object_prototype),
+                &mut marked_functions,
+                &mut marked_objects,
+                &mut work,
+            );
+            mark_heap_reference(
+                HeapReference::Object(realm.global_object),
                 &mut marked_functions,
                 &mut marked_objects,
                 &mut work,
@@ -797,6 +821,20 @@ impl Runtime {
             })
     }
 
+    pub(crate) fn realm_global_object(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        self.realms
+            .get(realm)
+            .map(|state| state.global_object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })
+    }
+
     pub(crate) fn object_record(
         &self,
         reference: HeapReference,
@@ -987,6 +1025,93 @@ impl Runtime {
         *public_roots = next_roots;
         self.public_roots += 1;
         Ok(JsValue::rooted_heap(&self.mailbox, reference))
+    }
+
+    fn retire_internal_root(
+        &mut self,
+        root: FunctionId,
+        expected_code: InstalledCodeId,
+    ) -> Result<(), crate::EngineFault> {
+        let function = self
+            .functions
+            .get(root)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "internal Script root",
+                index: root.index(),
+                generation: root.generation(),
+            })?;
+        if function.code != expected_code {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "internal Script root changed installed-code ownership",
+            });
+        }
+        if function.public_roots != 0 {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "internal Script root became publicly rooted",
+            });
+        }
+        let code = self
+            .code
+            .get(expected_code)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "installed code",
+                index: expected_code.index(),
+                generation: expected_code.generation(),
+            })?;
+        if code.live_functions == 0 {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "internal Script root has no installed-code live-function charge",
+            });
+        }
+
+        let function = self
+            .functions
+            .remove(root)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "internal Script root",
+                index: root.index(),
+                generation: root.generation(),
+            })?;
+        self.object_properties = self
+            .object_properties
+            .saturating_sub(usize_to_u64(function.object.property_count()));
+        let remove_code = {
+            let code =
+                self.code
+                    .get_mut(expected_code)
+                    .ok_or(crate::EngineFault::StaleHeapEdge {
+                        edge: "installed code",
+                        index: expected_code.index(),
+                        generation: expected_code.generation(),
+                    })?;
+            code.live_functions -= 1;
+            code.live_functions == 0
+        };
+        if remove_code {
+            let removed = self.remove_installed_code(expected_code);
+            debug_assert!(removed);
+            self.atoms.collect_dead();
+        }
+        self.collection_pending = true;
+        Ok(())
+    }
+
+    fn remove_installed_code(&mut self, id: InstalledCodeId) -> bool {
+        let Some(code) = self.code.remove(id) else {
+            return false;
+        };
+        self.installed_templates = self
+            .installed_templates
+            .saturating_sub(usize_to_u64(code.templates.len()));
+        let atoms = code.templates.iter().fold(0_u64, |total, template| {
+            total.saturating_add(usize_to_u64(template.atoms.len()))
+        });
+        let constants = code.templates.iter().fold(0_u64, |total, template| {
+            total.saturating_add(usize_to_u64(template.constants.len()))
+        });
+        self.installed_atoms = self.installed_atoms.saturating_sub(atoms);
+        self.installed_constants = self.installed_constants.saturating_sub(constants);
+        true
     }
 
     pub(crate) fn drain_releases(&mut self) {
@@ -1203,6 +1328,23 @@ pub struct Context<'runtime> {
     pub(crate) realm: RealmId,
 }
 
+#[derive(Clone, Copy)]
+enum RootPublication {
+    Public,
+    Internal,
+}
+
+impl RootPublication {
+    const fn is_public(self) -> bool {
+        matches!(self, Self::Public)
+    }
+}
+
+struct InstalledRoot {
+    function: FunctionId,
+    code: InstalledCodeId,
+}
+
 impl Context<'_> {
     /// Returns current logical usage without ending the exclusive context.
     #[must_use]
@@ -1253,14 +1395,68 @@ impl Context<'_> {
     ///
     /// Returns an exact unsupported opcode, limit, allocation, string, atom,
     /// or authority-invariant failure.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "installation preflight and the failure-atomic commit are one audited transaction"
-    )]
     pub fn instantiate(
         &mut self,
         authority: Arc<VerifiedBytecode>,
     ) -> Result<Function, InstallError> {
+        require_root_kind(&authority, CompilerExecutableKind::OrdinaryFunction)?;
+        let installed = self.install_root(authority, RootPublication::Public)?;
+        Ok(Function::from_root(JsValue::rooted_heap(
+            &self.runtime.mailbox,
+            HeapReference::Function(installed.function),
+        )))
+    }
+
+    /// Installs and executes one complete verified dynamic-Function Script.
+    ///
+    /// Only an authority whose root is tagged as
+    /// [`CompilerExecutableKind::DynamicFunctionScript`] is accepted. The
+    /// internal root has no external lexical environment and is never exposed
+    /// as a public function. Its receiver is this context's realm-owned global
+    /// object; the exact Script completion is rooted before the internal root
+    /// is retired.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed installation failure before execution, or an execution,
+    /// exception, resource, allocation, publication, or engine failure after
+    /// installation.
+    pub fn execute_dynamic_function_script(
+        &mut self,
+        authority: Arc<VerifiedBytecode>,
+        limits: ExecutionLimits,
+    ) -> Result<JsValue, DynamicFunctionScriptError> {
+        require_root_kind(&authority, CompilerExecutableKind::DynamicFunctionScript)?;
+        let global_object = self
+            .runtime
+            .realm_global_object(self.realm)
+            .map_err(crate::ExecutionError::from)?;
+        let installed = self.install_root(authority, RootPublication::Internal)?;
+        let result = self
+            .execute_internal_root(
+                installed.function,
+                StoredValue::Object(global_object),
+                limits,
+            )
+            .and_then(|completion| self.runtime.public_value(completion));
+        let retirement = self
+            .runtime
+            .retire_internal_root(installed.function, installed.code);
+        match retirement {
+            Ok(()) => result.map_err(DynamicFunctionScriptError::Execution),
+            Err(fault) => Err(DynamicFunctionScriptError::Execution(fault.into())),
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "installation preflight and the failure-atomic commit are one audited transaction"
+    )]
+    fn install_root(
+        &mut self,
+        authority: Arc<VerifiedBytecode>,
+        publication: RootPublication,
+    ) -> Result<InstalledRoot, InstallError> {
         preflight_opcodes(&authority)?;
         self.runtime.prepare_installation_safe_point()?;
 
@@ -1293,11 +1489,13 @@ impl Context<'_> {
             self.runtime.limits.max_heap_functions,
             usize_to_u64(self.runtime.functions.len()).saturating_add(1),
         )?;
-        check_install_limit(
-            RuntimeResource::PublicRoots,
-            self.runtime.limits.max_public_roots,
-            self.runtime.public_roots.saturating_add(1),
-        )?;
+        if publication.is_public() {
+            check_install_limit(
+                RuntimeResource::PublicRoots,
+                self.runtime.limits.max_public_roots,
+                self.runtime.public_roots.saturating_add(1),
+            )?;
+        }
 
         if !authority.root().metadata().closures().is_empty() {
             return Err(InstallError::AuthorityInvariant {
@@ -1319,18 +1517,21 @@ impl Context<'_> {
                 resource: RuntimeResource::HeapFunctions,
                 additional: 1,
             })?;
-        self.runtime
-            .mailbox
-            .try_reserve_root()
-            .map_err(|_| InstallError::AllocationFailed {
-                resource: RuntimeResource::ReleaseMailbox,
-                additional: 1,
+        if publication.is_public() {
+            self.runtime.mailbox.try_reserve_root().map_err(|_| {
+                InstallError::AllocationFailed {
+                    resource: RuntimeResource::ReleaseMailbox,
+                    additional: 1,
+                }
             })?;
+        }
 
         let templates = match self.runtime.stage_templates(&authority) {
             Ok(templates) => templates,
             Err(error) => {
-                self.runtime.mailbox.cancel_reserved_root();
+                if publication.is_public() {
+                    self.runtime.mailbox.cancel_reserved_root();
+                }
                 self.runtime.atoms.collect_dead();
                 return Err(error);
             }
@@ -1343,7 +1544,9 @@ impl Context<'_> {
             templates,
             live_functions: 1,
         }) else {
-            self.runtime.mailbox.cancel_reserved_root();
+            if publication.is_public() {
+                self.runtime.mailbox.cancel_reserved_root();
+            }
             self.runtime.atoms.collect_dead();
             return Err(InstallError::AllocationFailed {
                 resource: RuntimeResource::InstalledCode,
@@ -1355,11 +1558,13 @@ impl Context<'_> {
             template: root_template,
             environment: Vec::new(),
             object: ObjectRecord::empty(None),
-            public_roots: 1,
+            public_roots: u32::from(publication.is_public()),
         }) else {
             let removed = self.runtime.code.remove(code);
             debug_assert!(removed.is_some());
-            self.runtime.mailbox.cancel_reserved_root();
+            if publication.is_public() {
+                self.runtime.mailbox.cancel_reserved_root();
+            }
             self.runtime.atoms.collect_dead();
             return Err(InstallError::AllocationFailed {
                 resource: RuntimeResource::HeapFunctions,
@@ -1370,11 +1575,13 @@ impl Context<'_> {
         self.runtime.installed_templates += functions;
         self.runtime.installed_atoms += atoms;
         self.runtime.installed_constants += constants;
-        self.runtime.public_roots += 1;
-        Ok(Function::from_root(JsValue::rooted_heap(
-            &self.runtime.mailbox,
-            HeapReference::Function(root),
-        )))
+        if publication.is_public() {
+            self.runtime.public_roots += 1;
+        }
+        Ok(InstalledRoot {
+            function: root,
+            code,
+        })
     }
 }
 
@@ -1386,6 +1593,25 @@ fn runtime_string(
     } else {
         JsString::from_code_units(value.code_units())
     }
+}
+
+fn require_root_kind(
+    authority: &VerifiedBytecode,
+    expected: CompilerExecutableKind,
+) -> Result<(), InstallError> {
+    let actual = authority.root().metadata().executable_kind();
+    if actual == expected {
+        return Ok(());
+    }
+    let message = match expected {
+        CompilerExecutableKind::OrdinaryFunction => {
+            "dynamic-function Script cannot be instantiated as an ordinary function"
+        }
+        CompilerExecutableKind::DynamicFunctionScript => {
+            "ordinary function cannot execute as a dynamic-function Script"
+        }
+    };
+    Err(InstallError::AuthorityInvariant { message })
 }
 
 fn preflight_opcodes(authority: &VerifiedBytecode) -> Result<(), InstallError> {

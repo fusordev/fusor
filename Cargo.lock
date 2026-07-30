@@ -699,6 +699,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "quickjs"
+version = "0.0.1"
+dependencies = [
+ "quickjs-bytecode",
+ "quickjs-compiler",
+ "quickjs-frontend",
+ "quickjs-runtime",
+]
+
+[[package]]
 name = "quickjs-bytecode"
 version = "0.0.1"
 

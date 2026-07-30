@@ -787,3 +787,42 @@ impl From<EngineFault> for ExecutionError {
         Self::EngineFault(source)
     }
 }
+
+/// Failure while installing or executing one verified dynamic-Function Script.
+#[derive(Debug)]
+pub enum DynamicFunctionScriptError {
+    /// Complete authority installation failed before Script execution began.
+    Install(InstallError),
+    /// The installed Script failed during execution or completion publication.
+    Execution(ExecutionError),
+}
+
+impl fmt::Display for DynamicFunctionScriptError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Install(source) => source.fmt(formatter),
+            Self::Execution(source) => source.fmt(formatter),
+        }
+    }
+}
+
+impl Error for DynamicFunctionScriptError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Install(source) => Some(source),
+            Self::Execution(source) => Some(source),
+        }
+    }
+}
+
+impl From<InstallError> for DynamicFunctionScriptError {
+    fn from(source: InstallError) -> Self {
+        Self::Install(source)
+    }
+}
+
+impl From<ExecutionError> for DynamicFunctionScriptError {
+    fn from(source: ExecutionError) -> Self {
+        Self::Execution(source)
+    }
+}

@@ -1,17 +1,18 @@
 use std::sync::Arc;
 
 use quickjs_bytecode::{
-    AtomPoolIndex, BytecodeBuilder, BytecodeGraphResource, BytecodeGraphVerificationLimits,
-    BytecodePc, BytecodeVerificationErrorKind, ClosureVariableDefinition, CompilerAtom,
-    CompilerBindingKind, CompilerBindingPolicy, CompilerCaptureLayout, CompilerCapturedBinding,
-    CompilerClosureSource, CompilerConstantKind, CompilerConstantLayout,
-    CompilerInitializationPolicy, CompilerSource, CompilerString, CompilerWritePolicy,
-    ExecutionRequirement, FinalOpcode, FunctionGraphVerificationLimits, FunctionIndexDomains,
-    FunctionTemplateId, Operands, PcSourceSpan, ScopeLink, SourceByteSpan,
-    UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody,
-    UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader, UnverifiedFunctionMetadata,
-    VariableDefinition, VerificationLimits, VerifiedBytecode, VerifiedControlFlow,
-    verify_compiler_bytecode_graph, verify_compiler_control_flow, verify_compiler_function_graph,
+    AtomPoolIndex, BindingPolicyViolationReason, BytecodeBuilder, BytecodeGraphResource,
+    BytecodeGraphVerificationLimits, BytecodePc, BytecodeVerificationErrorKind,
+    ClosureVariableDefinition, CompilerAtom, CompilerBindingKind, CompilerBindingPolicy,
+    CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureSource, CompilerConstantKind,
+    CompilerConstantLayout, CompilerExecutableKind, CompilerInitializationPolicy, CompilerSource,
+    CompilerString, CompilerWritePolicy, ExecutionRequirement, FinalOpcode,
+    FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId, Operands,
+    PcSourceSpan, ScopeLink, SourceByteSpan, UnverifiedCompilerBytecodeGraph,
+    UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph,
+    UnverifiedFunctionHeader, UnverifiedFunctionMetadata, VariableDefinition, VerificationLimits,
+    VerifiedBytecode, VerifiedControlFlow, verify_compiler_bytecode_graph,
+    verify_compiler_control_flow, verify_compiler_function_graph,
 };
 
 fn atom(text: &str) -> CompilerAtom {
@@ -61,6 +62,33 @@ fn flow_with_strict(
     constant_kinds: &[CompilerConstantKind],
     strict: bool,
 ) -> Arc<VerifiedControlFlow> {
+    flow_with_header(
+        instructions,
+        atoms,
+        arguments,
+        locals,
+        captures,
+        imported_closures,
+        constant_kinds,
+        UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
+            strict,
+            arguments,
+            u32::try_from(captures.len()).expect("capture count"),
+        ),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flow_with_header(
+    instructions: &[(FinalOpcode, Operands)],
+    atoms: u32,
+    arguments: u32,
+    locals: u32,
+    captures: &[CompilerCapturedBinding],
+    imported_closures: u32,
+    constant_kinds: &[CompilerConstantKind],
+    header: UnverifiedFunctionHeader,
+) -> Arc<VerifiedControlFlow> {
     Arc::new(
         verify_compiler_control_flow(
             UnverifiedCompilerFunctionBody::new(
@@ -72,11 +100,7 @@ fn flow_with_strict(
                     locals,
                     imported_closures,
                 ),
-                UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
-                    strict,
-                    arguments,
-                    u32::try_from(captures.len()).expect("capture count"),
-                ),
+                header,
             )
             .with_capture_layout(CompilerCaptureLayout::new(Arc::from(captures)))
             .with_constant_layout(CompilerConstantLayout::new(Arc::from(constant_kinds))),
@@ -114,6 +138,15 @@ fn var_policy() -> CompilerBindingPolicy {
 }
 
 fn function_name_policy() -> CompilerBindingPolicy {
+    CompilerBindingPolicy::new(
+        CompilerBindingKind::FunctionName,
+        CompilerInitializationPolicy::FunctionName,
+        CompilerWritePolicy::ImmutableInStrictCode,
+        false,
+    )
+}
+
+fn strict_function_name_policy() -> CompilerBindingPolicy {
     CompilerBindingPolicy::new(
         CompilerBindingKind::FunctionName,
         CompilerInitializationPolicy::FunctionName,
@@ -155,6 +188,26 @@ fn source(
             mappings
                 .iter()
                 .map(|&(pc, span)| PcSourceSpan::new(BytecodePc::new(pc), span))
+                .collect::<Vec<_>>(),
+        ),
+    )
+}
+
+fn source_for_flow(
+    text: &Arc<str>,
+    flow: &VerifiedControlFlow,
+    function_span: SourceByteSpan,
+    name_span: SourceByteSpan,
+) -> CompilerSource {
+    CompilerSource::new(
+        Arc::from("fixture.js"),
+        Arc::clone(text),
+        function_span,
+        Some(name_span),
+        Arc::from(
+            flow.instructions()
+                .iter()
+                .map(|instruction| PcSourceSpan::new(instruction.decoded().pc(), function_span))
                 .collect::<Vec<_>>(),
         ),
     )
@@ -445,14 +498,14 @@ fn final_authority_admits_ordinary_object_properties_and_method_calls() {
 }
 
 #[test]
-fn push_this_authority_is_limited_to_strict_functions() {
+fn push_this_authority_is_limited_to_strict_functions_and_dynamic_scripts() {
     let instructions = [
         (FinalOpcode::PushThis, Operands::None),
         (FinalOpcode::Return, Operands::None),
     ];
     let text = "function f(){\"use strict\";return this}";
     let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
-    let source = || {
+    let ordinary_source = || {
         source(
             text,
             function_span,
@@ -460,8 +513,16 @@ fn push_this_authority_is_limited_to_strict_functions() {
             &[(0, function_span), (1, function_span)],
         )
     };
-    let strict =
-        shaped_input_with_strict(&instructions, &[atom("f")], &[], 0, 0, &[], source(), true);
+    let strict = shaped_input_with_strict(
+        &instructions,
+        &[atom("f")],
+        &[],
+        0,
+        0,
+        &[],
+        ordinary_source(),
+        true,
+    );
     let verified =
         verify_compiler_bytecode_graph(strict, BytecodeGraphVerificationLimits::default())
             .expect("strict functions may load their raw receiver");
@@ -474,8 +535,16 @@ fn push_this_authority_is_limited_to_strict_functions() {
         ]
     );
 
-    let sloppy =
-        shaped_input_with_strict(&instructions, &[atom("f")], &[], 0, 0, &[], source(), false);
+    let sloppy = shaped_input_with_strict(
+        &instructions,
+        &[atom("f")],
+        &[],
+        0,
+        0,
+        &[],
+        ordinary_source(),
+        false,
+    );
     let error = verify_compiler_bytecode_graph(sloppy, BytecodeGraphVerificationLimits::default())
         .expect_err("sloppy this normalization remains fail-closed");
     assert!(matches!(
@@ -485,6 +554,36 @@ fn push_this_authority_is_limited_to_strict_functions() {
             opcode: FinalOpcode::PushThis,
         } if *pc == BytecodePc::ZERO
     ));
+
+    let script_text = "return this";
+    let script_span =
+        SourceByteSpan::new(0, u32::try_from(script_text.len()).expect("source length"));
+    let dynamic_script = profiled_single_input(
+        &instructions,
+        UnverifiedFunctionHeader::dynamic_function_script(0),
+        CompilerExecutableKind::DynamicFunctionScript,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(
+            script_text,
+            script_span,
+            None,
+            &[(0, script_span), (1, script_span)],
+        ),
+    );
+    let verified =
+        verify_compiler_bytecode_graph(dynamic_script, BytecodeGraphVerificationLimits::default())
+            .expect(
+                "a Dynamic Function Script may forward its ordinary-call receiver to its child",
+            );
+    assert_eq!(
+        verified.root().metadata().executable_kind(),
+        CompilerExecutableKind::DynamicFunctionScript
+    );
 }
 
 #[test]
@@ -663,6 +762,52 @@ fn shaped_input_with_strict(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn profiled_single_input(
+    instructions: &[(FinalOpcode, Operands)],
+    header: UnverifiedFunctionHeader,
+    executable_kind: CompilerExecutableKind,
+    atoms: &[CompilerAtom],
+    function_name: Option<AtomPoolIndex>,
+    variables: &[VariableDefinition],
+    arguments: u32,
+    locals: u32,
+    captures: &[CompilerCapturedBinding],
+    source: CompilerSource,
+) -> UnverifiedCompilerBytecodeGraph {
+    let flow = flow_with_header(
+        instructions,
+        u32::try_from(atoms.len()).expect("atom count"),
+        arguments,
+        locals,
+        captures,
+        0,
+        &[],
+        header,
+    );
+    let graph = verify_compiler_function_graph(
+        UnverifiedCompilerFunctionGraph::new(
+            FunctionTemplateId::new(0),
+            Arc::from([
+                UnverifiedCompilerFunction::new(flow, Arc::from([]), Arc::from([]))
+                    .with_atom_pool(Arc::from(atoms)),
+            ]),
+        ),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("fixture graph");
+    UnverifiedCompilerBytecodeGraph::new(
+        Arc::new(graph),
+        Arc::from([UnverifiedFunctionMetadata::new(
+            function_name,
+            Arc::from(variables),
+            Arc::from([]),
+            source,
+        )
+        .with_executable_kind(executable_kind)]),
+    )
+}
+
 fn function_initializer_input(
     instructions: &[(FinalOpcode, Operands)],
     definition_name: &str,
@@ -827,6 +972,10 @@ fn complete_ordinary_metadata_grants_send_sync_execution_authority() {
         .function(FunctionTemplateId::new(0))
         .expect("root function");
     assert_eq!(
+        function.metadata().executable_kind(),
+        CompilerExecutableKind::OrdinaryFunction
+    );
+    assert_eq!(
         function
             .metadata()
             .function_name()
@@ -843,6 +992,289 @@ fn complete_ordinary_metadata_grants_send_sync_execution_authority() {
         &source.display_name_arc()
     ));
     assert!(Arc::ptr_eq(&source.text_arc(), &source.text_arc()));
+}
+
+#[test]
+fn dynamic_function_script_profile_grants_only_exact_root_script_authority() {
+    let text = "return undefined;";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let input_for = |header| {
+        profiled_single_input(
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            header,
+            CompilerExecutableKind::DynamicFunctionScript,
+            &[],
+            None,
+            &[],
+            0,
+            0,
+            &[],
+            source(text, function_span, None, &[(0, function_span)]),
+        )
+    };
+
+    let verified = verify_compiler_bytecode_graph(
+        input_for(UnverifiedFunctionHeader::dynamic_function_script(0)),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("an exact non-eval root Script gains execution authority");
+    let root = verified.root();
+    assert_eq!(
+        root.metadata().executable_kind(),
+        CompilerExecutableKind::DynamicFunctionScript
+    );
+    assert_eq!(
+        root.function()
+            .control_flow()
+            .function_header()
+            .flags()
+            .bits(),
+        0x0400
+    );
+    assert_eq!(
+        root.function()
+            .control_flow()
+            .function_header()
+            .mode()
+            .bits(),
+        0
+    );
+    assert_eq!(
+        root.function()
+            .control_flow()
+            .function_header()
+            .defined_argument_count(),
+        0
+    );
+
+    for rejected in [
+        UnverifiedFunctionHeader::new(0x0401, 0, 0, 0),
+        UnverifiedFunctionHeader::new(0x0400, 1, 0, 0),
+        UnverifiedFunctionHeader::new(0x0c00, 0, 0, 0),
+        UnverifiedFunctionHeader::ordinary_source_function(false, 0),
+    ] {
+        let error = verify_compiler_bytecode_graph(
+            input_for(rejected),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("Script authority requires exact debug-only normal-mode header bits");
+        assert_eq!(
+            error.kind(),
+            &BytecodeVerificationErrorKind::UnsupportedFunctionHeader
+        );
+    }
+
+    let ordinary_with_script_header = profiled_single_input(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        UnverifiedFunctionHeader::dynamic_function_script(0),
+        CompilerExecutableKind::OrdinaryFunction,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(text, function_span, None, &[(0, function_span)]),
+    );
+    let error = verify_compiler_bytecode_graph(
+        ordinary_with_script_header,
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("ordinary authority retains the exact 0x0643 header contract");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::UnsupportedFunctionHeader
+    );
+}
+
+#[test]
+fn dynamic_function_script_profile_rejects_names_and_every_argument_domain() {
+    let named_text = "script";
+    let named_span = SourceByteSpan::new(0, 6);
+    let named = profiled_single_input(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        UnverifiedFunctionHeader::dynamic_function_script(0),
+        CompilerExecutableKind::DynamicFunctionScript,
+        &[atom("script")],
+        Some(AtomPoolIndex::new(0)),
+        &[],
+        0,
+        0,
+        &[],
+        source(named_text, named_span, Some(named_span), &[(0, named_span)]),
+    );
+    let error = verify_compiler_bytecode_graph(named, BytecodeGraphVerificationLimits::default())
+        .expect_err("a Script record has no function-name metadata");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::DynamicFunctionScriptHasFunctionName
+    );
+
+    let argument_text = "argument";
+    let argument_span = SourceByteSpan::new(0, 8);
+    let argument_definition = [VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        parameter_policy(),
+        false,
+        None,
+    )];
+    let argument_input = |header| {
+        profiled_single_input(
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            header,
+            CompilerExecutableKind::DynamicFunctionScript,
+            &[atom("argument")],
+            None,
+            &argument_definition,
+            1,
+            0,
+            &[],
+            source(argument_text, argument_span, None, &[(0, argument_span)]),
+        )
+    };
+    for (header, defined) in [
+        (UnverifiedFunctionHeader::dynamic_function_script(0), 0),
+        (UnverifiedFunctionHeader::new(0x0400, 0, 1, 0), 1),
+    ] {
+        let error = verify_compiler_bytecode_graph(
+            argument_input(header),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("a Script root cannot expose source-defined or frame arguments");
+        assert_eq!(
+            error.kind(),
+            &BytecodeVerificationErrorKind::DynamicFunctionScriptHasArguments {
+                defined,
+                arguments: 1,
+            }
+        );
+    }
+}
+
+#[test]
+fn dynamic_function_script_rejects_internal_function_name_binding_authority() {
+    let text = "return undefined";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let internal_root_binding = [VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        function_name_policy(),
+        false,
+        None,
+    )];
+    let input = profiled_single_input(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        UnverifiedFunctionHeader::dynamic_function_script(0),
+        CompilerExecutableKind::DynamicFunctionScript,
+        &[atom("internal-script-root")],
+        None,
+        &internal_root_binding,
+        0,
+        1,
+        &[],
+        source(text, function_span, None, &[(0, function_span)]),
+    );
+
+    let error = verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect_err("Script metadata cannot expose its internal root as a named-function binding");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::DynamicFunctionScriptHasFunctionName
+    );
+}
+
+#[test]
+fn dynamic_function_script_profile_is_forbidden_on_child_templates() {
+    let root_flow = flow(
+        &[
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        1,
+        0,
+        0,
+        &[],
+        0,
+        &[CompilerConstantKind::Function],
+    );
+    let child_flow = flow_with_header(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        0,
+        0,
+        0,
+        &[],
+        0,
+        &[],
+        UnverifiedFunctionHeader::dynamic_function_script(0),
+    );
+    let graph = Arc::new(
+        verify_compiler_function_graph(
+            UnverifiedCompilerFunctionGraph::new(
+                FunctionTemplateId::new(0),
+                Arc::from([
+                    UnverifiedCompilerFunction::new(
+                        Arc::clone(&root_flow),
+                        Arc::from([quickjs_bytecode::CompilerConstant::Function(
+                            FunctionTemplateId::new(1),
+                        )]),
+                        Arc::from([]),
+                    )
+                    .with_atom_pool(Arc::from([atom("outer")])),
+                    UnverifiedCompilerFunction::new(
+                        Arc::clone(&child_flow),
+                        Arc::from([]),
+                        Arc::from([]),
+                    ),
+                ]),
+            ),
+            FunctionGraphVerificationLimits::default(),
+        )
+        .expect("staged child graph"),
+    );
+    let text: Arc<str> = Arc::from("function outer(){}");
+    let full_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let source_for = |flow: &VerifiedControlFlow, name_span| {
+        CompilerSource::new(
+            Arc::from("fixture.js"),
+            Arc::clone(&text),
+            full_span,
+            name_span,
+            Arc::from(
+                flow.instructions()
+                    .iter()
+                    .map(|instruction| PcSourceSpan::new(instruction.decoded().pc(), full_span))
+                    .collect::<Vec<_>>(),
+            ),
+        )
+    };
+    let input = UnverifiedCompilerBytecodeGraph::new(
+        graph,
+        Arc::from([
+            UnverifiedFunctionMetadata::new(
+                Some(AtomPoolIndex::new(0)),
+                Arc::from([]),
+                Arc::from([]),
+                source_for(&root_flow, Some(SourceByteSpan::new(9, 14))),
+            ),
+            UnverifiedFunctionMetadata::new(
+                None,
+                Arc::from([]),
+                Arc::from([]),
+                source_for(&child_flow, None),
+            )
+            .with_executable_kind(CompilerExecutableKind::DynamicFunctionScript),
+        ]),
+    );
+
+    let error = verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect_err("a Script executable cannot be owned by a function constant");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::DynamicFunctionScriptNotRoot
+    );
+    assert_eq!(error.function_id(), Some(FunctionTemplateId::new(1)));
 }
 
 #[test]
@@ -1174,14 +1606,214 @@ fn policy_analysis_rejects_unchecked_tdz_reads_and_noncompiler_opcodes() {
             ],
         ),
     )
-    .expect_err("named-function self bindings remain outside the current authority profile");
+    .expect_err("a bytecode write cannot mutate the named-function self binding");
     assert!(matches!(
         error.kind(),
         BytecodeVerificationErrorKind::BindingPolicyViolation {
-            reason: quickjs_bytecode::BindingPolicyViolationReason::InvalidDeclarationPolicy,
+            reason: BindingPolicyViolationReason::ImmutableWrite,
             ..
         }
     ));
+}
+
+#[test]
+fn function_name_binding_is_initialized_at_entry_with_only_the_exact_policy() {
+    let text = "function self(){}";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let definition = |policy| {
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(0)),
+            ScopeLink::End,
+            policy,
+            false,
+            None,
+        )
+    };
+    let input = |strict, policy| {
+        profiled_single_input(
+            &[
+                (FinalOpcode::GetLoc0, Operands::NoneLoc),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            UnverifiedFunctionHeader::ordinary_source_function(strict, 0),
+            CompilerExecutableKind::OrdinaryFunction,
+            &[atom("self")],
+            Some(AtomPoolIndex::new(0)),
+            &[definition(policy)],
+            0,
+            1,
+            &[],
+            source(
+                text,
+                function_span,
+                Some(SourceByteSpan::new(9, 13)),
+                &[(0, function_span), (1, function_span)],
+            ),
+        )
+    };
+
+    let sloppy = verify_compiler_bytecode_graph(
+        input(false, function_name_policy()),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("the sloppy named self binding uses ImmutableInStrictCode");
+    assert_eq!(
+        sloppy.root().metadata().variables()[0].policy(),
+        function_name_policy()
+    );
+    assert_eq!(
+        sloppy.usage().frame_state_entries(),
+        2,
+        "entry initialization remains part of bounded abstract-state analysis"
+    );
+
+    let strict = verify_compiler_bytecode_graph(
+        input(true, strict_function_name_policy()),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("the strict named self binding uses Immutable");
+    assert_eq!(
+        strict.root().metadata().variables()[0].policy(),
+        strict_function_name_policy()
+    );
+
+    for (strict, rejected) in [
+        (false, strict_function_name_policy()),
+        (true, function_name_policy()),
+        (
+            false,
+            CompilerBindingPolicy::new(
+                CompilerBindingKind::FunctionName,
+                CompilerInitializationPolicy::AtDeclaration,
+                CompilerWritePolicy::ImmutableInStrictCode,
+                false,
+            ),
+        ),
+        (
+            false,
+            CompilerBindingPolicy::new(
+                CompilerBindingKind::FunctionName,
+                CompilerInitializationPolicy::FunctionName,
+                CompilerWritePolicy::ImmutableInStrictCode,
+                true,
+            ),
+        ),
+    ] {
+        let error = verify_compiler_bytecode_graph(
+            input(strict, rejected),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("named-self write policy must match the owning function strictness");
+        assert!(matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::BindingPolicyViolation {
+                reason: BindingPolicyViolationReason::InvalidDeclarationPolicy,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn captured_function_name_binding_starts_initialized_with_an_active_cell() {
+    let root_flow = flow_with_header(
+        &[
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        2,
+        0,
+        1,
+        &[CompilerCapturedBinding::FunctionLocal(0)],
+        0,
+        &[CompilerConstantKind::Function],
+        UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(true, 0, 1),
+    );
+    let child_flow = flow(
+        &[
+            (FinalOpcode::GetVarRef0, Operands::NoneVarRef),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        2,
+        0,
+        0,
+        &[],
+        1,
+        &[],
+    );
+    let graph = Arc::new(
+        verify_compiler_function_graph(
+            UnverifiedCompilerFunctionGraph::new(
+                FunctionTemplateId::new(0),
+                Arc::from([
+                    UnverifiedCompilerFunction::new(
+                        Arc::clone(&root_flow),
+                        Arc::from([quickjs_bytecode::CompilerConstant::Function(
+                            FunctionTemplateId::new(1),
+                        )]),
+                        Arc::from([]),
+                    )
+                    .with_atom_pool(Arc::from([atom("self"), atom("child")])),
+                    UnverifiedCompilerFunction::new(
+                        Arc::clone(&child_flow),
+                        Arc::from([]),
+                        Arc::from([CompilerClosureSource::ParentVariableReference(0)]),
+                    )
+                    .with_atom_pool(Arc::from([atom("child"), atom("self")])),
+                ]),
+            ),
+            FunctionGraphVerificationLimits::default(),
+        )
+        .expect("captured named-self graph"),
+    );
+    let text: Arc<str> = Arc::from("function self(){return function child(){return self}}");
+    let full_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let input = UnverifiedCompilerBytecodeGraph::new(
+        graph,
+        Arc::from([
+            UnverifiedFunctionMetadata::new(
+                Some(AtomPoolIndex::new(0)),
+                Arc::from([VariableDefinition::new(
+                    Some(AtomPoolIndex::new(0)),
+                    ScopeLink::End,
+                    strict_function_name_policy(),
+                    false,
+                    Some(0),
+                )]),
+                Arc::from([]),
+                source_for_flow(&text, &root_flow, full_span, SourceByteSpan::new(9, 13)),
+            ),
+            UnverifiedFunctionMetadata::new(
+                Some(AtomPoolIndex::new(0)),
+                Arc::from([]),
+                Arc::from([ClosureVariableDefinition::new(
+                    Some(AtomPoolIndex::new(1)),
+                    strict_function_name_policy(),
+                    CompilerClosureSource::ParentVariableReference(0),
+                )]),
+                source_for_flow(
+                    &text,
+                    &child_flow,
+                    SourceByteSpan::new(23, full_span.end()),
+                    SourceByteSpan::new(32, 37),
+                ),
+            ),
+        ]),
+    );
+
+    let verified =
+        verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+            .expect("a child can capture and read the initialized named-self binding");
+    assert_eq!(verified.usage().frame_state_entries(), 2);
+    assert_eq!(
+        verified
+            .function(FunctionTemplateId::new(1))
+            .expect("child")
+            .metadata()
+            .closures()[0]
+            .policy(),
+        strict_function_name_policy()
+    );
 }
 
 #[test]

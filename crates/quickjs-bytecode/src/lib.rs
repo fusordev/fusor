@@ -71,7 +71,7 @@ pub use function::{
 pub use verified_bytecode::{
     BindingPolicyViolationReason, BindingSlot, BytecodeGraphResource, BytecodeGraphUsage,
     BytecodeGraphVerificationLimits, BytecodeVerificationError, BytecodeVerificationErrorKind,
-    ClosureVariableDefinition, CompilerBindingKind, CompilerBindingPolicy,
+    ClosureVariableDefinition, CompilerBindingKind, CompilerBindingPolicy, CompilerExecutableKind,
     CompilerInitializationPolicy, CompilerSource, CompilerWritePolicy, ExecutionRequirement,
     MetadataAtomField, PcSourceSpan, ScopeLink, SourceByteSpan, UnverifiedCompilerBytecodeGraph,
     UnverifiedFunctionMetadata, VariableDefinition, VerifiedBytecode, VerifiedBytecodeFunction,

@@ -311,20 +311,26 @@ failures allocate no wrapper. The compatibility release permits source to
 escape that wrapper, so the adapter deliberately does not require the Script
 AST to contain exactly one function expression.
 
-Runtime execution of that adapter is still pending. Ordinary `Function(...)`
-and `new Function(...)` will evaluate and convert constructor arguments in
-order, retain the exact wrapper and fragment map, compile the complete
-generated Script through Oxc semantic analysis and the project compiler, and
-execute only whole-function `VerifiedBytecode`. The Script completion value is
-the result; extracting an assumed child function expression would be
-incorrect because wrapper escape is observable. Compilation and installation
-belong to the constructor realm's global environment and never capture the
-caller frame. This path is not eval, must not emit `eval`/`apply_eval`, and
-continues to reject direct eval in generated code. Direct and indirect eval
-remain wholly unimplemented. GeneratorFunction, AsyncFunction, and
-AsyncGeneratorFunction also remain fail closed. Correct implementation first
-requires Script-root storage/lowering, global declaration instantiation, and
-realm-global execution rather than a host shortcut around those boundaries.
+The first runtime slice of that adapter is exposed as a host/internal facade
+entry for already-coerced UTF-8 fragments. It compiles the complete Program
+root and every nested template as one typed dynamic-Function Script authority,
+installs it in the selected constructor realm, executes an unexposed internal
+root with that realm's global object as receiver, retires the root, and returns
+the exact rooted Script completion. It never extracts an assumed child
+function expression, so wrapper escape remains observable. Named `anonymous`
+self bindings are metadata-initialized to the returned function, including
+when captured by a nested closure.
+
+This first slice deliberately rejects Program global declarations, unresolved
+constructor-realm names, and sloppy ordinary-function `this`; the realm global
+object is currently only the Script receiver. Global declaration
+instantiation and global name lookup must land before the host entry becomes
+the global `Function` call/constructor builtin. `new Function` additionally
+needs the pinned post-completion `new_target.prototype` adjustment. The path is
+not eval, never emits `eval`/`apply_eval`, and continues to reject direct eval
+anywhere in generated code. Direct and indirect eval remain wholly
+unimplemented. GeneratorFunction, AsyncFunction, and AsyncGeneratorFunction
+also remain fail closed.
 
 ## Bytecode
 

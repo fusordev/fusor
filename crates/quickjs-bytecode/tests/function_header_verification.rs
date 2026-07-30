@@ -123,6 +123,34 @@ fn retained_source_header_sets_the_quickjs_debug_flag() {
 }
 
 #[test]
+fn dynamic_function_script_header_is_debug_only_and_never_eval() {
+    let raw = UnverifiedFunctionHeader::dynamic_function_script(3);
+
+    assert_eq!(raw.serialized_flags(), 0x0400);
+    assert_eq!(raw.js_mode(), 0);
+    assert_eq!(raw.defined_argument_count(), 0);
+    assert_eq!(raw.variable_reference_count(), 3);
+
+    let verified = verify(
+        ordinary_body(),
+        0,
+        FunctionIndexDomains::new(0, 0, 0, 3, 0),
+        raw,
+    )
+    .expect("a non-eval Script header is structurally valid");
+    let header = verified.function_header();
+
+    assert_eq!(header.kind(), FunctionKind::Normal);
+    assert_eq!(header.flags().bits(), 0x0400);
+    assert!(header.flags().has_debug());
+    assert!(!header.flags().is_eval());
+    assert!(!header.flags().has_prototype());
+    assert!(!header.flags().has_simple_parameter_list());
+    assert!(!header.flags().arguments_allowed());
+    assert!(!header.mode().is_strict());
+}
+
+#[test]
 fn each_defined_boolean_header_flag_has_a_typed_getter() {
     for bit in [0, 1, 2, 3, 6, 7, 8, 9, 10, 11] {
         let verified = verify(

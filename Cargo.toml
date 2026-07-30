@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/quickjs",
     "crates/quickjs-bytecode",
     "crates/quickjs-compiler",
     "crates/quickjs-diagnostics",

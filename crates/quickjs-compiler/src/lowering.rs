@@ -6,7 +6,7 @@ use oxc_ast::{
         AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement, CallExpression,
         ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForStatement,
         ForStatementInit, Function, FunctionBody, FunctionType, IfStatement, LogicalExpression,
-        ObjectExpression, ObjectPropertyKind, PropertyKey as OxcPropertyKey, PropertyKind,
+        ObjectExpression, ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind,
         ReturnStatement, SequenceExpression, SimpleAssignmentTarget, Statement,
         StaticMemberExpression, ThrowStatement, UnaryExpression, UpdateExpression,
         VariableDeclaration, VariableDeclarationKind, WhileStatement,
@@ -24,9 +24,9 @@ use quickjs_bytecode::{
     CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
     CompilerCapturedBinding, CompilerClosureSource as CompilerGraphClosureSource,
     CompilerConstant as CompilerGraphConstant, CompilerConstantKind, CompilerConstantLayout,
-    CompilerConstantValue, CompilerInitializationPolicy as VerifiedInitializationPolicy,
-    CompilerSource, CompilerString, CompilerStringError,
-    CompilerWritePolicy as VerifiedWritePolicy, EncodeError, FinalOpcode,
+    CompilerConstantValue, CompilerExecutableKind,
+    CompilerInitializationPolicy as VerifiedInitializationPolicy, CompilerSource, CompilerString,
+    CompilerStringError, CompilerWritePolicy as VerifiedWritePolicy, EncodeError, FinalOpcode,
     FunctionGraphVerificationError, FunctionGraphVerificationLimits, FunctionIndexDomains,
     FunctionTemplateId, MAX_FUNCTION_INDEX_ENTRIES, Operands, PcSourceSpan, ScopeLink,
     SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction,
@@ -35,7 +35,10 @@ use quickjs_bytecode::{
     VerificationLimits, VerifiedBytecode, VerifiedCompilerFunctionGraph, VerifiedControlFlow,
     verify_compiler_bytecode_graph, verify_compiler_control_flow, verify_compiler_function_graph,
 };
-use quickjs_frontend::{OxcStringDecodeError, ParsedUnit, Span, decode_oxc_cooked_string};
+use quickjs_frontend::{
+    CompilationGoal, DynamicFunctionKind, OxcStringDecodeError, ParsedUnit, Span,
+    decode_oxc_cooked_string,
+};
 
 use crate::storage::{
     BindingId, CaptureSlot, CaptureSource, CompilationUnitKind, CompilerError, DeclarationKind,
@@ -200,11 +203,13 @@ impl CompiledClosureVariable {
     }
 }
 
-/// Owned output from validated ordinary-function lowering.
+/// Owned output from validated executable-body lowering.
 ///
 /// This per-function staging artifact is deliberately not execution authority
 /// by itself. [`CompiledFunctionTree::verified_bytecode`] returns the final
-/// code-and-metadata authority for the complete selected subtree.
+/// code-and-metadata authority for the complete selected subtree. Program-root
+/// synthetic locals are represented in verified metadata, not as source
+/// [`LoweredLocal`] bindings.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompiledFunction {
     executable: ExecutableId,
@@ -238,7 +243,11 @@ impl CompiledFunction {
         &self.source_text
     }
 
-    /// Returns the selected function's dense local layout.
+    /// Returns the selected executable's dense source-binding local layout.
+    ///
+    /// Compiler-internal locals such as dynamic Script completion storage are
+    /// intentionally absent; the verified function domains and metadata remain
+    /// the execution-authority layout.
     #[must_use]
     pub fn locals(&self) -> &[LoweredLocal] {
         &self.locals
@@ -279,7 +288,7 @@ impl CompiledFunction {
 /// [`CompilationContext::compile_leaf`] result.
 pub type CompiledLeafFunction = CompiledFunction;
 
-/// Failure-atomic output for one compiled ordinary-function subtree.
+/// Failure-atomic output for one complete compiled executable subtree.
 ///
 /// Functions are stored in stable executable preorder. Every constant edge
 /// names one member of this same tree. A selected nested root is accepted only
@@ -483,6 +492,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         selection: &CompilationExecutable,
         limits: VerificationLimits,
     ) -> Result<CompiledLeafFunction, LeafCompilationError> {
+        self.reject_dynamic_function_subtree_entry()?;
         let executable = self.resolve_selection(selection)?;
         let tree_layout = self.function_tree_layout()?;
         if let Some(child) = tree_layout.children(executable)?.first() {
@@ -562,7 +572,72 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         graph_limits: FunctionGraphVerificationLimits,
         bytecode_limits: BytecodeGraphVerificationLimits,
     ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        self.reject_dynamic_function_subtree_entry()?;
         let root = self.resolve_selection(selection)?;
+        self.compile_subtree_with_all_limits(root, limits, graph_limits, bytecode_limits)
+    }
+
+    /// Lowers the complete exact wrapper Script for an ordinary dynamic
+    /// `Function` constructor invocation.
+    ///
+    /// The Program root and every nested function template are compiled and
+    /// final-verified as one indivisible authority. No API on this context can
+    /// extract the synthetic named wrapper function from a dynamic source unit.
+    ///
+    /// # Errors
+    ///
+    /// Rejects every non-dynamic source unit, nonordinary dynamic-function
+    /// family, Program-level global binding or reference, unsupported syntax,
+    /// resource limit, and staged or final verification failure.
+    pub fn compile_dynamic_function_script(
+        &self,
+        limits: VerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        self.compile_dynamic_function_script_with_all_limits(
+            limits,
+            FunctionGraphVerificationLimits::default(),
+            BytecodeGraphVerificationLimits::default(),
+        )
+    }
+
+    /// Lowers a complete ordinary dynamic-Function Script with every staged
+    /// and final graph limit explicit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::compile_dynamic_function_script`].
+    pub fn compile_dynamic_function_script_with_all_limits(
+        &self,
+        limits: VerificationLimits,
+        graph_limits: FunctionGraphVerificationLimits,
+        bytecode_limits: BytecodeGraphVerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) {
+            return unsupported(
+                UnsupportedLeafFeature::DynamicFunctionRequiresScriptRoot,
+                self.unit.program().span,
+            );
+        }
+        let root = self
+            .planned
+            .plan
+            .executables()
+            .first()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "dynamic Function storage plan has a Program root",
+                span: Some(self.unit.program().span),
+            })?
+            .id();
+        self.compile_subtree_with_all_limits(root, limits, graph_limits, bytecode_limits)
+    }
+
+    fn compile_subtree_with_all_limits(
+        &self,
+        root: ExecutableId,
+        limits: VerificationLimits,
+        graph_limits: FunctionGraphVerificationLimits,
+        bytecode_limits: BytecodeGraphVerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
         let tree_layout = self.function_tree_layout()?;
         let subtree = tree_layout.subtree_preorder(root)?;
         let mut functions = Vec::with_capacity(subtree.len());
@@ -612,14 +687,25 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         })
     }
 
+    fn reject_dynamic_function_subtree_entry(&self) -> Result<(), LeafCompilationError> {
+        if matches!(self.unit.goal(), CompilationGoal::DynamicFunction(_)) {
+            return unsupported(
+                UnsupportedLeafFeature::DynamicFunctionRequiresScriptRoot,
+                self.unit.program().span,
+            );
+        }
+        Ok(())
+    }
+
     fn compile_function(
         &self,
         executable: ExecutableId,
         tree_layout: &FunctionTreeLayout,
         limits: VerificationLimits,
     ) -> Result<CompiledFunction, LeafCompilationError> {
-        let validated = self.validate_function(executable, tree_layout, limits)?;
+        let validated = self.validate_executable(executable, tree_layout, limits)?;
         let ValidatedFunction {
+            executable_kind,
             strict,
             argument_count,
             local_count,
@@ -655,7 +741,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             capture_layout.bindings().len(),
             "function variable references",
         )?;
-        let header = UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
+        let header = executable_header(
+            executable_kind,
             strict,
             argument_count,
             variable_reference_count,
@@ -692,7 +779,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 function_name_span,
                 source_mappings.into(),
             ),
-        );
+        )
+        .with_executable_kind(executable_kind);
 
         Ok(CompiledFunction {
             executable,
@@ -706,6 +794,25 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             control_flow: Arc::new(control_flow),
             metadata,
         })
+    }
+
+    fn validate_executable(
+        &self,
+        executable: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        limits: VerificationLimits,
+    ) -> Result<ValidatedFunction, LeafCompilationError> {
+        let metadata = self
+            .planned
+            .plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        match metadata.kind() {
+            ExecutableKind::Script {
+                asynchronous: false,
+            } => self.validate_dynamic_function_script(executable, tree_layout, limits),
+            _ => self.validate_function(executable, tree_layout, limits),
+        }
     }
 
     fn resolve_selection(
@@ -820,6 +927,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             self.compiled_closure_definitions(&closure_variables, constants)?;
 
         Ok(ValidatedFunction {
+            executable_kind: CompilerExecutableKind::OrdinaryFunction,
             strict: executable.is_strict(),
             argument_count: executable.parameter_count(),
             local_count: layout.local_count,
@@ -841,6 +949,98 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             closure_definitions,
             function_span: source_byte_span(function.span),
             function_name_span: executable.name_span().map(source_byte_span),
+            flow,
+        })
+    }
+
+    fn validate_dynamic_function_script(
+        &self,
+        executable_id: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        limits: VerificationLimits,
+    ) -> Result<ValidatedFunction, LeafCompilationError> {
+        let (executable, program) = self.selected_dynamic_function_script(executable_id)?;
+        if let Some(binding) = self
+            .planned
+            .plan
+            .bindings_for(executable_id)
+            .and_then(|bindings| bindings.first())
+        {
+            return unsupported(
+                UnsupportedLeafFeature::GlobalEnvironment,
+                binding
+                    .declaration_spans()
+                    .first()
+                    .copied()
+                    .unwrap_or(program.span),
+            );
+        }
+        if let Some(reference) = self
+            .planned
+            .plan
+            .unresolved_globals_for(executable_id)
+            .and_then(|references| references.first())
+        {
+            return unsupported(
+                UnsupportedLeafFeature::UnresolvedReference,
+                reference.span(),
+            );
+        }
+
+        let mut layout = FrameLayout::new(&self.planned.plan, executable_id)?;
+        let completion = layout.push_internal_local()?;
+        let mut flow = PlannedControlFlow::new(limits);
+        let constants = tree_layout.constant_pool(executable_id)?;
+        let planning = FunctionPlanningContext {
+            executable: executable_id,
+            layout: &layout,
+            tree_layout,
+            constants,
+        };
+        self.validate_program(program, completion, &planning, &mut flow)?;
+        let program_scope =
+            self.created_scope(program.scope_id.get(), program.node_id.get(), program.span)?;
+        let capture_layout =
+            self.compiler_capture_layout(executable_id, program_scope, &layout, tree_layout)?;
+        let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
+        if !closure_variables.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "dynamic Function Script root imports no caller closure",
+                span: Some(program.span),
+            });
+        }
+        let mut variable_definitions = self.compiled_variable_definitions(
+            executable_id,
+            program_scope,
+            &layout,
+            tree_layout,
+            constants,
+        )?;
+        variable_definitions.push(script_completion_variable_definition(constants)?);
+
+        Ok(ValidatedFunction {
+            executable_kind: CompilerExecutableKind::DynamicFunctionScript,
+            strict: executable.is_strict(),
+            argument_count: 0,
+            local_count: layout.local_count,
+            capture_count: layout.capture_count,
+            capture_layout,
+            locals: layout
+                .locals
+                .iter()
+                .map(|local| LoweredLocal {
+                    binding: local.binding,
+                    slot: local.slot,
+                })
+                .collect(),
+            constants: Arc::clone(&constants.entries),
+            atoms: Arc::clone(&constants.atoms),
+            closure_variables,
+            function_name: None,
+            variable_definitions,
+            closure_definitions: Vec::new(),
+            function_span: source_byte_span(program.span),
+            function_name_span: None,
             flow,
         })
     }
@@ -928,6 +1128,16 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 return Err(LeafCompilationError::SemanticInvariant {
                     invariant: "anonymous executable has no name span",
                     span: Some(executable.span()),
+                });
+            }
+            if executable.id().index() == 0
+                && self.unit.goal()
+                    == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
+            {
+                owner.push(CompiledMetadataAtomCandidate {
+                    key: CompiledMetadataAtomKey::ScriptCompletion,
+                    value: compiler_identifier_string("_ret_", executable.span())?,
+                    span: executable.span(),
                 });
             }
             for binding in self.planned.plan.bindings_for(executable.id()).ok_or(
@@ -1142,6 +1352,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             ],
             active_scopes: Vec::new(),
             loop_controls: Vec::new(),
+            completion: StatementCompletion::Discard,
         };
 
         while let Some(task) = state.work.pop() {
@@ -1155,6 +1366,45 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         }
         flow.ensure_terminal(body.span)?;
         Ok(())
+    }
+
+    fn validate_program<'statement>(
+        &self,
+        program: &'statement Program<'arena>,
+        completion: LocalSlot,
+        planning: &FunctionPlanningContext<'_>,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let program_scope =
+            self.created_scope(program.scope_id.get(), program.node_id.get(), program.span)?;
+        let mut state = StatementPlanningState {
+            work: vec![
+                StatementWork::PopScope(program_scope),
+                StatementWork::VisitList {
+                    statements: &program.body,
+                    next: 0,
+                },
+                StatementWork::PushScope {
+                    scope: program_scope,
+                    creator: program.node_id.get(),
+                    span: program.span,
+                },
+            ],
+            active_scopes: Vec::new(),
+            loop_controls: Vec::new(),
+            completion: StatementCompletion::Script(completion),
+        };
+
+        while let Some(task) = state.work.pop() {
+            self.process_statement_work(task, program.span, planning, flow, &mut state)?;
+        }
+        if !state.active_scopes.is_empty() || !state.loop_controls.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "Program planning closes every scope and loop region",
+                span: Some(program.span),
+            });
+        }
+        flow.ensure_script_terminal(completion, program.span)
     }
 
     fn process_statement_work<'statement>(
@@ -1271,7 +1521,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 self.validate_declaration(declaration, layout, tree_layout, constants, flow)?;
             }
             Statement::ExpressionStatement(statement) => {
-                Self::schedule_expression_statement(statement, &mut state.work);
+                Self::schedule_expression_statement(statement, state.completion, &mut state.work);
             }
             Statement::EmptyStatement(_) => {}
             Statement::ReturnStatement(statement) => {
@@ -1281,9 +1531,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 Self::schedule_throw_statement(statement, &mut state.work);
             }
             Statement::IfStatement(statement) => {
+                Self::reset_script_completion(state.completion, statement.span, flow)?;
                 Self::schedule_if_statement(statement, flow, &mut state.work)?;
             }
             Statement::WhileStatement(statement) => {
+                Self::reset_script_completion(state.completion, statement.span, flow)?;
                 Self::schedule_while_statement(
                     statement,
                     flow,
@@ -1294,12 +1546,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Statement::DoWhileStatement(statement) => {
                 Self::schedule_do_while_statement(
                     statement,
+                    state.completion,
                     flow,
                     &mut state.work,
                     state.active_scopes.len(),
                 )?;
             }
             Statement::ForStatement(statement) => {
+                Self::reset_script_completion(state.completion, statement.span, flow)?;
                 self.plan_for_statement(statement, flow, state)?;
             }
             Statement::BreakStatement(statement) => {
@@ -1356,14 +1610,36 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     fn schedule_expression_statement<'statement>(
         statement: &'statement ExpressionStatement<'arena>,
+        completion: StatementCompletion,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) {
+        let (opcode, operands) = match completion {
+            StatementCompletion::Discard => (FinalOpcode::Drop, Operands::None),
+            StatementCompletion::Script(slot) => compact_put_local(slot),
+        };
         work.push(StatementWork::Emit(PlannedInstruction::new(
-            FinalOpcode::Drop,
-            Operands::None,
+            opcode,
+            operands,
             statement.expression.span(),
         )));
         work.push(StatementWork::Expression(&statement.expression));
+    }
+
+    fn reset_script_completion(
+        completion: StatementCompletion,
+        span: Span,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let StatementCompletion::Script(slot) = completion else {
+            return Ok(());
+        };
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Undefined,
+            Operands::None,
+            span,
+        ))?;
+        let (opcode, operands) = compact_put_local(slot);
+        flow.emit(PlannedInstruction::new(opcode, operands, span))
     }
 
     fn schedule_return_statement<'statement>(
@@ -1490,6 +1766,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     fn schedule_do_while_statement<'statement>(
         statement: &'statement DoWhileStatement<'arena>,
+        completion: StatementCompletion,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
         scope_depth: usize,
@@ -1513,6 +1790,19 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         work.push(StatementWork::PopLoop);
         work.push(StatementWork::Visit(&statement.body));
         work.push(StatementWork::PushLoop(control));
+        if let StatementCompletion::Script(slot) = completion {
+            let (opcode, operands) = compact_put_local(slot);
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                opcode,
+                operands,
+                statement.span,
+            )));
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                statement.span,
+            )));
+        }
         work.push(StatementWork::Bind(iteration));
         Ok(())
     }
@@ -2255,7 +2545,15 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 executable: layout.executable,
             },
         )?;
-        if !executable.is_strict() {
+        let is_dynamic_function_script = self.unit.goal()
+            == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
+            && matches!(
+                executable.kind(),
+                ExecutableKind::Script {
+                    asynchronous: false
+                }
+            );
+        if !executable.is_strict() && !is_dynamic_function_script {
             return unsupported(UnsupportedLeafFeature::UnsupportedExpression, span);
         }
         Ok(PlannedInstruction::new(
@@ -3378,12 +3676,6 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         }
         let is_declaration = function.r#type == FunctionType::FunctionDeclaration;
         let is_expression = function.r#type == FunctionType::FunctionExpression;
-        if is_expression && function.id.is_some() {
-            return unsupported(
-                UnsupportedLeafFeature::NamedFunctionExpression,
-                function.span,
-            );
-        }
         if !is_declaration && !is_expression {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedFunctionForm,
@@ -3426,6 +3718,71 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             );
         }
         Ok((executable, function))
+    }
+
+    fn selected_dynamic_function_script(
+        &self,
+        executable_id: ExecutableId,
+    ) -> Result<(&Executable, &Program<'arena>), LeafCompilationError> {
+        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) {
+            return unsupported(
+                UnsupportedLeafFeature::DynamicFunctionRequiresScriptRoot,
+                self.unit.program().span,
+            );
+        }
+        let executable = self.planned.plan.executable(executable_id).ok_or(
+            LeafCompilationError::InvalidExecutable {
+                executable: executable_id,
+            },
+        )?;
+        let node_id = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(executable_id.index())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "dynamic Script executable has an Oxc node identity",
+                span: Some(executable.span()),
+            })?;
+        if self
+            .planned
+            .identities
+            .executable_by_node
+            .get(node_id.index())
+            .copied()
+            .flatten()
+            != Some(executable_id)
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "dynamic Script Oxc node and executable identities are bijective",
+                span: Some(executable.span()),
+            });
+        }
+        let AstKind::Program(program) = self.unit.semantic().nodes().kind(node_id) else {
+            return unsupported(
+                UnsupportedLeafFeature::DynamicFunctionRequiresScriptRoot,
+                executable.span(),
+            );
+        };
+        if executable_id.index() != 0
+            || executable.parent().is_some()
+            || executable.parameter_count() != 0
+            || executable.is_strict()
+            || !matches!(
+                executable.kind(),
+                ExecutableKind::Script {
+                    asynchronous: false
+                }
+            )
+            || self.planned.plan.kind() != CompilationUnitKind::Script
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "ordinary dynamic Function has one synchronous sloppy Script root",
+                span: Some(program.span),
+            });
+        }
+        Ok((executable, program))
     }
 
     fn binding_for_identifier(
@@ -3782,6 +4139,13 @@ struct StatementPlanningState<'statement, 'arena> {
     work: Vec<StatementWork<'statement, 'arena>>,
     active_scopes: Vec<ScopeId>,
     loop_controls: Vec<LoopControl>,
+    completion: StatementCompletion,
+}
+
+#[derive(Clone, Copy)]
+enum StatementCompletion {
+    Discard,
+    Script(LocalSlot),
 }
 
 #[derive(Clone)]
@@ -3816,6 +4180,26 @@ impl LoopJump {
         match self {
             Self::Break => &control.break_target,
             Self::Continue => &control.continue_target,
+        }
+    }
+}
+
+const fn executable_header(
+    kind: CompilerExecutableKind,
+    strict: bool,
+    argument_count: u32,
+    variable_reference_count: u32,
+) -> UnverifiedFunctionHeader {
+    match kind {
+        CompilerExecutableKind::OrdinaryFunction => {
+            UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
+                strict,
+                argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::DynamicFunctionScript => {
+            UnverifiedFunctionHeader::dynamic_function_script(variable_reference_count)
         }
     }
 }
@@ -4303,6 +4687,21 @@ impl FrameLayout {
         })
     }
 
+    fn push_internal_local(&mut self) -> Result<LocalSlot, LeafCompilationError> {
+        let slot = LocalSlot(checked_function_index(
+            self.local_count,
+            "function local slots",
+        )?);
+        self.local_count =
+            self.local_count
+                .checked_add(1)
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "function local slots",
+                })?;
+        checked_function_entry_count(self.local_count, "function local slots")?;
+        Ok(slot)
+    }
+
     fn slot(&self, binding: BindingId) -> Option<FrameSlot> {
         let index = self
             .slots
@@ -4313,6 +4712,7 @@ impl FrameLayout {
 }
 
 struct ValidatedFunction {
+    executable_kind: CompilerExecutableKind,
     strict: bool,
     argument_count: u32,
     local_count: u32,
@@ -4394,6 +4794,7 @@ enum CompiledAtomPurpose {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum CompiledMetadataAtomKey {
     FunctionName,
+    ScriptCompletion,
     Binding(BindingId),
 }
 
@@ -5019,6 +5420,25 @@ impl PlannedControlFlow {
         Ok(())
     }
 
+    fn ensure_script_terminal(
+        &mut self,
+        completion: LocalSlot,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        if self.label_bound_after_last_instruction
+            || self.last_instruction_can_fall_through.unwrap_or(true)
+        {
+            let (opcode, operands) = compact_get_local(completion);
+            self.emit(PlannedInstruction::new(opcode, operands, span))?;
+            self.emit(PlannedInstruction::new(
+                FinalOpcode::Return,
+                Operands::None,
+                span,
+            ))?;
+        }
+        Ok(())
+    }
+
     fn finish(self) -> Result<FinishedControlFlow, LeafCompilationError> {
         let Self {
             assembler,
@@ -5564,6 +5984,23 @@ fn verified_storage_policy(
     verified_binding_policy(binding.policy())
 }
 
+fn script_completion_variable_definition(
+    constants: &CompiledConstantPool,
+) -> Result<VariableDefinition, LeafCompilationError> {
+    Ok(VariableDefinition::new(
+        Some(constants.metadata_atom_index(CompiledMetadataAtomKey::ScriptCompletion)?),
+        ScopeLink::End,
+        CompilerBindingPolicy::new(
+            VerifiedBindingKind::Var,
+            VerifiedInitializationPolicy::UndefinedAtInstantiation,
+            VerifiedWritePolicy::Mutable,
+            false,
+        ),
+        false,
+        None,
+    ))
+}
+
 const fn binding_has_scope(policy: DeclarationPolicy) -> bool {
     matches!(
         policy.kind(),
@@ -5578,13 +6015,13 @@ const fn source_byte_span(span: Span) -> SourceByteSpan {
     SourceByteSpan::new(span.start, span.end)
 }
 
-/// Syntax or storage behavior outside the first ordinary leaf-function slice.
+/// Syntax or storage behavior outside the currently executable compiler slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedLeafFeature {
     /// The selected executable is not a synchronous ordinary function.
     NonOrdinaryFunction,
-    /// A named function expression requires its immutable self binding.
-    NamedFunctionExpression,
+    /// A dynamic Function unit must compile only through its complete Script root.
+    DynamicFunctionRequiresScriptRoot,
     /// An anonymous function needs exact inferred-name initialization.
     InferredFunctionName,
     /// The Oxc function form is neither a declaration nor function expression.
@@ -5606,13 +6043,15 @@ pub enum UnsupportedLeafFeature {
     UnsupportedLiteral,
     /// A binding cannot be represented by this frame layout.
     UnsupportedBinding,
+    /// Program-level bindings require the constructor realm's global environment.
+    GlobalEnvironment,
     /// A reference access or binding write policy is not supported.
     UnsupportedReference,
     /// An identifier remained unresolved after Oxc semantics.
     UnresolvedReference,
 }
 
-/// Failure to lower or verify an ordinary leaf function.
+/// Failure to lower or verify one executable body or complete subtree.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LeafCompilationError {
     /// The executable selection was issued by another compilation context.
@@ -6086,6 +6525,7 @@ mod tests {
                         continue_target: done.clone(),
                         scope_depth: 1,
                     }],
+                    completion: StatementCompletion::Discard,
                 };
                 context
                     .plan_loop_jump(

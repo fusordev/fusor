@@ -1,0 +1,17 @@
+[package]
+name = "quickjs"
+version = "0.0.1"
+description = "Ergonomic host facade for the pure-Rust QuickJS port"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+quickjs-bytecode = { path = "../quickjs-bytecode" }
+quickjs-compiler = { path = "../quickjs-compiler" }
+quickjs-frontend = { path = "../quickjs-frontend" }
+quickjs-runtime = { path = "../quickjs-runtime" }
+
+[lints]
+workspace = true

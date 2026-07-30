@@ -302,9 +302,17 @@ A milestone is complete only when all of its checked items pass in CI.
         means this path must return the Script completion rather than extract
         an assumed child function AST. Direct eval in generated code remains
         rejected; Eval/ApplyEval are never used. GeneratorFunction,
-        AsyncFunction, and AsyncGeneratorFunction remain fail closed. This is
-        blocked on Script-root lowering, global declaration instantiation, and
-        realm-global execution.
+        AsyncFunction, and AsyncGeneratorFunction remain fail closed.
+    - [x] Add the host/internal ordinary-Function entry for already-coerced
+          fragments: isolated Oxc parsing and semantics, complete Script-root
+          lowering, named-self initialization, whole-graph verification,
+          constructor-realm global receiver, exact completion publication,
+          and failure-safe internal-root retirement. Preserve wrapper escape
+          and reject direct eval and all nonordinary constructor families.
+    - [ ] Add realm-global declaration instantiation and unresolved-name
+          lookup, sloppy-function `this` normalization, ordered JavaScript
+          `ToString` argument conversion, the global `Function` call/construct
+          object, and `new_target.prototype` post-processing.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
       stack traces, iterators, and generators.
   - [x] First escaping exception path: local/captured TDZ access returns a

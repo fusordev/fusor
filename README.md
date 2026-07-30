@@ -26,9 +26,14 @@ Installation scans every instruction in every template before mutation.
 Computed/accessor/exotic object operations, constructors, optional/spread/apply
 calls, BigInt, coercive numeric operations, dynamic operators, serialized
 bytecode, every form of eval, and catch/finally typed-stack semantics remain
-deferred and fail closed. The ordinary dynamic `Function` constructor also
-remains pending its full Script/global-environment execution path; it will not
-be implemented through eval or caller lexical capture.
+deferred and fail closed. The `quickjs` facade now exposes a first internal
+ordinary dynamic-Function pipeline for already-coerced source fragments: it
+retains the exact wrapper/map, compiles the complete generated Script, executes
+only whole-graph `VerifiedBytecode` with a constructor-realm global receiver,
+and returns the exact Script completion. Program globals, unresolved
+constructor-realm lookups, sloppy-function `this`, the global `Function`
+object, and `new.target` prototype adjustment remain pending and fail closed.
+No dynamic-Function path uses eval or captures a caller lexical frame.
 
 ## Contract
 

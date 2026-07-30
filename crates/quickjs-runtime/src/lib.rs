@@ -35,8 +35,8 @@ pub use atom::{
     PREDEFINED_INTERNER_SLOTS, PropertyKey,
 };
 pub use error::{
-    EngineFault, ExceptionKind, ExecutionError, HandleError, HandleKind, InstallError, JsException,
-    JsStackFrame, RuntimeError, RuntimeResource, ValueKind,
+    DynamicFunctionScriptError, EngineFault, ExceptionKind, ExecutionError, HandleError,
+    HandleKind, InstallError, JsException, JsStackFrame, RuntimeError, RuntimeResource, ValueKind,
 };
 pub use number::JsNumber;
 pub use predefined_atoms::PredefinedAtom;

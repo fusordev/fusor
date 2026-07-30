@@ -26,7 +26,8 @@
 //! Iterative execution of runtime-installed verified bytecode.
 
 use quickjs_bytecode::{
-    BytecodePc, CompilerClosureSource, FinalOpcode, FunctionTemplateId, InstructionIndex, Operands,
+    BytecodePc, CompilerBindingKind, CompilerClosureSource, CompilerExecutableKind, FinalOpcode,
+    FunctionTemplateId, InstructionIndex, Operands, VerifiedBytecodeFunction,
     VerifiedSuccessorKind,
 };
 
@@ -75,6 +76,7 @@ struct Frame {
     code: InstalledCodeId,
     template: FunctionTemplateId,
     strict: bool,
+    receiver_access: ReceiverAccess,
     receiver: StoredValue,
     instruction: InstructionIndex,
     return_to: Option<InstructionIndex>,
@@ -97,7 +99,42 @@ struct FramePlan {
     stack_capacity: usize,
     reserved_values: u64,
     strict: bool,
+    receiver_access: ReceiverAccess,
     instruction: InstructionIndex,
+}
+
+#[derive(Clone, Copy)]
+enum ReceiverAccess {
+    Direct,
+    DeferredSloppy,
+}
+
+impl ReceiverAccess {
+    const fn for_function(strict: bool, executable_kind: CompilerExecutableKind) -> Self {
+        if strict
+            || matches!(
+                executable_kind,
+                CompilerExecutableKind::DynamicFunctionScript
+            )
+        {
+            Self::Direct
+        } else {
+            Self::DeferredSloppy
+        }
+    }
+}
+
+fn receiver_profile(function: &VerifiedBytecodeFunction<'_>) -> (bool, ReceiverAccess) {
+    let strict = function
+        .function()
+        .control_flow()
+        .function_header()
+        .mode()
+        .is_strict();
+    (
+        strict,
+        ReceiverAccess::for_function(strict, function.metadata().executable_kind()),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -217,6 +254,23 @@ impl Context<'_> {
         )?;
         let value = execute_frames(self.runtime, frame, limits)?;
         self.runtime.public_value(value)
+    }
+
+    pub(crate) fn execute_internal_root(
+        &mut self,
+        function: FunctionId,
+        receiver: StoredValue,
+        limits: ExecutionLimits,
+    ) -> Result<StoredValue, ExecutionError> {
+        let plan = plan_frame(self.runtime, function, 0, 0)?;
+        let frame = create_frame(
+            self.runtime,
+            plan,
+            receiver,
+            FrameArguments::Owned(Vec::new()),
+            None,
+        )?;
+        execute_frames(self.runtime, frame, limits)
     }
 }
 
@@ -421,7 +475,7 @@ fn plan_frame(
             instruction: 0,
         },
     )?;
-
+    let (strict, receiver_access) = receiver_profile(&verified);
     Ok(FramePlan {
         function: function_id,
         code: code_id,
@@ -430,7 +484,8 @@ fn plan_frame(
         local_count,
         stack_capacity,
         reserved_values: frame_values,
-        strict: control_flow.function_header().mode().is_strict(),
+        strict,
+        receiver_access,
         instruction,
     })
 }
@@ -504,6 +559,40 @@ fn create_frame(
         )));
     }
 
+    let verified =
+        code.authority
+            .function(plan.template)
+            .ok_or(EngineFault::InvalidClosureEnvironment {
+                function: plan.template,
+            })?;
+    let variable_count = plan.argument_count.checked_add(plan.local_count).ok_or(
+        EngineFault::InvalidClosureEnvironment {
+            function: plan.template,
+        },
+    )?;
+    if verified.metadata().variables().len() != variable_count {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: plan.template,
+        }
+        .into());
+    }
+    for (local, definition) in verified
+        .metadata()
+        .variables()
+        .iter()
+        .skip(plan.argument_count)
+        .enumerate()
+    {
+        if definition.policy().kind() == CompilerBindingKind::FunctionName {
+            let binding = locals
+                .get_mut(local)
+                .ok_or(EngineFault::InvalidClosureEnvironment {
+                    function: plan.template,
+                })?;
+            *binding = FrameBinding::Direct(SlotValue::Value(StoredValue::Function(plan.function)));
+        }
+    }
+
     let installed_index = usize::try_from(plan.template.get()).map_err(|_| {
         EngineFault::InvalidClosureEnvironment {
             function: plan.template,
@@ -538,6 +627,7 @@ fn create_frame(
         code: plan.code,
         template: plan.template,
         strict: plan.strict,
+        receiver_access: plan.receiver_access,
         receiver,
         instruction: plan.instruction,
         return_to,
@@ -668,9 +758,9 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
         FinalOpcode::Undefined => frame.stack.push(StoredValue::Undefined),
         FinalOpcode::Null => frame.stack.push(StoredValue::Null),
         FinalOpcode::PushThis => {
-            if !frame.strict {
+            if matches!(frame.receiver_access, ReceiverAccess::DeferredSloppy) {
                 return Err(EngineFault::RuntimeInvariant {
-                    message: "sloppy push_this entered the strict-only receiver profile",
+                    message: "sloppy ordinary push_this entered the deferred receiver profile",
                 }
                 .into());
             }
