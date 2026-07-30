@@ -7244,4 +7244,5 @@ fn unsupported_dispatch<T>(opcode: FinalOpcode) -> Result<T, ExecutionError> {
 }
 
 #[cfg(test)]
-include!("vm_tests.rs");
+#[path = "vm_tests.rs"]
+mod tests;
