@@ -150,6 +150,125 @@ fn verified_single(
 }
 
 #[test]
+fn final_authority_sorts_call_before_the_adjacent_abrupt_requirement() {
+    let instructions = [
+        (FinalOpcode::Push7, Operands::NoneInt),
+        (FinalOpcode::Call0, Operands::NPopX),
+        (FinalOpcode::Throw, Operands::None),
+    ];
+    let text = "function f(argument){var local;throw (7)();}";
+    let variables = [
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(1)),
+            ScopeLink::End,
+            parameter_policy(),
+            false,
+            None,
+        ),
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(2)),
+            ScopeLink::End,
+            var_policy(),
+            false,
+            None,
+        ),
+    ];
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+
+    let verified = verified_single(
+        &instructions,
+        &[atom("f"), atom("argument"), atom("local")],
+        &variables,
+        source(
+            text,
+            function_span,
+            Some(SourceByteSpan::new(9, 10)),
+            &[
+                (0, SourceByteSpan::new(38, 39)),
+                (1, SourceByteSpan::new(37, 42)),
+                (2, SourceByteSpan::new(31, 43)),
+            ],
+        ),
+    )
+    .expect("a directly called result can gain explicit-throw authority");
+
+    assert!(
+        verified
+            .requirements()
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]),
+        "requirements remain sorted and deduplicated"
+    );
+    assert!(
+        verified.requirements().windows(2).any(|pair| pair
+            == [
+                ExecutionRequirement::Calls,
+                ExecutionRequirement::AbruptCompletions,
+            ]),
+        "the call and abrupt-completion requirements remain adjacent and ordered"
+    );
+    assert_eq!(
+        verified.requirements(),
+        [
+            ExecutionRequirement::CoreValues,
+            ExecutionRequirement::Numbers,
+            ExecutionRequirement::Strings,
+            ExecutionRequirement::Calls,
+            ExecutionRequirement::AbruptCompletions,
+        ]
+    );
+}
+
+#[test]
+fn final_authority_keeps_throw_error_fail_closed() {
+    let instructions = [(
+        FinalOpcode::ThrowError,
+        Operands::AtomU8 {
+            atom: AtomPoolIndex::new(0),
+            value: 0,
+        },
+    )];
+    let text = "function f(argument){var local;return undefined}";
+    let variables = [
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(1)),
+            ScopeLink::End,
+            parameter_policy(),
+            false,
+            None,
+        ),
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(2)),
+            ScopeLink::End,
+            var_policy(),
+            false,
+            None,
+        ),
+    ];
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+
+    let error = verified_single(
+        &instructions,
+        &[atom("f"), atom("argument"), atom("local")],
+        &variables,
+        source(
+            text,
+            function_span,
+            Some(SourceByteSpan::new(9, 10)),
+            &[(0, function_span)],
+        ),
+    )
+    .expect_err("the internal throw-error shortcut remains outside final authority");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::ThrowError,
+        } if *pc == BytecodePc::ZERO
+    ));
+}
+
+#[test]
 fn final_authority_admits_only_direct_calls_and_records_the_requirement() {
     let instructions = [
         (FinalOpcode::Undefined, Operands::None),

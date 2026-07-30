@@ -130,12 +130,13 @@ resolved argument/local reads, unary and binary operators, short-circuit
 `&&`/`||`/`??`, conditional expressions, sequence and expression statements,
 mutable identifier assignment and update, lexical blocks, `if`/`else`,
 `while`, `do`/`while`, classic `for`, unlabeled `break`/`continue`, and
-explicit or implicit returns. A deepest leaf may read or write argument/local
-cells forwarded through ancestor capture slots. It lowers expressions and
-statements with iterative work lists, validates the complete selected body
-into typed pseudo-instructions before byte emission, assigns typed frame and
-imported-capture slots, and immediately produces a non-executable
-`VerifiedControlFlow` certificate. Scope entry reads Oxc's creator `ScopeId`
+explicit `throw` plus explicit or implicit returns. A deepest leaf may read or
+write argument/local cells forwarded through ancestor capture slots. It
+lowers expressions and statements with iterative work lists, validates the
+complete selected body into typed pseudo-instructions before byte emission,
+assigns typed frame and imported-capture slots, and immediately produces a
+non-executable `VerifiedControlFlow` certificate. Scope entry reads Oxc's
+creator `ScopeId`
 directly, checks its creator `NodeId`, instantiates body function declarations
 before user instructions, recreates block function declarations on every
 scope entry, and emits TDZ initialization only for ordinary lexical bindings
@@ -223,8 +224,8 @@ instruction source mappings, abstract frame-state cells, and binding-policy
 transfers. Retained parent-edge closure checks are charged to the policy
 budget before metadata analysis. It also records a sorted conservative list
 of runtime capability families: core values, Numbers, Strings, BigInts,
-closures, direct calls, lexical bindings, object operators, and dynamic
-operators. Those families describe
+closures, direct calls, abrupt completions, lexical bindings, object operators,
+and dynamic operators. Those families describe
 implementation requirements; they are not a whole-program value-type proof.
 All final-verifier traversals use explicit work lists and fallible bounded
 allocation, so neither Rust call-stack depth nor a recursion guard is part of
@@ -236,9 +237,9 @@ Oxc compiler profile. It remains runtime-independent and immutable, so one
 without a lock. `Context::instantiate` binds one installation to a validated
 same-runtime realm; the selected root must have an empty external closure
 environment. Child environments are subsequently derived only from verified
-parent capture metadata. Serialized bytecode, the full exceptional typed-stack
-model, handlers/finally/iterators, direct eval, and the remaining compiler
-profiles still fail closed.
+parent capture metadata. Serialized bytecode, catch/finally typed-stack state,
+handlers/iterators, direct eval, and the remaining compiler profiles still
+fail closed.
 
 `BytecodeAssembler` keeps symbolic label handles provenance-bound to one
 assembler through immutable `Arc` identity. Labels never enter final operands.
@@ -367,14 +368,17 @@ The admitted execution families are primitive Number/String/Boolean/nullish
 values, stack operations, arguments and locals, imported captures, closure
 creation, TDZ checks, `close_loc` cell rotation, branches, returns, truthiness,
 `typeof`, strict equality, the nullish predicate, and direct `call` plus
-`call0`–`call3`, including compact and full-width encodings. Calls evaluate
-the callee before arguments, pass `undefined` as the not-yet-observable direct
-receiver, fill missing formals with `undefined`, and share aggregate frame
-limits and instruction fuel. Method calls, constructors, tail calls, spread
-and apply, BigInt, coercive numeric operations, object/dynamic operators,
-serialized input, non-string atom namespaces, raw function slots, handlers,
-finally return addresses, iterator markers, and packed exceptional-stack
-values remain fail-closed.
+`call0`–`call3`, including compact and full-width encodings, plus explicit
+`throw`. Calls evaluate the callee before arguments, pass `undefined` as the
+not-yet-observable direct receiver, fill missing formals with `undefined`, and
+share aggregate frame limits and instruction fuel. An escaping throw carries
+its exact JavaScript value through the same frame vector, allocates caller
+provenance before publishing any heap root, and preserves caller order from
+immediate to outermost. Method calls, constructors, tail calls, spread and
+apply, BigInt, coercive numeric operations, object/dynamic operators,
+serialized input, non-string atom namespaces, raw function slots, catch
+handlers, finally return addresses, iterator markers, and packed exceptional
+stack values remain fail-closed.
 
 The symbolic assembler chooses the componentwise shortest valid final branch
 layout. This can differ from a conservative QuickJS peephole boundary while
@@ -496,20 +500,32 @@ will not be admitted until zombie-state and resurrection rules are complete.
 The current implementation keeps distinct domains:
 
 - public-handle errors: orphaned, foreign, stale, or wrong-kind handles;
-- admitted JavaScript exception records: a TDZ `ReferenceError` and exact
-  direct-call `TypeError: not a function`, each with an exact UTF-16 message,
-  origin function/bytecode PC/source location, plus source-mapped caller call
-  sites retained while explicit frames unwind;
+- admitted JavaScript exception records: engine-created TDZ `ReferenceError`
+  and exact direct-call `TypeError: not a function` payloads remain distinct
+  from arbitrary explicit `throw` values. Every record retains the origin
+  function/bytecode PC/source artifact plus caller call sites while explicit
+  frames unwind;
 - compile diagnostics: stable code, canonical message, severity, source span,
   labels, notes, and help;
 - verifier errors: function, bytecode PC, opcode, and violated invariant;
 - host errors: I/O, loader, timeout, cancellation, channel, and task failures;
 - engine faults: contradictions between verified authority and runtime state.
 
-General `throw`, catch/finally, error objects, and internal abrupt-completion
-transport are not admitted yet. Their target representation will keep thrown
-JavaScript values rooted and separate from compiler, verifier, handle, host,
-and engine failures. Miette remains presentation, not semantic truth.
+The VM carries engine-created errors and arbitrary thrown `StoredValue`s in one
+private typed abrupt-completion transport. After `throw` pops its value, that
+transport exclusively owns the value while active frames retain the remaining
+edges. Caller provenance is fallibly allocated and the escaping value is
+immediately published as one public `JsValue` root; collection is forbidden
+between those operations. Cloning the exception shares that `Arc` root header,
+and dropping its last clone schedules the normal deferred release.
+`StoredValue` crosses the public-handle boundary through an exhaustive
+primitive-versus-`HeapReference` split, and the release mailbox carries the
+typed heap reference. Adding a future object value therefore cannot compile
+until its root publication, deferred release, and collector handling are
+explicitly extended. Catch/finally, JavaScript Error objects, and catchable
+engine-created errors remain pending; ordinary host/resource/engine failures
+are not mislabeled as JavaScript throws. Miette remains presentation, not
+semantic truth.
 
 The leaf compiler maps instruction-local verifier failures back through its
 strictly ordered final-PC table with exact `BytecodePc` lookup. It never treats
@@ -549,9 +565,9 @@ bytecode PC → generated source span → incoming source-map chain → original
 
 Source-map chaining, its depth/cycle guards, error-object stack formatting,
 and the compressed serialized `pc2line` representation remain pending. The
-current TDZ and non-callable exceptions use retained generated bytecode PCs
-and source spans directly; nested direct calls also retain each parked caller
-call site without consulting the Rust stack.
+current TDZ, non-callable, and explicit-throw exceptions use retained generated
+bytecode PCs and source spans directly; nested direct calls also retain each
+parked caller call site without consulting the Rust stack.
 
 ## Planned Tokio host loop
 
@@ -598,7 +614,7 @@ It proves runtime-local realm installation, host calls, forwarded closure
 cells, TDZ diagnostics, `close_loc` rotation, compact/full operand forms,
 allocation-free public-root release, and safe-point collection of transient and
 cyclic function/cell graphs. Object allocation, property assignment, coercive
-`+`, and general `throw` remain later slices.
+`+`, catch/finally, and JavaScript Error objects remain later slices.
 
 The planned asynchronous slice creates a host timer Promise. A Tokio wakeup
 must be observed on the runtime owner, the FIFO job queue must drain

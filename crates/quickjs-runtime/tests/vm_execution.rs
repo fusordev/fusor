@@ -317,10 +317,11 @@ fn tdz_throws_exact_reference_error_with_verified_location() {
     let ExecutionError::Exception(exception) = error else {
         panic!("expected JavaScript exception, got {error:?}");
     };
-    assert_eq!(exception.kind(), ExceptionKind::ReferenceError);
+    assert_eq!(exception.kind(), Some(ExceptionKind::ReferenceError));
     assert_eq!(
         exception
             .message()
+            .expect("engine message")
             .to_utf8_lossy()
             .expect("UTF-8 error message"),
         "lexical is not initialized"
@@ -348,10 +349,11 @@ fn tdz_write_throws_before_consuming_or_initializing_the_binding() {
     let ExecutionError::Exception(exception) = error else {
         panic!("expected JavaScript exception, got {error:?}");
     };
-    assert_eq!(exception.kind(), ExceptionKind::ReferenceError);
+    assert_eq!(exception.kind(), Some(ExceptionKind::ReferenceError));
     assert_eq!(
         exception
             .message()
+            .expect("engine message")
             .to_utf8_lossy()
             .expect("UTF-8 error message"),
         "lexical is not initialized"
@@ -384,10 +386,11 @@ fn captured_tdz_state_survives_frame_teardown() {
     let ExecutionError::Exception(exception) = error else {
         panic!("expected JavaScript exception, got {error:?}");
     };
-    assert_eq!(exception.kind(), ExceptionKind::ReferenceError);
+    assert_eq!(exception.kind(), Some(ExceptionKind::ReferenceError));
     assert_eq!(
         exception
             .message()
+            .expect("engine message")
             .to_utf8_lossy()
             .expect("UTF-8 error message"),
         "lexical is not initialized"

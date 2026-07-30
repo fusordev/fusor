@@ -124,18 +124,22 @@ guard is used.
 `VerifiedBytecode` retains the staged graph, final metadata, resource usage,
 and a sorted conservative set of `ExecutionRequirement` families:
 `CoreValues`, `Numbers`, `Strings`, `BigInts`, `Closures`, `Calls`,
-`LexicalBindings`, `ObjectOperators`, and `DynamicOperators`. These are
-runtime implementation requirements, not a proof of whole-program value
-types. The immutable authority is shared through `Arc` and needs no lock.
+`AbruptCompletions`, `LexicalBindings`, `ObjectOperators`, and
+`DynamicOperators`. These are runtime implementation requirements, not a
+proof of whole-program value types. The immutable authority is shared through
+`Arc` and needs no lock.
 
 This type is the code-and-metadata authority for the admitted ordinary
 compiler profile, not a runtime function or closure. A future materializer
 must separately require a realm in the same runtime and the exact root or
 parent closure environment. Direct eval remains deferred and fail-closed.
-Serialized bytecode and its full exceptional typed-stack proof, including
-handlers, finally return addresses, and iterator markers, are not implemented.
-The complete typed-stack rules below remain the target for that wider
-boundary.
+The current compiler profile admits `throw` only as a verified terminal that
+consumes exactly one ordinary value. Its runtime transports that value through
+the explicit frame vector and roots it only if it escapes to the host.
+Serialized bytecode and the full exceptional typed-stack proof, including
+catch handlers, finally return addresses, and iterator markers, are not
+implemented. The complete typed-stack rules below remain the target for that
+wider boundary.
 
 Current source verification is structural: it proves UTF-8 boundaries,
 containment, exact instruction-PC correspondence, and metadata consistency. It
@@ -702,7 +706,7 @@ frame-state matrix cells, and policy/capture transfer work are aggregate
 charges. Every input-proportional allocation after preflight is fallible and
 cannot silently retry with a larger profile. Final ownership moves the
 already-reserved metadata vector behind a fixed-size `Arc` header without
-copying it; only fixed-size ownership headers and the at-most-nine-entry
+copying it; only fixed-size ownership headers and the at-most-ten-entry
 execution-requirement set use bounded infallible allocation.
 
 A caller may lower the current profile. Raising it is available only through

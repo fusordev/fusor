@@ -31,8 +31,8 @@ use quickjs_bytecode::{
 };
 
 use crate::{
-    Context, EngineFault, ExecutionError, Function, HandleError, HandleKind, JsException,
-    JsStackFrame, JsString, JsValue, Runtime, RuntimeResource,
+    Context, EngineFault, ExceptionKind, ExecutionError, Function, HandleError, HandleKind,
+    JsException, JsStackFrame, JsString, JsValue, Runtime, RuntimeResource,
     ids::{BindingCellId, FunctionId, InstalledCodeId},
     runtime::{
         BindingCell, FrameBindingAddress, HeapFunction, InstalledCode, InstalledConstant,
@@ -103,7 +103,21 @@ enum Step {
         argument_count: usize,
         return_to: InstructionIndex,
     },
+    Abrupt(PendingException),
     Return(StoredValue),
+}
+
+enum PendingExceptionPayload {
+    EngineError {
+        kind: ExceptionKind,
+        message: JsString,
+    },
+    ThrownValue(StoredValue),
+}
+
+struct PendingException {
+    payload: PendingExceptionPayload,
+    origin: JsStackFrame,
 }
 
 enum FrameArguments<'a> {
@@ -139,10 +153,11 @@ impl Context<'_> {
     /// # Errors
     ///
     /// Rejects orphaned, foreign, or stale handles before frame mutation.
-    /// During execution it returns the admitted exact TDZ `ReferenceError` or
-    /// non-callable `TypeError`, with verified origin and caller provenance,
-    /// plus instruction interruption, resource/allocation failures, or
-    /// internal engine faults.
+    /// During execution it returns the admitted exact TDZ `ReferenceError`,
+    /// non-callable `TypeError`, or arbitrary value from an explicit
+    /// JavaScript `throw`, with verified origin and caller provenance, plus
+    /// instruction interruption, resource/allocation failures, or internal
+    /// engine faults.
     pub fn call(
         &mut self,
         function: &Function,
@@ -212,15 +227,7 @@ fn execute_frames(
             instruction: 0,
         })?;
         executed += 1;
-        let step = execute_one(runtime, frame);
-        let step = match step {
-            Ok(step) => step,
-            Err(ExecutionError::Exception(mut exception)) => {
-                attach_exception_callers(runtime, &frames, &mut exception)?;
-                return Err(ExecutionError::Exception(exception));
-            }
-            Err(error) => return Err(error),
-        };
+        let step = execute_one(runtime, frame)?;
         match step {
             Step::Continue => {}
             Step::Call {
@@ -251,6 +258,16 @@ fn execute_frames(
                 )?;
                 active_frame_values = active_frame_values.saturating_add(child.reserved_values);
                 frames.push(child);
+            }
+            Step::Abrupt(pending) => {
+                // The pending transport exclusively owns a popped thrown
+                // value while active frames own the remaining heap edges.
+                // Allocate provenance, then immediately publish the escaping
+                // root; no collection safe point may be inserted between
+                // these operations.
+                let caller_frames = exception_caller_frames(runtime, &frames)?;
+                let exception = finish_exception(runtime, pending, caller_frames)?;
+                return Err(ExecutionError::Exception(exception));
             }
             Step::Return(value) => {
                 let finished = frames.pop().ok_or(EngineFault::MissingInstruction {
@@ -657,7 +674,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             }
             let callee_index = frame.stack.len() - required;
             let StoredValue::Function(function) = &frame.stack[callee_index] else {
-                return Err(ExecutionError::Exception(not_callable_exception(
+                return Ok(Step::Abrupt(not_callable_exception(
                     runtime, frame, source_pc,
                 )?));
             };
@@ -776,7 +793,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             let value = match duplicate_binding(runtime, frame_local(frame, index)?, true, frame) {
                 Ok(value) => value,
                 Err(BindingAccessError::Uninitialized) => {
-                    return Err(ExecutionError::Exception(tdz_exception(
+                    return Ok(Step::Abrupt(tdz_exception(
                         runtime,
                         frame,
                         BindingName::Local(index),
@@ -790,7 +807,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
         FinalOpcode::PutLocCheck => {
             let index = local_index(opcode, operands)?;
             if binding_is_uninitialized(runtime, frame_local(frame, index)?)? {
-                return Err(ExecutionError::Exception(tdz_exception(
+                return Ok(Step::Abrupt(tdz_exception(
                     runtime,
                     frame,
                     BindingName::Local(index),
@@ -803,7 +820,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
         FinalOpcode::SetLocCheck => {
             let index = local_index(opcode, operands)?;
             if binding_is_uninitialized(runtime, frame_local(frame, index)?)? {
-                return Err(ExecutionError::Exception(tdz_exception(
+                return Ok(Step::Abrupt(tdz_exception(
                     runtime,
                     frame,
                     BindingName::Local(index),
@@ -818,7 +835,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             let value = match duplicate_environment(runtime, frame, index, true) {
                 Ok(value) => value,
                 Err(BindingAccessError::Uninitialized) => {
-                    return Err(ExecutionError::Exception(tdz_exception(
+                    return Ok(Step::Abrupt(tdz_exception(
                         runtime,
                         frame,
                         BindingName::Closure(index),
@@ -832,7 +849,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
         FinalOpcode::PutVarRefCheck => {
             let index = closure_index(opcode, operands)?;
             if environment_is_uninitialized(runtime, frame, index)? {
-                return Err(ExecutionError::Exception(tdz_exception(
+                return Ok(Step::Abrupt(tdz_exception(
                     runtime,
                     frame,
                     BindingName::Closure(index),
@@ -903,6 +920,14 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
                 value,
                 StoredValue::Undefined | StoredValue::Null
             )));
+        }
+        FinalOpcode::Throw => {
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            let value = pop(frame)?;
+            return Ok(Step::Abrupt(PendingException {
+                payload: PendingExceptionPayload::ThrownValue(value),
+                origin,
+            }));
         }
         FinalOpcode::Return => return Ok(Step::Return(pop(frame)?)),
         FinalOpcode::ReturnUndef => return Ok(Step::Return(StoredValue::Undefined)),
@@ -1509,7 +1534,7 @@ fn tdz_exception(
     frame: &Frame,
     binding: BindingName,
     pc: BytecodePc,
-) -> Result<JsException, ExecutionError> {
+) -> Result<PendingException, ExecutionError> {
     let code = code(runtime, frame.code)?;
     let function =
         code.authority
@@ -1541,21 +1566,27 @@ fn tdz_exception(
     } else {
         JsString::from_utf8("lexical variable is not initialized")?
     };
-    Ok(JsException::reference_error(
-        message,
-        instruction_location(runtime, frame, pc)?,
-    ))
+    Ok(PendingException {
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::ReferenceError,
+            message,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
 }
 
 fn not_callable_exception(
     runtime: &Runtime,
     frame: &Frame,
     pc: BytecodePc,
-) -> Result<JsException, ExecutionError> {
-    Ok(JsException::type_error(
-        JsString::from_utf8("not a function")?,
-        instruction_location(runtime, frame, pc)?,
-    ))
+) -> Result<PendingException, ExecutionError> {
+    Ok(PendingException {
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8("not a function")?,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
 }
 
 fn instruction_location(
@@ -1587,18 +1618,18 @@ fn instruction_location(
     ))
 }
 
-fn attach_exception_callers(
+fn exception_caller_frames(
     runtime: &Runtime,
     frames: &[Frame],
-    exception: &mut JsException,
-) -> Result<(), ExecutionError> {
+) -> Result<Vec<JsStackFrame>, ExecutionError> {
     let caller_count = frames.len().saturating_sub(1);
-    exception
-        .try_reserve_caller_frames(caller_count)
-        .map_err(|_| ExecutionError::AllocationFailed {
+    let mut caller_frames = Vec::new();
+    caller_frames.try_reserve_exact(caller_count).map_err(|_| {
+        ExecutionError::AllocationFailed {
             resource: RuntimeResource::ExceptionFrames,
             additional: caller_count,
-        })?;
+        }
+    })?;
     for caller in frames[..caller_count].iter().rev() {
         let instruction = code(runtime, caller.code)?
             .authority
@@ -1626,13 +1657,29 @@ fn attach_exception_callers(
             }
             .into());
         }
-        exception.push_caller_frame(instruction_location(
+        caller_frames.push(instruction_location(
             runtime,
             caller,
             instruction.decoded().pc(),
         )?);
     }
-    Ok(())
+    Ok(caller_frames)
+}
+
+fn finish_exception(
+    runtime: &mut Runtime,
+    pending: PendingException,
+    caller_frames: Vec<JsStackFrame>,
+) -> Result<JsException, ExecutionError> {
+    let PendingException { payload, origin } = pending;
+    Ok(match payload {
+        PendingExceptionPayload::EngineError { kind, message } => {
+            JsException::engine_error(kind, message, origin, caller_frames)
+        }
+        PendingExceptionPayload::ThrownValue(value) => {
+            JsException::explicit_throw(runtime.public_value(value)?, origin, caller_frames)
+        }
+    })
 }
 
 fn frame_argument(frame: &Frame, index: u32) -> Result<&FrameBinding, EngineFault> {

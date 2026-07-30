@@ -38,7 +38,7 @@ use crate::{
     JsNumber, JsString, JsValue, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, RealmId},
-    value::{ReleaseMailbox, SlotValue, StoredValue},
+    value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
 
 const DEFAULT_MAX_REALMS: u64 = 65_535;
@@ -681,8 +681,9 @@ impl Runtime {
         &mut self,
         value: StoredValue,
     ) -> Result<JsValue, crate::ExecutionError> {
-        let StoredValue::Function(function) = value else {
-            return Ok(JsValue::primitive(&self.mailbox, value));
+        let function = match value.into_root_target() {
+            RootTarget::Primitive(value) => return Ok(JsValue::primitive(&self.mailbox, value)),
+            RootTarget::Heap(HeapReference::Function(function)) => function,
         };
         check_execution_limit(
             RuntimeResource::PublicRoots,
@@ -714,7 +715,10 @@ impl Runtime {
         };
         node.public_roots = next_roots;
         self.public_roots += 1;
-        Ok(JsValue::rooted_function(&self.mailbox, function))
+        Ok(JsValue::rooted_heap(
+            &self.mailbox,
+            HeapReference::Function(function),
+        ))
     }
 
     pub(crate) fn drain_releases(&mut self) {
@@ -722,11 +726,15 @@ impl Runtime {
         if !pending.is_empty() {
             self.collection_pending = true;
         }
-        for function in pending.iter().copied() {
-            if let Some(node) = self.functions.get_mut(function) {
-                debug_assert!(node.public_roots > 0);
-                node.public_roots = node.public_roots.saturating_sub(1);
-                self.public_roots = self.public_roots.saturating_sub(1);
+        for reference in pending.iter().copied() {
+            match reference {
+                HeapReference::Function(function) => {
+                    if let Some(node) = self.functions.get_mut(function) {
+                        debug_assert!(node.public_roots > 0);
+                        node.public_roots = node.public_roots.saturating_sub(1);
+                        self.public_roots = self.public_roots.saturating_sub(1);
+                    }
+                }
             }
         }
         self.mailbox.restore_pending(pending);
@@ -877,31 +885,31 @@ impl Context<'_> {
     /// Creates a runtime-local `undefined` value.
     #[must_use]
     pub fn undefined(&self) -> JsValue {
-        JsValue::primitive(&self.runtime.mailbox, StoredValue::Undefined)
+        JsValue::primitive(&self.runtime.mailbox, PrimitiveValue::Undefined)
     }
 
     /// Creates a runtime-local `null` value.
     #[must_use]
     pub fn null(&self) -> JsValue {
-        JsValue::primitive(&self.runtime.mailbox, StoredValue::Null)
+        JsValue::primitive(&self.runtime.mailbox, PrimitiveValue::Null)
     }
 
     /// Creates a runtime-local Boolean value.
     #[must_use]
     pub fn boolean(&self, value: bool) -> JsValue {
-        JsValue::primitive(&self.runtime.mailbox, StoredValue::Boolean(value))
+        JsValue::primitive(&self.runtime.mailbox, PrimitiveValue::Boolean(value))
     }
 
     /// Creates a runtime-local Number value.
     #[must_use]
     pub fn number(&self, value: JsNumber) -> JsValue {
-        JsValue::primitive(&self.runtime.mailbox, StoredValue::Number(value))
+        JsValue::primitive(&self.runtime.mailbox, PrimitiveValue::Number(value))
     }
 
     /// Roots an already-owned immutable JavaScript string in this runtime.
     #[must_use]
     pub fn string(&self, value: JsString) -> JsValue {
-        JsValue::primitive(&self.runtime.mailbox, StoredValue::String(value))
+        JsValue::primitive(&self.runtime.mailbox, PrimitiveValue::String(value))
     }
 
     /// Transactionally installs complete verified bytecode and materializes
@@ -1034,9 +1042,9 @@ impl Context<'_> {
         self.runtime.installed_atoms += atoms;
         self.runtime.installed_constants += constants;
         self.runtime.public_roots += 1;
-        Ok(Function::from_root(JsValue::rooted_function(
+        Ok(Function::from_root(JsValue::rooted_heap(
             &self.runtime.mailbox,
-            root,
+            HeapReference::Function(root),
         )))
     }
 }
@@ -1099,6 +1107,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Drop
             | FinalOpcode::Dup
             | FinalOpcode::Call
+            | FinalOpcode::Throw
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
             | FinalOpcode::GetLoc

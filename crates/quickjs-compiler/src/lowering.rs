@@ -7,8 +7,8 @@ use oxc_ast::{
         ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForStatement,
         ForStatementInit, Function, FunctionBody, FunctionType, IfStatement, LogicalExpression,
         PropertyKind, ReturnStatement, SequenceExpression, SimpleAssignmentTarget, Statement,
-        UnaryExpression, UpdateExpression, VariableDeclaration, VariableDeclarationKind,
-        WhileStatement,
+        ThrowStatement, UnaryExpression, UpdateExpression, VariableDeclaration,
+        VariableDeclarationKind, WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
@@ -1258,6 +1258,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Statement::ReturnStatement(statement) => {
                 Self::schedule_return_statement(statement, flow, &mut state.work)?;
             }
+            Statement::ThrowStatement(statement) => {
+                Self::schedule_throw_statement(statement, &mut state.work);
+            }
             Statement::IfStatement(statement) => {
                 Self::schedule_if_statement(statement, flow, &mut state.work)?;
             }
@@ -1364,6 +1367,18 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             ))?;
         }
         Ok(())
+    }
+
+    fn schedule_throw_statement<'statement>(
+        statement: &'statement ThrowStatement<'arena>,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) {
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Throw,
+            Operands::None,
+            statement.span,
+        )));
+        work.push(StatementWork::Expression(&statement.argument));
     }
 
     fn plan_for_statement<'statement>(
@@ -4656,7 +4671,7 @@ impl PlannedControlFlow {
         self.instruction_spans.push(instruction.span);
         self.last_instruction_can_fall_through = Some(!matches!(
             instruction.opcode,
-            FinalOpcode::Return | FinalOpcode::ReturnUndef
+            FinalOpcode::Return | FinalOpcode::ReturnUndef | FinalOpcode::Throw
         ));
         self.label_bound_after_last_instruction = false;
         Ok(())

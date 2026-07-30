@@ -31,6 +31,45 @@ use std::{
 
 use crate::{HandleError, HandleKind, JsNumber, JsString, ValueKind, ids::FunctionId};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HeapReference {
+    Function(FunctionId),
+}
+
+impl HeapReference {
+    fn into_stored_value(self) -> StoredValue {
+        match self {
+            Self::Function(function) => StoredValue::Function(function),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum PrimitiveValue {
+    Undefined,
+    Null,
+    Boolean(bool),
+    Number(JsNumber),
+    String(JsString),
+}
+
+impl PrimitiveValue {
+    fn into_stored_value(self) -> StoredValue {
+        match self {
+            Self::Undefined => StoredValue::Undefined,
+            Self::Null => StoredValue::Null,
+            Self::Boolean(value) => StoredValue::Boolean(value),
+            Self::Number(value) => StoredValue::Number(value),
+            Self::String(value) => StoredValue::String(value),
+        }
+    }
+}
+
+pub(crate) enum RootTarget {
+    Primitive(PrimitiveValue),
+    Heap(HeapReference),
+}
+
 #[derive(Debug)]
 pub(crate) enum StoredValue {
     Undefined,
@@ -42,6 +81,17 @@ pub(crate) enum StoredValue {
 }
 
 impl StoredValue {
+    pub(crate) fn into_root_target(self) -> RootTarget {
+        match self {
+            Self::Undefined => RootTarget::Primitive(PrimitiveValue::Undefined),
+            Self::Null => RootTarget::Primitive(PrimitiveValue::Null),
+            Self::Boolean(value) => RootTarget::Primitive(PrimitiveValue::Boolean(value)),
+            Self::Number(value) => RootTarget::Primitive(PrimitiveValue::Number(value)),
+            Self::String(value) => RootTarget::Primitive(PrimitiveValue::String(value)),
+            Self::Function(function) => RootTarget::Heap(HeapReference::Function(function)),
+        }
+    }
+
     pub(crate) const fn kind(&self) -> ValueKind {
         match self {
             Self::Undefined => ValueKind::Undefined,
@@ -112,7 +162,7 @@ impl SlotValue {
 }
 
 pub(crate) struct ReleaseMailbox {
-    pending: Cell<Vec<FunctionId>>,
+    pending: Cell<Vec<HeapReference>>,
     outstanding: Cell<usize>,
 }
 
@@ -146,21 +196,21 @@ impl ReleaseMailbox {
         self.outstanding.set(outstanding.saturating_sub(1));
     }
 
-    fn queue_release(&self, function: FunctionId) {
+    fn queue_release(&self, reference: HeapReference) {
         let outstanding = self.outstanding.get();
         debug_assert!(outstanding > 0);
         let mut pending = self.pending.take();
         debug_assert!(pending.len() < pending.capacity());
-        pending.push(function);
+        pending.push(reference);
         self.pending.set(pending);
         self.outstanding.set(outstanding.saturating_sub(1));
     }
 
-    pub(crate) fn take_pending(&self) -> Vec<FunctionId> {
+    pub(crate) fn take_pending(&self) -> Vec<HeapReference> {
         self.pending.take()
     }
 
-    pub(crate) fn restore_pending(&self, mut pending: Vec<FunctionId>) {
+    pub(crate) fn restore_pending(&self, mut pending: Vec<HeapReference>) {
         let current = self.pending.take();
         debug_assert!(current.is_empty());
         pending.clear();
@@ -178,20 +228,15 @@ impl ReleaseMailbox {
 struct ValueRoot {
     owner: Weak<ReleaseMailbox>,
     value: StoredValue,
-    reserved_release: bool,
+    release: Option<HeapReference>,
 }
 
 impl Drop for ValueRoot {
     fn drop(&mut self) {
-        if !self.reserved_release {
-            return;
-        }
-        let StoredValue::Function(function) = self.value else {
-            debug_assert!(false, "only function roots reserve deferred release");
-            return;
-        };
-        if let Some(owner) = self.owner.upgrade() {
-            owner.queue_release(function);
+        if let Some(reference) = self.release
+            && let Some(owner) = self.owner.upgrade()
+        {
+            owner.queue_release(reference);
         }
     }
 }
@@ -217,12 +262,11 @@ impl JsValue {
         clippy::arc_with_non_send_sync,
         reason = "user-selected Arc root headers deliberately remain runtime-local through Cell"
     )]
-    pub(crate) fn primitive(owner: &Arc<ReleaseMailbox>, value: StoredValue) -> Self {
-        debug_assert!(!matches!(value, StoredValue::Function(_)));
+    pub(crate) fn primitive(owner: &Arc<ReleaseMailbox>, value: PrimitiveValue) -> Self {
         Self(Arc::new(ValueRoot {
             owner: Arc::downgrade(owner),
-            value,
-            reserved_release: false,
+            value: value.into_stored_value(),
+            release: None,
         }))
     }
 
@@ -230,11 +274,11 @@ impl JsValue {
         clippy::arc_with_non_send_sync,
         reason = "user-selected Arc root headers deliberately remain runtime-local through Cell"
     )]
-    pub(crate) fn rooted_function(owner: &Arc<ReleaseMailbox>, function: FunctionId) -> Self {
+    pub(crate) fn rooted_heap(owner: &Arc<ReleaseMailbox>, reference: HeapReference) -> Self {
         Self(Arc::new(ValueRoot {
             owner: Arc::downgrade(owner),
-            value: StoredValue::Function(function),
-            reserved_release: true,
+            value: reference.into_stored_value(),
+            release: Some(reference),
         }))
     }
 

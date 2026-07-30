@@ -16,12 +16,15 @@ transactionally install that authority into a same-runtime realm and host-call
 the resulting function. The admitted profile executes primitive constants,
 arguments, locals, captured cells, nested closures, TDZ checks, cell rotation,
 branches, returns, direct ordinary JavaScript-to-JavaScript calls, truthiness,
-`typeof`, strict equality, and nullish tests. Nested calls and recursion use an
-explicit frame vector with cumulative frame/value ceilings and shared fuel.
-Installation scans every instruction in every template before mutation;
-BigInt, coercive numeric operations, object/dynamic operations, JavaScript
-method/constructor/tail-call opcodes, serialized bytecode, direct eval, and the
-general exceptional typed-stack model remain deferred and fail closed.
+`typeof`, strict equality, nullish tests, and arbitrary explicit `throw`
+values. Nested calls, recursion, and abrupt unwinding use an explicit frame
+vector with cumulative frame/value ceilings and shared fuel. Escaping thrown
+heap values receive one `Arc`-backed public root only after source/caller
+provenance allocation succeeds. Installation scans every instruction in every
+template before mutation; BigInt, coercive numeric operations, object/dynamic
+operations, JavaScript method/constructor/tail-call opcodes, serialized
+bytecode, direct eval, and catch/finally typed-stack semantics remain deferred
+and fail closed.
 
 ## Contract
 

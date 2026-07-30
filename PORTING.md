@@ -40,6 +40,8 @@ Every production crate must be independently reusable and documented:
   semantics plus an isolated Rust C-ABI boundary;
 - `quickjs-typescript-strip`: low-priority, source-mapped, erasable
   TypeScript preprocessing;
+- `quickjs-serde`: low-priority, policy-driven conversion between rooted
+  JavaScript object graphs and Rust `serde` data models;
 - `quickjs`: ergonomic facade with deliberate feature flags;
 - thin `qjs`, `qjsc`, and bytecode-viewer binary crates built entirely on
   those libraries.
@@ -294,6 +296,12 @@ A milestone is complete only when all of its checked items pass in CI.
         template, verified bytecode PC, source name, and retained source span.
   - [x] Direct-call failures add `TypeError: not a function`; child exceptions
         preserve their origin and retain verified caller call-site frames.
+  - [x] Add arbitrary explicit `throw` end to end: Oxc `ThrowStatement`
+        lowering emits a verified one-value terminal; the VM transports
+        engine errors and explicit values through one private typed abrupt
+        path while unwinding the existing frame vector; provenance allocation
+        precedes publication of an escaping heap root; cloned exceptions share
+        one `Arc` root header; and handler/finally opcodes remain fail-closed.
 - [ ] Deterministic debug/line tables.
 
 ### M3 — values and object model
@@ -385,6 +393,10 @@ A milestone is complete only when all of its checked items pass in CI.
       with no C/C++ source, bindgen, or C compiler.
 - [ ] Opt-in erasable TypeScript stripping that emits a mandatory source map
       before entering the ordinary JavaScript frontend.
+- [ ] Low-priority `serde` bridge for bounded, policy-controlled
+      JavaScript-object-to-Rust serialization and Rust-to-JavaScript
+      deserialization, including cycles, accessors, symbols, BigInt, typed
+      arrays, and exception behavior.
 - [ ] Feature, platform, conformance, diagnostics, cancellation, and security
       matrices for every optional layer.
 

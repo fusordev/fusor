@@ -2,7 +2,7 @@ use std::{error::Error, fmt, sync::Arc};
 
 use quickjs_bytecode::{BytecodePc, FinalOpcode, FunctionTemplateId, SourceByteSpan};
 
-use crate::{AtomError, JsString, JsStringError};
+use crate::{AtomError, JsString, JsStringError, JsValue};
 
 /// Public runtime handle category.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -325,7 +325,10 @@ impl From<AtomError> for InstallError {
     }
 }
 
-/// JavaScript exception category currently constructible by this VM slice.
+/// Category of an engine-created JavaScript error.
+///
+/// An explicitly thrown JavaScript value has no category unless that value is
+/// itself later modeled as an Error object.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ExceptionKind {
     /// A lexical binding was read or written before initialization.
@@ -392,97 +395,120 @@ impl JsStackFrame {
     }
 }
 
-/// One JavaScript abrupt completion with verified bytecode/source provenance.
+#[derive(Clone, Debug)]
+enum ExceptionPayload {
+    EngineError {
+        kind: ExceptionKind,
+        message: JsString,
+    },
+    ThrownValue(JsValue),
+}
+
+/// One escaping JavaScript abrupt completion with verified source provenance.
 #[derive(Clone, Debug)]
 pub struct JsException {
-    kind: ExceptionKind,
-    message: JsString,
-    function: FunctionTemplateId,
-    pc: BytecodePc,
-    source_name: Arc<str>,
-    source_text: Arc<str>,
-    source_span: SourceByteSpan,
+    payload: ExceptionPayload,
+    origin: JsStackFrame,
     caller_frames: Vec<JsStackFrame>,
 }
 
 impl JsException {
-    pub(crate) fn reference_error(message: JsString, location: JsStackFrame) -> Self {
+    /// Constructs an engine-created error from already-owned parts.
+    ///
+    /// This constructor performs no allocation. The caller must reserve and
+    /// populate `caller_frames` before transferring it here.
+    pub(crate) fn engine_error(
+        kind: ExceptionKind,
+        message: JsString,
+        origin: JsStackFrame,
+        caller_frames: Vec<JsStackFrame>,
+    ) -> Self {
         Self {
-            kind: ExceptionKind::ReferenceError,
-            message,
-            function: location.function,
-            pc: location.pc,
-            source_name: location.source_name,
-            source_text: location.source_text,
-            source_span: location.source_span,
-            caller_frames: Vec::new(),
+            payload: ExceptionPayload::EngineError { kind, message },
+            origin,
+            caller_frames,
         }
     }
 
-    pub(crate) fn type_error(message: JsString, location: JsStackFrame) -> Self {
+    /// Constructs an explicit `throw` completion from already-owned parts.
+    ///
+    /// This constructor performs no allocation. `value` is already a
+    /// runtime-local public root when it names a heap value, and the caller
+    /// must reserve and populate `caller_frames` before transferring it here.
+    pub(crate) fn explicit_throw(
+        value: JsValue,
+        origin: JsStackFrame,
+        caller_frames: Vec<JsStackFrame>,
+    ) -> Self {
         Self {
-            kind: ExceptionKind::TypeError,
-            message,
-            function: location.function,
-            pc: location.pc,
-            source_name: location.source_name,
-            source_text: location.source_text,
-            source_span: location.source_span,
-            caller_frames: Vec::new(),
+            payload: ExceptionPayload::ThrownValue(value),
+            origin,
+            caller_frames,
         }
     }
 
-    pub(crate) fn try_reserve_caller_frames(
-        &mut self,
-        additional: usize,
-    ) -> Result<(), std::collections::TryReserveError> {
-        self.caller_frames.try_reserve_exact(additional)
-    }
-
-    pub(crate) fn push_caller_frame(&mut self, frame: JsStackFrame) {
-        self.caller_frames.push(frame);
-    }
-
-    /// Returns the exception category.
+    /// Returns the engine-created error category.
+    ///
+    /// An arbitrary value escaping from a JavaScript `throw` returns `None`.
     #[must_use]
-    pub const fn kind(&self) -> ExceptionKind {
-        self.kind
+    pub const fn kind(&self) -> Option<ExceptionKind> {
+        match &self.payload {
+            ExceptionPayload::EngineError { kind, .. } => Some(*kind),
+            ExceptionPayload::ThrownValue(_) => None,
+        }
     }
 
-    /// Returns the exact JavaScript message without its error-name prefix.
+    /// Returns the exact engine-created error message without its name prefix.
+    ///
+    /// An arbitrary value escaping from a JavaScript `throw` returns `None`.
     #[must_use]
-    pub const fn message(&self) -> &JsString {
-        &self.message
+    pub const fn message(&self) -> Option<&JsString> {
+        match &self.payload {
+            ExceptionPayload::EngineError { message, .. } => Some(message),
+            ExceptionPayload::ThrownValue(_) => None,
+        }
+    }
+
+    /// Returns the exact value supplied to a JavaScript `throw`.
+    ///
+    /// Engine-created errors return `None`. A returned heap value remains
+    /// rooted by this exception until its last shared value root is dropped.
+    #[must_use]
+    pub const fn thrown_value(&self) -> Option<&JsValue> {
+        match &self.payload {
+            ExceptionPayload::EngineError { .. } => None,
+            ExceptionPayload::ThrownValue(value) => Some(value),
+        }
     }
 
     /// Returns the graph-local function template.
     #[must_use]
     pub const fn function(&self) -> FunctionTemplateId {
-        self.function
+        self.origin.function
     }
 
     /// Returns the verified bytecode position.
     #[must_use]
     pub const fn pc(&self) -> BytecodePc {
-        self.pc
+        self.origin.pc
     }
 
     /// Returns the retained source display name.
     #[must_use]
     pub fn source_name(&self) -> &str {
-        &self.source_name
+        &self.origin.source_name
     }
 
     /// Returns the immutable retained source artifact containing the origin.
     #[must_use]
     pub fn source_text(&self) -> &str {
-        &self.source_text
+        &self.origin.source_text
     }
 
     /// Returns the exact retained source span.
     #[must_use]
     pub const fn source_span(&self) -> SourceByteSpan {
-        self.source_span
+        self.origin.source_span
     }
 
     /// Returns caller call sites from the immediate caller outward.
@@ -493,6 +519,27 @@ impl JsException {
     #[must_use]
     pub fn caller_frames(&self) -> &[JsStackFrame] {
         &self.caller_frames
+    }
+}
+
+impl fmt::Display for JsException {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.payload {
+            ExceptionPayload::EngineError { kind, message } => {
+                let name = match kind {
+                    ExceptionKind::ReferenceError => "ReferenceError",
+                    ExceptionKind::TypeError => "TypeError",
+                };
+                write!(
+                    formatter,
+                    "{name}: {}",
+                    message
+                        .to_utf8_lossy()
+                        .unwrap_or_else(|_| "<message allocation failed>".to_owned())
+                )
+            }
+            ExceptionPayload::ThrownValue(_) => formatter.write_str("uncaught JavaScript value"),
+        }
     }
 }
 
@@ -671,20 +718,7 @@ impl fmt::Display for ExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Handle(source) => source.fmt(formatter),
-            Self::Exception(exception) => {
-                let name = match exception.kind() {
-                    ExceptionKind::ReferenceError => "ReferenceError",
-                    ExceptionKind::TypeError => "TypeError",
-                };
-                write!(
-                    formatter,
-                    "{name}: {}",
-                    exception
-                        .message()
-                        .to_utf8_lossy()
-                        .unwrap_or_else(|_| "<message allocation failed>".to_owned())
-                )
-            }
+            Self::Exception(exception) => exception.fmt(formatter),
             Self::InstructionLimitExceeded { limit, executed } => write!(
                 formatter,
                 "instruction limit {limit} exhausted after {executed} instructions"

@@ -202,9 +202,13 @@ fn non_callable_throws_exact_type_error_at_call_site() {
     else {
         panic!("expected JavaScript exception");
     };
-    assert_eq!(exception.kind(), ExceptionKind::TypeError);
+    assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
     assert_eq!(
-        exception.message().to_utf8_lossy().expect("message"),
+        exception
+            .message()
+            .expect("engine message")
+            .to_utf8_lossy()
+            .expect("message"),
         "not a function"
     );
     assert_eq!(exception.function(), FunctionTemplateId::new(0));
@@ -255,7 +259,7 @@ fn non_callable_check_happens_after_argument_evaluation() {
             .call(&fail, &[], ExecutionLimits::default())
             .expect_err("number remains non-callable"),
         ExecutionError::Exception(ref exception)
-            if exception.kind() == ExceptionKind::TypeError
+            if exception.kind() == Some(ExceptionKind::TypeError)
     ));
     let changed = context
         .call(&get, &[], ExecutionLimits::default())
@@ -281,7 +285,7 @@ fn child_exceptions_keep_origin_and_record_parked_callers() {
     else {
         panic!("expected JavaScript exception");
     };
-    assert_eq!(exception.kind(), ExceptionKind::ReferenceError);
+    assert_eq!(exception.kind(), Some(ExceptionKind::ReferenceError));
     assert_eq!(exception.function(), FunctionTemplateId::new(1));
     assert_eq!(exception.source_text(), source);
     let callers = exception.caller_frames();
@@ -508,7 +512,7 @@ fn abrupt_call_errors_leave_function_and_cell_graphs_collectable() {
             else {
                 panic!("expected JavaScript exception");
             };
-            assert_eq!(exception.kind(), expected_kind);
+            assert_eq!(exception.kind(), Some(expected_kind));
         }
         runtime
             .collect_cycles()

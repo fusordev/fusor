@@ -555,6 +555,8 @@ pub enum ExecutionRequirement {
     Closures,
     /// Direct ordinary JavaScript calls with an `undefined` receiver.
     Calls,
+    /// Explicit JavaScript abrupt completions.
+    AbruptCompletions,
     /// Lexical initialization, TDZ, or captured scoped locals.
     LexicalBindings,
     /// `in` or `instanceof` object semantics.
@@ -1375,10 +1377,10 @@ pub fn verify_compiler_bytecode_graph(
         })
     })?;
     let mut requirements = Vec::new();
-    requirements.try_reserve_exact(9).map_err(|_| {
+    requirements.try_reserve_exact(10).map_err(|_| {
         BytecodeVerificationError::graph(BytecodeVerificationErrorKind::AllocationFailed {
             resource: BytecodeGraphResource::VerifiedMetadata,
-            requested: 9,
+            requested: 10,
         })
     })?;
     requirements.push(ExecutionRequirement::CoreValues);
@@ -2761,6 +2763,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Call
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
+            | FinalOpcode::Throw
             | FinalOpcode::GetLoc
             | FinalOpcode::PutLoc
             | FinalOpcode::SetLoc
@@ -3608,6 +3611,9 @@ fn collect_requirements(
             | FinalOpcode::Call2
             | FinalOpcode::Call3 => {
                 push_requirement(requirements, ExecutionRequirement::Calls);
+            }
+            FinalOpcode::Throw => {
+                push_requirement(requirements, ExecutionRequirement::AbruptCompletions);
             }
             FinalOpcode::PushBigIntI32 => {
                 push_requirement(requirements, ExecutionRequirement::BigInts);

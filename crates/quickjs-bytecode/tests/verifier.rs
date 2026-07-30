@@ -2,9 +2,9 @@ use quickjs_bytecode::{
     AtomPoolIndex, BytecodeBuilder, BytecodePc, ControlFlowEdge, DecodeError, FinalOpcode,
     FunctionCountDomain, FunctionIndexDomains, FunctionKind, FunctionKindRequirement,
     InvalidControlFlowTargetReason, OperandIndexDomain, Operands, SecondaryOperandField,
-    UnsupportedVerifierFeature, UnverifiedFunctionBody, UnverifiedFunctionHeader,
-    VerificationError, VerificationErrorKind, VerificationLimits, VerificationResource,
-    VerifiedSuccessorKind, verify_control_flow,
+    UnsupportedVerifierFeature, UnverifiedCompilerFunctionBody, UnverifiedFunctionBody,
+    UnverifiedFunctionHeader, VerificationError, VerificationErrorKind, VerificationLimits,
+    VerificationResource, VerifiedSuccessorKind, verify_compiler_control_flow, verify_control_flow,
 };
 
 fn encode(instructions: &[(FinalOpcode, Operands)]) -> Vec<u8> {
@@ -106,6 +106,84 @@ fn straight_line_certificate_tracks_boundaries_stack_and_successors() {
     assert!(verified.is_instruction_start(BytecodePc::ZERO));
     assert!(!verified.is_instruction_start(BytecodePc::new(4)));
     assert_eq!(verified.instruction_index_at(BytecodePc::new(4)), None);
+}
+
+#[test]
+fn explicit_throw_is_a_terminal_with_one_consumed_value() {
+    let bytecode = encode(&[
+        (FinalOpcode::Push7, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+    ]);
+    let verified = verify(bytecode.clone(), 1, FunctionIndexDomains::default());
+
+    assert_eq!(verified.computed_stack_size(), 1);
+    assert_eq!(
+        verified
+            .instructions()
+            .iter()
+            .map(|instruction| instruction.entry_stack_depth())
+            .collect::<Vec<_>>(),
+        [Some(0), Some(1)]
+    );
+    assert_eq!(
+        verified.instructions()[1].successors().kind(),
+        VerifiedSuccessorKind::Terminate
+    );
+
+    verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode,
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect("a consumed thrown value leaves an empty compiler exit stack");
+}
+
+#[test]
+fn explicit_throw_underflow_is_rejected_at_the_terminal() {
+    let error = reject(
+        encode(&[(FinalOpcode::Throw, Operands::None)]),
+        0,
+        FunctionIndexDomains::default(),
+    );
+
+    assert_eq!(
+        error.kind(),
+        &VerificationErrorKind::StackUnderflow {
+            required: 1,
+            available: 0,
+        }
+    );
+    assert_eq!(error.pc(), Some(BytecodePc::ZERO));
+    assert_eq!(error.opcode(), Some(FinalOpcode::Throw));
+}
+
+#[test]
+fn compiler_throw_rejects_values_stranded_below_the_thrown_value() {
+    let bytecode = encode(&[
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Throw, Operands::None),
+    ]);
+    verify(bytecode.clone(), 2, FunctionIndexDomains::default());
+
+    let error = verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode,
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect_err("compiler terminals must not strand an ordinary value below the throw");
+    assert_eq!(
+        error.kind(),
+        &VerificationErrorKind::NonEmptyCompilerExitStack { remaining: 1 }
+    );
+    assert_eq!(error.pc(), Some(BytecodePc::new(2)));
+    assert_eq!(error.opcode(), Some(FinalOpcode::Throw));
 }
 
 #[test]
@@ -792,6 +870,23 @@ fn missing_handler_and_finally_capabilities_fail_closed_with_typed_reasons() {
         }
     );
 
+    let nip_catch_error = reject(
+        encode(&[
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::NipCatch, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]),
+        2,
+        FunctionIndexDomains::default(),
+    );
+    assert_eq!(
+        nip_catch_error.kind(),
+        &VerificationErrorKind::UnsupportedOpcodeSemantics {
+            feature: UnsupportedVerifierFeature::CatchMarkers,
+        }
+    );
+
     let gosub_error = reject(
         encode(&[
             (FinalOpcode::Gosub, Operands::Label(4)),
@@ -802,6 +897,21 @@ fn missing_handler_and_finally_capabilities_fail_closed_with_typed_reasons() {
     );
     assert_eq!(
         gosub_error.kind(),
+        &VerificationErrorKind::UnsupportedOpcodeSemantics {
+            feature: UnsupportedVerifierFeature::FinallyReturnAddresses,
+        }
+    );
+
+    let ret_error = reject(
+        encode(&[
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Ret, Operands::None),
+        ]),
+        1,
+        FunctionIndexDomains::default(),
+    );
+    assert_eq!(
+        ret_error.kind(),
         &VerificationErrorKind::UnsupportedOpcodeSemantics {
             feature: UnsupportedVerifierFeature::FinallyReturnAddresses,
         }
