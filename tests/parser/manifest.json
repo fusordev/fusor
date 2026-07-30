@@ -1,0 +1,1052 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "eval": "excluded-user-deferred",
+  "cases": [
+    {
+      "path": "accept/async-script/for-await-of.js",
+      "goal": "async-script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["statements"],
+      "claims": ["statement.iteration-labels"],
+      "evidence": ["tests/test_loop.js:77-382", "quickjs.c:28548"],
+      "difference": null
+    },
+    {
+      "path": "accept/async-script/top-level-await.js",
+      "goal": "async-script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["functions"],
+      "claims": ["function.contextual-early-errors"],
+      "evidence": ["test262.conf:232", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "accept/module/export-default-class.mjs",
+      "goal": "module",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["modules"],
+      "claims": ["module.import-export"],
+      "evidence": ["quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "accept/module/export-default-expression.mjs",
+      "goal": "module",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["modules"],
+      "claims": ["module.import-export"],
+      "evidence": ["quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "accept/module/export-default-function.mjs",
+      "goal": "module",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["modules", "functions"],
+      "claims": ["module.import-export", "function.forms"],
+      "evidence": ["quickjs.c:31477", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "accept/module/export.mjs",
+      "goal": "module",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["modules", "bindings"],
+      "claims": ["module.import-export", "binding.declarations-patterns"],
+      "evidence": ["quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "accept/module/import-attributes.mjs",
+      "goal": "module",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["modules", "target-profile"],
+      "claims": ["module.attributes", "profile.accepted-es2025"],
+      "evidence": ["test262.conf:122", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "accept/module/import-export-forms.mjs",
+      "goal": "module",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["modules"],
+      "claims": ["module.import-export"],
+      "evidence": ["quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "accept/module/import-meta-and-dynamic-import.mjs",
+      "goal": "module",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["modules", "expressions"],
+      "claims": ["module.import-export", "expression.member-call-new-optional", "expression.contextual-meta-super-new-target"],
+      "evidence": ["test262.conf:105", "test262.conf:122", "test262.conf:126", "quickjs.c:26715", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "accept/module/module-forms-support.mjs",
+      "goal": "module",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["modules"],
+      "claims": ["module.import-export"],
+      "evidence": ["quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "accept/module/namespace-import.mjs",
+      "goal": "module",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["modules"],
+      "claims": ["module.import-export"],
+      "evidence": ["quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "accept/module/support.mjs",
+      "goal": "module",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["modules"],
+      "claims": ["module.import-export"],
+      "evidence": ["quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "accept/module/top-level-await.js",
+      "goal": "module",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["modules"],
+      "claims": ["module.top-level-await-context"],
+      "evidence": ["test262.conf:232", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "accept/module/top-level-await.mjs",
+      "goal": "module",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["modules"],
+      "claims": ["module.top-level-await-context"],
+      "evidence": ["test262.conf:232", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/annex-b-block-function.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["annex-b", "functions"],
+      "claims": ["annex-b.block-functions", "function.forms"],
+      "evidence": ["tests/test_language.js", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/annex-b-if-function.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["annex-b", "functions"],
+      "claims": ["annex-b.block-functions", "function.forms"],
+      "evidence": ["quickjs.c:28370", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/asi-and-arrow.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["source-lexical", "functions"],
+      "claims": ["lexical.asi-ambiguity", "function.forms"],
+      "evidence": ["tests/test_language.js:578-608", "quickjs.c:22261"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/basic.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["bindings", "expressions"],
+      "claims": ["binding.declarations-patterns", "expression.operators-assignment"],
+      "evidence": ["tests/test_language.js", "quickjs.c:27882"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/class-features.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["classes-objects"],
+      "claims": ["class.syntax-private-super"],
+      "evidence": ["test262.conf:78-88", "quickjs.c:25157"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/control-flow.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["statements"],
+      "claims": ["statement.basic-control", "statement.iteration-labels", "statement.abrupt-handlers"],
+      "evidence": ["tests/test_loop.js:77-382", "quickjs.c:28370", "quickjs.c:28548"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/expressions.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["expressions"],
+      "claims": ["expression.operators-assignment", "expression.member-call-new-optional"],
+      "evidence": ["tests/test_language.js:609-632", "quickjs.c:26715", "quickjs.c:27882"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/function-parameters.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["functions", "bindings"],
+      "claims": ["function.parameters", "function.cover-grammar-early-errors", "binding.declarations-patterns"],
+      "evidence": ["tests/test_language.js:356-451", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/generators-and-async.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["functions"],
+      "claims": ["function.forms", "function.contextual-early-errors"],
+      "evidence": ["tests/test_language.js:578-600", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/html-comment.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["source-lexical", "annex-b"],
+      "claims": ["lexical.comments-hashbang-html", "annex-b.html-comments"],
+      "evidence": ["quickjs.c:22261", "test262.conf"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/lexical-literals.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["source-lexical"],
+      "claims": ["lexical.comments-hashbang-html", "lexical.identifiers-keywords-unicode", "lexical.literals-tokenization"],
+      "evidence": ["tests/test_language.js:634-675", "quickjs.c:22281", "quickjs.c:22486"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/object-literals.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["classes-objects", "bindings"],
+      "claims": ["class.object-literals", "binding.declarations-patterns"],
+      "evidence": ["tests/test_language.js:356-451", "quickjs.c:24850", "quickjs.c:26221"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/private-class.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["classes-objects"],
+      "claims": ["class.syntax-private-super"],
+      "evidence": ["test262.conf:78-88", "quickjs.c:25157"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/scoped-bindings.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["bindings", "statements"],
+      "claims": ["binding.declarations-patterns", "statement.abrupt-handlers"],
+      "evidence": ["tests/test_loop.js:336-382", "quickjs.c:26221"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/sloppy-duplicate-parameters.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["functions"],
+      "claims": ["function.parameters"],
+      "evidence": ["quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/strict-promise-try.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["expressions"],
+      "claims": ["expression.member-call-new-optional"],
+      "evidence": ["test262.conf:171"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/super-and-new-target.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["classes-objects", "functions", "expressions"],
+      "claims": ["class.syntax-private-super", "function.contextual-early-errors", "expression.contextual-meta-super-new-target"],
+      "evidence": ["tests/test_language.js:243-310", "test262.conf:160", "quickjs.c:25157"],
+      "difference": null
+    },
+    {
+      "path": "accept/script/with-statement.js",
+      "goal": "script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["statements"],
+      "claims": ["statement.basic-control"],
+      "evidence": ["quickjs.c:28370"],
+      "difference": null
+    },
+    {
+      "path": "accept/strict-async-script/hashbang.js",
+      "goal": "strict-async-script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["source-lexical"],
+      "claims": ["lexical.comments-hashbang-html"],
+      "evidence": ["test262.conf:119", "quickjs.c:22261"],
+      "difference": null
+    },
+    {
+      "path": "accept/strict-async-script/top-level-await.js",
+      "goal": "strict-async-script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["functions"],
+      "claims": ["function.contextual-early-errors"],
+      "evidence": ["test262.conf:232", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "accept/strict-script/html-comment.js",
+      "goal": "strict-script",
+      "quickjs": "accept",
+      "frontend": "accept",
+      "families": ["source-lexical", "annex-b"],
+      "claims": ["lexical.comments-hashbang-html", "annex-b.html-comments"],
+      "evidence": ["quickjs.c:22261"],
+      "difference": null
+    },
+    {
+      "path": "candidate-accept/script/regexp-pattern-deferred.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "accept",
+      "families": ["target-profile"],
+      "claims": ["profile.regexp-pattern-delegation"],
+      "evidence": ["quickjs.c:22486", "tests/test_language.js"],
+      "difference": {
+        "id": "QJS-OXC-001",
+        "direction": "frontend-accept",
+        "rationale": "The Oxc front end owns RegExp literal boundaries and flags, while QuickJS-compatible pattern parsing is deliberately delegated to the future RegExp layer.",
+        "regression": "candidate-accept/script/regexp-pattern-deferred.js"
+      }
+    },
+    {
+      "path": "reject/async-script/await-binding.js",
+      "goal": "async-script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["functions", "bindings"],
+      "claims": ["function.contextual-early-errors", "binding.collision-early-errors"],
+      "evidence": ["tests/test_language.js:578-600", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "reject/async-script/import-meta.js",
+      "goal": "async-script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["expressions"],
+      "claims": ["expression.contextual-meta-super-new-target"],
+      "evidence": ["test262.conf:126", "quickjs.c:26715"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/await-binding.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["modules"],
+      "claims": ["module.top-level-await-context"],
+      "evidence": ["test262.conf:232", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/await-using.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["target-profile"],
+      "claims": ["profile.rejected-outside-target"],
+      "evidence": ["test262.conf:108", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/duplicate-default-export.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["modules"],
+      "claims": ["module.early-errors"],
+      "evidence": ["quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/duplicate-export-name.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["modules", "bindings"],
+      "claims": ["module.early-errors", "binding.collision-early-errors"],
+      "evidence": ["quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/duplicate-import-attribute.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["modules"],
+      "claims": ["module.attributes"],
+      "evidence": ["test262.conf:122", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/duplicate-parameters.js",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["functions"],
+      "claims": ["function.parameters", "function.contextual-early-errors"],
+      "evidence": ["quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/duplicate-parameters.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["functions"],
+      "claims": ["function.parameters", "function.contextual-early-errors"],
+      "evidence": ["quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/html-comment.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["source-lexical", "annex-b", "modules"],
+      "claims": ["lexical.comments-hashbang-html", "annex-b.html-comments", "module.early-errors"],
+      "evidence": ["quickjs.c:22261", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/import-assertion.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["target-profile", "modules"],
+      "claims": ["profile.rejected-outside-target", "module.attributes"],
+      "evidence": ["test262.conf:122", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/import-defer.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["target-profile", "modules"],
+      "claims": ["profile.rejected-outside-target", "module.import-export"],
+      "evidence": ["test262.conf:124", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/import-source.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["target-profile", "modules"],
+      "claims": ["profile.rejected-outside-target", "module.import-export"],
+      "evidence": ["test262.conf:197-198", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/lone-surrogate-export-name.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["source-lexical", "modules"],
+      "claims": ["lexical.identifiers-keywords-unicode", "module.early-errors"],
+      "evidence": ["tests/test_language.js:634-641", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/lone-surrogate-import-name.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["source-lexical", "modules"],
+      "claims": ["lexical.identifiers-keywords-unicode", "module.early-errors"],
+      "evidence": ["tests/test_language.js:634-641", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/non-string-import-attribute.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["modules"],
+      "claims": ["module.attributes"],
+      "evidence": ["test262.conf:122", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/string-named-reexport.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["target-profile", "modules"],
+      "claims": ["profile.rejected-outside-target", "module.import-export"],
+      "evidence": ["test262.conf:57", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/string-namespace-export.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["target-profile", "modules"],
+      "claims": ["profile.rejected-outside-target", "module.import-export"],
+      "evidence": ["test262.conf:57", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/unresolved-local-export.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["modules"],
+      "claims": ["module.early-errors"],
+      "evidence": ["quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/module/with-statement.mjs",
+      "goal": "module",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["statements", "modules"],
+      "claims": ["statement.basic-control", "module.early-errors"],
+      "evidence": ["quickjs.c:28370", "quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/auto-accessor.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["target-profile", "classes-objects"],
+      "claims": ["profile.rejected-outside-target", "class.syntax-private-super"],
+      "evidence": ["test262.conf:101", "quickjs.c:25157"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/arrow-line-terminator.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["source-lexical", "functions"],
+      "claims": ["lexical.asi-ambiguity", "function.cover-grammar-early-errors"],
+      "evidence": ["tests/test_language.js:600-608", "quickjs.c:22261", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/break-outside-loop.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["statements"],
+      "claims": ["statement.abrupt-handlers", "statement.iteration-labels"],
+      "evidence": ["tests/test_loop.js:208-223", "quickjs.c:28370"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/catch-binding-collision.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["bindings", "statements"],
+      "claims": ["binding.collision-early-errors", "statement.lexical-placement-collisions"],
+      "evidence": ["tests/test_loop.js:336-382", "quickjs.c:28370"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/const-without-initializer.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["bindings"],
+      "claims": ["binding.declarations-patterns"],
+      "evidence": ["quickjs.c:26221"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/continue-outside-loop.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["statements"],
+      "claims": ["statement.abrupt-handlers", "statement.iteration-labels"],
+      "evidence": ["tests/test_loop.js:208-223", "quickjs.c:28370"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/decorator.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["target-profile", "classes-objects"],
+      "claims": ["profile.rejected-outside-target", "class.syntax-private-super"],
+      "evidence": ["test262.conf:101", "quickjs.c:25157"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/duplicate-label.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["statements"],
+      "claims": ["statement.iteration-labels"],
+      "evidence": ["tests/test_loop.js:208-223", "quickjs.c:28370"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/duplicate-lexical-declaration.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["bindings"],
+      "claims": ["binding.collision-early-errors"],
+      "evidence": ["quickjs.c:26221"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/duplicate-private-name.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["classes-objects"],
+      "claims": ["class.duplicate-proto-private-early-errors"],
+      "evidence": ["test262.conf:80-87", "quickjs.c:25157"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/duplicate-proto-data.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["classes-objects"],
+      "claims": ["class.duplicate-proto-private-early-errors"],
+      "evidence": ["test262.conf:53", "quickjs.c:24850"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/duplicate-regexp-flag.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["source-lexical"],
+      "claims": ["lexical.malformed-token-rejections"],
+      "evidence": ["quickjs.c:22486"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/for-await-of.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["functions", "statements"],
+      "claims": ["function.contextual-early-errors", "statement.iteration-labels"],
+      "evidence": ["test262.conf:70", "quickjs.c:28548"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/import-meta.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["expressions"],
+      "claims": ["expression.contextual-meta-super-new-target"],
+      "evidence": ["test262.conf:126", "quickjs.c:26715"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/invalid-assignment-target.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["expressions"],
+      "claims": ["expression.operators-assignment"],
+      "evidence": ["quickjs.c:27882"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/invalid-escaped-identifier.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["source-lexical"],
+      "claims": ["lexical.identifiers-keywords-unicode", "lexical.malformed-token-rejections"],
+      "evidence": ["tests/test_language.js:634-641", "quickjs.c:22281"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/invalid-numeric-separator.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["source-lexical"],
+      "claims": ["lexical.literals-tokenization", "lexical.malformed-token-rejections"],
+      "evidence": ["test262.conf:162", "quickjs.c:22281"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/lexical-single-statement.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["statements"],
+      "claims": ["statement.lexical-placement-collisions"],
+      "evidence": ["quickjs.c:28370"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/module-declaration.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["modules", "target-profile"],
+      "claims": ["module.import-export", "profile.rejected-outside-target"],
+      "evidence": ["quickjs.c:31477"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/non-simple-duplicate-parameters.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["functions"],
+      "claims": ["function.parameters", "function.cover-grammar-early-errors"],
+      "evidence": ["test262.conf:102-104", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/optional-chain-assignment.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["expressions"],
+      "claims": ["expression.member-call-new-optional"],
+      "evidence": ["tests/test_language.js:609-632", "quickjs.c:26715"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/parameter-after-rest.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["functions"],
+      "claims": ["function.parameters", "function.cover-grammar-early-errors"],
+      "evidence": ["test262.conf:192", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/rest-parameter-default.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["functions"],
+      "claims": ["function.parameters", "function.cover-grammar-early-errors"],
+      "evidence": ["test262.conf:102", "test262.conf:192", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/strict-duplicate-parameters.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["functions"],
+      "claims": ["function.parameters", "function.contextual-early-errors"],
+      "evidence": ["quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/strict-with-statement.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["statements"],
+      "claims": ["statement.basic-control"],
+      "evidence": ["quickjs.c:28370"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/super-call-outside-constructor.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["expressions"],
+      "claims": ["expression.contextual-meta-super-new-target"],
+      "evidence": ["test262.conf:212", "quickjs.c:26715"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/super-outside-method.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["classes-objects"],
+      "claims": ["class.syntax-private-super"],
+      "evidence": ["tests/test_language.js:243-310", "quickjs.c:25157"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/switch-lexical-collision.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["bindings", "statements"],
+      "claims": ["binding.collision-early-errors", "statement.lexical-placement-collisions"],
+      "evidence": ["tests/test_loop.js:225-334", "quickjs.c:28370"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/throw-line-terminator.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["source-lexical", "statements"],
+      "claims": ["lexical.asi-ambiguity", "statement.abrupt-handlers"],
+      "evidence": ["quickjs.c:22261", "quickjs.c:28370"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/top-level-new-target.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["expressions"],
+      "claims": ["expression.contextual-meta-super-new-target"],
+      "evidence": ["test262.conf:160", "quickjs.c:26715"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/top-level-return.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["statements", "functions"],
+      "claims": ["statement.abrupt-handlers", "function.contextual-early-errors"],
+      "evidence": ["quickjs.c:28370", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/try-without-handler.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["statements"],
+      "claims": ["statement.abrupt-handlers", "statement.lexical-placement-collisions"],
+      "evidence": ["tests/test_loop.js:336-382", "quickjs.c:28370"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/undeclared-private-name.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["classes-objects"],
+      "claims": ["class.syntax-private-super"],
+      "evidence": ["test262.conf:78-88", "quickjs.c:25157"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/unknown-regexp-flag.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["source-lexical"],
+      "claims": ["lexical.malformed-token-rejections"],
+      "evidence": ["quickjs.c:22486"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/unterminated-block-comment.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["source-lexical"],
+      "claims": ["lexical.malformed-token-rejections"],
+      "evidence": ["quickjs.c:22261"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/unterminated-string.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["source-lexical"],
+      "claims": ["lexical.malformed-token-rejections"],
+      "evidence": ["quickjs.c:22281"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/unterminated-template.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["source-lexical"],
+      "claims": ["lexical.malformed-token-rejections"],
+      "evidence": ["test262.conf:230", "quickjs.c:22281"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/using-declaration.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["target-profile", "bindings"],
+      "claims": ["profile.rejected-outside-target", "binding.declarations-patterns"],
+      "evidence": ["test262.conf:108", "quickjs.c:26221"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/yield-binding-in-generator.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["functions"],
+      "claims": ["function.contextual-early-errors"],
+      "evidence": ["test262.conf:117", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "reject/strict-async-script/duplicate-parameters.js",
+      "goal": "strict-async-script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["functions"],
+      "claims": ["function.parameters", "function.contextual-early-errors"],
+      "evidence": ["quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "reject/strict-script/annex-b-if-function.js",
+      "goal": "strict-script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["annex-b", "functions"],
+      "claims": ["annex-b.block-functions", "function.contextual-early-errors"],
+      "evidence": ["quickjs.c:28370", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "reject/strict-script/arguments-binding.js",
+      "goal": "strict-script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["bindings"],
+      "claims": ["binding.strict-mode-early-errors"],
+      "evidence": ["quickjs.c:36210"],
+      "difference": null
+    },
+    {
+      "path": "reject/strict-script/delete-identifier.js",
+      "goal": "strict-script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["bindings"],
+      "claims": ["binding.strict-mode-early-errors"],
+      "evidence": ["quickjs.c:27383", "quickjs.c:36210"],
+      "difference": null
+    },
+    {
+      "path": "reject/strict-script/duplicate-parameters.js",
+      "goal": "strict-script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["bindings", "functions"],
+      "claims": ["binding.strict-mode-early-errors", "function.parameters"],
+      "evidence": ["quickjs.c:36210", "quickjs.c:36383"],
+      "difference": null
+    },
+    {
+      "path": "reject/strict-script/legacy-octal-literal.js",
+      "goal": "strict-script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["bindings"],
+      "claims": ["binding.strict-mode-early-errors"],
+      "evidence": ["quickjs.c:22281", "quickjs.c:36210"],
+      "difference": null
+    },
+    {
+      "path": "reject/strict-script/legacy-octal-string-escape.js",
+      "goal": "strict-script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["bindings"],
+      "claims": ["binding.strict-mode-early-errors"],
+      "evidence": ["quickjs.c:22281", "quickjs.c:36210"],
+      "difference": null
+    },
+    {
+      "path": "reject/strict-script/reserved-word-binding.js",
+      "goal": "strict-script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["bindings"],
+      "claims": ["binding.strict-mode-early-errors"],
+      "evidence": ["quickjs.c:36210"],
+      "difference": null
+    },
+    {
+      "path": "reject/strict-script/with-statement.js",
+      "goal": "strict-script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["statements"],
+      "claims": ["statement.basic-control"],
+      "evidence": ["quickjs.c:28370"],
+      "difference": null
+    }
+  ]
+}

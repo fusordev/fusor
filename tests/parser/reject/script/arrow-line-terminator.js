@@ -1,0 +1,2 @@
+const arrow = value
+=> value;

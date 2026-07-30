@@ -1,0 +1,4 @@
+class Invalid {
+    #value;
+    #value;
+}

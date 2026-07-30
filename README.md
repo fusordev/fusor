@@ -147,10 +147,16 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo doc --workspace --no-deps
+cargo xtask parser-differential --oracle /path/to/quickjs-2026-06-04/qjs
 ```
 
 The upstream C engine may be built separately as a development oracle for
 differential testing. It is never linked into or shipped with this project.
+The parser task validates the current declared non-`eval` goal/feature/claim
+matrix in [`tests/parser/manifest.json`](tests/parser/manifest.json) before
+running any fixture, and refuses undeclared fixtures or stale intentional
+differences. That matrix is an expanding compatibility gate; it is not yet a
+claim that every QuickJS grammar production has been covered.
 
 ## License
 

@@ -95,12 +95,24 @@ A milestone is complete only when all of its checked items pass in CI.
       typed request indices, and local/indirect/star linking roles.
 - [ ] Differentially test Oxc acceptance, early errors, strict mode, Annex B,
       and ES2025 syntax against the pinned QuickJS release.
+  - [x] Enforce a closed manifest of all five non-eval compilation goals, nine
+        feature families, and concrete grammar/early-error claims; reject
+        missing/orphan fixtures, inconsistent expectations, stale differences,
+        missing required accept/reject claim polarities, and a non-pinned
+        oracle release before executing the corpus.
+  - [ ] Expand the checked claim set into an exhaustive non-eval production and
+        early-error ledger derived from the pinned QuickJS parser; the current
+        matrix is a compatibility seed, not proof of the complete grammar.
   - [x] Differentially test all four dynamic Function-constructor families
         against the pinned `qjsc -c` compiler oracle, including
         exact-wrapper-sensitive comments, wrapper escape, strict/contextual
         parameters, Unicode, and malformed input without executing JavaScript.
-- [ ] Record every parser compatibility gap and either close it or mark it as
-      an intentional, regression-tested Oxc difference before claiming M1.
+- [ ] Record every discovered parser compatibility gap and either close it or
+      mark it as an intentional, regression-tested Oxc difference before
+      claiming M1.
+  - [x] Record malformed RegExp-pattern acceptance as `QJS-OXC-001`: Oxc owns
+        literal boundaries and flags while the deferred QuickJS-derived RegExp
+        layer owns pattern grammar.
 
 ### M2 — compiler and VM core
 

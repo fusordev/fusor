@@ -315,6 +315,19 @@ mapping and must not silently substitute different runtime semantics.
 TypeScript, JSX, and alternate JavaScript-runtime behavior remain outside the
 default parser profile.
 
+The parser differential corpus has a checked manifest rather than an informal
+fixture directory. It fixes the compatibility release and explicit `eval`
+exclusion, enumerates every fixture exactly once, and uses closed compilation
+goal, feature-family, and current grammar/early-error claim sets. Directory
+expectations and manifest expectations must agree, and claims retain both
+QuickJS acceptance and rejection coverage wherever both are meaningful. Any
+Oxc/QuickJS mismatch must carry a unique direction, rationale, and regression
+fixture, and that record becomes invalid if the expectations converge. The
+current RegExp pattern difference is deliberate: Oxc recognizes the literal
+boundary and flags, while the future QuickJS-derived RegExp layer owns pattern
+grammar. The claim set remains an expanding review contract and does not by
+itself certify that every pinned QuickJS parser production has a fixture.
+
 Dynamic Function constructors use a dedicated adapter rather than parsing a
 naked body. It joins separately coerced parameter fragments with the exact
 QuickJS wrapper punctuation, parses the complete generated Script with Oxc,

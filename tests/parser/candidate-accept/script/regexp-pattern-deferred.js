@@ -1,0 +1,3 @@
+const pattern = /(/;
+
+void pattern;
