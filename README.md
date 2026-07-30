@@ -30,14 +30,23 @@ left-to-right resumable `ToPrimitive`, exact UTF-16 `StringToNumber`,
 results.
 Functions and ordinary objects use typed `Arc`-backed public roots, and the
 iterative collector traces their data properties, accessor functions,
-prototypes, closures, and binding cells. Nested calls, recursion,
+prototypes, closures, and binding cells. Boolean is the first implemented
+primitive-wrapper family: each realm owns the exact global constructor,
+false-branded `Boolean.prototype`, and `toString`/`valueOf` methods. Primitive
+Boolean property access walks that realm prototype without allocating,
+construction creates a branded wrapper, strict receivers remain primitive,
+and sloppy receivers are boxed once at frame creation. `Object.prototype`
+tagging and boxing recognize the same internal brand, including data-valued
+`Symbol.toStringTag` overrides. Accessor-backed `newTarget.prototype` and
+`Symbol.toStringTag` reads, plus Number, String, and Symbol wrappers, remain
+deferred and fail closed. Nested calls, recursion,
 getter/setter dispatch, and abrupt unwinding use an explicit frame vector with
 cumulative frame/value ceilings and shared fuel. Installation scans every
 instruction in every template before mutation. BigInt values and mixed numeric
 domains, arrays and other exotic objects, shorthand/spread and `__proto__`
 data-initializer semantics, anonymous data-function inferred names,
 async/generator methods, `super`/home-object semantics, realm-global accessor
-writes, optional/spread/apply calls, remaining primitive-wrapper coercions,
+writes, optional/spread/apply calls, Number/String/Symbol wrapper coercions,
 serialized bytecode, every form of eval, and catch/finally typed-stack
 semantics remain deferred and fail closed.
 Ordinary `new` calls now execute constructor-capable bytecode functions and
@@ -48,10 +57,11 @@ retains the exact wrapper/map, compiles the complete generated Script,
 executes only whole-graph `VerifiedBytecode` with a constructor-realm global
 receiver, and returns the exact Script completion. Unresolved names use typed
 constructor-realm lookup/write slots, and sloppy dynamic functions normalize
-`this` lazily against their installed constructor realm. Escaped Program
-`var` and function declarations now create configurable constructor-realm data
-properties, with correct existing-property handling, function hoisting,
-duplicate-last-wins initialization, and failure-atomic descriptor preflight.
+`this` once at frame creation against their installed constructor realm.
+Escaped Program `var` and function declarations now create configurable
+constructor-realm data properties, with correct existing-property handling,
+function hoisting, duplicate-last-wins initialization, and failure-atomic
+descriptor preflight.
 Escaped `let` and `const` remain
 evaluation-local TDZ cells and can survive only through escaping closures.
 The intrinsic descriptors, call/new realm selection, wrapper escape,
@@ -71,11 +81,12 @@ data or accessor-backed lookup preserves the original receiver, native or
 verified-bytecode getters and methods resume on the same iterative frame
 vector, and throws stop conversion before parsing. `call` preserves the target
 realm's strict/sloppy receiver rules and forwards the Oxc compiler service when
-its target is the ordinary `Function` constructor. Sloppy primitive boxing,
-persistent global lexical collisions, and `Function.prototype.apply`/`bind`/
-`Symbol.hasInstance` remain fail-closed. Per-session compilation-count and
-generated-source limits bound nested construction. No dynamic-Function path
-uses eval or captures a caller lexical frame.
+its target is the ordinary `Function` constructor. Sloppy Boolean boxing is
+implemented; Number/String/Symbol boxing, persistent global lexical collisions,
+and `Function.prototype.apply`/`bind`/`Symbol.hasInstance` remain fail-closed.
+Per-session compilation-count and generated-source limits bound nested
+construction. No dynamic-Function path uses eval or captures a caller lexical
+frame.
 
 ## Contract
 

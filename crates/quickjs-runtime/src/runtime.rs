@@ -41,7 +41,7 @@ use crate::{
     PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
-    object::{HeapObject, ObjectRecord, OwnProperty},
+    object::{BoxedPrimitive, HeapObject, ObjectRecord, OwnProperty},
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
 
@@ -311,7 +311,14 @@ enum RealmIntrinsics {
     Ready {
         function_prototype: FunctionId,
         function_constructor: FunctionId,
+        boolean: BooleanIntrinsics,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BooleanIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
 }
 
 struct RealmHandle {
@@ -383,11 +390,17 @@ pub(crate) enum NativeFunctionKind {
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
     FunctionPrototypeToString,
+    BooleanConstructor,
+    BooleanPrototypeToString,
+    BooleanPrototypeValueOf,
 }
 
 impl NativeFunctionKind {
     pub(crate) const fn is_constructor(self) -> bool {
-        matches!(self, Self::OrdinaryFunctionConstructor)
+        matches!(
+            self,
+            Self::OrdinaryFunctionConstructor | Self::BooleanConstructor
+        )
     }
 }
 
@@ -702,17 +715,17 @@ impl Runtime {
         check_limit(
             RuntimeResource::HeapObjects,
             self.limits.max_heap_objects,
-            usize_to_u64(self.objects.len()).saturating_add(2),
+            usize_to_u64(self.objects.len()).saturating_add(3),
         )?;
         check_limit(
             RuntimeResource::HeapFunctions,
             self.limits.max_heap_functions,
-            usize_to_u64(self.functions.len()).saturating_add(6),
+            usize_to_u64(self.functions.len()).saturating_add(9),
         )?;
         check_limit(
             RuntimeResource::ObjectProperties,
             self.limits.max_object_properties,
-            self.object_properties.saturating_add(19),
+            self.object_properties.saturating_add(30),
         )?;
         self.realms
             .try_reserve(1)
@@ -721,20 +734,22 @@ impl Runtime {
                 additional: 1,
             })?;
         self.objects
-            .try_reserve(2)
+            .try_reserve(3)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
-                additional: 2,
+                additional: 3,
             })?;
         self.functions
-            .try_reserve(6)
+            .try_reserve(9)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::HeapFunctions,
-                additional: 6,
+                additional: 9,
             })?;
 
         let function_key =
             PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Function));
+        let boolean_key =
+            PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Boolean));
         let prototype_key =
             PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Prototype));
         let constructor_key =
@@ -748,6 +763,7 @@ impl Runtime {
         let value_of_key =
             PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::ValueOf));
         let function_name = predefined_string(&self.atoms, PredefinedAtom::Function);
+        let boolean_name = predefined_string(&self.atoms, PredefinedAtom::Boolean);
         let empty_name = predefined_string(&self.atoms, PredefinedAtom::EmptyString);
         let to_string_name = predefined_string(&self.atoms, PredefinedAtom::ToString);
         let value_of_name = predefined_string(&self.atoms, PredefinedAtom::ValueOf);
@@ -755,10 +771,10 @@ impl Runtime {
 
         let mut global_record = ObjectRecord::empty(None);
         global_record
-            .try_reserve_data(1)
+            .try_reserve_data(2)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
-                additional: 1,
+                additional: 2,
             })?;
         let mut object_prototype_record = ObjectRecord::empty(None);
         object_prototype_record.try_reserve_data(2).map_err(|_| {
@@ -809,22 +825,44 @@ impl Runtime {
                 resource: RuntimeResource::ObjectProperties,
                 additional: 2,
             })?;
+        let mut boolean_prototype_record = ObjectRecord::empty(None);
+        boolean_prototype_record.try_reserve_data(3).map_err(|_| {
+            RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 3,
+            }
+        })?;
+        let mut boolean_constructor_record = ObjectRecord::empty(None);
+        boolean_constructor_record
+            .try_reserve_data(3)
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 3,
+            })?;
+        let mut boolean_to_string_record = ObjectRecord::empty(None);
+        boolean_to_string_record.try_reserve_data(2).map_err(|_| {
+            RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 2,
+            }
+        })?;
+        let mut boolean_value_of_record = ObjectRecord::empty(None);
+        boolean_value_of_record.try_reserve_data(2).map_err(|_| {
+            RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 2,
+            }
+        })?;
 
         let object_prototype = self
             .objects
-            .try_insert(HeapObject {
-                record: object_prototype_record,
-                public_roots: 0,
-            })
+            .try_insert(HeapObject::ordinary(object_prototype_record))
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
             })?;
         global_record.replace_prototype(Some(HeapReference::Object(object_prototype)));
-        let Ok(global_object) = self.objects.try_insert(HeapObject {
-            record: global_record,
-            public_roots: 0,
-        }) else {
+        let Ok(global_object) = self.objects.try_insert(HeapObject::ordinary(global_record)) else {
             let removed = self.objects.remove(object_prototype);
             debug_assert!(removed.is_some());
             return Err(RuntimeError::AllocationFailed {
@@ -971,6 +1009,54 @@ impl Runtime {
         };
         let call_key = PropertyKey::from_validated_atom(call_atom.clone());
 
+        boolean_prototype_record.replace_prototype(Some(HeapReference::Object(object_prototype)));
+        let boolean_prototype = self
+            .objects
+            .try_insert(HeapObject::with_boxed_primitive(
+                boolean_prototype_record,
+                BoxedPrimitive::Boolean(false),
+            ))
+            .expect("the realm transaction reserved all intrinsic object slots");
+        boolean_constructor_record
+            .replace_prototype(Some(HeapReference::Function(function_prototype)));
+        let boolean_constructor = self
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: id,
+                    kind: NativeFunctionKind::BooleanConstructor,
+                }),
+                object: boolean_constructor_record,
+                public_roots: 0,
+            })
+            .expect("the realm transaction reserved all intrinsic function slots");
+        boolean_to_string_record
+            .replace_prototype(Some(HeapReference::Function(function_prototype)));
+        let boolean_to_string = self
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: id,
+                    kind: NativeFunctionKind::BooleanPrototypeToString,
+                }),
+                object: boolean_to_string_record,
+                public_roots: 0,
+            })
+            .expect("the realm transaction reserved all intrinsic function slots");
+        boolean_value_of_record
+            .replace_prototype(Some(HeapReference::Function(function_prototype)));
+        let boolean_value_of = self
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: id,
+                    kind: NativeFunctionKind::BooleanPrototypeValueOf,
+                }),
+                object: boolean_value_of_record,
+                public_roots: 0,
+            })
+            .expect("the realm transaction reserved all intrinsic function slots");
+
         let property_result = (|| {
             let object_prototype_node = self
                 .objects
@@ -982,7 +1068,7 @@ impl Runtime {
                 StoredValue::Function(object_to_string),
             )?;
             object_prototype_node.record.append_data(
-                value_of_key,
+                value_of_key.clone(),
                 PropertyLayout::data(true, false, true),
                 StoredValue::Function(object_value_of),
             )?;
@@ -992,7 +1078,7 @@ impl Runtime {
                 .get_mut(function_prototype)
                 .expect("new Function.prototype remains live");
             function_prototype_node.object.append_data(
-                constructor_key,
+                constructor_key.clone(),
                 PropertyLayout::data(true, false, true),
                 StoredValue::Function(function_constructor),
             )?;
@@ -1007,7 +1093,7 @@ impl Runtime {
                 StoredValue::String(empty_name),
             )?;
             function_prototype_node.object.append_data(
-                to_string_key,
+                to_string_key.clone(),
                 PropertyLayout::data(true, false, true),
                 StoredValue::Function(function_to_string),
             )?;
@@ -1022,7 +1108,7 @@ impl Runtime {
                 .get_mut(function_constructor)
                 .expect("new Function constructor remains live");
             function_constructor_node.object.append_data(
-                prototype_key,
+                prototype_key.clone(),
                 PropertyLayout::data(false, false, false),
                 StoredValue::Function(function_prototype),
             )?;
@@ -1039,8 +1125,8 @@ impl Runtime {
 
             for (function, name, length) in [
                 (object_to_string, to_string_name.clone(), 0),
-                (object_value_of, value_of_name, 0),
-                (function_to_string, to_string_name, 0),
+                (object_value_of, value_of_name.clone(), 0),
+                (function_to_string, to_string_name.clone(), 0),
                 (function_call, call_name, 1),
             ] {
                 let method = self
@@ -1059,6 +1145,66 @@ impl Runtime {
                 )?;
             }
 
+            let boolean_prototype_node = self
+                .objects
+                .get_mut(boolean_prototype)
+                .expect("new Boolean.prototype remains live");
+            boolean_prototype_node.record.append_data(
+                constructor_key,
+                PropertyLayout::data(true, false, true),
+                StoredValue::Function(boolean_constructor),
+            )?;
+            boolean_prototype_node.record.append_data(
+                to_string_key.clone(),
+                PropertyLayout::data(true, false, true),
+                StoredValue::Function(boolean_to_string),
+            )?;
+            boolean_prototype_node.record.append_data(
+                value_of_key.clone(),
+                PropertyLayout::data(true, false, true),
+                StoredValue::Function(boolean_value_of),
+            )?;
+
+            let boolean_constructor_node = self
+                .functions
+                .get_mut(boolean_constructor)
+                .expect("new Boolean constructor remains live");
+            boolean_constructor_node.object.append_data(
+                prototype_key.clone(),
+                PropertyLayout::data(false, false, false),
+                StoredValue::Object(boolean_prototype),
+            )?;
+            boolean_constructor_node.object.append_data(
+                length_key.clone(),
+                PropertyLayout::data(false, false, true),
+                StoredValue::Number(JsNumber::from_i32(1)),
+            )?;
+            boolean_constructor_node.object.append_data(
+                name_key.clone(),
+                PropertyLayout::data(false, false, true),
+                StoredValue::String(boolean_name),
+            )?;
+
+            for (function, name) in [
+                (boolean_to_string, to_string_name.clone()),
+                (boolean_value_of, value_of_name),
+            ] {
+                let method = self
+                    .functions
+                    .get_mut(function)
+                    .expect("new Boolean intrinsic method remains live");
+                method.object.append_data(
+                    length_key.clone(),
+                    PropertyLayout::data(false, false, true),
+                    StoredValue::Number(JsNumber::from_i32(0)),
+                )?;
+                method.object.append_data(
+                    name_key.clone(),
+                    PropertyLayout::data(false, false, true),
+                    StoredValue::String(name),
+                )?;
+            }
+
             self.objects
                 .get_mut(global_object)
                 .expect("new global object remains live")
@@ -1067,9 +1213,26 @@ impl Runtime {
                     function_key,
                     PropertyLayout::data(true, false, true),
                     StoredValue::Function(function_constructor),
+                )?;
+            self.objects
+                .get_mut(global_object)
+                .expect("new global object remains live")
+                .record
+                .append_data(
+                    boolean_key,
+                    PropertyLayout::data(true, false, true),
+                    StoredValue::Function(boolean_constructor),
                 )
         })();
         if property_result.is_err() {
+            let removed = self.functions.remove(boolean_value_of);
+            debug_assert!(removed.is_some());
+            let removed = self.functions.remove(boolean_to_string);
+            debug_assert!(removed.is_some());
+            let removed = self.functions.remove(boolean_constructor);
+            debug_assert!(removed.is_some());
+            let removed = self.objects.remove(boolean_prototype);
+            debug_assert!(removed.is_some());
             let removed = self.functions.remove(function_call);
             debug_assert!(removed.is_some());
             let removed = self.functions.remove(function_to_string);
@@ -1101,8 +1264,12 @@ impl Runtime {
             .intrinsics = RealmIntrinsics::Ready {
             function_prototype,
             function_constructor,
+            boolean: BooleanIntrinsics {
+                prototype: boolean_prototype,
+                constructor: boolean_constructor,
+            },
         };
-        self.object_properties += 19;
+        self.object_properties += 30;
         Ok(Realm(Arc::new(RealmHandle {
             owner: Arc::downgrade(&self.mailbox),
             id,
@@ -1253,6 +1420,7 @@ impl Runtime {
             if let RealmIntrinsics::Ready {
                 function_prototype,
                 function_constructor,
+                boolean,
             } = realm.intrinsics
             {
                 mark_heap_reference(
@@ -1263,6 +1431,18 @@ impl Runtime {
                 );
                 mark_heap_reference(
                     HeapReference::Function(function_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Object(boolean.prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(boolean.constructor),
                     &mut marked_functions,
                     &mut marked_objects,
                     &mut work,
@@ -1543,6 +1723,44 @@ impl Runtime {
         }
     }
 
+    pub(crate) fn realm_boolean_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        match state.intrinsics {
+            RealmIntrinsics::Initializing => Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm Boolean intrinsics are not initialized",
+            }),
+            RealmIntrinsics::Ready { boolean, .. } => {
+                let prototype = self.objects.get(boolean.prototype).ok_or(
+                    crate::EngineFault::StaleHeapEdge {
+                        edge: "Boolean.prototype intrinsic",
+                        index: boolean.prototype.index(),
+                        generation: boolean.prototype.generation(),
+                    },
+                )?;
+                if prototype
+                    .boxed_primitive()
+                    .and_then(BoxedPrimitive::as_boolean)
+                    != Some(false)
+                {
+                    return Err(crate::EngineFault::RuntimeInvariant {
+                        message: "Boolean.prototype intrinsic has the wrong boxed value",
+                    });
+                }
+                Ok(boolean.prototype)
+            }
+        }
+    }
+
     pub(crate) fn function_realm(
         &self,
         function: FunctionId,
@@ -1661,16 +1879,73 @@ impl Runtime {
             })?;
         let object = self
             .objects
-            .try_insert(HeapObject {
-                record: ObjectRecord::empty(Some(prototype)),
-                public_roots: 0,
-            })
+            .try_insert(HeapObject::ordinary(ObjectRecord::empty(Some(prototype))))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
             })?;
         self.collection_pending = true;
         Ok(object)
+    }
+
+    pub(crate) fn allocate_boxed_boolean_with_prototype(
+        &mut self,
+        prototype: HeapReference,
+        value: bool,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.heap_reference_is_live(prototype) {
+            return Err(stale_heap_reference(prototype).into());
+        }
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let object = self
+            .objects
+            .try_insert(HeapObject::with_boxed_primitive(
+                ObjectRecord::empty(Some(prototype)),
+                BoxedPrimitive::Boolean(value),
+            ))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    pub(crate) fn allocate_boxed_boolean(
+        &mut self,
+        realm: RealmId,
+        value: bool,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let prototype = self.realm_boolean_prototype(realm)?;
+        self.allocate_boxed_boolean_with_prototype(HeapReference::Object(prototype), value)
+    }
+
+    pub(crate) fn boxed_boolean(
+        &self,
+        object: ObjectId,
+    ) -> Result<Option<bool>, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+            .map(|object| {
+                object
+                    .boxed_primitive()
+                    .and_then(BoxedPrimitive::as_boolean)
+            })
     }
 
     pub(crate) fn append_data_property(
@@ -3348,15 +3623,16 @@ mod tests {
         let RealmIntrinsics::Ready {
             function_prototype,
             function_constructor,
+            boolean,
         } = state.intrinsics
         else {
             panic!("realm intrinsics remained uninitialized");
         };
 
         assert_eq!(runtime.usage().realms(), 1);
-        assert_eq!(runtime.usage().heap_objects(), 2);
-        assert_eq!(runtime.usage().heap_functions(), 6);
-        assert_eq!(runtime.usage().object_properties(), 19);
+        assert_eq!(runtime.usage().heap_objects(), 3);
+        assert_eq!(runtime.usage().heap_functions(), 9);
+        assert_eq!(runtime.usage().object_properties(), 30);
         assert_eq!(runtime.usage().installed_code(), 0);
         assert_eq!(
             runtime.atom_usage(),
@@ -3531,6 +3807,114 @@ mod tests {
             |value| matches!(value, StoredValue::String(name) if name == JsString::from_utf8("Function").expect("name")),
         );
 
+        let boolean_prototype = runtime
+            .objects
+            .get(boolean.prototype)
+            .expect("Boolean.prototype");
+        assert_eq!(
+            boolean_prototype.record.prototype(),
+            Some(HeapReference::Object(state.object_prototype))
+        );
+        assert_eq!(
+            boolean_prototype
+                .boxed_primitive()
+                .and_then(crate::object::BoxedPrimitive::as_boolean),
+            Some(false),
+            "Boolean.prototype carries the false Boolean internal slot"
+        );
+        assert_eq!(
+            runtime
+                .realm_boolean_prototype(realm_id)
+                .expect("Boolean.prototype intrinsic"),
+            boolean.prototype
+        );
+        assert_data_property(
+            &boolean_prototype.record,
+            &runtime,
+            PredefinedAtom::Constructor,
+            PropertyLayout::data(true, false, true),
+            |value| matches!(value, StoredValue::Function(id) if id == boolean.constructor),
+        );
+        let boolean_to_string = function_property(
+            &boolean_prototype.record,
+            &runtime,
+            PredefinedAtom::ToString,
+            PropertyLayout::data(true, false, true),
+        );
+        assert_native_method(
+            &runtime,
+            boolean_to_string,
+            function_prototype,
+            realm_id,
+            NativeFunctionKind::BooleanPrototypeToString,
+            PredefinedAtom::ToString,
+            0,
+        );
+        let boolean_value_of = function_property(
+            &boolean_prototype.record,
+            &runtime,
+            PredefinedAtom::ValueOf,
+            PropertyLayout::data(true, false, true),
+        );
+        assert_native_method(
+            &runtime,
+            boolean_value_of,
+            function_prototype,
+            realm_id,
+            NativeFunctionKind::BooleanPrototypeValueOf,
+            PredefinedAtom::ValueOf,
+            0,
+        );
+        for method in [boolean_to_string, boolean_value_of] {
+            let node = runtime
+                .functions
+                .get(method)
+                .expect("Boolean prototype method");
+            assert!(
+                !node
+                    .native()
+                    .expect("native Boolean method")
+                    .kind
+                    .is_constructor(),
+                "Boolean prototype methods must not be constructors"
+            );
+            assert!(
+                !has_own_property(&node.object, &runtime, PredefinedAtom::Prototype),
+                "Boolean prototype methods must not have an own prototype"
+            );
+        }
+
+        let boolean_constructor = runtime.functions.get(boolean.constructor).expect("Boolean");
+        assert_eq!(
+            boolean_constructor.object.prototype(),
+            Some(HeapReference::Function(function_prototype))
+        );
+        let boolean_native = boolean_constructor.native().expect("native Boolean");
+        assert_eq!(boolean_native.realm, realm_id);
+        assert_eq!(boolean_native.kind, NativeFunctionKind::BooleanConstructor);
+        assert!(boolean_native.kind.is_constructor());
+        assert_data_property(
+            &boolean_constructor.object,
+            &runtime,
+            PredefinedAtom::Prototype,
+            PropertyLayout::data(false, false, false),
+            |value| matches!(value, StoredValue::Object(id) if id == boolean.prototype),
+        );
+        assert_data_property(
+            &boolean_constructor.object,
+            &runtime,
+            PredefinedAtom::Length,
+            PropertyLayout::data(false, false, true),
+            |value| matches!(value, StoredValue::Number(number) if number.strict_equals(JsNumber::from_i32(1))),
+        );
+        assert_data_property(
+            &boolean_constructor.object,
+            &runtime,
+            PredefinedAtom::Name,
+            PropertyLayout::data(false, false, true),
+            |value| matches!(value, StoredValue::String(name) if name == JsString::from_utf8("Boolean").expect("name")),
+        );
+
         let global = runtime
             .objects
             .get(state.global_object)
@@ -3545,6 +3929,13 @@ mod tests {
             PredefinedAtom::Function,
             PropertyLayout::data(true, false, true),
             |value| matches!(value, StoredValue::Function(id) if id == function_constructor),
+        );
+        assert_data_property(
+            &global.record,
+            &runtime,
+            PredefinedAtom::Boolean,
+            PropertyLayout::data(true, false, true),
+            |value| matches!(value, StoredValue::Function(id) if id == boolean.constructor),
         );
     }
 
@@ -3604,22 +3995,22 @@ mod tests {
     fn function_intrinsic_creation_is_failure_atomic_at_each_limit() {
         for (limits, expected_resource, limit, observed) in [
             (
-                RuntimeLimits::default().with_max_heap_objects(1),
+                RuntimeLimits::default().with_max_heap_objects(2),
                 RuntimeResource::HeapObjects,
-                1,
                 2,
+                3,
             ),
             (
-                RuntimeLimits::default().with_max_heap_functions(5),
+                RuntimeLimits::default().with_max_heap_functions(8),
                 RuntimeResource::HeapFunctions,
-                5,
-                6,
+                8,
+                9,
             ),
             (
-                RuntimeLimits::default().with_max_object_properties(18),
+                RuntimeLimits::default().with_max_object_properties(29),
                 RuntimeResource::ObjectProperties,
-                18,
-                19,
+                29,
+                30,
             ),
         ] {
             let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -3635,6 +4026,89 @@ mod tests {
             ));
             assert_eq!(runtime.usage(), RuntimeUsage::default());
         }
+    }
+
+    #[test]
+    fn boxed_boolean_allocation_limit_failure_is_atomic() {
+        let mut runtime =
+            Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(3)).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let usage = runtime.usage();
+        let collection_pending = runtime.collection_pending;
+
+        for value in [false, true] {
+            let error = runtime
+                .allocate_boxed_boolean(realm_id, value)
+                .expect_err("boxed Boolean must exceed the exact intrinsic object limit");
+
+            assert!(matches!(
+                error,
+                crate::ExecutionError::LimitExceeded {
+                    resource: RuntimeResource::HeapObjects,
+                    limit: 3,
+                    observed: 4,
+                }
+            ));
+            assert_eq!(runtime.usage(), usage);
+            assert_eq!(runtime.collection_pending, collection_pending);
+        }
+    }
+
+    #[test]
+    fn boxed_boolean_allocation_at_exact_limit_preserves_brand_and_prototype() {
+        let mut runtime =
+            Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(4)).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let prototype = runtime
+            .realm_boolean_prototype(realm_id)
+            .expect("Boolean.prototype");
+
+        let object = runtime
+            .allocate_boxed_boolean(realm_id, true)
+            .expect("one boxed Boolean fits the exact limit");
+
+        assert_eq!(runtime.usage().heap_objects(), 4);
+        assert_eq!(runtime.usage().object_properties(), 30);
+        assert_eq!(
+            runtime.boxed_boolean(object).expect("live wrapper"),
+            Some(true)
+        );
+        assert_eq!(
+            runtime
+                .objects
+                .get(object)
+                .expect("boxed Boolean")
+                .record
+                .prototype(),
+            Some(HeapReference::Object(prototype))
+        );
+        assert!(runtime.collection_pending);
+    }
+
+    #[test]
+    fn boolean_brand_is_not_inferred_from_the_prototype_chain() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let prototype = runtime
+            .realm_boolean_prototype(realm_id)
+            .expect("Boolean.prototype");
+        let fake = runtime
+            .allocate_ordinary_object_with_prototype(HeapReference::Object(prototype))
+            .expect("ordinary object with Boolean.prototype");
+
+        assert_eq!(
+            runtime
+                .objects
+                .get(fake)
+                .expect("ordinary object")
+                .record
+                .prototype(),
+            Some(HeapReference::Object(prototype))
+        );
+        assert_eq!(runtime.boxed_boolean(fake).expect("live object"), None);
     }
 
     #[test]
@@ -3678,7 +4152,7 @@ mod tests {
         let report = runtime.collect_cycles().expect("collection");
 
         assert_eq!(report.functions(), 0);
-        assert_eq!(runtime.usage().heap_functions(), 6);
+        assert_eq!(runtime.usage().heap_functions(), 9);
         assert_eq!(runtime.usage().installed_code(), 0);
         assert_eq!(
             runtime
@@ -3728,8 +4202,8 @@ mod tests {
 
         assert_eq!(report.functions(), 1);
         assert!(runtime.functions.get(function_call).is_none());
-        assert_eq!(runtime.usage().heap_functions(), 5);
-        assert_eq!(runtime.usage().object_properties(), 17);
+        assert_eq!(runtime.usage().heap_functions(), 8);
+        assert_eq!(runtime.usage().object_properties(), 28);
     }
 
     #[test]
@@ -3826,7 +4300,7 @@ mod tests {
         assert!(runtime.functions.get(getter).is_some());
         assert!(runtime.functions.get(setter).is_some());
         assert!(runtime.functions.get(orphan).is_none());
-        assert_eq!(runtime.usage().object_properties(), 20);
+        assert_eq!(runtime.usage().object_properties(), 31);
     }
 
     #[test]
@@ -3933,7 +4407,7 @@ mod tests {
 
         runtime.rollback_root_environment(realm_id, &environment);
 
-        assert_eq!(runtime.usage().object_properties(), 20);
+        assert_eq!(runtime.usage().object_properties(), 31);
         assert!(matches!(
             runtime
                 .objects

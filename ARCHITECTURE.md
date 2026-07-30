@@ -342,10 +342,11 @@ forward those slots through verified parent-closure edges. Runtime lookup and
 write observe the installed code's realm even when another realm initiates
 the call; absent strict reads and writes throw exact `ReferenceError`s,
 `typeof` uses the non-throwing form, and sloppy assignment creates a global
-object property. Sloppy dynamic-function `this` is normalized lazily at
-`PushThis`: objects are preserved and nullish receivers use the installed
-constructor realm's global object. Primitive boxing remains fail closed until
-the primitive wrapper object model lands.
+object property. Sloppy ordinary-function `this` is normalized once while its
+frame is created: objects are preserved, nullish receivers use the installed
+callee realm's global object, and Boolean values allocate a branded wrapper
+whose prototype comes from that realm. Strict functions retain the raw
+receiver. Number/String/Symbol boxing remains fail closed.
 
 Program `var` and function declarations use typed constructor-realm
 global-object slots. Installation preflights the complete declaration set
@@ -383,7 +384,8 @@ across native or verified-bytecode accessor and method calls, counts suspended
 state against frame/value ceilings, and resumes without Rust recursion.
 Accessor lookup stops at the first descriptor, invokes inherited getters with
 the original source object, and treats a missing getter as `undefined`.
-Primitive boxing, persistent global lexical collision checks, and
+Boolean boxing is implemented by the typed wrapper graph described below;
+Number/String/Symbol boxing, persistent global lexical collision checks, and
 `Function.prototype.apply`/`bind`/`Symbol.hasInstance` stay fail closed.
 The path never emits `eval`/`apply_eval` and rejects direct eval anywhere in
 generated code. Direct and indirect eval remain wholly unimplemented.
@@ -484,11 +486,13 @@ property produce exact `TypeError`s, including
 `TypeError: no setter for property`; sloppy rejected writes are ignored. A
 method call preserves a static member reference through parentheses, evaluates
 lookup before arguments, and passes its base as the raw receiver; a sequence
-expression deliberately yields an unbound value. Outside a verified
-dynamic-Function authority, sloppy `PushThis` is admitted only for typed
-ordinary methods. Dynamic sloppy functions normalize it lazily against their
-installed realm; direct calls still pass raw `undefined`. Calls fill missing
-formals with `undefined` and share aggregate frame limits and instruction fuel.
+expression deliberately yields an unbound value. Sloppy ordinary-function
+frames normalize their receiver once against the installed callee realm before
+execution: nullish values become its global object, objects keep identity, and
+Boolean values become one branded wrapper reused by every `PushThis`. Strict
+functions keep the raw receiver. Number/String/Symbol sloppy receivers remain
+fail closed. Calls fill missing formals with `undefined` and share aggregate
+frame limits and instruction fuel.
 An escaping throw carries its exact JavaScript value through the same frame
 vector, allocates caller provenance before publishing any heap root, and
 preserves caller order from immediate to outermost. Dynamic operators use a
@@ -504,9 +508,9 @@ exact `InternalError` instead of escaping as a host allocation error. BigInt
 values and mixed numeric domains,
 async/generator methods, `super`/home-object semantics, realm-global setter
 dispatch, prototype mutation, proxies and other exotics, derived/class and
-nonordinary constructor forms, optional/spread/apply/tail calls, general
-sloppy-`this` primitive boxing, remaining primitive wrapper/prototype
-conversions, serialized input, raw function slots, catch handlers, finally
+nonordinary constructor forms, optional/spread/apply/tail calls,
+Number/String/Symbol sloppy-`this` boxing and wrapper/prototype conversions,
+serialized input, raw function slots, catch handlers, finally
 return addresses, iterator markers, and packed exceptional stack values remain
 fail closed. Ordinary
 accessors are typed slots: `GetField`
@@ -640,18 +644,28 @@ until zombie-state and resurrection rules are complete.
   admitted. Deletion, general flag changes, computed definitions, realm-global
   setter dispatch, and prototype mutation remain fail closed.
 - Object literals inherit their realm's internal `Object.prototype`, which
-  currently owns exact `toString` and `valueOf` native data properties.
-  `Function.prototype` likewise owns exact `toString` and `call`; all four
-  method functions belong to the realm, inherit `Function.prototype`, and
-  participate in the iterative heap trace. Ordinary objects and function
-  objects share typed data/accessor property storage, and both getter and
-  setter function edges are traced. `DefineField` creates configurable,
-  writable, enumerable
-  data properties; `DefineMethod` creates configurable/enumerable methods or
-  accessors, with writable method data properties and exact getter/setter-half
-  merging. It initializes the function's exact property-derived name before
-  publication, while the compiled arity supplies `length`; duplicate literal
-  keys replace one slot without double charging.
+  owns exact `toString` and `valueOf` native data properties.
+  `Function.prototype` likewise owns exact `toString` and `call`.
+  Each realm additionally owns the global Boolean constructor, a
+  false-branded `Boolean.prototype` inheriting `Object.prototype`, and exact
+  `toString`/`valueOf` methods. The constructor and all six intrinsic method
+  functions inherit `Function.prototype` and participate in the iterative heap
+  trace. Boolean wrappers store a typed internal payload rather than inferring
+  their brand from the prototype; the same object representation reserves
+  typed Number, String, and Symbol payload variants for later intrinsic
+  families. Boolean construction accepts data-valued object/function
+  `newTarget.prototype` and falls back to the new target realm's
+  `Boolean.prototype` for primitives. Accessor-backed `newTarget.prototype`
+  and accessor-backed `Symbol.toStringTag` still fail closed at the synchronous
+  intrinsic-read boundary; both require resumable native `Get` continuations.
+  Ordinary objects and function objects share typed data/accessor property
+  storage, and both getter and setter function edges are traced.
+  `DefineField` creates configurable, writable, enumerable data properties;
+  `DefineMethod` creates configurable/enumerable methods or accessors, with
+  writable method data properties and exact getter/setter-half merging. It
+  initializes the function's exact property-derived name before publication,
+  while the compiled arity supplies `length`; duplicate literal keys replace
+  one slot without double charging.
 - Ordinary data/accessor layouts have an opaque value-independent
   representation; accessor layouts cannot carry a writable flag. Current
   ordinary property slots are typed as data or accessor; binding-cell and lazy

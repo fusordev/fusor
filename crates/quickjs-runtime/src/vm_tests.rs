@@ -287,6 +287,76 @@ mod tests {
     }
 
     #[test]
+    fn boolean_constructor_wrapper_uses_new_target_prototype_and_realm_fallback() {
+        let (mut runtime, realm, new_target, _native) = runtime_with_function_constructor();
+        let function_prototype = runtime
+            .realm_function_prototype(realm)
+            .expect("Function.prototype");
+        let Ok(wrapper) = create_boolean_constructor_wrapper(&mut runtime, new_target, true) else {
+            panic!("function-valued newTarget.prototype");
+        };
+        assert_eq!(
+            runtime.boxed_boolean(wrapper).expect("live wrapper"),
+            Some(true)
+        );
+        assert_eq!(
+            runtime
+                .object_record(HeapReference::Object(wrapper))
+                .expect("wrapper")
+                .prototype(),
+            Some(HeapReference::Function(function_prototype))
+        );
+
+        let custom_prototype = source_object(&mut runtime, realm);
+        let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+        let constructor = runtime
+            .functions
+            .get_mut(new_target)
+            .expect("new target function");
+        let replaced = constructor.object.replace_existing_with_data(
+            &prototype_key,
+            PropertyLayout::data(false, false, false),
+            StoredValue::Object(custom_prototype),
+        );
+        assert!(replaced.is_some());
+        let Ok(wrapper) = create_boolean_constructor_wrapper(&mut runtime, new_target, false) else {
+            panic!("object-valued newTarget.prototype");
+        };
+        assert_eq!(
+            runtime
+                .object_record(HeapReference::Object(wrapper))
+                .expect("wrapper")
+                .prototype(),
+            Some(HeapReference::Object(custom_prototype))
+        );
+
+        let constructor = runtime
+            .functions
+            .get_mut(new_target)
+            .expect("new target function");
+        let replaced = constructor.object.replace_existing_with_data(
+            &prototype_key,
+            PropertyLayout::data(false, false, false),
+            StoredValue::Number(JsNumber::from_i32(1)),
+        );
+        assert!(replaced.is_some());
+        let Ok(wrapper) = create_boolean_constructor_wrapper(&mut runtime, new_target, true) else {
+            panic!("primitive newTarget.prototype fallback");
+        };
+        assert_eq!(
+            runtime
+                .object_record(HeapReference::Object(wrapper))
+                .expect("wrapper")
+                .prototype(),
+            Some(HeapReference::Object(
+                runtime
+                    .realm_boolean_prototype(realm)
+                    .expect("Boolean.prototype")
+            ))
+        );
+    }
+
+    #[test]
     fn property_key_continuations_charge_every_suspended_javascript_value() {
         let (mut runtime, realm, _constructor, _native) = runtime_with_function_constructor();
         let object = source_object(&mut runtime, realm);
@@ -304,6 +374,7 @@ mod tests {
         assert_eq!(
             continuation(PropertyKeyTarget::Read {
                 base: StoredValue::Undefined,
+                realm,
             })
             .retained_values(),
             2
@@ -313,6 +384,7 @@ mod tests {
                 base: StoredValue::Undefined,
                 value: StoredValue::Undefined,
                 strict: false,
+                realm,
             })
             .retained_values(),
             3
@@ -1453,7 +1525,7 @@ mod tests {
             }",
             "make",
         );
-        let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(21))
+        let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(32))
             .expect("runtime");
         let realm = runtime.create_realm().expect("realm");
         let maker = runtime
@@ -1475,8 +1547,8 @@ mod tests {
             error,
             ExecutionError::LimitExceeded {
                 resource: RuntimeResource::ObjectProperties,
-                limit: 21,
-                observed: 22,
+                limit: 32,
+                observed: 33,
             }
         ));
         let failed = runtime.usage();
@@ -1784,8 +1856,7 @@ mod tests {
         .expect("frontend")
     }
 
-    fn runtime_with_function_constructor()
-    -> (Runtime, crate::ids::RealmId, FunctionId, NativeFunction) {
+    fn runtime_with_function_constructor() -> (Runtime, RealmId, FunctionId, NativeFunction) {
         let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
         let realm = runtime.create_realm().expect("realm");
         let realm = runtime.context(&realm).expect("context").realm;
@@ -1806,7 +1877,7 @@ mod tests {
         (runtime, realm, constructor, native)
     }
 
-    fn source_object(runtime: &mut Runtime, realm: crate::ids::RealmId) -> ObjectId {
+    fn source_object(runtime: &mut Runtime, realm: RealmId) -> ObjectId {
         let prototype = runtime
             .realm_object_prototype(realm)
             .expect("Object.prototype");

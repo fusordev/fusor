@@ -302,9 +302,10 @@ A milestone is complete only when all of its checked items pass in CI.
         and non-callable values throw exact `TypeError: not a function`.
         Escaping child exceptions retain immediate-to-outer caller PCs and
         source spans. Static-property methods now use the same frame vector and
-        preserve their raw receiver; optional/spread/apply, tail calls,
-        general sloppy-`this` normalization, `arguments`, and direct eval
-        remain fail closed.
+        preserve their raw receiver; Boolean receivers now use the typed
+        wrapper path below, while Number/String/Symbol sloppy-`this`
+        normalization, optional/spread/apply, tail calls, `arguments`, and
+        direct eval remain fail closed.
   - [x] Execute ordinary `Function(...)` and `new Function(...)` without eval:
         convert already-evaluated arguments in order, retain the exact
         QuickJS-compatible wrapper and fragment map, compile the complete
@@ -324,8 +325,9 @@ A milestone is complete only when all of its checked items pass in CI.
     - [x] Add typed unresolved-name lookup and write slots rooted in the
           constructor realm, iterative propagation through nested functions,
           exact missing-name and `typeof` behavior, cross-realm ownership,
-          and lazy sloppy dynamic-function `this` normalization without caller
-          capture. Keep primitive receiver boxing fail closed.
+          and constructor-realm sloppy dynamic-function `this` normalization
+          without caller capture. Boolean receivers use the realm wrapper
+          below; Number/String/Symbol receiver boxing remains fail closed.
     - [x] Add escaped Program declaration instantiation: indirect-eval `var`
           and function declarations create configurable global-object
           bindings while preserving compatible existing properties, with
@@ -345,8 +347,9 @@ A milestone is complete only when all of its checked items pass in CI.
           `Object.prototype.valueOf`, and `Function.prototype.toString`
           natives with exact method/name/length descriptors, GC reachability,
           current object/function tags and identity, retained verified
-          bytecode source, and the pinned native-source form. Primitive boxing
-          and observable object-valued native names remain fail closed.
+          bytecode source, and the pinned native-source form. Boolean boxing
+          and data-valued tagging land below; Number/String/Symbol boxing and
+          observable object-valued native names remain fail closed.
     - [x] Complete source-argument `ToPrimitive`: check
           `Symbol.toPrimitive` with the string hint, fall back to callable
           `toString` then `valueOf`, stop property lookup at data or accessor
@@ -441,9 +444,26 @@ A milestone is complete only when all of its checked items pass in CI.
         postfix two-value stack shape, fallible Number formatting, exact
         string-limit `InternalError`, and whole-graph admission remain
         regression-tested.
-  - [ ] Add primitive wrapper payloads/prototypes, the remaining conversion
-        hints and built-in entry points, BigInt numeric domains, and the
-        remaining conversion/formatting surface.
+  - [x] Add the Boolean intrinsic and first typed primitive-wrapper substrate:
+        every realm installs the exact global constructor, false-branded
+        prototype, native `toString`/`valueOf` methods, descriptors, prototype
+        edges, and GC roots. Call conversion uses truthiness without observable
+        coercion; construction honors data-valued `newTarget.prototype`;
+        primitive reads walk the realm prototype with the raw receiver; strict
+        writes reject and sloppy writes disappear; strict calls retain
+        primitives while sloppy calls allocate exactly one wrapper per frame.
+        Internal branding, `Object.prototype` boxing and data-valued tagging,
+        prototype-sensitive `ToPrimitive`, exact receiver and nonconstructor
+        errors, cross-realm ownership, and allocation-limit rollback are
+        covered.
+  - [ ] Make intrinsic property reads resumable for accessor-backed
+        `newTarget.prototype` during construction and accessor-backed
+        `Symbol.toStringTag` during `Object.prototype.toString`; current
+        synchronous internal reads reject these paths instead of skipping or
+        approximating them.
+  - [ ] Add Number/String/Symbol wrapper payload consumers and prototypes, the
+        remaining conversion hints and built-in entry points, BigInt numeric
+        domains, and the remaining conversion/formatting surface.
 - [ ] Complete property descriptors, interned shapes, mutable prototypes, and
       exotic objects.
 - [ ] Dense/sparse arrays and typed indexed access.

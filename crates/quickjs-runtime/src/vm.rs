@@ -39,7 +39,7 @@ use crate::{
     JsStringError, JsValue, OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
     PredefinedAtom, PropertyKey, PropertyLayout, Runtime, RuntimeResource,
     conversion::{number_to_int32, number_to_uint32, string_to_number},
-    ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId},
+    ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     object::OwnProperty,
     runtime::{
         BindingCell, BytecodeFunction, EnvironmentBinding, FrameBindingAddress,
@@ -145,7 +145,6 @@ struct Frame {
     code: InstalledCodeId,
     template: FunctionTemplateId,
     strict: bool,
-    receiver_access: ReceiverAccess,
     receiver: StoredValue,
     instruction: InstructionIndex,
     return_to: Option<CallReturn>,
@@ -245,11 +244,13 @@ enum PropertyKeyTarget {
     ToKey,
     Read {
         base: StoredValue,
+        realm: RealmId,
     },
     Write {
         base: StoredValue,
         value: StoredValue,
         strict: bool,
+        realm: RealmId,
     },
     DefineMethod {
         base: StoredValue,
@@ -407,7 +408,7 @@ struct FramePlan {
 #[derive(Clone, Copy)]
 enum ReceiverAccess {
     Direct,
-    DeferredSloppy,
+    NormalizeSloppy,
 }
 
 impl ReceiverAccess {
@@ -420,7 +421,7 @@ impl ReceiverAccess {
         {
             Self::Direct
         } else {
-            Self::DeferredSloppy
+            Self::NormalizeSloppy
         }
     }
 }
@@ -439,25 +440,29 @@ fn receiver_profile(function: &VerifiedBytecodeFunction<'_>) -> (bool, ReceiverA
 }
 
 fn normalize_receiver(
-    runtime: &Runtime,
-    realm: crate::ids::RealmId,
+    runtime: &mut Runtime,
+    realm: RealmId,
     access: ReceiverAccess,
     receiver: StoredValue,
-) -> Result<StoredValue, EngineFault> {
+) -> Result<StoredValue, ExecutionError> {
     if matches!(access, ReceiverAccess::Direct) {
         return Ok(receiver);
     }
     match receiver {
-        StoredValue::Undefined | StoredValue::Null => {
-            runtime.realm_global_object(realm).map(StoredValue::Object)
-        }
+        StoredValue::Undefined | StoredValue::Null => runtime
+            .realm_global_object(realm)
+            .map(StoredValue::Object)
+            .map_err(ExecutionError::from),
         StoredValue::Function(_) | StoredValue::Object(_) => Ok(receiver),
-        StoredValue::Boolean(_)
-        | StoredValue::Number(_)
-        | StoredValue::String(_)
-        | StoredValue::Symbol(_) => Err(EngineFault::RuntimeInvariant {
-            message: "primitive sloppy receiver reached the pre-wrapper object profile",
-        }),
+        StoredValue::Boolean(value) => runtime
+            .allocate_boxed_boolean(realm, value)
+            .map(StoredValue::Object),
+        StoredValue::Number(_) | StoredValue::String(_) | StoredValue::Symbol(_) => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "primitive sloppy receiver reached the pre-wrapper object profile",
+            }
+            .into())
+        }
     }
 }
 
@@ -675,8 +680,14 @@ impl Context<'_> {
             for argument in arguments {
                 owned_arguments.push(argument.stored()?.duplicate());
             }
-            let value =
-                execute_native_entry(self.runtime, native, owned_arguments, limits, compiler)?;
+            let value = execute_native_entry(
+                self.runtime,
+                function_id,
+                native,
+                owned_arguments,
+                limits,
+                compiler,
+            )?;
             return self.runtime.public_value(value);
         }
 
@@ -884,6 +895,7 @@ fn execute_frame_loop(
                     )?;
                     let dispatch = dispatch_native_call(
                         runtime,
+                        function,
                         native,
                         inputs,
                         Some(return_to),
@@ -1368,6 +1380,7 @@ fn resolve_native_dispatch(
         if let Some(native) = native {
             let outcome = dispatch_native_call(
                 runtime,
+                call.function,
                 native,
                 CallInputs {
                     receiver: call.receiver,
@@ -1439,6 +1452,7 @@ impl Error for DynamicFunctionServiceUnavailable {}
 
 fn execute_native_entry(
     runtime: &mut Runtime,
+    function: FunctionId,
     native: NativeFunction,
     arguments: Vec<StoredValue>,
     limits: ExecutionLimits,
@@ -1459,6 +1473,7 @@ fn execute_native_entry(
     };
     let dispatch = dispatch_native_call(
         runtime,
+        function,
         native,
         inputs,
         None,
@@ -1510,6 +1525,7 @@ fn execute_native_entry(
 )]
 fn dispatch_native_call(
     runtime: &mut Runtime,
+    function: FunctionId,
     native: NativeFunction,
     inputs: CallInputs,
     return_to: Option<CallReturn>,
@@ -1531,13 +1547,7 @@ fn dispatch_native_call(
         return Err(NativeFailure::Abrupt(PendingException {
             payload: PendingExceptionPayload::EngineError {
                 kind: ExceptionKind::TypeError,
-                message: JsString::from_utf8(
-                    if native.kind == NativeFunctionKind::FunctionPrototypeCall {
-                        "call is not a constructor"
-                    } else {
-                        "not a constructor"
-                    },
-                )?,
+                message: function_not_constructor_message(runtime, function)?,
             },
             origin,
         }));
@@ -1600,12 +1610,16 @@ fn dispatch_native_call(
             )
         }
         NativeFunctionKind::ObjectPrototypeToString => {
-            let value = object_prototype_to_string(runtime, &inputs.receiver)?;
+            let value = object_prototype_to_string(runtime, native.realm, &inputs.receiver)?;
             Ok(NativeDispatch::Immediate(StoredValue::String(value)))
         }
         NativeFunctionKind::ObjectPrototypeValueOf => match inputs.receiver {
             value @ (StoredValue::Function(_) | StoredValue::Object(_)) => {
                 Ok(NativeDispatch::Immediate(value))
+            }
+            StoredValue::Boolean(value) => {
+                let object = runtime.allocate_boxed_boolean(native.realm, value)?;
+                Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
             }
             StoredValue::Undefined | StoredValue::Null => {
                 let Some(origin) = origin else {
@@ -1624,16 +1638,34 @@ fn dispatch_native_call(
                     origin,
                 }))
             }
-            StoredValue::Boolean(_)
-            | StoredValue::Number(_)
-            | StoredValue::String(_)
-            | StoredValue::Symbol(_) => Err(NativeFailure::Execution(
-                EngineFault::RuntimeInvariant {
-                    message: "Object.prototype.valueOf primitive boxing is not implemented",
-                }
-                .into(),
-            )),
+            StoredValue::Number(_) | StoredValue::String(_) | StoredValue::Symbol(_) => {
+                Err(NativeFailure::Execution(
+                    EngineFault::RuntimeInvariant {
+                        message: "Object.prototype.valueOf primitive boxing is not implemented",
+                    }
+                    .into(),
+                ))
+            }
         },
+        NativeFunctionKind::BooleanConstructor => {
+            let mut arguments = inputs.arguments;
+            let value = arguments.take_first_or_undefined().is_truthy();
+            let Some(new_target) = inputs.new_target else {
+                return Ok(NativeDispatch::Immediate(StoredValue::Boolean(value)));
+            };
+            let object = create_boolean_constructor_wrapper(runtime, new_target, value)?;
+            Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+        }
+        NativeFunctionKind::BooleanPrototypeToString => {
+            let value = boolean_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(if value { "true" } else { "false" })?,
+            )))
+        }
+        NativeFunctionKind::BooleanPrototypeValueOf => {
+            let value = boolean_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(value)))
+        }
         NativeFunctionKind::FunctionPrototypeToString => {
             let StoredValue::Function(function) = inputs.receiver else {
                 let Some(origin) = origin else {
@@ -1657,6 +1689,60 @@ fn dispatch_native_call(
             )))
         }
     }
+}
+
+fn boolean_receiver_value(
+    runtime: &Runtime,
+    receiver: &StoredValue,
+    origin: Option<&JsStackFrame>,
+) -> Result<bool, NativeFailure> {
+    let value = match receiver {
+        StoredValue::Boolean(value) => Some(*value),
+        StoredValue::Object(object) => runtime.boxed_boolean(*object)?,
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Number(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::Function(_) => None,
+    };
+    if let Some(value) = value {
+        return Ok(value);
+    }
+    let origin = origin.cloned().unwrap_or_else(native_function_host_origin);
+    Err(NativeFailure::Abrupt(PendingException {
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8("not a boolean")?,
+        },
+        origin,
+    }))
+}
+
+fn create_boolean_constructor_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    value: bool,
+) -> Result<ObjectId, NativeFailure> {
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let requested =
+        read_heap_property(runtime, HeapReference::Function(new_target), &prototype_key)?;
+    let prototype = match requested {
+        StoredValue::Function(function) => HeapReference::Function(function),
+        StoredValue::Object(object) => HeapReference::Object(object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            let realm = runtime.function_realm(new_target)?;
+            HeapReference::Object(runtime.realm_boolean_prototype(realm)?)
+        }
+    };
+    runtime
+        .allocate_boxed_boolean_with_prototype(prototype, value)
+        .map_err(NativeFailure::Execution)
 }
 
 #[allow(
@@ -2864,8 +2950,8 @@ fn finish_property_key_target(
             message: "property-key conversion lost its ToKey fast path",
         }
         .into()),
-        PropertyKeyTarget::Read { base } => {
-            match read_static_property(runtime, &base, &property.key)? {
+        PropertyKeyTarget::Read { base, realm } => {
+            match read_static_property(runtime, realm, &base, &property.key)? {
                 PropertyReadOutcome::Value(value) => Ok(NativeDispatch::Immediate(value)),
                 PropertyReadOutcome::Getter { function, receiver } => {
                     Ok(NativeDispatch::Call(NativeCall {
@@ -2886,7 +2972,8 @@ fn finish_property_key_target(
             base,
             value,
             strict,
-        } => match write_static_property(runtime, &base, property.key, value, strict)? {
+            realm,
+        } => match write_static_property(runtime, realm, &base, property.key, value, strict)? {
             PropertyWriteOutcome::Complete => Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
             PropertyWriteOutcome::Setter {
                 function,
@@ -3177,17 +3264,26 @@ fn finish_ordinary_function_constructor(
 
 fn object_prototype_to_string(
     runtime: &Runtime,
+    realm: RealmId,
     receiver: &StoredValue,
 ) -> Result<JsString, NativeFailure> {
     let (reference, default_tag) = match receiver {
         StoredValue::Undefined => return Ok(JsString::from_utf8("[object Undefined]")?),
         StoredValue::Null => return Ok(JsString::from_utf8("[object Null]")?),
+        StoredValue::Boolean(_) => (
+            HeapReference::Object(runtime.realm_boolean_prototype(realm)?),
+            "Boolean",
+        ),
         StoredValue::Function(function) => (HeapReference::Function(*function), "Function"),
-        StoredValue::Object(object) => (HeapReference::Object(*object), "Object"),
-        StoredValue::Boolean(_)
-        | StoredValue::Number(_)
-        | StoredValue::String(_)
-        | StoredValue::Symbol(_) => {
+        StoredValue::Object(object) => (
+            HeapReference::Object(*object),
+            if runtime.boxed_boolean(*object)?.is_some() {
+                "Boolean"
+            } else {
+                "Object"
+            },
+        ),
+        StoredValue::Number(_) | StoredValue::String(_) | StoredValue::Symbol(_) => {
             return Err(NativeFailure::Execution(
                 EngineFault::RuntimeInvariant {
                     message: "Object.prototype.toString primitive boxing is not implemented",
@@ -3708,7 +3804,7 @@ fn plan_frame(
     reason = "failure-atomic frame allocation and initialization remain one transaction"
 )]
 fn create_frame(
-    runtime: &Runtime,
+    runtime: &mut Runtime,
     plan: FramePlan,
     receiver: StoredValue,
     supplied: FrameArguments<'_>,
@@ -3839,12 +3935,13 @@ fn create_frame(
             additional: plan.stack_capacity,
         })?;
 
+    let receiver = normalize_receiver(runtime, code.realm, plan.receiver_access, receiver)?;
+
     Ok(Frame {
         function: plan.function,
         code: plan.code,
         template: plan.template,
         strict: plan.strict,
-        receiver_access: plan.receiver_access,
         receiver,
         instruction: plan.instruction,
         return_to,
@@ -3978,13 +4075,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
         FinalOpcode::Undefined => frame.stack.push(StoredValue::Undefined),
         FinalOpcode::Null => frame.stack.push(StoredValue::Null),
         FinalOpcode::PushThis => {
-            let realm = code(runtime, frame.code)?.realm;
-            frame.stack.push(normalize_receiver(
-                runtime,
-                realm,
-                frame.receiver_access,
-                frame.receiver.duplicate(),
-            )?);
+            frame.stack.push(frame.receiver.duplicate());
         }
         FinalOpcode::PushFalse => frame.stack.push(StoredValue::Boolean(false)),
         FinalOpcode::PushTrue => frame.stack.push(StoredValue::Boolean(true)),
@@ -4154,6 +4245,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             frame.stack.push(StoredValue::Function(function));
         }
         FinalOpcode::GetArrayEl | FinalOpcode::GetArrayEl2 => {
+            let realm = code(runtime, frame.code)?.realm;
             let key = pop(frame)?;
             let base = if opcode == FinalOpcode::GetArrayEl {
                 pop(frame)?
@@ -4185,7 +4277,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
                 begin_property_key_conversion(
                     runtime,
                     key,
-                    PropertyKeyTarget::Read { base },
+                    PropertyKeyTarget::Read { base, realm },
                     Some(return_to),
                     origin,
                 ),
@@ -4193,6 +4285,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             );
         }
         FinalOpcode::PutArrayEl => {
+            let realm = code(runtime, frame.code)?.realm;
             let value = pop(frame)?;
             let key = pop(frame)?;
             let base = pop(frame)?;
@@ -4212,6 +4305,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
                         base,
                         value,
                         strict: frame.strict,
+                        realm,
                     },
                     Some(return_to),
                     origin,
@@ -4286,13 +4380,14 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             );
         }
         FinalOpcode::GetField | FinalOpcode::GetField2 => {
+            let realm = code(runtime, frame.code)?.realm;
             let property = static_property_operand(runtime, frame, operands)?;
             let base = if opcode == FinalOpcode::GetField {
                 pop(frame)?
             } else {
                 peek(frame)?.duplicate()
             };
-            match read_static_property(runtime, &base, &property.key)? {
+            match read_static_property(runtime, realm, &base, &property.key)? {
                 PropertyReadOutcome::Value(value) => frame.stack.push(value),
                 PropertyReadOutcome::Getter { function, receiver } => {
                     let return_to =
@@ -4325,10 +4420,11 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             }
         }
         FinalOpcode::PutField => {
+            let realm = code(runtime, frame.code)?.realm;
             let property = static_property_operand(runtime, frame, operands)?;
             let value = pop(frame)?;
             let base = pop(frame)?;
-            match write_static_property(runtime, &base, property.key, value, frame.strict)? {
+            match write_static_property(runtime, realm, &base, property.key, value, frame.strict)? {
                 PropertyWriteOutcome::Complete => {}
                 PropertyWriteOutcome::Setter {
                     function,
@@ -4832,6 +4928,7 @@ struct DefineMethodComputedOperand {
 
 struct GlobalReferenceOperand {
     binding: RealmGlobalBindingId,
+    realm: RealmId,
     object: ObjectId,
     key: PropertyKey,
     name: JsString,
@@ -5026,6 +5123,7 @@ fn global_reference_operand(
         })?;
     Ok(GlobalReferenceOperand {
         binding: global,
+        realm,
         object: runtime.realm_global_object(realm)?,
         key: PropertyKey::from_validated_atom(record.name.clone()),
         name,
@@ -5090,7 +5188,14 @@ fn write_realm_global(
             }
             let base = StoredValue::Object(global.object);
             Ok(
-                match write_static_property(runtime, &base, global.key, value, strict)? {
+                match write_static_property(
+                    runtime,
+                    global.realm,
+                    &base,
+                    global.key,
+                    value,
+                    strict,
+                )? {
                     PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
                     PropertyWriteOutcome::Setter { .. } => {
                         return Err(EngineFault::UnsupportedAccessorWrite {
@@ -5107,7 +5212,14 @@ fn write_realm_global(
         RealmGlobalBindingState::Object => {
             let base = StoredValue::Object(global.object);
             Ok(
-                match write_static_property(runtime, &base, global.key, value, strict)? {
+                match write_static_property(
+                    runtime,
+                    global.realm,
+                    &base,
+                    global.key,
+                    value,
+                    strict,
+                )? {
                     PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
                     PropertyWriteOutcome::Setter { .. } => {
                         return Err(EngineFault::UnsupportedAccessorWrite {
@@ -5126,15 +5238,20 @@ fn write_realm_global(
 
 fn read_static_property(
     runtime: &Runtime,
+    realm: RealmId,
     base: &StoredValue,
     key: &PropertyKey,
 ) -> Result<PropertyReadOutcome, ExecutionError> {
     Ok(match base {
         StoredValue::Undefined => PropertyReadOutcome::Failed(PropertyFailure::ReadUndefined),
         StoredValue::Null => PropertyReadOutcome::Failed(PropertyFailure::ReadNull),
-        StoredValue::Boolean(_) | StoredValue::Number(_) => {
-            PropertyReadOutcome::Value(StoredValue::Undefined)
-        }
+        StoredValue::Boolean(_) => read_heap_property_for_receiver(
+            runtime,
+            HeapReference::Object(runtime.realm_boolean_prototype(realm)?),
+            base.duplicate(),
+            key,
+        )?,
+        StoredValue::Number(_) => PropertyReadOutcome::Value(StoredValue::Undefined),
         StoredValue::Symbol(atom) => {
             if property_key_has_string_name(key, "description") {
                 atom.description().map_or_else(
@@ -5265,12 +5382,51 @@ fn inherited_property(
     lookup_heap_property(runtime, current, key)
 }
 
+fn write_primitive_property(
+    runtime: &Runtime,
+    prototype: HeapReference,
+    receiver: &StoredValue,
+    key: &PropertyKey,
+    value: StoredValue,
+    strict: bool,
+) -> Result<PropertyWriteOutcome, ExecutionError> {
+    if let Some(inherited) = inherited_property(runtime, Some(prototype), key)? {
+        match inherited {
+            OwnProperty::Accessor { setter, .. } => {
+                return Ok(match setter {
+                    Some(function) => PropertyWriteOutcome::Setter {
+                        function,
+                        receiver: receiver.duplicate(),
+                        value,
+                    },
+                    None if strict => PropertyWriteOutcome::Failed(PropertyFailure::NoSetter),
+                    None => PropertyWriteOutcome::Complete,
+                });
+            }
+            OwnProperty::Data { layout, .. } if layout.writable() != Some(true) => {
+                return Ok(if strict {
+                    PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+                } else {
+                    PropertyWriteOutcome::Complete
+                });
+            }
+            OwnProperty::Data { .. } => {}
+        }
+    }
+    Ok(if strict {
+        PropertyWriteOutcome::Failed(PropertyFailure::NotObject)
+    } else {
+        PropertyWriteOutcome::Complete
+    })
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "ordinary write semantics audit every primitive, own, inherited, accessor, and extensibility branch"
 )]
 fn write_static_property(
     runtime: &mut Runtime,
+    realm: RealmId,
     base: &StoredValue,
     key: PropertyKey,
     value: StoredValue,
@@ -5285,10 +5441,18 @@ fn write_static_property(
         StoredValue::Null => {
             return Ok(PropertyWriteOutcome::Failed(PropertyFailure::WriteNull));
         }
-        StoredValue::Boolean(_)
-        | StoredValue::Number(_)
-        | StoredValue::String(_)
-        | StoredValue::Symbol(_) => {
+        StoredValue::Boolean(_) => {
+            let prototype = runtime.realm_boolean_prototype(realm)?;
+            return write_primitive_property(
+                runtime,
+                HeapReference::Object(prototype),
+                base,
+                &key,
+                value,
+                strict,
+            );
+        }
+        StoredValue::Number(_) | StoredValue::String(_) | StoredValue::Symbol(_) => {
             return Ok(if strict {
                 PropertyWriteOutcome::Failed(PropertyFailure::NotObject)
             } else {
@@ -6093,10 +6257,10 @@ fn create_closure(
     }
 
     let prototype_object = if let Some(record) = prototype_record {
-        let Ok(object) = runtime.objects.try_insert(crate::object::HeapObject {
-            record,
-            public_roots: 0,
-        }) else {
+        let Ok(object) = runtime
+            .objects
+            .try_insert(crate::object::HeapObject::ordinary(record))
+        else {
             rollback_new_cells(runtime, frame, &pending_cells, &new_cells);
             return Err(ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,

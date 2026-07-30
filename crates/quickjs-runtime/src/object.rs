@@ -26,7 +26,7 @@
 use std::{collections::TryReserveError, sync::Arc};
 
 use crate::{
-    PropertyKey, PropertyLayout, PropertyLayoutKind,
+    Atom, JsNumber, JsString, PropertyKey, PropertyLayout, PropertyLayoutKind,
     ids::FunctionId,
     value::{HeapReference, StoredValue},
 };
@@ -365,16 +365,117 @@ impl ObjectRecord {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "all primitive wrapper payloads are defined together so later intrinsic families reuse one typed object representation"
+)]
+#[derive(Clone)]
+pub(crate) enum BoxedPrimitive {
+    Boolean(bool),
+    Number(JsNumber),
+    String(JsString),
+    Symbol(Atom),
+}
+
+#[allow(
+    dead_code,
+    reason = "typed wrapper inspection lands before every primitive intrinsic consumes it"
+)]
+impl BoxedPrimitive {
+    #[must_use]
+    pub(crate) const fn as_boolean(&self) -> Option<bool> {
+        match self {
+            Self::Boolean(value) => Some(*value),
+            Self::Number(_) | Self::String(_) | Self::Symbol(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn as_number(&self) -> Option<JsNumber> {
+        match self {
+            Self::Number(value) => Some(*value),
+            Self::Boolean(_) | Self::String(_) | Self::Symbol(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn as_string(&self) -> Option<&JsString> {
+        match self {
+            Self::String(value) => Some(value),
+            Self::Boolean(_) | Self::Number(_) | Self::Symbol(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn as_symbol(&self) -> Option<&Atom> {
+        match self {
+            Self::Symbol(value) => Some(value),
+            Self::Boolean(_) | Self::Number(_) | Self::String(_) => None,
+        }
+    }
+}
+
+pub(crate) enum HeapObjectKind {
+    Ordinary,
+    BoxedPrimitive(BoxedPrimitive),
+}
+
+impl HeapObjectKind {
+    #[must_use]
+    pub(crate) const fn boxed_primitive(&self) -> Option<&BoxedPrimitive> {
+        match self {
+            Self::Ordinary => None,
+            Self::BoxedPrimitive(value) => Some(value),
+        }
+    }
+}
+
 pub(crate) struct HeapObject {
+    kind: HeapObjectKind,
     pub(crate) record: ObjectRecord,
     pub(crate) public_roots: u32,
 }
 
+impl HeapObject {
+    #[must_use]
+    pub(crate) const fn ordinary(record: ObjectRecord) -> Self {
+        Self {
+            kind: HeapObjectKind::Ordinary,
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn with_boxed_primitive(record: ObjectRecord, value: BoxedPrimitive) -> Self {
+        Self {
+            kind: HeapObjectKind::BoxedPrimitive(value),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "kind inspection supports class-sensitive object behavior beyond the first Boolean consumer"
+    )]
+    pub(crate) const fn kind(&self) -> &HeapObjectKind {
+        &self.kind
+    }
+
+    #[must_use]
+    pub(crate) const fn boxed_primitive(&self) -> Option<&BoxedPrimitive> {
+        self.kind.boxed_primitive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ObjectRecord, OwnProperty};
+    use super::{BoxedPrimitive, HeapObject, HeapObjectKind, ObjectRecord, OwnProperty};
     use crate::{
-        ArrayIndex, PropertyKey, PropertyLayout,
+        ArrayIndex, AtomLimits, AtomTable, JsNumber, JsString, PredefinedAtom, PropertyKey,
+        PropertyLayout,
         arena::{Arena, RuntimeIdentity},
         ids::FunctionMarker,
         value::StoredValue,
@@ -526,5 +627,57 @@ mod tests {
                 && read_function == getter
                 && write_function == setter
         ));
+    }
+
+    #[test]
+    fn ordinary_heap_object_has_no_boxed_primitive_payload() {
+        let object = HeapObject::ordinary(ObjectRecord::empty(None));
+
+        assert!(matches!(object.kind(), HeapObjectKind::Ordinary));
+        assert!(object.boxed_primitive().is_none());
+        assert_eq!(object.public_roots, 0);
+    }
+
+    #[test]
+    fn boolean_wrapper_preserves_its_typed_payload() {
+        let object = HeapObject::with_boxed_primitive(
+            ObjectRecord::empty(None),
+            BoxedPrimitive::Boolean(true),
+        );
+
+        assert!(matches!(
+            object.kind(),
+            HeapObjectKind::BoxedPrimitive(BoxedPrimitive::Boolean(true))
+        ));
+        let payload = object.boxed_primitive().expect("boxed primitive");
+        assert_eq!(payload.as_boolean(), Some(true));
+        assert!(payload.as_number().is_none());
+        assert!(payload.as_string().is_none());
+        assert!(payload.as_symbol().is_none());
+    }
+
+    #[test]
+    fn future_wrapper_payload_variants_have_typed_read_only_accessors() {
+        let number = BoxedPrimitive::Number(JsNumber::from_f64(-0.0));
+        assert_eq!(
+            number.as_number().expect("number").as_f64().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(number.as_boolean(), None);
+
+        let text = JsString::from_utf8("wrapper").expect("string");
+        let string = BoxedPrimitive::String(text.clone());
+        assert_eq!(string.as_string(), Some(&text));
+        assert!(string.as_symbol().is_none());
+
+        let atoms = AtomTable::new(AtomLimits::default()).expect("atom table");
+        let iterator = atoms.predefined(PredefinedAtom::SymbolIterator);
+        let symbol = BoxedPrimitive::Symbol(iterator.clone());
+        assert!(
+            symbol
+                .as_symbol()
+                .is_some_and(|payload| payload.is_same_identity(&iterator))
+        );
+        assert!(symbol.as_string().is_none());
     }
 }
