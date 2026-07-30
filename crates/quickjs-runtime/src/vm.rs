@@ -34,8 +34,8 @@ use quickjs_bytecode::{
 };
 
 use crate::{
-    Context, DynamicFunctionCompileFailure, EngineFault, ExceptionKind, ExecutionError, Function,
-    HandleError, HandleKind, JsException, JsNumber, JsStackFrame, JsString, JsValue,
+    ArrayIndex, Context, DynamicFunctionCompileFailure, EngineFault, ExceptionKind, ExecutionError,
+    Function, HandleError, HandleKind, JsException, JsNumber, JsStackFrame, JsString, JsValue,
     OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey,
     PropertyLayout, Runtime, RuntimeResource,
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId},
@@ -3354,7 +3354,10 @@ fn static_property_at(
             index: index.get(),
         })?;
     Ok(StaticPropertyOperand {
-        key: PropertyKey::from_validated_atom(atom),
+        key: ArrayIndex::parse_property_key(&name).map_or_else(
+            || PropertyKey::from_validated_atom(atom),
+            PropertyKey::from_index,
+        ),
         name,
     })
 }
@@ -5732,6 +5735,130 @@ mod tests {
         assert_method_function_source(&runtime, method, "valueOf(first,second){return second;}");
         assert_method_function_source(&runtime, getter, "get toString(){return 1;}");
         assert_method_function_source(&runtime, setter, "set toString(next){}");
+    }
+
+    #[test]
+    fn static_object_keys_use_exact_array_index_canonicalization() {
+        let maker_authority = compile_test_function(
+            r#"function make(){return {2147483648:1,"2147483648":7,"4294967294":2,4294967295:3,"01":4,0:5,"":6};}"#,
+            "make",
+        );
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let maker = runtime
+            .context(&realm)
+            .expect("context")
+            .instantiate(maker_authority)
+            .expect("maker");
+        let maker_id = maker.id().expect("maker id");
+        let FunctionImplementation::Bytecode(bytecode) = &runtime
+            .functions
+            .get(maker_id)
+            .expect("installed maker")
+            .implementation
+        else {
+            panic!("maker must be bytecode");
+        };
+        let installed_atoms = runtime
+            .code
+            .get(bytecode.code)
+            .expect("installed code")
+            .templates
+            .get(bytecode.template.get() as usize)
+            .expect("installed template")
+            .atoms
+            .clone();
+
+        let object = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&maker, &[], ExecutionLimits::default())
+            .expect("object");
+        let object_id = object.object_id().expect("object id");
+        let record = runtime
+            .object_record(HeapReference::Object(object_id))
+            .expect("object record");
+
+        let assert_data = |key: &PropertyKey, expected: i32| {
+            assert!(matches!(
+                record.own_property(key),
+                Some(OwnProperty::Data {
+                    layout,
+                    value: StoredValue::Number(number),
+                }) if layout == PropertyLayout::data(true, true, true)
+                    && number.strict_equals(JsNumber::from_i32(expected))
+            ));
+        };
+        for (index, expected) in [(2_147_483_648, 7), (4_294_967_294, 2), (0, 5)] {
+            assert_data(
+                &PropertyKey::from_index(ArrayIndex::new(index).expect("array index")),
+                expected,
+            );
+        }
+
+        let atom_key = |expected: &str| {
+            let atom = installed_atoms
+                .iter()
+                .find(|atom| {
+                    atom.description().is_some_and(|description| {
+                        description
+                            .to_utf8_lossy()
+                            .is_ok_and(|text| text == expected)
+                    })
+                })
+                .cloned()
+                .expect("installed property atom");
+            PropertyKey::from_validated_atom(atom)
+        };
+        assert_data(&atom_key("4294967295"), 3);
+        assert_data(&atom_key("01"), 4);
+        assert_data(&atom_key(""), 6);
+        assert_eq!(
+            record.property_count(),
+            6,
+            "numeric and quoted canonical spellings share one property"
+        );
+    }
+
+    #[test]
+    fn canonical_number_bigint_and_quoted_keys_share_descriptor_transitions() {
+        let maker_authority = compile_test_function(
+            r#"function make(){return {16:1,get 0x10n(){return 2;},set "16"(next){next;},16n(){return 4;}};}"#,
+            "make",
+        );
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let maker = runtime
+            .context(&realm)
+            .expect("context")
+            .instantiate(maker_authority)
+            .expect("maker");
+        let object = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&maker, &[], ExecutionLimits::default())
+            .expect("object");
+        let object_id = object.object_id().expect("object id");
+        let record = runtime
+            .object_record(HeapReference::Object(object_id))
+            .expect("object record");
+        let key = PropertyKey::from_index(ArrayIndex::new(16).expect("array index"));
+
+        assert_eq!(
+            record.property_count(),
+            1,
+            "Number, BigInt, and quoted spellings must transition one canonical slot"
+        );
+        let Some(OwnProperty::Data {
+            layout,
+            value: StoredValue::Function(method),
+        }) = record.own_property(&key)
+        else {
+            panic!("the final BigInt method must replace the merged accessor");
+        };
+        assert_eq!(layout, PropertyLayout::data(true, true, true));
+        assert_method_function_shape(&runtime, method, "16", 0);
+        assert_method_function_source(&runtime, method, "16n(){return 4;}");
     }
 
     #[test]

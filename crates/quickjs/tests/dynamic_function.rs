@@ -169,6 +169,53 @@ fn facade_executes_static_object_methods_getters_and_setters() {
 }
 
 #[test]
+fn facade_executes_cooked_quoted_and_canonical_numeric_object_keys() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            r#"let object={
+                 stored:0,
+                 "\u0072ead"(){"use strict";return this.value;},
+                 1e400(){return 2;},
+                 set "value"(next){"use strict";this.stored=next;},
+                 get "\u0076alue"(){"use strict";return this.stored;}
+             };
+             object.value=40;
+             if(object.read.name!=="read"){return 0;}
+             if(object.Infinity.name!=="Infinity"){return 0;}
+             if(object.read()!==40){return 0;}
+             if(object.Infinity()!==2){return 0;}
+             return 42;"#,
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("quoted and numeric static-key frontend")
+    .into_value()
+    .into_function()
+    .expect("outer function");
+
+    let value = call_with_dynamic_function_support(
+        &mut context,
+        &run,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("quoted and numeric object-key execution");
+
+    assert!(
+        value
+            .as_number()
+            .expect("live value")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(42))
+    );
+}
+
+#[test]
 fn facade_wrapper_escape_can_invoke_global_function_during_script_execution() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

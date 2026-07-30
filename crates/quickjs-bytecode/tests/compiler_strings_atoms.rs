@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use quickjs_bytecode::{
-    BytecodeBuilder, CompilerAtom, CompilerCaptureLayout, CompilerConstant, CompilerConstantLayout,
-    CompilerConstantValue, CompilerString, FinalOpcode, FunctionGraphResource,
-    FunctionGraphVerificationErrorKind, FunctionGraphVerificationLimits, FunctionIndexDomains,
-    FunctionTemplateId, Operands, UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody,
-    UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader, VerificationLimits,
-    verify_compiler_control_flow, verify_compiler_function_graph,
+    AtomPoolIndex, BytecodeBuilder, BytecodePc, CompilerAtom, CompilerCaptureLayout,
+    CompilerClosureSource, CompilerConstant, CompilerConstantLayout, CompilerConstantValue,
+    CompilerString, FinalOpcode, FunctionGraphResource, FunctionGraphVerificationErrorKind,
+    FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId, Operands,
+    UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph,
+    UnverifiedFunctionHeader, VerificationLimits, verify_compiler_control_flow,
+    verify_compiler_function_graph,
 };
 
 fn string(units: &[u16]) -> CompilerString {
@@ -145,7 +146,7 @@ fn graph_owns_and_verifies_function_local_atom_payloads() {
         &[
             (
                 FinalOpcode::PushAtomValue,
-                Operands::Atom(quickjs_bytecode::AtomPoolIndex::new(0)),
+                Operands::Atom(AtomPoolIndex::new(0)),
             ),
             (FinalOpcode::Return, Operands::None),
         ],
@@ -222,6 +223,158 @@ fn graph_rejects_empty_and_tagged_integer_atom_payloads() {
     assert_eq!(
         error.kind(),
         &FunctionGraphVerificationErrorKind::TaggedIntegerAtom { index: 0 }
+    );
+}
+
+#[test]
+fn graph_certifies_exceptional_atoms_only_for_static_object_properties() {
+    let empty = CompilerAtom::new_static_property_only(string(&[]));
+    let zero = CompilerAtom::new_static_property_only(string(&['0' as u16]));
+    let function = graph_function(
+        2,
+        &[
+            (FinalOpcode::Object, Operands::None),
+            (FinalOpcode::PushI32, Operands::I32(1)),
+            (
+                FinalOpcode::DefineField,
+                Operands::Atom(AtomPoolIndex::new(0)),
+            ),
+            (FinalOpcode::Undefined, Operands::None),
+            (
+                FinalOpcode::DefineMethod,
+                Operands::AtomU8 {
+                    atom: AtomPoolIndex::new(1),
+                    value: 4,
+                },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        Arc::from([empty.clone(), zero.clone()]),
+        Arc::from([]),
+    );
+
+    let verified = graph(function, FunctionGraphVerificationLimits::default())
+        .expect("exceptional spellings are valid at static object-property sites");
+    assert_eq!(verified.root().atoms(), [empty, zero]);
+    assert_eq!(verified.usage().atoms(), 2);
+    assert_eq!(verified.usage().string_payload_bytes(), 1);
+}
+
+#[test]
+fn graph_rejects_hostile_static_property_only_atom_uses() {
+    let push_string = graph_function(
+        1,
+        &[
+            (
+                FinalOpcode::PushAtomValue,
+                Operands::Atom(AtomPoolIndex::new(0)),
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        Arc::from([CompilerAtom::new_static_property_only(string(
+            &['0' as u16],
+        ))]),
+        Arc::from([]),
+    );
+    let error = graph(push_string, FunctionGraphVerificationLimits::default())
+        .expect_err("a tagged spelling cannot escape through PushAtomValue");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::StaticPropertyOnlyAtomOperand {
+            index: 0,
+            pc: BytecodePc::ZERO,
+            opcode: FinalOpcode::PushAtomValue,
+        }
+    );
+
+    let ordinary_spelling = graph_function(
+        1,
+        &[
+            (FinalOpcode::Object, Operands::None),
+            (FinalOpcode::PushI32, Operands::I32(1)),
+            (
+                FinalOpcode::DefineField,
+                Operands::Atom(AtomPoolIndex::new(0)),
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        Arc::from([CompilerAtom::new_static_property_only(string(
+            &['x' as u16],
+        ))]),
+        Arc::from([]),
+    );
+    let error = graph(
+        ordinary_spelling,
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("ordinary spellings remain general atoms");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::InvalidStaticPropertyOnlyAtom { index: 0 }
+    );
+
+    let repeated = CompilerAtom::new_static_property_only(string(&['0' as u16]));
+    let duplicate = graph_function(
+        2,
+        &[
+            (FinalOpcode::Object, Operands::None),
+            (FinalOpcode::PushI32, Operands::I32(1)),
+            (
+                FinalOpcode::DefineField,
+                Operands::Atom(AtomPoolIndex::new(0)),
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        Arc::from([repeated.clone(), repeated]),
+        Arc::from([]),
+    );
+    let error = graph(duplicate, FunctionGraphVerificationLimits::default())
+        .expect_err("the property-only marker cannot bypass content interning");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DuplicateAtom {
+            first: 0,
+            duplicate: 1,
+        }
+    );
+}
+
+#[test]
+fn graph_rejects_static_property_only_atoms_as_realm_globals() {
+    let mut builder = BytecodeBuilder::new();
+    builder
+        .push(FinalOpcode::ReturnUndef, Operands::None)
+        .expect("fixture instruction must encode");
+    let flow = verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            builder.into_bytes(),
+            FunctionIndexDomains::new(1, 0, 0, 0, 1),
+            UnverifiedFunctionHeader::stripped_ordinary_source_function(false, 0),
+        )
+        .with_capture_layout(CompilerCaptureLayout::default())
+        .with_constant_layout(CompilerConstantLayout::new(Arc::from([]))),
+        VerificationLimits::default(),
+    )
+    .expect("fixture body must verify against its declared domains");
+    let function = UnverifiedCompilerFunction::new(
+        Arc::new(flow),
+        Arc::from([]),
+        Arc::from([CompilerClosureSource::ConstructorRealmGlobal(
+            AtomPoolIndex::new(0),
+        )]),
+    )
+    .with_atom_pool(Arc::from([CompilerAtom::new_static_property_only(string(
+        &['0' as u16],
+    ))]));
+
+    let error = graph(function, FunctionGraphVerificationLimits::default())
+        .expect_err("static property atoms cannot become realm-global names");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::StaticPropertyOnlyAtomClosureSource {
+            closure: 0,
+            index: 0,
+        }
     );
 }
 

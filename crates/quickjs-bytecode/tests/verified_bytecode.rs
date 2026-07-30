@@ -8,7 +8,7 @@ use quickjs_bytecode::{
     CompilerClosureSource, CompilerConstantKind, CompilerConstantLayout, CompilerExecutableKind,
     CompilerInitializationPolicy, CompilerSource, CompilerString, CompilerWritePolicy,
     ExecutionRequirement, FinalOpcode, FunctionGraphVerificationLimits, FunctionIndexDomains,
-    FunctionTemplateId, Operands, PcSourceSpan, ScopeLink, SourceByteSpan,
+    FunctionTemplateId, MetadataAtomField, Operands, PcSourceSpan, ScopeLink, SourceByteSpan,
     UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody,
     UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader, UnverifiedFunctionMetadata,
     VariableDefinition, VerificationLimits, VerifiedBytecode, VerifiedControlFlow,
@@ -17,6 +17,13 @@ use quickjs_bytecode::{
 
 fn atom(text: &str) -> CompilerAtom {
     CompilerAtom::new(
+        CompilerString::try_from_code_units(text.encode_utf16().collect::<Vec<_>>().into())
+            .expect("fixture atom"),
+    )
+}
+
+fn static_property_only_atom(text: &str) -> CompilerAtom {
+    CompilerAtom::new_static_property_only(
         CompilerString::try_from_code_units(text.encode_utf16().collect::<Vec<_>>().into())
             .expect("fixture atom"),
     )
@@ -232,6 +239,58 @@ fn verified_single(
         single_input(instructions, atoms, variables, source),
         BytecodeGraphVerificationLimits::default(),
     )
+}
+
+#[test]
+fn final_authority_rejects_static_property_only_atoms_in_metadata() {
+    let instructions = [
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::PushI32, Operands::I32(1)),
+        (
+            FinalOpcode::DefineField,
+            Operands::Atom(AtomPoolIndex::new(0)),
+        ),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let flow = flow(&instructions, 1, 0, 0, &[], 0, &[]);
+    let graph = verify_compiler_function_graph(
+        UnverifiedCompilerFunctionGraph::new(
+            FunctionTemplateId::new(0),
+            Arc::from([UnverifiedCompilerFunction::new(
+                Arc::clone(&flow),
+                Arc::from([]),
+                Arc::from([]),
+            )
+            .with_atom_pool(Arc::from([static_property_only_atom("")]))]),
+        ),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("the exceptional atom has one certified static-property use");
+    let text: Arc<str> = Arc::from(r#"function f(){return {"":1};}"#);
+    let metadata = UnverifiedFunctionMetadata::new(
+        Some(AtomPoolIndex::new(0)),
+        Arc::from([]),
+        Arc::from([]),
+        source_for_flow(
+            &text,
+            &flow,
+            SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length")),
+            SourceByteSpan::new(9, 10),
+        ),
+    );
+
+    let error = verify_compiler_bytecode_graph(
+        UnverifiedCompilerBytecodeGraph::new(Arc::new(graph), Arc::from([metadata])),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a property-only atom cannot become a function name");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::StaticPropertyOnlyMetadataAtom {
+            field: MetadataAtomField::FunctionName,
+            index: 0,
+        }
+    );
 }
 
 #[test]

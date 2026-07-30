@@ -25,6 +25,8 @@
 
 use std::fmt;
 
+use quickjs_bytecode::Binary64Constant;
+
 /// An ECMAScript Number with the pinned `QuickJS` integer fast-path invariant.
 ///
 /// JavaScript exposes one binary64 Number domain. Exact signed 32-bit values
@@ -120,7 +122,7 @@ impl JsNumber {
     pub(crate) fn to_javascript_string(self) -> String {
         match self.0 {
             NumberRepr::Int(value) => value.to_string(),
-            NumberRepr::Float(value) => format_binary64_for_javascript(value),
+            NumberRepr::Float(value) => Binary64Constant::from_f64(value).to_javascript_string(),
         }
     }
 
@@ -197,100 +199,6 @@ impl JsNumber {
     const fn is_int32_optimized(self) -> bool {
         matches!(self.0, NumberRepr::Int(_))
     }
-}
-
-fn format_binary64_for_javascript(value: f64) -> String {
-    if value.is_nan() {
-        return "NaN".to_owned();
-    }
-    if value == f64::INFINITY {
-        return "Infinity".to_owned();
-    }
-    if value == f64::NEG_INFINITY {
-        return "-Infinity".to_owned();
-    }
-    if value == 0.0 {
-        return "0".to_owned();
-    }
-
-    let rendered = value.to_string();
-    let (negative, unsigned) = rendered
-        .strip_prefix('-')
-        .map_or((false, rendered.as_str()), |unsigned| (true, unsigned));
-    let (mantissa, explicit_exponent) = unsigned
-        .split_once(['e', 'E'])
-        .map_or((unsigned, 0), |(mantissa, exponent)| {
-            (mantissa, parse_decimal_exponent(exponent))
-        });
-    let decimal_position = mantissa.find('.').unwrap_or(mantissa.len());
-    let mut digits = mantissa
-        .bytes()
-        .filter(|byte| *byte != b'.')
-        .map(char::from)
-        .collect::<String>();
-    let first_significant = digits.bytes().position(|byte| byte != b'0').unwrap_or(0);
-    let scientific_exponent = explicit_exponent
-        .saturating_add(i32::try_from(decimal_position).unwrap_or(i32::MAX))
-        .saturating_sub(i32::try_from(first_significant).unwrap_or(i32::MAX))
-        .saturating_sub(1);
-    digits.drain(..first_significant);
-    while digits.len() > 1 && digits.ends_with('0') {
-        digits.pop();
-    }
-
-    let mut output = String::new();
-    if negative {
-        output.push('-');
-    }
-    if !(-6..21).contains(&scientific_exponent) {
-        let mut characters = digits.chars();
-        if let Some(first) = characters.next() {
-            output.push(first);
-        }
-        let remainder = characters.as_str();
-        if !remainder.is_empty() {
-            output.push('.');
-            output.push_str(remainder);
-        }
-        output.push('e');
-        if scientific_exponent >= 0 {
-            output.push('+');
-        }
-        output.push_str(&scientific_exponent.to_string());
-        return output;
-    }
-
-    if scientific_exponent < 0 {
-        output.push_str("0.");
-        let zeros = usize::try_from(-scientific_exponent - 1).unwrap_or(0);
-        output.extend(std::iter::repeat_n('0', zeros));
-        output.push_str(&digits);
-        return output;
-    }
-
-    let integer_digits = usize::try_from(scientific_exponent + 1).unwrap_or(usize::MAX);
-    if integer_digits >= digits.len() {
-        output.push_str(&digits);
-        output.extend(std::iter::repeat_n('0', integer_digits - digits.len()));
-    } else {
-        output.push_str(&digits[..integer_digits]);
-        output.push('.');
-        output.push_str(&digits[integer_digits..]);
-    }
-    output
-}
-
-fn parse_decimal_exponent(value: &str) -> i32 {
-    let (negative, digits) = value
-        .strip_prefix('-')
-        .map_or((false, value), |digits| (true, digits));
-    let digits = digits.strip_prefix('+').unwrap_or(digits);
-    let exponent = digits.bytes().fold(0_i32, |exponent, digit| {
-        exponent
-            .saturating_mul(10)
-            .saturating_add(i32::from(digit.saturating_sub(b'0')))
-    });
-    if negative { -exponent } else { exponent }
 }
 
 impl From<i32> for JsNumber {

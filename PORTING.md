@@ -276,13 +276,15 @@ A milestone is complete only when all of its checked items pass in CI.
         `typeof`, strict equality, nullish tests, ordinary objects, static data
         property operations, static accessor getter reads, strict `this`, and
         static-property method calls across compact/full encodings. Static
-        identifier-named synchronous object methods/getters/setters lower
-        through typed `define_method` pairs with bounded fresh-literal target
-        provenance; static own/inherited setters execute iteratively with the
-        original receiver and assignment RHS.
-        Frames and all traversals use explicit vectors. BigInt, coercive
-        numeric operations, computed/exotic object operations, non-identifier
-        or computed member keys, async/generator methods, `super`/home-object
+        identifier, quoted String, Number, and BigInt literal-named synchronous
+        object methods/getters/setters lower through typed `define_method`
+        pairs with bounded fresh-literal target provenance; static
+        own/inherited setters execute iteratively with the original receiver
+        and assignment RHS. Cooked and canonical literal names share exact
+        property identity, while retained method source keeps raw spelling.
+        Frames and all traversals use explicit vectors. BigInt values, coercive
+        numeric operations, computed/exotic object operations, computed member
+        keys, async/generator methods, `super`/home-object
         semantics, realm-global setter dispatch, dynamic operators,
         nonordinary constructor families, and tail-call opcodes remain fail
         closed.
@@ -411,14 +413,15 @@ A milestone is complete only when all of its checked items pass in CI.
       iterative tracing across prototype, data, getter/setter, function, and
       cell edges. Own/inherited getter reads stop on getterless accessors,
       preserve the original receiver and `GetField2` base, and use iterative
-      native/bytecode dispatch. Static identifier-named synchronous object
-      methods/getters/setters use exact nonconstructable headers, derived
-      names/lengths, enumerable/configurable descriptors, source-order
-      data/accessor replacement, and iterative setter dispatch that discards
-      the setter completion while preserving the assignment RHS. Computed or
-      non-identifier keys, async/generator methods, `super`/home-object
-      semantics, realm-global setter dispatch, prototype mutation, exotics,
-      and transition interning remain pending.
+      native/bytecode dispatch. Static identifier, quoted String, Number, and
+      BigInt literal-named synchronous object methods/getters/setters use exact
+      nonconstructable headers, derived names/lengths,
+      enumerable/configurable descriptors, source-order data/accessor
+      replacement, and iterative setter dispatch that discards the setter
+      completion while preserving the assignment RHS. Computed keys,
+      async/generator methods, `super`/home-object semantics, realm-global
+      setter dispatch, prototype mutation, exotics, and transition interning
+      remain pending.
 - [ ] ECMAScript primitive conversions, parsing/printing, and remaining numeric
       edge cases.
 - [ ] Complete property descriptors, interned shapes, mutable prototypes, and

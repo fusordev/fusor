@@ -17,7 +17,8 @@ use std::{
 };
 
 use crate::{
-    AtomPoolIndex, CompilerAtom, CompilerConstantKind, CompilerString, VerifiedControlFlow,
+    AtomPoolIndex, BytecodePc, CompilerAtom, CompilerConstantKind, CompilerString, FinalOpcode,
+    VerifiedControlFlow,
 };
 
 /// Provisional maximum number of compiler function templates in one graph.
@@ -76,6 +77,107 @@ impl Binary64Constant {
     pub const fn to_f64(self) -> f64 {
         f64::from_bits(self.0)
     }
+
+    /// Formats the retained Number with the decimal/exponent spelling used by
+    /// JavaScript `ToString` in the pinned `QuickJS` release.
+    #[must_use]
+    pub fn to_javascript_string(self) -> String {
+        format_binary64_for_javascript(self.to_f64())
+    }
+}
+
+fn format_binary64_for_javascript(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value == f64::INFINITY {
+        return "Infinity".to_owned();
+    }
+    if value == f64::NEG_INFINITY {
+        return "-Infinity".to_owned();
+    }
+    if value == 0.0 {
+        return "0".to_owned();
+    }
+
+    let rendered = value.to_string();
+    let (negative, unsigned) = rendered
+        .strip_prefix('-')
+        .map_or((false, rendered.as_str()), |unsigned| (true, unsigned));
+    let (mantissa, explicit_exponent) = unsigned
+        .split_once(['e', 'E'])
+        .map_or((unsigned, 0), |(mantissa, exponent)| {
+            (mantissa, parse_decimal_exponent(exponent))
+        });
+    let decimal_position = mantissa.find('.').unwrap_or(mantissa.len());
+    let mut digits = mantissa
+        .bytes()
+        .filter(|byte| *byte != b'.')
+        .map(char::from)
+        .collect::<String>();
+    let first_significant = digits.bytes().position(|byte| byte != b'0').unwrap_or(0);
+    let scientific_exponent = explicit_exponent
+        .saturating_add(i32::try_from(decimal_position).unwrap_or(i32::MAX))
+        .saturating_sub(i32::try_from(first_significant).unwrap_or(i32::MAX))
+        .saturating_sub(1);
+    digits.drain(..first_significant);
+    while digits.len() > 1 && digits.ends_with('0') {
+        digits.pop();
+    }
+
+    let mut output = String::new();
+    if negative {
+        output.push('-');
+    }
+    if !(-6..21).contains(&scientific_exponent) {
+        let mut characters = digits.chars();
+        if let Some(first) = characters.next() {
+            output.push(first);
+        }
+        let remainder = characters.as_str();
+        if !remainder.is_empty() {
+            output.push('.');
+            output.push_str(remainder);
+        }
+        output.push('e');
+        if scientific_exponent >= 0 {
+            output.push('+');
+        }
+        output.push_str(&scientific_exponent.to_string());
+        return output;
+    }
+
+    if scientific_exponent < 0 {
+        output.push_str("0.");
+        let zeros = usize::try_from(-scientific_exponent - 1).unwrap_or(0);
+        output.extend(std::iter::repeat_n('0', zeros));
+        output.push_str(&digits);
+        return output;
+    }
+
+    let integer_digits = usize::try_from(scientific_exponent + 1).unwrap_or(usize::MAX);
+    if integer_digits >= digits.len() {
+        output.push_str(&digits);
+        output.extend(std::iter::repeat_n('0', integer_digits - digits.len()));
+    } else {
+        output.push_str(&digits[..integer_digits]);
+        output.push('.');
+        output.push_str(&digits[integer_digits..]);
+    }
+    output
+}
+
+fn parse_decimal_exponent(value: &str) -> i32 {
+    let (negative, digits) = value
+        .strip_prefix('-')
+        .map_or((false, value), |digits| (true, digits));
+    let digits = digits.strip_prefix('+').unwrap_or(digits);
+    let exponent = digits.bytes().fold(0_i32, |exponent, digit| {
+        exponent
+            .saturating_mul(10)
+            .saturating_add(i32::from(digit.saturating_sub(b'0')))
+    });
+    if negative { -exponent } else { exponent }
 }
 
 /// One ordinary compiler-owned constant value.
@@ -786,6 +888,27 @@ pub enum FunctionGraphVerificationErrorKind {
         /// Rejected atom-pool index.
         index: u32,
     },
+    /// A static-property-only atom contains an ordinary atom spelling.
+    InvalidStaticPropertyOnlyAtom {
+        /// Rejected atom-pool index.
+        index: u32,
+    },
+    /// A static-property-only atom is referenced by another opcode family.
+    StaticPropertyOnlyAtomOperand {
+        /// Rejected atom-pool index.
+        index: u32,
+        /// Instruction carrying the invalid reference.
+        pc: BytecodePc,
+        /// Opcode carrying the invalid reference.
+        opcode: FinalOpcode,
+    },
+    /// A constructor-realm global source references a static-property-only atom.
+    StaticPropertyOnlyAtomClosureSource {
+        /// Closure-domain slot containing the invalid source.
+        closure: u32,
+        /// Rejected atom-pool index.
+        index: u32,
+    },
     /// Actual constant-pool entries do not match the body domain.
     ConstantCountMismatch {
         /// Body-declared constant count.
@@ -927,6 +1050,18 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
             Self::TaggedIntegerAtom { index } => write!(
                 formatter,
                 "atom slot {index} contains a tagged-integer spelling"
+            ),
+            Self::InvalidStaticPropertyOnlyAtom { index } => write!(
+                formatter,
+                "static-property-only atom slot {index} contains an ordinary atom spelling"
+            ),
+            Self::StaticPropertyOnlyAtomOperand { index, pc, opcode } => write!(
+                formatter,
+                "static-property-only atom slot {index} is referenced by {opcode} at PC {pc}"
+            ),
+            Self::StaticPropertyOnlyAtomClosureSource { closure, index } => write!(
+                formatter,
+                "constructor-realm global closure slot {closure} references static-property-only atom slot {index}"
             ),
             Self::ConstantCountMismatch { declared, entries } => write!(
                 formatter,
@@ -1136,7 +1271,7 @@ fn validate_function_records(
             ));
         }
         if let Some(atoms) = &function.atoms {
-            validate_atoms(id, atoms)?;
+            validate_atoms(id, atoms, flow, &function.closure_sources)?;
         }
         validate_realm_global_source_atoms(id, &function.closure_sources, domains.atom_pool_len())?;
         validate_unique_closure_sources(id, &function.closure_sources)?;
@@ -1330,6 +1465,8 @@ fn validate_unique_closure_sources(
 fn validate_atoms(
     function: FunctionTemplateId,
     atoms: &[CompilerAtom],
+    flow: &VerifiedControlFlow,
+    closure_sources: &[CompilerClosureSource],
 ) -> Result<(), FunctionGraphVerificationError> {
     let mut seen = HashMap::new();
     seen.try_reserve(atoms.len()).map_err(|_| {
@@ -1343,25 +1480,82 @@ fn validate_atoms(
     })?;
     for (duplicate, atom) in atoms.iter().enumerate() {
         let duplicate = usize_to_u32(duplicate);
-        if atom.string().is_empty() {
+        let is_empty = atom.string().is_empty();
+        let is_tagged_integer = atom.string().is_tagged_integer_atom();
+        if atom.is_static_property_only() && !(is_empty || is_tagged_integer) {
+            return Err(FunctionGraphVerificationError::at_function(
+                function,
+                FunctionGraphVerificationErrorKind::InvalidStaticPropertyOnlyAtom {
+                    index: duplicate,
+                },
+            ));
+        }
+        if !atom.is_static_property_only() && is_empty {
             return Err(FunctionGraphVerificationError::at_function(
                 function,
                 FunctionGraphVerificationErrorKind::EmptyAtom { index: duplicate },
             ));
         }
-        if atom.string().is_tagged_integer_atom() {
+        if !atom.is_static_property_only() && is_tagged_integer {
             return Err(FunctionGraphVerificationError::at_function(
                 function,
                 FunctionGraphVerificationErrorKind::TaggedIntegerAtom { index: duplicate },
             ));
         }
-        if let Some(&first) = seen.get(atom) {
+        if let Some(&first) = seen.get(atom.string()) {
             return Err(FunctionGraphVerificationError::at_function(
                 function,
                 FunctionGraphVerificationErrorKind::DuplicateAtom { first, duplicate },
             ));
         }
-        seen.insert(atom, duplicate);
+        seen.insert(atom.string(), duplicate);
+    }
+
+    for instruction in flow.instructions() {
+        let decoded = instruction.decoded();
+        let Some(index) = decoded.instruction().operands().atom_pool_index() else {
+            continue;
+        };
+        let Some(atom) = usize::try_from(index.get())
+            .ok()
+            .and_then(|index| atoms.get(index))
+        else {
+            continue;
+        };
+        if atom.is_static_property_only()
+            && !matches!(
+                decoded.instruction().opcode(),
+                FinalOpcode::DefineField | FinalOpcode::DefineMethod
+            )
+        {
+            return Err(FunctionGraphVerificationError::at_function(
+                function,
+                FunctionGraphVerificationErrorKind::StaticPropertyOnlyAtomOperand {
+                    index: index.get(),
+                    pc: decoded.pc(),
+                    opcode: decoded.instruction().opcode(),
+                },
+            ));
+        }
+    }
+
+    for (closure, source) in closure_sources.iter().enumerate() {
+        let CompilerClosureSource::ConstructorRealmGlobal(index) = source else {
+            continue;
+        };
+        if usize::try_from(index.get())
+            .ok()
+            .and_then(|index| atoms.get(index))
+            .is_some_and(CompilerAtom::is_static_property_only)
+        {
+            return Err(FunctionGraphVerificationError::at_function(
+                function,
+                FunctionGraphVerificationErrorKind::StaticPropertyOnlyAtomClosureSource {
+                    closure: usize_to_u32(closure),
+                    index: index.get(),
+                },
+            ));
+        }
     }
     Ok(())
 }

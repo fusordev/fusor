@@ -103,7 +103,8 @@ entry prefix, and validates each scope-entry activation-and-initializer group.
 This prevents a branch from entering the store or a different child template
 from initializing the declared name.
 
-Static-identifier object-literal methods/getters/setters are typed
+Static identifier, quoted String, Number, and BigInt literal-named
+object-literal methods/getters/setters are typed
 `OrdinaryMethod` children with exact header flags `0x0742`, only the strict
 mode bit admitted, matching declared argument counts, and no source function
 name or self binding. Every such child must be owned exactly once by one
@@ -117,6 +118,16 @@ closure descends from one `Object` instruction on every incoming path.
 Same-origin branches may rejoin; argument, primitive, or mixed-origin targets
 are rejected. Retained operand states and transfer visits share the explicit
 frame-state and policy-transfer budgets.
+
+Ordinary compiler atoms remain nonempty and reject QuickJS tagged-integer
+spellings. The compiler may instead mark exactly an empty or tagged-integer
+description as static-property-only. Graph verification admits each such index
+only as a `DefineField` or `DefineMethod` operand and rejects it from
+`PushAtomValue`, constructor-realm globals, and every other opcode family.
+Final metadata verification independently rejects property-only indices from
+function, binding, closure, and internal names. Runtime property resolution
+then canonicalizes every static description through the exact array-index
+range, including ordinary string atoms above the tagged-integer range.
 
 A dynamic-Function Script root may instead attach a function initializer to a
 constructor-realm `FunctionAtInstantiation` closure slot. Verification ties the

@@ -166,6 +166,13 @@ String values from `"0"` through `"2147483647"`, and direct child templates
 share one index namespace, remain in source order, and are not deduplicated.
 All other nonempty source strings use an immutable function-local atom table,
 deduplicated by exact UTF-16 contents; empty strings use `push_empty_string`.
+Static object-literal keys additionally admit cooked quoted Strings and
+canonical Number or BigInt spellings. Empty and tagged-integer spellings use a
+typed static-property-only atom entry that whole-graph verification permits
+only at `define_field` or `define_method`; it cannot become a runtime String,
+binding name, or realm-global source. Number spelling is centralized on
+`Binary64Constant`, while Oxc supplies exact arbitrary-size decimal BigInt key
+text without requiring runtime BigInt values.
 `push_const8` and `fclosure8` select constant indices `0..=255`; their
 full-width forms select indices `>= 256`, while `push_atom_value` always carries
 a typed full-width `AtomPoolIndex`.
@@ -197,8 +204,8 @@ cycle, reachability, nesting-depth, and capture-source checks. Capture work
 remains bounded across shared parent edges. A selected
 nested root with imported cells fails closed until an explicit verified root
 environment exists. `compile_leaf` remains the explicit nested-function-free
-API and rejects a selection with children. BigInt/RegExp and other value
-families, non-string atom namespaces, raw class/function stack entries,
+API and rejects a selection with children. BigInt and RegExp runtime values,
+non-string atom namespaces, raw class/function stack entries,
 inferred anonymous-function names, labeled control, `for-in`, and `for-of`
 stay rejected until their owned records and semantics exist.
 
@@ -275,10 +282,11 @@ constant, vardef, child, and closure metadata.
 
 Module functions and named function expressions fail closed until their
 distinct surrounding-storage and self-binding behavior is implemented.
-Static-identifier object-literal concise methods/getters/setters lower as
+Static identifier, quoted String, Number, and BigInt literal-named
+object-literal concise methods/getters/setters lower as
 nonconstructable `OrdinaryMethod` templates paired with one adjacent
-`fclosure*; define_method` site. Computed or non-identifier keys,
-async/generator methods, and `super`/home-object use remain fail closed.
+`fclosure*; define_method` site. Computed keys, async/generator methods, and
+`super`/home-object use remain fail closed.
 Ordinary function values may also be stored in data properties and called
 through a static member reference. The compiled artifact keeps the exact
 source text, storage plan, local layout, exact atom and heterogeneous constant
@@ -447,13 +455,18 @@ returns, truthiness, `typeof`, strict equality, the nullish predicate, direct
 native forwarding boundary attaches one zero-value identity continuation, so
 self-targeting call chains remain on the same iterative dispatcher while
 counting exactly against the active-frame ceiling. Object literals create
-realm-owned ordinary objects and define static identifier-named data
-properties plus synchronous methods/getters/setters in source order. Typed
+realm-owned ordinary objects and define static identifier, quoted String,
+Number, and BigInt literal-named data properties plus synchronous
+methods/getters/setters in source order. Typed
 ordinary-method closures use the exact nonconstructable header and are
 consumed by one verifier-certified `DefineMethod` site whose target retains one
-object-literal origin across every incoming path. Definition derives the
-observable method or accessor name, preserves exact arity, and merges or
-replaces data/accessor halves without charging a duplicate slot. Static reads
+object-literal origin across every incoming path. Quoted names are decoded to
+exact cooked UTF-16; Number and BigInt names use canonical JavaScript strings,
+while retained function source keeps the raw token spelling. Definition
+derives the observable method or accessor name, preserves exact arity, and
+merges or replaces data/accessor halves without charging a duplicate slot.
+Canonical decimal property descriptions become immediate array-index keys
+through `4294967294`; `4294967295` remains an ordinary string key. Static reads
 and writes operate across ordinary objects and function objects. Setter calls
 preserve the original receiver and sole assignment RHS, discard their
 completion, and resume the assigning frame at the certified successor; the
@@ -470,11 +483,11 @@ installed realm; direct calls still pass raw `undefined`. Calls fill missing
 formals with `undefined` and share aggregate frame limits and instruction fuel.
 An escaping throw carries its exact JavaScript value through the same frame
 vector, allocates caller provenance before publishing any heap root, and
-preserves caller order from immediate to outermost. Computed or non-identifier
-object-member keys, async/generator methods, `super`/home-object semantics,
+preserves caller order from immediate to outermost. Computed object-member
+keys, async/generator methods, `super`/home-object semantics,
 realm-global setter dispatch, prototype mutation, proxies and exotics,
 derived/class and nonordinary constructor forms, optional/spread/apply/tail
-calls, general sloppy-`this` primitive boxing, BigInt, coercive numeric
+calls, general sloppy-`this` primitive boxing, BigInt values, coercive numeric
 operations, dynamic operators, serialized input, non-string atom namespaces,
 raw function slots, catch handlers, finally return addresses, iterator
 markers, and packed exceptional stack values remain fail closed. Ordinary
@@ -596,13 +609,17 @@ until zombie-state and resurrection rules are complete.
 - Bytecode never stores an `Atom` pointer or runtime identity. Atom operands
   are validated function-local pool indices; serialized units carry bounded
   atom contents and namespace metadata, and loading reinterns or creates each
-  pool entry exactly once in the destination runtime.
+  pool entry exactly once in the destination runtime. Empty or
+  tagged-integer static property spellings carry a separate property-only role;
+  graph verification rejects that role from every opcode except
+  `DefineField`/`DefineMethod`, and final verification rejects it from all
+  metadata.
 - The current ordinary-object slice keeps each shape in a private
   `Arc<Vec<_>>` and each aligned slot typed as data or accessor. Property
   growth reserves the unique vectors fallibly before mutating either logical
   sequence; transition interning is not implemented yet. Static object-literal
-  accessor definition and static setter dispatch are admitted. Deletion,
-  general flag changes, computed/non-identifier definitions, realm-global
+  literal-key definition, accessor definition, and static setter dispatch are
+  admitted. Deletion, general flag changes, computed definitions, realm-global
   setter dispatch, and prototype mutation remain fail closed.
 - Object literals inherit their realm's internal `Object.prototype`, which
   currently owns exact `toString` and `valueOf` native data properties.
@@ -750,12 +767,12 @@ function outer(value) {
 It proves runtime-local realm installation, host and JavaScript calls,
 forwarded closure cells, TDZ diagnostics, `close_loc` rotation, compact/full
 operand forms, allocation-free public-root release, ordinary object allocation
-and static data properties, identifier-named synchronous object
-methods/getters/setters, strict receiver-aware calls, iterative accessor
-dispatch, and safe-point collection of transient/cyclic function, cell, and
-object graphs. General descriptor mutation, computed properties,
-`super`/home-object semantics, coercive `+`, catch/finally, and JavaScript
-Error objects remain later slices.
+and static data properties, identifier/String/Number/BigInt literal-named
+synchronous object methods/getters/setters, strict receiver-aware calls,
+iterative accessor dispatch, and safe-point collection of transient/cyclic
+function, cell, and object graphs. General descriptor mutation, computed
+properties, `super`/home-object semantics, coercive `+`, catch/finally, and
+JavaScript Error objects remain later slices.
 
 The planned asynchronous slice creates a host timer Promise. A Tokio wakeup
 must be observed on the runtime owner, the FIFO job queue must drain

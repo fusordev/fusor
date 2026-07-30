@@ -151,6 +151,140 @@ fn static_data_properties_are_defined_in_source_order() {
 }
 
 #[test]
+fn quoted_data_keys_use_exact_cooked_utf16_and_raw_source_spans() {
+    let source = r#"function make(){return {"\u0061":1,"a":2,"\uD800":3,"":4,"0":5,0:6};}"#;
+    let compiled = compile(source, "make");
+    let definitions = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .filter_map(|instruction| {
+            let decoded = instruction.decoded();
+            (decoded.instruction().opcode() == FinalOpcode::DefineField)
+                .then_some((decoded.pc(), decoded.instruction().operands()))
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        definitions
+            .iter()
+            .map(|(_, operands)| *operands)
+            .collect::<Vec<_>>(),
+        [
+            Operands::Atom(AtomPoolIndex::new(0)),
+            Operands::Atom(AtomPoolIndex::new(0)),
+            Operands::Atom(AtomPoolIndex::new(1)),
+            Operands::Atom(AtomPoolIndex::new(2)),
+            Operands::Atom(AtomPoolIndex::new(3)),
+            Operands::Atom(AtomPoolIndex::new(3)),
+        ],
+        "cooked-equivalent strings and numeric zero share canonical property atoms"
+    );
+    assert_eq!(atom_code_units(&compiled, 0), vec![u16::from(b'a')]);
+    assert_eq!(atom_code_units(&compiled, 1), vec![0xd800]);
+    assert_eq!(atom_code_units(&compiled, 2), Vec::<u16>::new());
+    assert_eq!(atom_code_units(&compiled, 3), vec![u16::from(b'0')]);
+    assert!(!compiled.atoms()[0].is_static_property_only());
+    assert!(!compiled.atoms()[1].is_static_property_only());
+    assert!(compiled.atoms()[2].is_static_property_only());
+    assert!(compiled.atoms()[3].is_static_property_only());
+    assert_eq!(
+        definitions
+            .iter()
+            .map(|(pc, _)| source_slice_at(&compiled, source, *pc))
+            .collect::<Vec<_>>(),
+        [
+            r#""\u0061":1"#,
+            r#""a":2"#,
+            r#""\uD800":3"#,
+            r#""":4"#,
+            r#""0":5"#,
+            "0:6",
+        ],
+        "source mappings retain each raw property definition"
+    );
+    assert_eq!(
+        compile_tree(source, "make").functions().len(),
+        1,
+        "empty and tagged-index keys survive complete graph verification"
+    );
+}
+
+#[test]
+fn numeric_and_bigint_data_keys_use_quickjs_canonical_spelling() {
+    let source = r#"function make(){return {1:0,1.0:0,1e0:0,0x1:0,0b1:0,0o1:0,"1":0,1n:0,1e-6:0,1e-7:0,1e20:0,1e21:0,1e400:0,9007199254740993:0,4294967294:0,4294967295:0,0x10n:0,0b1_0000n:0,9_007_199_254_740_993n:0};}"#;
+    let compiled = compile(source, "make");
+    assert!(
+        compiled.constants().is_empty(),
+        "static numeric keys do not become runtime Number or BigInt constants"
+    );
+    let definitions = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .filter_map(|instruction| {
+            let decoded = instruction.decoded();
+            (decoded.instruction().opcode() == FinalOpcode::DefineField)
+                .then_some((decoded.pc(), decoded.instruction().operands()))
+        })
+        .collect::<Vec<_>>();
+    let atom_indices = definitions
+        .iter()
+        .map(|(_, operands)| match operands {
+            Operands::Atom(atom) => atom.get(),
+            _ => panic!("DefineField has one static property atom"),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        atom_indices,
+        [0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 10],
+        "Number, BigInt, and quoted spellings collide only after canonical conversion"
+    );
+    for (index, expected) in [
+        "1",
+        "0.000001",
+        "1e-7",
+        "100000000000000000000",
+        "1e+21",
+        "Infinity",
+        "9007199254740992",
+        "4294967294",
+        "4294967295",
+        "16",
+        "9007199254740993",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            atom_code_units(&compiled, u32::try_from(index).expect("atom index")),
+            expected.encode_utf16().collect::<Vec<_>>()
+        );
+    }
+    assert!(compiled.atoms()[0].is_static_property_only());
+    assert!(compiled.atoms()[9].is_static_property_only());
+    assert!(
+        !compiled.atoms()[7].is_static_property_only(),
+        "array-index canonicalization beyond QuickJS's tagged-i32 atom range occurs at runtime"
+    );
+    assert!(!compiled.atoms()[10].is_static_property_only());
+    assert_eq!(
+        definitions[16..]
+            .iter()
+            .map(|(pc, _)| source_slice_at(&compiled, source, *pc))
+            .collect::<Vec<_>>(),
+        ["0x10n:0", "0b1_0000n:0", "9_007_199_254_740_993n:0"],
+        "BigInt source mappings retain bases and separators"
+    );
+    assert_eq!(
+        compile_tree(source, "make").functions().len(),
+        1,
+        "canonical Number and BigInt keys survive complete graph verification"
+    );
+}
+
+#[test]
 fn static_methods_and_accessors_use_typed_closures_and_exact_enumerable_flags() {
     let tree = compile_tree(
         "function make(){return {method(){return 1;},get value(){return 2;},set value(next){next;}};}",
@@ -221,6 +355,161 @@ fn static_methods_and_accessors_use_typed_closures_and_exact_enumerable_flags() 
             "the retained method source includes its property key and accessor prefix"
         );
     }
+}
+
+#[test]
+fn quoted_and_numeric_methods_preserve_canonical_names_and_raw_function_sources() {
+    let source = r#"function make(){return {"\u0061 b"(){return 1;},2(){return 2;},get "\u0062 c"(){return 3;},get 3(){return 4;},set '\x64 e'(next){next;},set 4(next){next;}};}"#;
+    let tree = compile_tree(source, "make");
+    let root = tree.root();
+    let definitions = tree_instructions(root)
+        .into_iter()
+        .filter_map(|(opcode, operands)| (opcode == FinalOpcode::DefineMethod).then_some(operands))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        definitions,
+        [
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(0),
+                value: 4,
+            },
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 4,
+            },
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(2),
+                value: 5,
+            },
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(3),
+                value: 5,
+            },
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(4),
+                value: 6,
+            },
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(5),
+                value: 6,
+            },
+        ]
+    );
+    for (index, expected) in ["a b", "2", "b c", "3", "d e", "4"].iter().enumerate() {
+        assert_eq!(
+            atom_code_units(root, u32::try_from(index).expect("atom index")),
+            expected.encode_utf16().collect::<Vec<_>>()
+        );
+    }
+    for index in [1_usize, 3, 5] {
+        assert!(root.atoms()[index].is_static_property_only());
+    }
+    for (verified, expected_source) in tree.verified_bytecode().functions().skip(1).zip([
+        r#""\u0061 b"(){return 1;}"#,
+        "2(){return 2;}",
+        r#"get "\u0062 c"(){return 3;}"#,
+        "get 3(){return 4;}",
+        r"set '\x64 e'(next){next;}",
+        "set 4(next){next;}",
+    ]) {
+        assert_eq!(
+            verified.metadata().function_name(),
+            None,
+            "DefineMethod owns the canonical inferred method/accessor name"
+        );
+        assert_eq!(
+            verified.metadata().source().function_source(),
+            expected_source,
+            "retained source preserves the exact raw property spelling"
+        );
+    }
+}
+
+#[test]
+fn bigint_methods_and_accessors_keep_exact_values_names_and_raw_sources() {
+    let source = r"function make(){return {0x10n(){return 1;},get 0b10n(){return 2;},set 0o3n(next){next;},9_007_199_254_740_993n(){return 3;}};}";
+    let tree = compile_tree(source, "make");
+    let root = tree.root();
+    let definitions = tree_instructions(root)
+        .into_iter()
+        .filter_map(|(opcode, operands)| (opcode == FinalOpcode::DefineMethod).then_some(operands))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        definitions,
+        [
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(0),
+                value: 4,
+            },
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 5,
+            },
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(2),
+                value: 6,
+            },
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(3),
+                value: 4,
+            },
+        ]
+    );
+    for (index, expected) in ["16", "2", "3", "9007199254740993"].iter().enumerate() {
+        assert_eq!(
+            atom_code_units(root, u32::try_from(index).expect("atom index")),
+            expected.encode_utf16().collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        tree.verified_bytecode()
+            .functions()
+            .skip(1)
+            .map(|function| function.metadata().source().function_source())
+            .collect::<Vec<_>>(),
+        [
+            "0x10n(){return 1;}",
+            "get 0b10n(){return 2;}",
+            "set 0o3n(next){next;}",
+            "9_007_199_254_740_993n(){return 3;}",
+        ]
+    );
+}
+
+#[test]
+fn quoted_proto_methods_are_ordinary_while_quoted_proto_data_stays_fail_closed() {
+    let tree = compile_tree(
+        r#"function make(){return {"__proto__"(){return 1;},get "__proto__"(){return 2;},set "__proto__"(next){next;}};}"#,
+        "make",
+    );
+    let definitions = tree_instructions(tree.root())
+        .into_iter()
+        .filter_map(|(opcode, operands)| (opcode == FinalOpcode::DefineMethod).then_some(operands))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        definitions,
+        [
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(0),
+                value: 4,
+            },
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(0),
+                value: 5,
+            },
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(0),
+                value: 6,
+            },
+        ]
+    );
+    assert_eq!(
+        atom_code_units(tree.root(), 0),
+        "__proto__".encode_utf16().collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -477,22 +766,17 @@ fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
             "\"method\"",
         ),
         (
-            "function make(){return {\"method\"(){return 1;}};}",
-            UnsupportedLeafFeature::ObjectMethodOrAccessor,
-            "\"method\"",
-        ),
-        (
-            "function make(){return {1(){return 1;}};}",
-            UnsupportedLeafFeature::ObjectMethodOrAccessor,
+            "function make(){return {[1](){return 1;}};}",
+            UnsupportedLeafFeature::UnsupportedExpression,
             "1",
         ),
         (
-            "function make(){return {async method(){return 1;}};}",
+            "function make(){return {async \"method\"(){return 1;}};}",
             UnsupportedLeafFeature::NonOrdinaryFunction,
             "return 1",
         ),
         (
-            "function make(){return {*method(){yield 1;}};}",
+            "function make(){return {*1(){yield 1;}};}",
             UnsupportedLeafFeature::NonOrdinaryFunction,
             "yield 1",
         ),
@@ -507,7 +791,27 @@ fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
             "\"__proto__\"",
         ),
         (
+            r#"function make(value){return {"__pro\u0074o__":value};}"#,
+            UnsupportedLeafFeature::UnsupportedExpression,
+            r#""__pro\u0074o__""#,
+        ),
+        (
             "function make(){return {handler:function(){}};}",
+            UnsupportedLeafFeature::InferredFunctionName,
+            "function(){}",
+        ),
+        (
+            r#"function make(){return {"handler":function(){}};}"#,
+            UnsupportedLeafFeature::InferredFunctionName,
+            "function(){}",
+        ),
+        (
+            "function make(){return {1:function(){}};}",
+            UnsupportedLeafFeature::InferredFunctionName,
+            "function(){}",
+        ),
+        (
+            "function make(){return {1n:function(){}};}",
             UnsupportedLeafFeature::InferredFunctionName,
             "function(){}",
         ),

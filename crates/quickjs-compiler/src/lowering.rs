@@ -1365,7 +1365,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     ) -> Result<(), LeafCompilationError> {
         let nodes = self.unit.semantic().nodes();
         match nodes.kind(node_id) {
-            AstKind::NumericLiteral(literal) if exact_i32(literal.value).is_none() => {
+            AstKind::NumericLiteral(literal)
+                if !is_noncomputed_static_property_key_node(self.unit, node_id)
+                    && exact_i32(literal.value).is_none() =>
+            {
                 let parent = nodes.parent_id(node_id);
                 let folded_negative_i32 = matches!(
                     nodes.kind(parent),
@@ -1385,7 +1388,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 }
             }
             AstKind::StringLiteral(literal)
-                if !matches!(nodes.parent_kind(node_id), AstKind::Directive(_)) =>
+                if !matches!(nodes.parent_kind(node_id), AstKind::Directive(_))
+                    && !is_noncomputed_static_property_key_node(self.unit, node_id) =>
             {
                 let value = decode_compiler_string(
                     literal.value.as_str(),
@@ -1422,19 +1426,20 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 record_string_candidate(owner, value, template.span, candidates, atom_candidates)?;
             }
             AstKind::ObjectProperty(property) => {
-                if let OxcPropertyKey::StaticIdentifier(identifier) = &property.key {
-                    record_property_candidate(
-                        owner,
-                        identifier.name.as_str(),
-                        identifier.span,
-                        atom_candidates,
-                    )?;
+                if !property.computed
+                    && !property.shorthand
+                    && let Some(key) = compiled_static_property_key(&property.key)?
+                {
+                    record_property_candidate(owner, key.value, key.span, atom_candidates)?;
                 }
             }
             AstKind::StaticMemberExpression(member) => {
                 record_property_candidate(
                     owner,
-                    member.property.name.as_str(),
+                    compiler_identifier_string(
+                        member.property.name.as_str(),
+                        member.property.span,
+                    )?,
                     member.property.span,
                     atom_candidates,
                 )?;
@@ -3037,7 +3042,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             if property.computed || property.shorthand {
                 return unsupported(UnsupportedLeafFeature::UnsupportedExpression, property.span);
             }
-            let OxcPropertyKey::StaticIdentifier(identifier) = &property.key else {
+            let Some(key) = compiled_static_property_key(&property.key)? else {
                 return unsupported(
                     if property.method || property.kind != PropertyKind::Init {
                         UnsupportedLeafFeature::ObjectMethodOrAccessor
@@ -3069,7 +3074,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
                     FinalOpcode::DefineMethod,
                     Operands::AtomU8 {
-                        atom: constants.property_atom_index(identifier.span)?,
+                        atom: constants.property_atom_index(key.span)?,
                         value: kind.define_method_flags(),
                     },
                     property.span,
@@ -3082,18 +3087,15 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 )?));
                 continue;
             }
-            if identifier.name == "__proto__" {
-                return unsupported(
-                    UnsupportedLeafFeature::UnsupportedExpression,
-                    identifier.span,
-                );
+            if key.value.code_units().eq("__proto__".encode_utf16()) {
+                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, key.span);
             }
             if let Some(span) = anonymous_function_definition_span(&property.value) {
                 return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
             }
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
                 FinalOpcode::DefineField,
-                Operands::Atom(constants.property_atom_index(identifier.span)?),
+                Operands::Atom(constants.property_atom_index(key.span)?),
                 property.span,
             )));
             work.push(ExpressionWork::Visit(&property.value));
@@ -5939,6 +5941,11 @@ struct CompiledAtomCandidate {
     purpose: CompiledAtomPurpose,
 }
 
+struct CompiledStaticPropertyKey {
+    value: CompilerString,
+    span: Span,
+}
+
 impl CompiledAtomCandidate {
     const fn order_key(&self) -> (u32, u32, CompiledAtomPurpose) {
         (self.span.start, self.span.end, self.purpose)
@@ -6058,9 +6065,13 @@ fn freeze_atom_candidates(
     let mut atoms = Vec::with_capacity(candidates.len());
     let mut interner = HashMap::with_capacity(candidates.len());
     for candidate in candidates {
-        if candidate.value.is_empty() || candidate.value.is_tagged_integer_atom() {
+        let static_property_only = candidate.purpose == CompiledAtomPurpose::Property
+            && (candidate.value.is_empty() || candidate.value.is_tagged_integer_atom());
+        if candidate.purpose == CompiledAtomPurpose::RuntimeString
+            && (candidate.value.is_empty() || candidate.value.is_tagged_integer_atom())
+        {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "atom strings are nonempty non-tagged-integer spellings",
+                invariant: "runtime string atoms are nonempty non-tagged-integer spellings",
                 span: Some(candidate.span),
             });
         }
@@ -6079,7 +6090,11 @@ fn freeze_atom_candidates(
                 u32::try_from(atoms.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
                     domain: "atom pool entries",
                 })?;
-            atoms.push(CompilerAtom::new(candidate.value.clone()));
+            atoms.push(if static_property_only {
+                CompilerAtom::new_static_property_only(candidate.value.clone())
+            } else {
+                CompilerAtom::new(candidate.value.clone())
+            });
             interner.insert(candidate.value, index);
             index
         };
@@ -6390,6 +6405,53 @@ fn compiler_identifier_string(
         .map_err(|source| LeafCompilationError::CompilerString { span, source })
 }
 
+fn compiled_static_property_key(
+    key: &OxcPropertyKey<'_>,
+) -> Result<Option<CompiledStaticPropertyKey>, LeafCompilationError> {
+    let (value, span) = match key {
+        OxcPropertyKey::StaticIdentifier(identifier) => (
+            compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+            identifier.span,
+        ),
+        OxcPropertyKey::StringLiteral(literal) => (
+            decode_compiler_string(
+                literal.value.as_str(),
+                literal.lone_surrogates,
+                literal.span,
+            )?,
+            literal.span,
+        ),
+        OxcPropertyKey::NumericLiteral(literal) => {
+            let value = Binary64Constant::from_f64(literal.value).to_javascript_string();
+            (
+                compiler_identifier_string(&value, literal.span)?,
+                literal.span,
+            )
+        }
+        OxcPropertyKey::BigIntLiteral(literal) => (
+            compiler_identifier_string(literal.value.as_str(), literal.span)?,
+            literal.span,
+        ),
+        _ => return Ok(None),
+    };
+    Ok(Some(CompiledStaticPropertyKey { value, span }))
+}
+
+fn is_noncomputed_static_property_key_node(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> bool {
+    let AstKind::ObjectProperty(property) = unit.semantic().nodes().parent_kind(node_id) else {
+        return false;
+    };
+    if property.computed {
+        return false;
+    }
+    match &property.key {
+        OxcPropertyKey::StringLiteral(literal) => literal.node_id.get() == node_id,
+        OxcPropertyKey::NumericLiteral(literal) => literal.node_id.get() == node_id,
+        OxcPropertyKey::BigIntLiteral(literal) => literal.node_id.get() == node_id,
+        _ => false,
+    }
+}
+
 fn record_string_candidate(
     owner: ExecutableId,
     value: CompilerString,
@@ -6420,17 +6482,10 @@ fn record_string_candidate(
 
 fn record_property_candidate(
     owner: ExecutableId,
-    name: &str,
+    value: CompilerString,
     span: Span,
     atoms: &mut [Vec<CompiledAtomCandidate>],
 ) -> Result<(), LeafCompilationError> {
-    let value = compiler_identifier_string(name, span)?;
-    if value.is_empty() || value.is_tagged_integer_atom() {
-        return Err(LeafCompilationError::SemanticInvariant {
-            invariant: "static property identifiers are nonempty non-index atoms",
-            span: Some(span),
-        });
-    }
     atoms
         .get_mut(owner.index())
         .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
@@ -7197,7 +7252,7 @@ pub enum UnsupportedLeafFeature {
     /// The Oxc function form is neither a declaration nor function expression.
     UnsupportedFunctionForm,
     /// An object method or accessor is outside the admitted static,
-    /// synchronous, identifier-named profile.
+    /// synchronous, identifier-or-literal-named profile.
     ObjectMethodOrAccessor,
     /// The selected function contains another executable body.
     NestedExecutable,

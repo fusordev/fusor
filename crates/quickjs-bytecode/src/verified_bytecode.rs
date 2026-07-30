@@ -1214,6 +1214,14 @@ pub enum BytecodeVerificationErrorKind {
         /// Function-local atom count.
         len: u32,
     },
+    /// A metadata field references an atom certified only for static object
+    /// property definition.
+    StaticPropertyOnlyMetadataAtom {
+        /// Invalid atom field.
+        field: MetadataAtomField,
+        /// Rejected index.
+        index: u32,
+    },
     /// A variable definition has an invalid policy or opcode relationship.
     BindingPolicyViolation {
         /// Affected frame slot.
@@ -1492,6 +1500,10 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::MetadataAtomOutOfBounds { field, index, len } => write!(
                 formatter,
                 "metadata atom {field:?} index {index} is outside atom count {len}"
+            ),
+            Self::StaticPropertyOnlyMetadataAtom { field, index } => write!(
+                formatter,
+                "metadata atom {field:?} references static-property-only atom slot {index}"
             ),
             Self::BindingPolicyViolation { slot, pc, reason } => {
                 write!(formatter, "binding policy {reason:?} for {slot:?}")?;
@@ -3200,6 +3212,19 @@ fn verify_atom_bounds(
                 field,
                 index: atom.get(),
                 len,
+            },
+        ));
+    }
+    if function
+        .atoms()
+        .get(atom.get() as usize)
+        .is_some_and(crate::CompilerAtom::is_static_property_only)
+    {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::StaticPropertyOnlyMetadataAtom {
+                field,
+                index: atom.get(),
             },
         ));
     }

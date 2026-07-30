@@ -85,6 +85,28 @@ fn binary64_constants_preserve_observable_bits_and_canonicalize_nan() {
 }
 
 #[test]
+fn binary64_constants_use_exact_javascript_property_name_spelling() {
+    for (value, expected) in [
+        (0.0, "0"),
+        (-0.0, "0"),
+        (1.5, "1.5"),
+        (1.0e-7, "1e-7"),
+        (1.0e-6, "0.000001"),
+        (1.0e20, "100000000000000000000"),
+        (1.0e21, "1e+21"),
+        (f64::NAN, "NaN"),
+        (f64::INFINITY, "Infinity"),
+        (f64::NEG_INFINITY, "-Infinity"),
+        (0.000_001_234_567_890_123, "0.000001234567890123"),
+    ] {
+        assert_eq!(
+            Binary64Constant::from_f64(value).to_javascript_string(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn graph_verifier_retains_heterogeneous_value_and_function_constants() {
     let one = CompilerConstant::Value(CompilerConstantValue::Number(Binary64Constant::from_f64(
         1.5,

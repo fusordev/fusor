@@ -259,18 +259,48 @@ impl FusedIterator for CompilerStringCodeUnits<'_> {}
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CompilerAtom {
     string: CompilerString,
+    static_property_only: bool,
 }
 
 impl CompilerAtom {
-    /// Wraps an exact string as an atom payload.
+    /// Wraps an exact nonempty, non-tagged string as a general atom payload.
+    ///
+    /// Whole-function graph verification rejects an empty string or a
+    /// tagged-integer spelling created through this constructor.
     #[must_use]
     pub const fn new(string: CompilerString) -> Self {
-        Self { string }
+        Self {
+            string,
+            static_property_only: false,
+        }
+    }
+
+    /// Marks an empty or tagged-integer spelling as a static object-property
+    /// operand.
+    ///
+    /// This is only an unverified compiler assertion. Whole-function graph
+    /// verification proves that the spelling is one of those two exceptional
+    /// forms and that every bytecode reference is an object-literal
+    /// `define_field` or `define_method` operand. Generic string atoms retain
+    /// their stricter invariant.
+    #[must_use]
+    pub const fn new_static_property_only(string: CompilerString) -> Self {
+        Self {
+            string,
+            static_property_only: true,
+        }
     }
 
     /// Returns the exact string represented by this atom.
     #[must_use]
     pub const fn string(&self) -> &CompilerString {
         &self.string
+    }
+
+    /// Returns whether this entry is restricted to a static object-property
+    /// operand by whole-function graph verification.
+    #[must_use]
+    pub const fn is_static_property_only(&self) -> bool {
+        self.static_property_only
     }
 }
