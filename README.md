@@ -15,8 +15,10 @@ as immutable, `Arc`-backed `VerifiedBytecode`. A runtime context can
 transactionally install that authority into a same-runtime realm and host-call
 the resulting function. The admitted profile executes primitive constants,
 arguments, locals, captured cells, nested closures, TDZ checks, cell rotation,
-branches, returns, direct ordinary JavaScript-to-JavaScript calls, truthiness,
-`typeof`, strict equality, nullish tests, ordinary object literals with
+branches, labeled loops and blocks, strict-equality `switch` dispatch with
+lexical scope and fallthrough, returns, direct ordinary
+JavaScript-to-JavaScript calls, truthiness, `typeof`, strict equality, nullish
+tests, ordinary object literals with
 source-ordered static identifier, quoted String, Number, and BigInt
 literal-named data properties and synchronous methods/getters/setters, static
 data property reads/writes, own and inherited static accessor getter/setter
@@ -156,6 +158,7 @@ cargo doc --workspace --no-deps
 cargo xtask parser-differential --oracle /path/to/quickjs-2026-06-04/qjs
 cargo xtask dynamic-function-differential --oracle /path/to/quickjs-2026-06-04/qjsc
 cargo xtask number-radix-differential --oracle /path/to/quickjs-2026-06-04/qjs
+cargo xtask control-flow-differential --oracle /path/to/quickjs-2026-06-04/qjs
 ```
 
 The upstream C engine may be built separately as a development oracle for
@@ -169,6 +172,10 @@ The Number radix task reconstructs exact binary64 bit patterns on both sides,
 checks every radix for exponent and mantissa boundaries, and adds a bounded
 fixed-seed sample from
 [`tests/number-radix/manifest.json`](tests/number-radix/manifest.json).
+The control-flow task executes its strictly tagged manifest through the public
+dynamic-Function facade and compares normalized primitive results and
+engine-created errors with the pinned `qjs` oracle. Its corpus is
+[`tests/control-flow/manifest.json`](tests/control-flow/manifest.json).
 
 ## License
 

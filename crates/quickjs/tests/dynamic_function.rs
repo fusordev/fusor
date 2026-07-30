@@ -54,6 +54,86 @@ fn ordinary_dynamic_function_compiles_the_whole_wrapper_and_executes() {
 }
 
 #[test]
+fn ordinary_dynamic_function_executes_labeled_switch_control_flow() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let parameters = [SourceFragment::new("limit")];
+    let body = "\
+        let current=0;\
+        let result=0;\
+        outer: while(current<limit){\
+            current++;\
+            switch(current){\
+                case 1: result+=1; break;\
+                case 2: result+=10; continue outer;\
+                default: break outer;\
+            }\
+            result+=100;\
+        }\
+        return result;";
+
+    let function = construct_dynamic_function(
+        &mut context,
+        source(&parameters, body),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function with labeled switch")
+    .into_value()
+    .into_function()
+    .expect("ordinary wrapper completion");
+    let limit = context.number(JsNumber::from_i32(3));
+    let result = context
+        .call(&function, &[limit], ExecutionLimits::default())
+        .expect("dynamic Function call");
+
+    assert!(
+        result
+            .as_number()
+            .expect("live value")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(111))
+    );
+}
+
+#[test]
+fn ordinary_dynamic_function_executes_the_oxc_chained_label_continue_extension() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let body = "\
+        let current=0;\
+        let result=0;\
+        outer: inner: while(current<3){\
+            current++;\
+            if(current<3) continue outer;\
+            result=current;\
+        }\
+        return result;";
+
+    let function = construct_dynamic_function(
+        &mut context,
+        source(&[], body),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function with Oxc chained-label continue semantics")
+    .into_value()
+    .into_function()
+    .expect("ordinary wrapper completion");
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("chained-label dynamic Function call");
+
+    assert!(
+        result
+            .as_number()
+            .expect("live value")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(3))
+    );
+}
+
+#[test]
 fn facade_call_supplies_the_real_oxc_compiler_to_global_function() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

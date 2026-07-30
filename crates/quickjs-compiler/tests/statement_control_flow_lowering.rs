@@ -1,12 +1,23 @@
+use std::fmt::Write as _;
+
 use oxc_ast::ast::Statement;
 use oxc_semantic::ScopeId;
-use quickjs_bytecode::{BytecodePc, FinalOpcode, Operands, VerificationLimits};
-use quickjs_compiler::{
-    CompilationContext, CompiledLeafFunction, LeafCompilationError, UnsupportedLeafFeature,
+use quickjs_bytecode::{
+    AssemblerError, AssemblerResource, BytecodePc, FinalOpcode, Operands, VerificationLimits,
 };
+use quickjs_compiler::{CompilationContext, CompiledLeafFunction, LeafCompilationError};
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
 fn compile(source: &str, name: &str) -> CompiledLeafFunction {
+    compile_with_limits(source, name, VerificationLimits::default())
+        .expect("statement control-flow compilation must succeed")
+}
+
+fn compile_with_limits(
+    source: &str,
+    name: &str,
+    limits: VerificationLimits,
+) -> Result<CompiledLeafFunction, LeafCompilationError> {
     with_parsed_program(
         source,
         FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
@@ -16,15 +27,13 @@ fn compile(source: &str, name: &str) -> CompiledLeafFunction {
                 .executables()
                 .find(|executable| executable.metadata().name() == Some(name))
                 .expect("named function executable");
-            context
-                .compile_leaf(&executable, VerificationLimits::default())
-                .expect("statement control-flow compilation must succeed")
+            context.compile_leaf(&executable, limits)
         },
     )
     .expect("front-end acceptance")
 }
 
-fn compile_error(source: &str, name: &str) -> LeafCompilationError {
+fn compile_tree_root(source: &str, name: &str) -> CompiledLeafFunction {
     with_parsed_program(
         source,
         FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
@@ -35,8 +44,10 @@ fn compile_error(source: &str, name: &str) -> LeafCompilationError {
                 .find(|executable| executable.metadata().name() == Some(name))
                 .expect("named function executable");
             context
-                .compile_leaf(&executable, VerificationLimits::default())
-                .expect_err("unsupported statement control flow must fail closed")
+                .compile_tree(&executable, VerificationLimits::default())
+                .expect("statement control-flow tree compilation must succeed")
+                .root()
+                .clone()
         },
     )
     .expect("front-end acceptance")
@@ -554,15 +565,264 @@ fn a_join_after_two_returning_branches_is_backed_by_a_real_terminal() {
 }
 
 #[test]
-fn labeled_control_flow_fails_closed_at_the_exact_label() {
-    let source = "function f(a){ outer: while(a){ break outer; } }";
-    let error = compile_error(source, "f");
-    let LeafCompilationError::Unsupported { feature, span } = error else {
-        panic!("labeled control flow must be unsupported");
-    };
+fn labeled_break_and_continue_select_the_named_iteration() {
+    let source = "function f(a,b){ outer: while(a){ while(b){ if(a) continue outer; break outer; } } return b; }";
+    let compiled = compile(source, "f");
+    let instructions = compiled.control_flow().instructions();
 
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedBody);
-    assert_eq!(&source[span.start as usize..span.end as usize], "outer");
+    let continue_jump = instructions
+        .iter()
+        .find(|instruction| {
+            source_slice_at(&compiled, source, instruction.decoded().pc()) == "continue outer;"
+        })
+        .expect("labeled continue jump");
+    assert_eq!(
+        continue_jump.decoded().instruction().opcode(),
+        FinalOpcode::Goto8
+    );
+    let continue_target = continue_jump
+        .successors()
+        .jump_target()
+        .and_then(|target| compiled.control_flow().instruction(target))
+        .expect("labeled continue target");
+    assert_eq!(
+        source_slice_at(&compiled, source, continue_target.decoded().pc()),
+        "a"
+    );
+
+    let break_jump = instructions
+        .iter()
+        .find(|instruction| {
+            source_slice_at(&compiled, source, instruction.decoded().pc()) == "break outer;"
+        })
+        .expect("labeled break jump");
+    assert_eq!(
+        break_jump.decoded().instruction().opcode(),
+        FinalOpcode::Goto8
+    );
+    let break_target = break_jump
+        .successors()
+        .jump_target()
+        .and_then(|target| compiled.control_flow().instruction(target))
+        .expect("labeled break target");
+    assert_eq!(
+        source_slice_at(&compiled, source, break_target.decoded().pc()),
+        "b"
+    );
+}
+
+#[test]
+fn chained_labels_share_the_iteration_continue_target() {
+    let source = "function f(a){ first: second: while(a){ if(a) continue first; \
+                  break second; } return false; }";
+    let compiled = compile(source, "f");
+    let instructions = compiled.control_flow().instructions();
+
+    let continue_jump = instructions
+        .iter()
+        .find(|instruction| {
+            source_slice_at(&compiled, source, instruction.decoded().pc()) == "continue first;"
+        })
+        .expect("outer chained continue jump");
+    let continue_target = continue_jump
+        .successors()
+        .jump_target()
+        .and_then(|target| compiled.control_flow().instruction(target))
+        .expect("shared loop continue target");
+    assert_eq!(
+        source_slice_at(&compiled, source, continue_target.decoded().pc()),
+        "a"
+    );
+
+    let break_jump = instructions
+        .iter()
+        .find(|instruction| {
+            source_slice_at(&compiled, source, instruction.decoded().pc()) == "break second;"
+        })
+        .expect("inner chained break jump");
+    let break_target = break_jump
+        .successors()
+        .jump_target()
+        .and_then(|target| compiled.control_flow().instruction(target))
+        .expect("shared loop break target");
+    assert_eq!(
+        source_slice_at(&compiled, source, break_target.decoded().pc()),
+        "false"
+    );
+    assert_eq!(
+        break_target.decoded().instruction().opcode(),
+        FinalOpcode::PushFalse
+    );
+    assert_ne!(continue_target.decoded().pc(), break_target.decoded().pc());
+}
+
+#[test]
+fn direct_labels_attach_to_do_while_and_classic_for_iterations() {
+    for (source, jump_source) in [
+        (
+            "function f(a){ repeat: do { if(a) continue repeat; break repeat; } while(a); return a; }",
+            "continue repeat;",
+        ),
+        (
+            "function f(a){ repeat: for(;a;a=false){ continue repeat; } return a; }",
+            "continue repeat;",
+        ),
+    ] {
+        let compiled = compile(source, "f");
+        let jump = compiled
+            .control_flow()
+            .instructions()
+            .iter()
+            .find(|instruction| {
+                source_slice_at(&compiled, source, instruction.decoded().pc()) == jump_source
+            })
+            .expect("labeled iteration jump");
+        assert_eq!(jump.decoded().instruction().opcode(), FinalOpcode::Goto8);
+        assert!(jump.successors().jump_target().is_some());
+    }
+}
+
+#[test]
+fn breaking_a_regular_label_closes_nested_captured_scopes() {
+    let source = "function outer(value){ \"use strict\"; let saved; target: { let current=value; function capture(){return current;} saved=capture; break target; } return saved; }";
+    let compiled = compile_tree_root(source, "outer");
+    let instructions = compiled.control_flow().instructions();
+
+    let break_index = instructions
+        .iter()
+        .position(|instruction| {
+            source_slice_at(&compiled, source, instruction.decoded().pc()) == "break target;"
+        })
+        .expect("regular labeled break");
+    assert_eq!(
+        instructions[break_index - 1]
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::CloseLoc
+    );
+    assert_eq!(
+        instructions[break_index].decoded().instruction().opcode(),
+        FinalOpcode::Goto8
+    );
+    assert_eq!(
+        source_slice_at(
+            &compiled,
+            source,
+            instructions[break_index - 1].decoded().pc()
+        ),
+        "current"
+    );
+    let exit = instructions[break_index]
+        .successors()
+        .jump_target()
+        .and_then(|target| compiled.control_flow().instruction(target))
+        .expect("regular label exit");
+    assert_eq!(
+        source_slice_at(&compiled, source, exit.decoded().pc()),
+        "saved"
+    );
+}
+
+#[test]
+fn switch_dispatch_uses_strict_equality_and_enters_bodies_at_depth_zero() {
+    let source = "function f(value){ switch(value){ case 1: return 10; default: return 30; case 2: return 20; } }";
+    let compiled = compile(source, "f");
+    let instructions = compiled.control_flow().instructions();
+
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::Dup
+            })
+            .count(),
+        2
+    );
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::StrictEq
+            })
+            .count(),
+        2
+    );
+    for expected in ["10", "30", "20"] {
+        let entry = instructions
+            .iter()
+            .find(|instruction| {
+                source_slice_at(&compiled, source, instruction.decoded().pc()) == expected
+            })
+            .expect("case body instruction");
+        assert_eq!(entry.entry_stack_depth(), Some(0));
+    }
+    assert_eq!(compiled.control_flow().computed_stack_size(), 3);
+}
+
+#[test]
+fn switch_scope_is_entered_after_the_discriminant_and_before_case_tests() {
+    let source = "function f(value){ switch(value){ case local: let local=1; return local; } }";
+    let compiled = compile(source, "f");
+    let instructions = compiled.control_flow().instructions();
+
+    let discriminant = instructions
+        .iter()
+        .position(|instruction| {
+            instruction.decoded().instruction().opcode() == FinalOpcode::GetArg0
+                && source_slice_at(&compiled, source, instruction.decoded().pc()) == "value"
+        })
+        .expect("switch discriminant");
+    let tdz = instructions
+        .iter()
+        .position(|instruction| {
+            instruction.decoded().instruction().opcode() == FinalOpcode::SetLocUninitialized
+                && source_slice_at(&compiled, source, instruction.decoded().pc()) == "local"
+        })
+        .expect("switch lexical TDZ initialization");
+    let case_test = instructions
+        .iter()
+        .position(|instruction| {
+            instruction.decoded().instruction().opcode() == FinalOpcode::GetLocCheck
+                && source_slice_at(&compiled, source, instruction.decoded().pc()) == "local"
+        })
+        .expect("case test lexical read");
+
+    assert!(discriminant < tdz);
+    assert!(tdz < case_test);
+}
+
+#[test]
+fn switch_scaffold_checks_the_instruction_budget_before_label_planning() {
+    let source = "function f(value){ switch(value){ case 0: case 1: } }";
+    let error = compile_with_limits(
+        source,
+        "f",
+        VerificationLimits::new(1_000, 1, 0, 0, 100, 10),
+    )
+    .expect_err("switch scaffold must exceed the one-instruction budget");
+
+    let LeafCompilationError::BytecodeAssembly {
+        span: Some(span),
+        source:
+            AssemblerError::LimitExceeded {
+                resource,
+                instruction_index,
+                limit,
+                observed,
+            },
+    } = error
+    else {
+        panic!("switch scaffold must fail with the assembler instruction limit");
+    };
+    assert_eq!(resource, AssemblerResource::Instructions);
+    assert_eq!(instruction_index, 1);
+    assert_eq!(limit, 1);
+    assert_eq!(observed, 2);
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        "switch(value){ case 0: case 1: }"
+    );
 }
 
 #[test]
@@ -627,5 +887,83 @@ fn deeply_nested_blocks_lower_without_recursive_statement_planning() {
             (BytecodePc::new(0), FinalOpcode::GetArg0, Operands::NoneArg),
             (BytecodePc::new(1), FinalOpcode::Return, Operands::None),
         ]
+    );
+}
+
+#[test]
+fn deeply_chained_labels_lower_without_recursive_statement_planning() {
+    const LABEL_COUNT: usize = 1_024;
+    let mut source = String::from("function f(a){");
+    for index in 0..LABEL_COUNT {
+        write!(&mut source, "label{index}:").expect("writing to a string is infallible");
+    }
+    source.push_str("while(a){break label0;}return a;}");
+
+    let compiled = compile(&source, "f");
+    assert!(
+        compiled
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                source_slice_at(&compiled, &source, instruction.decoded().pc()) == "break label0;"
+            })
+    );
+}
+
+#[test]
+fn repeated_jumps_to_the_innermost_chained_label_use_indexed_resolution() {
+    const LABEL_COUNT: usize = 2_048;
+    const JUMP_COUNT: usize = 2_048;
+    let mut source = String::from("function f(a){");
+    for index in 0..LABEL_COUNT {
+        write!(&mut source, "label{index}:").expect("writing to a string is infallible");
+    }
+    source.push_str("while(a){");
+    for _ in 0..JUMP_COUNT {
+        write!(&mut source, "if(a)continue label{};", LABEL_COUNT - 1)
+            .expect("writing to a string is infallible");
+    }
+    source.push_str("break;}return false;}");
+
+    let compiled = compile(&source, "f");
+    assert_eq!(
+        compiled
+            .control_flow()
+            .instructions()
+            .iter()
+            .filter(|instruction| {
+                source_slice_at(&compiled, &source, instruction.decoded().pc())
+                    .starts_with("continue label")
+            })
+            .count(),
+        JUMP_COUNT
+    );
+}
+
+#[test]
+fn deeply_nested_switches_lower_without_recursive_statement_planning() {
+    const SWITCH_COUNT: usize = 256;
+    let mut source = String::from("function f(a){");
+    for _ in 0..SWITCH_COUNT {
+        source.push_str("switch(a){case 0:");
+    }
+    source.push_str("return a;");
+    for _ in 0..SWITCH_COUNT {
+        source.push('}');
+    }
+    source.push('}');
+
+    let compiled = compile(&source, "f");
+    assert_eq!(
+        compiled
+            .control_flow()
+            .instructions()
+            .iter()
+            .filter(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::StrictEq
+            })
+            .count(),
+        SWITCH_COUNT
     );
 }

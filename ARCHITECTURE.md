@@ -129,9 +129,10 @@ compact `BigInt` values, the empty string, exact binary64 Number constants,
 resolved argument/local reads, unary and binary operators, short-circuit
 `&&`/`||`/`??`, conditional expressions, sequence and expression statements,
 mutable identifier assignment and update, lexical blocks, `if`/`else`,
-`while`, `do`/`while`, classic `for`, unlabeled `break`/`continue`, and
-explicit `throw` plus explicit or implicit returns. A deepest leaf may read or
-write argument/local cells forwarded through ancestor capture slots. It
+`while`, `do`/`while`, classic `for`, `switch`, labeled and unlabeled
+`break`/`continue`, and explicit `throw` plus explicit or implicit returns. A
+deepest leaf may read or write argument/local cells forwarded through ancestor
+capture slots. It
 lowers expressions and statements with iterative work lists, validates the
 complete selected body into typed pseudo-instructions before byte emission,
 assigns typed frame and imported-capture slots, and immediately produces a
@@ -148,6 +149,19 @@ has one explicit loop-head scope and rotates its captured cells after
 initialization and on every natural or `continue` edge before update, without
 re-running TDZ initialization. All scheduling remains iterative and uses
 explicit work stacks; there is no `recursion_guard` layer or dependency.
+Breakable control regions distinguish regular labels, iterations, and
+switches. Active labeled, breakable, and iteration targets are indexed so abrupt
+control lookup does not rescan nested label chains. Switch dispatch retains its
+discriminant only while it performs lazy source-ordered strict comparisons;
+depth-one match trampolines drop it before branching to depth-zero consequent
+labels. Dispatch, trampolines, and bodies are scheduled one case at a time
+through `Arc`-shared immutable labels, rather than materializing a second
+case-proportional work buffer. The shared switch lexical scope is entered after
+discriminant evaluation and before the first case test, and consequents then
+fall through in source order. Chained iteration labels preserve Oxc's ES
+semantics, an intentional `QJS-OXC-002` difference from pinned QuickJS's
+innermost-label-only `continue` limitation; a linear post-Oxc check repairs
+invalid chained targets that Oxc otherwise accepts.
 
 Strict block-function declarations use a narrow two-phase lexical
 normalization: scope entry first activates the local or captured cell in an
@@ -206,8 +220,8 @@ nested root with imported cells fails closed until an explicit verified root
 environment exists. `compile_leaf` remains the explicit nested-function-free
 API and rejects a selection with children. BigInt and RegExp runtime values,
 non-string atom namespaces, raw class/function stack entries,
-inferred anonymous-function names, labeled control, `for-in`, and `for-of`
-stay rejected until their owned records and semantics exist.
+inferred anonymous-function names, `for-in`, and `for-of` stay rejected until
+their owned records and semantics exist.
 
 A final compiler-profile pass combines that staged graph with exact function
 metadata and source snapshots and returns immutable, `Arc`-backed

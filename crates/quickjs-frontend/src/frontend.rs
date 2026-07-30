@@ -6,14 +6,14 @@
 //! literal boundaries and flags, while the QuickJS-compatible `RegExp` layer owns
 //! pattern semantics.
 
-use std::{error::Error, fmt};
+use std::{collections::HashMap, error::Error, fmt};
 
 pub use oxc_allocator::Allocator;
 pub use oxc_ast::ast::Program;
 use oxc_ast::{
     AstKind, Comment,
     ast::{
-        Argument, Directive, ImportPhase, ModuleExportName, VariableDeclarationKind,
+        Argument, Directive, ImportPhase, ModuleExportName, Statement, VariableDeclarationKind,
         WithClauseKeyword,
     },
     builder::AstBuilder,
@@ -25,6 +25,7 @@ pub use oxc_semantic::{Scoping, Semantic};
 pub use oxc_span::Span;
 use oxc_span::{GetSpan, SourceType};
 pub use oxc_syntax::module_record::ModuleRecord;
+use oxc_syntax::node::NodeId;
 use quickjs_diagnostics::{
     Diagnostic as SharedDiagnostic, DiagnosticCode as SharedDiagnosticCode, DiagnosticCodeError,
     DiagnosticLabel as SharedDiagnosticLabel, DiagnosticSeverity, SourceError, SourceId,
@@ -1747,6 +1748,8 @@ pub enum FrontendDiagnosticCode {
     OxcParser,
     /// An Oxc semantic/early-error diagnostic.
     OxcSemantic,
+    /// A labeled `continue` chain does not terminate in an iteration statement.
+    InvalidChainedContinueTarget,
     /// Oxc's AST and module record were inconsistent during owned lowering.
     ModuleSyntaxLowering,
     /// A `using` declaration unsupported by the pinned `QuickJS` profile.
@@ -1799,6 +1802,9 @@ impl FrontendDiagnosticCode {
             }
             Self::OxcParser => "quickjs::frontend::oxc::parser",
             Self::OxcSemantic => "quickjs::frontend::oxc::semantic",
+            Self::InvalidChainedContinueTarget => {
+                "quickjs::frontend::semantic::invalid_chained_continue_target"
+            }
             Self::ModuleSyntaxLowering => "quickjs::frontend::lowering::module_syntax",
             Self::UnsupportedUsingDeclaration => "quickjs::frontend::profile::using_declaration",
             Self::UnsupportedAwaitUsingDeclaration => {
@@ -1835,6 +1841,7 @@ impl FrontendDiagnosticCode {
             | Self::AsyncScriptPreparationFailed
             | Self::OxcParser
             | Self::OxcSemantic
+            | Self::InvalidChainedContinueTarget
             | Self::ModuleSyntaxLowering => None,
             Self::TooManyCallArguments => Some(
                 "reduce the fixed argument prefix or introduce a spread before it reaches 65,535 arguments",
@@ -2138,6 +2145,25 @@ impl FrontendError {
                 labels: vec![DiagnosticLabel {
                     span,
                     message: None,
+                }],
+            }],
+            parser_panicked: false,
+            unsupported_goal: None,
+            limit_error: None,
+        }
+    }
+
+    fn invalid_chained_continue_target(span: Span) -> Self {
+        Self {
+            stage: DiagnosticStage::Semantic,
+            diagnostics: vec![FrontendDiagnostic {
+                code: FrontendDiagnosticCode::InvalidChainedContinueTarget,
+                message: "break/continue label not found".to_owned(),
+                labels: vec![DiagnosticLabel {
+                    span,
+                    message: Some(
+                        "this label chain does not terminate in an iteration statement".to_owned(),
+                    ),
                 }],
             }],
             parser_panicked: false,
@@ -2939,6 +2965,9 @@ fn parse_in_mode<'arena, 'scope>(
             false,
         ));
     }
+    if let Some(span) = invalid_chained_continue_target_span(semantic.semantic.nodes()) {
+        return Err(FrontendError::invalid_chained_continue_target(span));
+    }
     let semantic = semantic.semantic;
     let module_syntax = ModuleSyntaxRecord::from_oxc(program, &module_record)
         .map_err(FrontendError::from_module_syntax)?;
@@ -3113,6 +3142,133 @@ fn async_script_import_meta_span(semantic: &Semantic<'_>) -> Option<Span> {
         };
         Some(import_meta.span)
     })
+}
+
+#[derive(Clone, Copy)]
+struct ActiveContinueLabel {
+    boundary: Option<NodeId>,
+    ends_in_iteration: bool,
+}
+
+struct ContinueAncestor<'a> {
+    node_id: NodeId,
+    replaced_label: Option<(&'a str, Option<ActiveContinueLabel>)>,
+    opens_boundary: bool,
+}
+
+fn leave_continue_ancestor<'a>(
+    ancestor: &ContinueAncestor<'a>,
+    active_labels: &mut HashMap<&'a str, ActiveContinueLabel>,
+    boundaries: &mut Vec<NodeId>,
+) {
+    if let Some((name, previous)) = ancestor.replaced_label {
+        if let Some(previous) = previous {
+            active_labels.insert(name, previous);
+        } else {
+            active_labels.remove(name);
+        }
+    }
+    if ancestor.opens_boundary {
+        let popped = boundaries.pop();
+        debug_assert_eq!(popped, Some(ancestor.node_id));
+    }
+}
+
+fn chained_label_iteration_targets(nodes: &AstNodes<'_>) -> HashMap<NodeId, bool> {
+    // Oxc accepts `outer: inner: switch (...) { continue outer; }`, while
+    // QuickJS requires every label in a continue-target chain to end at an
+    // iteration statement. Cache each chain once so adversarial nested labels
+    // cannot make this compatibility check quadratic.
+    let mut label_targets = HashMap::<NodeId, bool>::new();
+    let mut uncached_chain = Vec::new();
+    for node in nodes.iter() {
+        let AstKind::LabeledStatement(statement) = node.kind() else {
+            continue;
+        };
+        if label_targets.contains_key(&statement.node_id.get()) {
+            continue;
+        }
+
+        uncached_chain.clear();
+        let mut current = statement;
+        let ends_in_iteration = loop {
+            let node_id = current.node_id.get();
+            if let Some(cached) = label_targets.get(&node_id) {
+                break *cached;
+            }
+            uncached_chain.push(node_id);
+            match &current.body {
+                Statement::LabeledStatement(nested) => current = nested,
+                body => break body.is_iteration_statement(),
+            }
+        };
+        for node_id in uncached_chain.drain(..) {
+            label_targets.insert(node_id, ends_in_iteration);
+        }
+    }
+    label_targets
+}
+
+fn invalid_chained_continue_target_span(nodes: &AstNodes<'_>) -> Option<Span> {
+    let label_targets = chained_label_iteration_targets(nodes);
+    // Semantic nodes are stored in preorder. Maintain the active labels and
+    // compilation boundary while advancing through that order; every node is
+    // entered and left once, and each labelled continue is one hash lookup.
+    let mut ancestors = Vec::<ContinueAncestor<'_>>::new();
+    let mut active_labels = HashMap::<&str, ActiveContinueLabel>::new();
+    let mut boundaries = Vec::<NodeId>::new();
+
+    for (node_id, node) in nodes.iter_enumerated() {
+        if !ancestors.is_empty() {
+            let parent_id = nodes.parent_id(node_id);
+            while ancestors
+                .last()
+                .is_some_and(|entry| entry.node_id != parent_id)
+            {
+                let ancestor = ancestors
+                    .pop()
+                    .expect("the non-empty ancestor stack has a final entry");
+                leave_continue_ancestor(&ancestor, &mut active_labels, &mut boundaries);
+            }
+        }
+
+        let kind = node.kind();
+        let opens_boundary = kind.is_function_like() || matches!(kind, AstKind::StaticBlock(_));
+        if opens_boundary {
+            boundaries.push(node_id);
+        }
+
+        let replaced_label = if let AstKind::LabeledStatement(statement) = kind {
+            let name = statement.label.name.as_str();
+            let target = ActiveContinueLabel {
+                boundary: boundaries.last().copied(),
+                ends_in_iteration: label_targets
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or_else(|| statement.body.is_iteration_statement()),
+            };
+            Some((name, active_labels.insert(name, target)))
+        } else {
+            None
+        };
+
+        if let AstKind::ContinueStatement(statement) = kind
+            && let Some(label) = &statement.label
+            && let Some(target) = active_labels.get(label.name.as_str())
+            && target.boundary == boundaries.last().copied()
+            && !target.ends_in_iteration
+        {
+            return Some(label.span);
+        }
+
+        ancestors.push(ContinueAncestor {
+            node_id,
+            replaced_label,
+            opens_boundary,
+        });
+    }
+
+    None
 }
 
 /// An owned execution boundary for Oxc parser and semantic work.

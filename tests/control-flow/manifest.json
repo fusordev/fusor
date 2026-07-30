@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "labeled-break-outer-loop",
+      "covers": ["labeled-break"],
+      "body": "let out = \"\";\nouter: for (let i = 0; i < 3; i = i + 1) {\n  for (let j = 0; j < 3; j = j + 1) {\n    if (i === 1) { if (j === 1) break outer; }\n    out = out + i + j;\n  }\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "00010210"}
+    },
+    {
+      "id": "labeled-continue-outer-loop",
+      "covers": ["labeled-continue"],
+      "body": "let out = \"\";\nouter: for (let i = 0; i < 3; i = i + 1) {\n  for (let j = 0; j < 3; j = j + 1) {\n    if (j === 1) continue outer;\n    out = out + i + j;\n  }\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "001020"}
+    },
+    {
+      "id": "chained-labels-target-the-same-loop",
+      "covers": ["chained-labels", "labeled-break", "labeled-continue"],
+      "body": "let out = \"\";\nlet i = 0;\nouter: inner: while (i < 4) {\n  i = i + 1;\n  if (i === 1) { out = out + \"c\"; continue inner; }\n  if (i === 3) { out = out + \"b\"; break outer; }\n  out = out + i;\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "c2b"}
+    },
+    {
+      "id": "generic-label-closes-captured-scope",
+      "covers": ["generic-labeled-break", "captures"],
+      "body": "let saved;\ntarget: {\n  let current = \"captured\";\n  saved = function capture() { return current; };\n  break target;\n  current = \"wrong\";\n}\nreturn saved();",
+      "expect": {"kind": "string", "value": "captured"}
+    },
+    {
+      "id": "directly-labeled-switch-break",
+      "covers": ["labeled-switch"],
+      "body": "let out = \"\";\ntarget: switch (2) {\n  case 1: out = \"wrong\"; break;\n  case 2: out = \"hit\"; break target;\n  default: out = \"default\";\n}\nout = out + \"!\";\nreturn out;",
+      "expect": {"kind": "string", "value": "hit!"}
+    },
+    {
+      "id": "switch-default-middle-and-fallthrough",
+      "covers": ["switch-default-middle", "switch-fallthrough"],
+      "body": "let first = \"\";\nswitch (9) {\n  case 1: first = first + \"a\"; break;\n  default: first = first + \"d\";\n  case 7: first = first + \"g\";\n  case 8: first = first + \"h\"; break;\n}\nlet second = \"\";\nswitch (7) {\n  case 1: second = second + \"a\"; break;\n  default: second = second + \"d\";\n  case 7: second = second + \"g\";\n  case 8: second = second + \"h\"; break;\n}\nreturn first + \"|\" + second;",
+      "expect": {"kind": "string", "value": "dgh|gh"}
+    },
+    {
+      "id": "switch-case-tests-stop-after-match",
+      "covers": ["switch-case-order"],
+      "body": "let out = \"\";\nfunction mark(value) { out = out + value; return value; }\nswitch (mark(\"d\")) {\n  case mark(\"a\"): out = out + \"A\"; break;\n  case mark(\"d\"): out = out + \"D\"; break;\n  case mark(\"z\"): out = out + \"Z\"; break;\n  default: out = out + \"?\";\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "dadD"}
+    },
+    {
+      "id": "switch-shared-lexical-tdz",
+      "covers": ["switch-lexical-tdz"],
+      "body": "switch (0) {\n  case 0: return hidden;\n  case 1: let hidden = 1;\n}",
+      "expect": {
+        "kind": "throw",
+        "name": "ReferenceError",
+        "message": "hidden is not initialized"
+      }
+    },
+    {
+      "id": "switch-discriminant-precedes-lexical-scope",
+      "covers": ["switch-discriminant-before-scope"],
+      "body": "let selector = 2;\nlet out = \"\";\nswitch (selector) {\n  case 2: let selector = 7; out = out + \"hit\"; break;\n  default: out = \"wrong\";\n}\nreturn out + selector;",
+      "expect": {"kind": "string", "value": "hit2"}
+    },
+    {
+      "id": "switch-without-default-and-without-match",
+      "covers": ["switch-no-match"],
+      "body": "let out = \"before\";\nswitch (9) {\n  case 1: out = \"wrong\"; break;\n  case 2: out = \"also-wrong\";\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "before"}
+    },
+    {
+      "id": "nested-loop-switch-break-and-continue",
+      "covers": ["nested-loop-switch"],
+      "body": "let out = \"\";\nfor (let i = 0; i < 4; i = i + 1) {\n  switch (i) {\n    case 0: out = out + \"a\"; continue;\n    case 1: out = out + \"b\"; break;\n    case 2: break;\n    default: out = out + \"d\";\n  }\n  out = out + \"x\";\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "abxxdx"}
+    },
+    {
+      "id": "switch-break-preserves-case-capture",
+      "covers": ["captures", "switch-fallthrough"],
+      "body": "let saved;\nswitch (2) {\n  case 1: break;\n  case 2: {\n    let captured = \"inside\";\n    saved = function capture() { return captured; };\n    break;\n  }\n}\nreturn saved();",
+      "expect": {"kind": "string", "value": "inside"}
+    }
+  ]
+}

@@ -354,6 +354,21 @@
       "difference": null
     },
     {
+      "path": "candidate-accept/script/chained-label-continue.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "accept",
+      "families": ["statements"],
+      "claims": ["statement.iteration-labels"],
+      "evidence": ["quickjs.c:28791", "quickjs.c:28225"],
+      "difference": {
+        "id": "QJS-OXC-002",
+        "direction": "frontend-accept",
+        "rationale": "Published Oxc follows ES chained-label continue semantics, while pinned QuickJS only makes the label immediately attached to a loop continuable; the Rust compiler deliberately preserves the Oxc semantic result.",
+        "regression": "candidate-accept/script/chained-label-continue.js"
+      }
+    },
+    {
       "path": "candidate-accept/script/regexp-pattern-deferred.js",
       "goal": "script",
       "quickjs": "reject",
@@ -606,6 +621,26 @@
       "families": ["bindings", "statements"],
       "claims": ["binding.collision-early-errors", "statement.lexical-placement-collisions"],
       "evidence": ["tests/test_loop.js:336-382", "quickjs.c:28370"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/chained-label-continue-block.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["statements"],
+      "claims": ["statement.iteration-labels"],
+      "evidence": ["quickjs.c:28791", "quickjs.c:28225"],
+      "difference": null
+    },
+    {
+      "path": "reject/script/chained-label-continue-switch.js",
+      "goal": "script",
+      "quickjs": "reject",
+      "frontend": "reject",
+      "families": ["statements"],
+      "claims": ["statement.iteration-labels"],
+      "evidence": ["quickjs.c:28791", "quickjs.c:28225"],
       "difference": null
     },
     {

@@ -94,6 +94,25 @@ fn quickjs_profile_failure_is_a_syntax_error() {
 }
 
 #[test]
+fn invalid_chained_continue_target_is_a_syntax_error() {
+    let compiler = OxcDynamicFunctionCompiler::new(DynamicFunctionLimits::default());
+    let error = compiler
+        .compile(source(
+            &[],
+            "outer: inner: switch (0) { case 0: continue outer; }",
+        ))
+        .expect_err("the labeled chain does not terminate in an iteration");
+
+    let DynamicFunctionCompileFailure::Syntax { message } = error else {
+        panic!("the supplemental semantic rejection must become Syntax");
+    };
+    assert_eq!(
+        message.to_utf8_lossy().expect("diagnostic UTF-8"),
+        "break/continue label not found"
+    );
+}
+
+#[test]
 fn direct_eval_remains_an_engine_rejection() {
     let compiler = OxcDynamicFunctionCompiler::new(DynamicFunctionLimits::default());
     let error = compiler

@@ -77,6 +77,179 @@ fn executes_verified_literals_arguments_locals_and_branches() {
 }
 
 #[test]
+fn labeled_loops_and_nested_switches_execute_with_the_nearest_control_target() {
+    let authority = compile(
+        "function run(limit){\
+            let current=0;\
+            let result=0;\
+            outer: while(current<limit){\
+                current++;\
+                switch(current){\
+                    case 1: result+=1; break;\
+                    case 2: result+=10; continue outer;\
+                    default: break outer;\
+                }\
+                result+=100;\
+            }\
+            return result;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context.instantiate(authority).expect("function");
+    let limit = context.number(JsNumber::from_i32(3));
+
+    let result = context
+        .call(&function, &[limit], ExecutionLimits::default())
+        .expect("labeled switch execution");
+    assert_eq!(
+        result
+            .as_number()
+            .expect("live result")
+            .map(JsNumber::as_f64),
+        Some(111.0)
+    );
+}
+
+#[test]
+fn switch_case_tests_are_lazy_and_default_in_the_middle_is_only_the_fallback() {
+    let authority = compile(
+        "function run(value){\
+            let order=0;\
+            let result=0;\
+            switch(value){\
+                case (order=order*10+1,1): result=10;\
+                default: result+=1;\
+                case (order=order*10+2,2): result+=2; break;\
+                case (order=order*10+3,3): result=30;\
+            }\
+            return order*100+result;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context.instantiate(authority).expect("function");
+
+    for (argument, expected) in [(1, 113), (2, 1_202), (3, 12_330), (9, 12_303)] {
+        let argument = context.number(JsNumber::from_i32(argument));
+        let result = context
+            .call(&function, &[argument], ExecutionLimits::default())
+            .expect("switch execution");
+        assert_eq!(
+            result
+                .as_number()
+                .expect("live result")
+                .map(JsNumber::as_f64),
+            Some(f64::from(expected))
+        );
+    }
+}
+
+#[test]
+fn directly_labeled_and_empty_switches_drop_unmatched_discriminants() {
+    let authority = compile(
+        "function run(value){\
+            let result=1;\
+            target: switch(value){\
+                case 1: result=10; break target;\
+            }\
+            switch(value){}\
+            return result+1;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context.instantiate(authority).expect("function");
+
+    for (argument, expected) in [(1, 11), (9, 2)] {
+        let argument = context.number(JsNumber::from_i32(argument));
+        let result = context
+            .call(&function, &[argument], ExecutionLimits::default())
+            .expect("directly labeled switch execution");
+        assert_eq!(
+            result
+                .as_number()
+                .expect("live result")
+                .map(JsNumber::as_f64),
+            Some(f64::from(expected))
+        );
+    }
+}
+
+#[test]
+fn switch_scope_is_tdz_initialized_before_the_first_case_test() {
+    let authority = compile(
+        "function run(value){ switch(value){ case local: let local=1; return local; } }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context.instantiate(authority).expect("function");
+    let value = context.number(JsNumber::from_i32(0));
+
+    let error = context
+        .call(&function, &[value], ExecutionLimits::default())
+        .expect_err("switch case test TDZ");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("expected JavaScript exception, got {error:?}");
+    };
+    assert_eq!(exception.kind(), Some(ExceptionKind::ReferenceError));
+    assert_eq!(
+        exception
+            .message()
+            .expect("engine message")
+            .to_utf8_lossy()
+            .expect("UTF-8 error message"),
+        "local is not initialized"
+    );
+}
+
+#[test]
+fn regular_labeled_break_preserves_a_captured_block_cell() {
+    let authority = compile(
+        "function outer(value){\"use strict\";\
+            let saved;\
+            target:{\
+                let current=value;\
+                function capture(){return current;}\
+                saved=capture;\
+                break target;\
+            }\
+            return saved;\
+        }",
+        "outer",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let outer = context.instantiate(authority).expect("outer");
+    let expected = context.number(JsNumber::from_i32(47));
+    let capture = context
+        .call(&outer, &[expected], ExecutionLimits::default())
+        .expect("capture")
+        .into_function()
+        .expect("capture function");
+
+    let result = context
+        .call(&capture, &[], ExecutionLimits::default())
+        .expect("captured cell");
+    assert_eq!(
+        result
+            .as_number()
+            .expect("live result")
+            .map(JsNumber::as_f64),
+        Some(47.0)
+    );
+}
+
+#[test]
 fn missing_arguments_are_undefined_and_extra_arguments_do_not_extend_formals() {
     let authority = compile("function identity(value){return value;}", "identity");
     let mut runtime = runtime();

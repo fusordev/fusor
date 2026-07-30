@@ -60,6 +60,15 @@ while QuickJS-compatible pattern semantics remain delegated to the future
 RegExp layer. The candidate fixture keeps that boundary visible and executable
 instead of silently treating it as parser compatibility.
 
+`QJS-OXC-002` records published Oxc accepting an ES-valid `continue` to an
+outer label in a chain that directly labels one iteration statement. Pinned
+QuickJS only treats the innermost label as continuable. The Rust compiler
+preserves Oxc's resolved semantics for complete chained-label support; the
+bounded runtime control-flow differential excludes this intentional syntax
+difference and covers the common QuickJS-compatible label surface. A narrow
+post-Oxc semantic check still rejects chains that terminate in a regular
+statement or `switch`; those are invalid `continue` targets in both engines.
+
 Strict Script fixtures run the pinned oracle with `--strict`. Async Script
 fixtures load the source and call the pinned `std.evalScript` with
 `{ async: true }`; strict+async fixtures prepend a synthetic strict directive

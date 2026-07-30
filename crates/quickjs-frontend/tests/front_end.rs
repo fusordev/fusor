@@ -169,6 +169,67 @@ fn rejects_semantic_early_errors_and_retains_diagnostic_byte_spans() {
 }
 
 #[test]
+fn rejects_chained_continue_targets_that_do_not_end_in_an_iteration() {
+    for source in [
+        "outer: inner: { continue outer; }",
+        "outer: inner: switch (0) { case 0: continue outer; }",
+    ] {
+        let allocator = Allocator::new();
+        let error = parse(&allocator, source, FrontendOptions::new(ParseMode::Script))
+            .expect_err("a chained continue target must end in an iteration");
+
+        assert_eq!(error.stage(), DiagnosticStage::Semantic, "{source}");
+        assert_eq!(error.diagnostics().len(), 1, "{source}");
+        let diagnostic = &error.diagnostics()[0];
+        assert_eq!(
+            diagnostic.code,
+            FrontendDiagnosticCode::InvalidChainedContinueTarget,
+            "{source}"
+        );
+        assert_eq!(diagnostic.message, "break/continue label not found");
+        assert_eq!(diagnostic.labels.len(), 1, "{source}");
+        let span = diagnostic.labels[0].span;
+        assert_eq!(&source[span.start as usize..span.end as usize], "outer");
+    }
+}
+
+#[test]
+fn preserves_valid_chained_continue_targets_ending_in_an_iteration() {
+    for source in [
+        "outer: inner: while (false) { continue outer; }",
+        "outer: inner: do { continue outer; } while (false);",
+        "outer: inner: for (;;) { continue outer; }",
+        "outer: inner: for (const value in object) { continue outer; }",
+        "outer: inner: for (const value of values) { continue outer; }",
+    ] {
+        let allocator = Allocator::new();
+        parse(&allocator, source, FrontendOptions::new(ParseMode::Script))
+            .expect("a chained label ending in an iteration is a valid continue target");
+    }
+}
+
+#[test]
+fn handles_many_chained_labels_and_continues_without_rewalking_each_chain() {
+    const LABEL_COUNT: usize = 1_024;
+    const CONTINUE_COUNT: usize = 2_048;
+
+    let mut source = String::with_capacity(LABEL_COUNT * 8 + CONTINUE_COUNT * 12 + 32);
+    for index in 0..LABEL_COUNT {
+        source.push('l');
+        source.push_str(&index.to_string());
+        source.push(':');
+    }
+    source.push_str("while (false) {");
+    for _ in 0..CONTINUE_COUNT {
+        source.push_str("continue l0;");
+    }
+    source.push('}');
+
+    with_parsed_program(&source, FrontendOptions::new(ParseMode::Script), |_| ())
+        .expect("large valid label chains must remain bounded frontend work");
+}
+
+#[test]
 fn compilation_goals_preserve_lossless_direct_eval_context() {
     let bindings = [DirectEvalBinding::new(
         "captured",

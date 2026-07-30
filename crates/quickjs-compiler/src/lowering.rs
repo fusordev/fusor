@@ -6,11 +6,12 @@ use oxc_ast::{
         AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement, CallExpression,
         ComputedMemberExpression, ConditionalExpression, DoWhileStatement, Expression,
         ExpressionStatement, ForStatement, ForStatementInit, Function, FunctionBody, FunctionType,
-        IdentifierReference, IfStatement, LogicalExpression, NewExpression, ObjectExpression,
-        ObjectProperty, ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind,
-        ReturnStatement, SequenceExpression, SimpleAssignmentTarget, Statement,
-        StaticMemberExpression, ThrowStatement, UnaryExpression, UpdateExpression,
-        VariableDeclaration, VariableDeclarationKind, WhileStatement,
+        IdentifierReference, IfStatement, LabelIdentifier, LabeledStatement, LogicalExpression,
+        NewExpression, ObjectExpression, ObjectProperty, ObjectPropertyKind, Program,
+        PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement, SequenceExpression,
+        SimpleAssignmentTarget, Statement, StaticMemberExpression, SwitchStatement, ThrowStatement,
+        UnaryExpression, UpdateExpression, VariableDeclaration, VariableDeclarationKind,
+        WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
@@ -19,13 +20,13 @@ use oxc_syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
 };
 use quickjs_bytecode::{
-    AssemblerError, AssemblerLabel, AssemblerLimits, AtomPoolIndex, Binary64Constant, BranchKind,
-    BytecodeAssembler, BytecodeGraphVerificationLimits, BytecodePc, BytecodeVerificationError,
-    ClosureVariableDefinition as VerifiedClosureVariableDefinition, CompilerAtom,
-    CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
-    CompilerCapturedBinding, CompilerClosureSource as CompilerGraphClosureSource,
-    CompilerConstant as CompilerGraphConstant, CompilerConstantKind, CompilerConstantLayout,
-    CompilerConstantValue, CompilerExecutableKind,
+    AssemblerError, AssemblerLabel, AssemblerLimits, AssemblerResource, AtomPoolIndex,
+    Binary64Constant, BranchKind, BytecodeAssembler, BytecodeGraphVerificationLimits, BytecodePc,
+    BytecodeVerificationError, ClosureVariableDefinition as VerifiedClosureVariableDefinition,
+    CompilerAtom, CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy,
+    CompilerCaptureLayout, CompilerCapturedBinding,
+    CompilerClosureSource as CompilerGraphClosureSource, CompilerConstant as CompilerGraphConstant,
+    CompilerConstantKind, CompilerConstantLayout, CompilerConstantValue, CompilerExecutableKind,
     CompilerInitializationPolicy as VerifiedInitializationPolicy, CompilerSource, CompilerString,
     CompilerStringError, CompilerWritePolicy as VerifiedWritePolicy, EncodeError, FinalOpcode,
     FunctionGraphVerificationError, FunctionGraphVerificationLimits, FunctionIndexDomains,
@@ -564,11 +565,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     /// supports simple local declarations, immediate primitive values,
     /// resolved argument/local reads and mutable writes, value operators
     /// including short-circuit and conditional expressions, lexical blocks,
-    /// `if`/`else`, `while`, `do`/`while`, classic `for`, unlabeled
-    /// `break`/`continue`, expression statements, and explicit or implicit
-    /// returns. A leaf may own ordinary value constants and may read or write
-    /// frame cells captured from an ancestor. The entire function is converted
-    /// to typed symbolic instructions before branch relaxation emits any bytes.
+    /// `if`/`else`, `while`, `do`/`while`, classic `for`, `switch`, labeled and
+    /// unlabeled `break`/`continue`, expression statements, and explicit or
+    /// implicit returns. A leaf may own ordinary value constants and may read
+    /// or write frame cells captured from an ancestor. The entire function is
+    /// converted to typed symbolic instructions before branch relaxation emits
+    /// any bytes.
     /// A selected static ordinary method/accessor may be staged here for
     /// inspection, but this leaf artifact is never execution authority; only
     /// [`Self::compile_tree`] on its owning parent can certify and publish the
@@ -1476,16 +1478,16 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 },
             ],
             active_scopes: Vec::new(),
-            loop_controls: Vec::new(),
+            controls: StatementControlStack::default(),
             completion: StatementCompletion::Discard,
         };
 
         while let Some(task) = state.work.pop() {
             self.process_statement_work(task, body.span, planning, flow, &mut state)?;
         }
-        if !state.active_scopes.is_empty() || !state.loop_controls.is_empty() {
+        if !state.active_scopes.is_empty() || !state.controls.is_empty() {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "statement planning closes every scope and loop region",
+                invariant: "statement planning closes every scope and control region",
                 span: Some(body.span),
             });
         }
@@ -1516,16 +1518,16 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 },
             ],
             active_scopes: Vec::new(),
-            loop_controls: Vec::new(),
+            controls: StatementControlStack::default(),
             completion: StatementCompletion::Script(completion),
         };
 
         while let Some(task) = state.work.pop() {
             self.process_statement_work(task, program.span, planning, flow, &mut state)?;
         }
-        if !state.active_scopes.is_empty() || !state.loop_controls.is_empty() {
+        if !state.active_scopes.is_empty() || !state.controls.is_empty() {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "Program planning closes every scope and loop region",
+                invariant: "Program planning closes every scope and control region",
                 span: Some(program.span),
             });
         }
@@ -1580,16 +1582,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             StatementWork::CloseScope(scope) => {
                 self.plan_scope_exit(planning.executable, scope, planning.layout, flow)?;
             }
-            StatementWork::PushLoop(control) => state.loop_controls.push(control),
-            StatementWork::PopLoop => {
-                state
-                    .loop_controls
-                    .pop()
-                    .ok_or(LeafCompilationError::SemanticInvariant {
-                        invariant: "statement loop stack is nonempty on exit",
-                        span: Some(body_span),
-                    })?;
-            }
+            StatementWork::PushControl(control) => state.controls.push(control, body_span)?,
+            StatementWork::PopControl => state.controls.pop(body_span)?,
             StatementWork::Expression(expression) => self.plan_expression(
                 expression,
                 planning.layout,
@@ -1609,6 +1603,24 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 flow.branch(kind, &target, span)?;
             }
             StatementWork::Bind(label) => flow.bind(&label)?,
+            StatementWork::SwitchDispatch {
+                statement,
+                labels,
+                next,
+            } => Self::schedule_next_switch_dispatch(statement, labels, next, &mut state.work)?,
+            StatementWork::SwitchTrampoline {
+                statement,
+                labels,
+                next,
+            } => Self::schedule_next_switch_trampoline(statement, labels, next, &mut state.work)?,
+            StatementWork::SwitchNoMatch { labels, done, span } => {
+                Self::schedule_switch_no_match(&labels, done, span, &mut state.work);
+            }
+            StatementWork::SwitchBody {
+                statement,
+                labels,
+                next,
+            } => Self::schedule_next_switch_body(statement, labels, next, &mut state.work)?,
             StatementWork::Visit(statement) => self.plan_statement(
                 statement,
                 planning.layout,
@@ -1666,6 +1678,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     flow,
                     &mut state.work,
                     state.active_scopes.len(),
+                    Vec::new(),
                 )?;
             }
             Statement::DoWhileStatement(statement) => {
@@ -1675,15 +1688,16 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     flow,
                     &mut state.work,
                     state.active_scopes.len(),
+                    Vec::new(),
                 )?;
             }
             Statement::ForStatement(statement) => {
                 Self::reset_script_completion(state.completion, statement.span, flow)?;
-                self.plan_for_statement(statement, flow, state)?;
+                self.plan_for_statement(statement, Vec::new(), flow, state)?;
             }
             Statement::BreakStatement(statement) => {
-                self.plan_loop_jump(
-                    statement.label.as_ref().map(|label| label.span),
+                self.plan_control_jump(
+                    statement.label.as_ref(),
                     statement.span,
                     LoopJump::Break,
                     state,
@@ -1692,8 +1706,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 )?;
             }
             Statement::ContinueStatement(statement) => {
-                self.plan_loop_jump(
-                    statement.label.as_ref().map(|label| label.span),
+                self.plan_control_jump(
+                    statement.label.as_ref(),
                     statement.span,
                     LoopJump::Continue,
                     state,
@@ -1702,10 +1716,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 )?;
             }
             Statement::LabeledStatement(statement) => {
-                return unsupported(
-                    UnsupportedLeafFeature::UnsupportedBody,
-                    statement.label.span,
-                );
+                self.plan_labeled_statement(statement, flow, state)?;
+            }
+            Statement::SwitchStatement(statement) => {
+                Self::reset_script_completion(state.completion, statement.span, flow)?;
+                self.plan_switch_statement(statement, Vec::new(), flow, state)?;
             }
             _ => {
                 return unsupported(UnsupportedLeafFeature::UnsupportedBody, statement.span());
@@ -1804,6 +1819,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     fn plan_for_statement<'statement>(
         &self,
         statement: &'statement ForStatement<'arena>,
+        labels: Vec<&'statement str>,
         flow: &mut PlannedControlFlow,
         state: &mut StatementPlanningState<'statement, 'arena>,
     ) -> Result<(), LeafCompilationError> {
@@ -1818,7 +1834,76 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             flow,
             &mut state.work,
             state.active_scopes.len(),
+            labels,
         )
+    }
+
+    fn plan_labeled_statement<'statement>(
+        &self,
+        statement: &'statement LabeledStatement<'arena>,
+        flow: &mut PlannedControlFlow,
+        state: &mut StatementPlanningState<'statement, 'arena>,
+    ) -> Result<(), LeafCompilationError> {
+        let mut labels = Vec::new();
+        labels
+            .try_reserve(1)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "labeled statement chain",
+            })?;
+        labels.push(statement.label.name.as_str());
+        let mut body = &statement.body;
+        while let Statement::LabeledStatement(nested) = body {
+            labels
+                .try_reserve(1)
+                .map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "labeled statement chain",
+                })?;
+            labels.push(nested.label.name.as_str());
+            body = &nested.body;
+        }
+
+        match body {
+            Statement::WhileStatement(statement) => {
+                Self::reset_script_completion(state.completion, statement.span, flow)?;
+                Self::schedule_while_statement(
+                    statement,
+                    flow,
+                    &mut state.work,
+                    state.active_scopes.len(),
+                    labels,
+                )
+            }
+            Statement::DoWhileStatement(statement) => Self::schedule_do_while_statement(
+                statement,
+                state.completion,
+                flow,
+                &mut state.work,
+                state.active_scopes.len(),
+                labels,
+            ),
+            Statement::ForStatement(statement) => {
+                Self::reset_script_completion(state.completion, statement.span, flow)?;
+                self.plan_for_statement(statement, labels, flow, state)
+            }
+            Statement::SwitchStatement(statement) => {
+                Self::reset_script_completion(state.completion, statement.span, flow)?;
+                self.plan_switch_statement(statement, labels, flow, state)
+            }
+            body => {
+                let done = flow.new_statement_label(statement.span)?;
+                let control = ControlRegion::breakable(
+                    labels,
+                    done.clone(),
+                    false,
+                    state.active_scopes.len(),
+                );
+                state.work.push(StatementWork::Bind(done));
+                state.work.push(StatementWork::PopControl);
+                state.work.push(StatementWork::Visit(body));
+                state.work.push(StatementWork::PushControl(control));
+                Ok(())
+            }
+        }
     }
 
     fn schedule_if_statement<'statement>(
@@ -1862,23 +1947,20 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         flow: &mut PlannedControlFlow,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
         scope_depth: usize,
+        labels: Vec<&'statement str>,
     ) -> Result<(), LeafCompilationError> {
         let test = flow.new_statement_label(statement.test.span())?;
         let done = flow.new_statement_label(statement.span)?;
-        let control = LoopControl {
-            break_target: done.clone(),
-            continue_target: test.clone(),
-            scope_depth,
-        };
+        let control = ControlRegion::iteration(labels, done.clone(), test.clone(), scope_depth);
         work.push(StatementWork::Bind(done.clone()));
         work.push(StatementWork::Branch {
             kind: BranchKind::Goto,
             target: test.clone(),
             span: statement.span,
         });
-        work.push(StatementWork::PopLoop);
+        work.push(StatementWork::PopControl);
         work.push(StatementWork::Visit(&statement.body));
-        work.push(StatementWork::PushLoop(control));
+        work.push(StatementWork::PushControl(control));
         work.push(StatementWork::Branch {
             kind: BranchKind::IfFalse,
             target: done,
@@ -1895,15 +1977,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         flow: &mut PlannedControlFlow,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
         scope_depth: usize,
+        labels: Vec<&'statement str>,
     ) -> Result<(), LeafCompilationError> {
         let iteration = flow.new_statement_label(statement.body.span())?;
         let test = flow.new_statement_label(statement.test.span())?;
         let done = flow.new_statement_label(statement.span)?;
-        let control = LoopControl {
-            break_target: done.clone(),
-            continue_target: test.clone(),
-            scope_depth,
-        };
+        let control = ControlRegion::iteration(labels, done.clone(), test.clone(), scope_depth);
         work.push(StatementWork::Bind(done));
         work.push(StatementWork::Branch {
             kind: BranchKind::IfTrue,
@@ -1912,9 +1991,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         });
         work.push(StatementWork::Expression(&statement.test));
         work.push(StatementWork::Bind(test));
-        work.push(StatementWork::PopLoop);
+        work.push(StatementWork::PopControl);
         work.push(StatementWork::Visit(&statement.body));
-        work.push(StatementWork::PushLoop(control));
+        work.push(StatementWork::PushControl(control));
         if let StatementCompletion::Script(slot) = completion {
             let (opcode, operands) = compact_put_local(slot);
             work.push(StatementWork::Emit(PlannedInstruction::new(
@@ -1938,6 +2017,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         flow: &mut PlannedControlFlow,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
         enclosing_scope_depth: usize,
+        labels: Vec<&'statement str>,
     ) -> Result<(), LeafCompilationError> {
         let test = flow.new_statement_label(
             statement
@@ -1958,11 +2038,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 .ok_or(LeafCompilationError::CapacityExceeded {
                     domain: "statement scope depth",
                 })?;
-        let control = LoopControl {
-            break_target: done.clone(),
-            continue_target: rotate.clone(),
-            scope_depth: loop_scope_depth,
-        };
+        let control =
+            ControlRegion::iteration(labels, done.clone(), rotate.clone(), loop_scope_depth);
 
         work.push(StatementWork::PopScope(scope));
         work.push(StatementWork::Bind(done.clone()));
@@ -1981,9 +2058,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         }
         work.push(StatementWork::CloseScope(scope));
         work.push(StatementWork::Bind(rotate));
-        work.push(StatementWork::PopLoop);
+        work.push(StatementWork::PopControl);
         work.push(StatementWork::Visit(&statement.body));
-        work.push(StatementWork::PushLoop(control));
+        work.push(StatementWork::PushControl(control));
         if let Some(test_expression) = &statement.test {
             work.push(StatementWork::Branch {
                 kind: BranchKind::IfFalse,
@@ -2018,26 +2095,345 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
-    fn plan_loop_jump(
+    fn plan_switch_statement<'statement>(
         &self,
-        label_span: Option<Span>,
+        statement: &'statement SwitchStatement<'arena>,
+        labels: Vec<&'statement str>,
+        flow: &mut PlannedControlFlow,
+        state: &mut StatementPlanningState<'statement, 'arena>,
+    ) -> Result<(), LeafCompilationError> {
+        let scope = self.created_scope(
+            statement.scope_id.get(),
+            statement.node_id.get(),
+            statement.span,
+        )?;
+        let scope_depth = state.active_scopes.len().checked_add(1).ok_or(
+            LeafCompilationError::CapacityExceeded {
+                domain: "statement scope depth",
+            },
+        )?;
+        let done = flow.new_statement_label(statement.span)?;
+        let control = ControlRegion::breakable(labels, done.clone(), true, scope_depth);
+        let switch_labels = Arc::new(Self::prepare_switch_control_labels(statement, flow)?);
+
+        state
+            .work
+            .try_reserve(10)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement work stack",
+            })?;
+        state.work.push(StatementWork::PopScope(scope));
+        state.work.push(StatementWork::Bind(done.clone()));
+        state.work.push(StatementWork::PopControl);
+        state.work.push(StatementWork::SwitchBody {
+            statement,
+            labels: Arc::clone(&switch_labels),
+            next: 0,
+        });
+        state.work.push(StatementWork::SwitchNoMatch {
+            labels: Arc::clone(&switch_labels),
+            done,
+            span: statement.span,
+        });
+        state.work.push(StatementWork::SwitchTrampoline {
+            statement,
+            labels: Arc::clone(&switch_labels),
+            next: 0,
+        });
+        state.work.push(StatementWork::SwitchDispatch {
+            statement,
+            labels: switch_labels,
+            next: 0,
+        });
+        state.work.push(StatementWork::PushControl(control));
+        state.work.push(StatementWork::PushScope {
+            scope,
+            creator: statement.node_id.get(),
+            span: statement.span,
+        });
+        state
+            .work
+            .push(StatementWork::Expression(&statement.discriminant));
+        Ok(())
+    }
+
+    fn prepare_switch_control_labels(
+        statement: &SwitchStatement<'arena>,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<SwitchControlLabels, LeafCompilationError> {
+        let mut default_index = None;
+        for (index, case) in statement.cases.iter().enumerate() {
+            if case.test.is_none() && default_index.replace(index).is_some() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "Oxc accepts at most one switch default clause",
+                    span: Some(case.span),
+                });
+            }
+        }
+        let tested_count = statement
+            .cases
+            .len()
+            .checked_sub(usize::from(default_index.is_some()))
+            .ok_or(LeafCompilationError::CapacityExceeded {
+                domain: "switch tested case count",
+            })?;
+        let scaffold_instructions = switch_scaffold_instruction_count(
+            statement.cases.len(),
+            tested_count,
+            default_index.is_some(),
+        )?;
+        flow.ensure_additional_instruction_capacity(scaffold_instructions, statement.span)?;
+
+        let mut body = Vec::new();
+        body.try_reserve_exact(statement.cases.len()).map_err(|_| {
+            LeafCompilationError::CapacityExceeded {
+                domain: "switch body labels",
+            }
+        })?;
+        let mut matched = Vec::new();
+        matched
+            .try_reserve_exact(statement.cases.len())
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "switch match labels",
+            })?;
+        for case in &statement.cases {
+            body.push(flow.new_statement_label(case.span)?);
+            matched.push(flow.new_label_with_expected_depth(case.span, Some(1))?);
+        }
+        let no_match = if default_index.is_none() {
+            Some(flow.new_label_with_expected_depth(statement.span, Some(1))?)
+        } else {
+            None
+        };
+        let fallback = match default_index {
+            Some(index) => {
+                matched
+                    .get(index)
+                    .cloned()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "switch default index names a case",
+                        span: Some(statement.span),
+                    })?
+            }
+            None => no_match
+                .clone()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "switch without a default has a no-match target",
+                    span: Some(statement.span),
+                })?,
+        };
+        Ok(SwitchControlLabels {
+            body,
+            matched,
+            fallback,
+            no_match,
+        })
+    }
+
+    fn schedule_next_switch_dispatch<'statement>(
+        statement: &'statement SwitchStatement<'arena>,
+        labels: Arc<SwitchControlLabels>,
+        mut next: usize,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        while let Some(case) = statement.cases.get(next) {
+            let index = next;
+            next = next
+                .checked_add(1)
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "switch dispatch case index",
+                })?;
+            let Some(test) = &case.test else {
+                continue;
+            };
+            let target = labels.matched.get(index).cloned().ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "every switch case has a match target",
+                    span: Some(case.span),
+                },
+            )?;
+            work.try_reserve(5)
+                .map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "statement work stack",
+                })?;
+            work.push(StatementWork::SwitchDispatch {
+                statement,
+                labels,
+                next,
+            });
+            work.push(StatementWork::Branch {
+                kind: BranchKind::IfTrue,
+                target,
+                span: test.span(),
+            });
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::StrictEq,
+                Operands::None,
+                test.span(),
+            )));
+            work.push(StatementWork::Expression(test));
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Dup,
+                Operands::None,
+                test.span(),
+            )));
+            return Ok(());
+        }
+        work.try_reserve(1)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement work stack",
+            })?;
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Goto,
+            target: labels.fallback.clone(),
+            span: statement.span,
+        });
+        Ok(())
+    }
+
+    fn schedule_next_switch_trampoline<'statement>(
+        statement: &'statement SwitchStatement<'arena>,
+        labels: Arc<SwitchControlLabels>,
+        next: usize,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let Some(case) = statement.cases.get(next) else {
+            return Ok(());
+        };
+        let match_target =
+            labels
+                .matched
+                .get(next)
+                .cloned()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "every switch case has a match trampoline",
+                    span: Some(case.span),
+                })?;
+        let body_target =
+            labels
+                .body
+                .get(next)
+                .cloned()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "every switch case has a body target",
+                    span: Some(case.span),
+                })?;
+        let next = next
+            .checked_add(1)
+            .ok_or(LeafCompilationError::CapacityExceeded {
+                domain: "switch trampoline case index",
+            })?;
+        work.try_reserve(4)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement work stack",
+            })?;
+        work.push(StatementWork::SwitchTrampoline {
+            statement,
+            labels,
+            next,
+        });
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Goto,
+            target: body_target,
+            span: case.span,
+        });
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            case.span,
+        )));
+        work.push(StatementWork::Bind(match_target));
+        Ok(())
+    }
+
+    fn schedule_switch_no_match<'statement>(
+        labels: &SwitchControlLabels,
+        done: CompilerLabel,
+        span: Span,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) {
+        let Some(no_match) = &labels.no_match else {
+            return;
+        };
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span,
+        });
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            span,
+        )));
+        work.push(StatementWork::Bind(no_match.clone()));
+    }
+
+    fn schedule_next_switch_body<'statement>(
+        statement: &'statement SwitchStatement<'arena>,
+        labels: Arc<SwitchControlLabels>,
+        next: usize,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let Some(case) = statement.cases.get(next) else {
+            return Ok(());
+        };
+        let body_target =
+            labels
+                .body
+                .get(next)
+                .cloned()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "every switch case has a body target",
+                    span: Some(case.span),
+                })?;
+        let next = next
+            .checked_add(1)
+            .ok_or(LeafCompilationError::CapacityExceeded {
+                domain: "switch body case index",
+            })?;
+        work.try_reserve(3)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement work stack",
+            })?;
+        work.push(StatementWork::SwitchBody {
+            statement,
+            labels,
+            next,
+        });
+        work.push(StatementWork::VisitList {
+            statements: &case.consequent,
+            next: 0,
+        });
+        work.push(StatementWork::Bind(body_target));
+        Ok(())
+    }
+
+    fn plan_control_jump<'statement>(
+        &self,
+        label: Option<&'statement LabelIdentifier<'arena>>,
         statement_span: Span,
         jump: LoopJump,
-        state: &StatementPlanningState<'_, '_>,
+        state: &StatementPlanningState<'statement, 'arena>,
         layout: &FrameLayout,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        if let Some(label_span) = label_span {
-            return unsupported(UnsupportedLeafFeature::UnsupportedBody, label_span);
-        }
-        let control =
-            state
-                .loop_controls
-                .last()
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: jump.missing_region_invariant(),
-                    span: Some(statement_span),
-                })?;
+        let control = state
+            .controls
+            .resolve(label.map(|label| label.name.as_str()), jump)
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: if label.is_some() {
+                    jump.missing_label_invariant()
+                } else {
+                    jump.missing_region_invariant()
+                },
+                span: Some(statement_span),
+            })?;
+        let target = jump
+            .target(control)
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: jump.invalid_labeled_target_invariant(),
+                span: Some(statement_span),
+            })?;
         if control.scope_depth > state.active_scopes.len() {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: jump.scope_invariant(),
@@ -2047,7 +2443,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         for scope in state.active_scopes[control.scope_depth..].iter().rev() {
             self.plan_scope_exit(layout.executable, *scope, layout, flow)?;
         }
-        flow.branch(BranchKind::Goto, jump.target(control), statement_span)
+        flow.branch(BranchKind::Goto, target, statement_span)
     }
 
     fn created_scope(
@@ -5095,8 +5491,8 @@ enum StatementWork<'statement, 'arena> {
     },
     PopScope(ScopeId),
     CloseScope(ScopeId),
-    PushLoop(LoopControl),
-    PopLoop,
+    PushControl(ControlRegion<'statement>),
+    PopControl,
     Declaration(&'statement VariableDeclaration<'arena>),
     Expression(&'statement Expression<'arena>),
     Emit(PlannedInstruction),
@@ -5106,12 +5502,32 @@ enum StatementWork<'statement, 'arena> {
         span: Span,
     },
     Bind(CompilerLabel),
+    SwitchDispatch {
+        statement: &'statement SwitchStatement<'arena>,
+        labels: Arc<SwitchControlLabels>,
+        next: usize,
+    },
+    SwitchTrampoline {
+        statement: &'statement SwitchStatement<'arena>,
+        labels: Arc<SwitchControlLabels>,
+        next: usize,
+    },
+    SwitchNoMatch {
+        labels: Arc<SwitchControlLabels>,
+        done: CompilerLabel,
+        span: Span,
+    },
+    SwitchBody {
+        statement: &'statement SwitchStatement<'arena>,
+        labels: Arc<SwitchControlLabels>,
+        next: usize,
+    },
 }
 
 struct StatementPlanningState<'statement, 'arena> {
     work: Vec<StatementWork<'statement, 'arena>>,
     active_scopes: Vec<ScopeId>,
-    loop_controls: Vec<LoopControl>,
+    controls: StatementControlStack<'statement>,
     completion: StatementCompletion,
 }
 
@@ -5122,10 +5538,228 @@ enum StatementCompletion {
 }
 
 #[derive(Clone)]
-struct LoopControl {
+struct ControlRegion<'statement> {
+    labels: Vec<&'statement str>,
     break_target: CompilerLabel,
-    continue_target: CompilerLabel,
+    continue_target: Option<CompilerLabel>,
+    accepts_unlabeled_break: bool,
     scope_depth: usize,
+}
+
+impl<'statement> ControlRegion<'statement> {
+    fn iteration(
+        labels: Vec<&'statement str>,
+        break_target: CompilerLabel,
+        continue_target: CompilerLabel,
+        scope_depth: usize,
+    ) -> Self {
+        Self {
+            labels,
+            break_target,
+            continue_target: Some(continue_target),
+            accepts_unlabeled_break: true,
+            scope_depth,
+        }
+    }
+
+    fn breakable(
+        labels: Vec<&'statement str>,
+        break_target: CompilerLabel,
+        accepts_unlabeled_break: bool,
+        scope_depth: usize,
+    ) -> Self {
+        Self {
+            labels,
+            break_target,
+            continue_target: None,
+            accepts_unlabeled_break,
+            scope_depth,
+        }
+    }
+}
+
+#[derive(Default)]
+struct StatementControlStack<'statement> {
+    regions: Vec<ControlRegion<'statement>>,
+    labeled: HashMap<&'statement str, usize>,
+    breakable: Vec<usize>,
+    iterations: Vec<usize>,
+}
+
+impl<'statement> StatementControlStack<'statement> {
+    #[cfg(test)]
+    fn with_control(
+        control: ControlRegion<'statement>,
+        span: Span,
+    ) -> Result<Self, LeafCompilationError> {
+        let mut controls = Self::default();
+        controls.push(control, span)?;
+        Ok(controls)
+    }
+
+    fn push(
+        &mut self,
+        control: ControlRegion<'statement>,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        let index = self.regions.len();
+        self.regions
+            .try_reserve(1)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement control regions",
+            })?;
+        self.labeled
+            .try_reserve(control.labels.len())
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement labeled control targets",
+            })?;
+        if control.accepts_unlabeled_break {
+            self.breakable
+                .try_reserve(1)
+                .map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "statement break targets",
+                })?;
+        }
+        if control.continue_target.is_some() {
+            self.iterations
+                .try_reserve(1)
+                .map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "statement continue targets",
+                })?;
+        }
+        if control
+            .labels
+            .iter()
+            .any(|label| self.labeled.contains_key(label))
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc rejects duplicate active statement labels",
+                span: Some(span),
+            });
+        }
+        for label in &control.labels {
+            if self.labeled.insert(label, index).is_some() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "Oxc rejects duplicate labels in one statement chain",
+                    span: Some(span),
+                });
+            }
+        }
+        if control.accepts_unlabeled_break {
+            self.breakable.push(index);
+        }
+        if control.continue_target.is_some() {
+            self.iterations.push(index);
+        }
+        self.regions.push(control);
+        Ok(())
+    }
+
+    fn pop(&mut self, span: Span) -> Result<(), LeafCompilationError> {
+        let index =
+            self.regions
+                .len()
+                .checked_sub(1)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "statement control-region stack is nonempty on exit",
+                    span: Some(span),
+                })?;
+        let control = self
+            .regions
+            .pop()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "statement control-region index names a region",
+                span: Some(span),
+            })?;
+        if control.accepts_unlabeled_break {
+            let actual = self
+                .breakable
+                .pop()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "statement break target stack is nonempty on exit",
+                    span: Some(span),
+                })?;
+            if actual != index {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "statement break targets exit in last-in-first-out order",
+                    span: Some(span),
+                });
+            }
+        }
+        if control.continue_target.is_some() {
+            let actual = self
+                .iterations
+                .pop()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "statement continue target stack is nonempty on exit",
+                    span: Some(span),
+                })?;
+            if actual != index {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "statement continue targets exit in last-in-first-out order",
+                    span: Some(span),
+                });
+            }
+        }
+        for label in control.labels {
+            if self.labeled.remove(label) != Some(index) {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "statement label names its active control region",
+                    span: Some(span),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve(&self, label: Option<&str>, jump: LoopJump) -> Option<&ControlRegion<'statement>> {
+        let index = match (label, jump) {
+            (Some(label), _) => self.labeled.get(label),
+            (None, LoopJump::Break) => self.breakable.last(),
+            (None, LoopJump::Continue) => self.iterations.last(),
+        }?;
+        self.regions.get(*index)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.regions.is_empty()
+            && self.labeled.is_empty()
+            && self.breakable.is_empty()
+            && self.iterations.is_empty()
+    }
+}
+
+struct SwitchControlLabels {
+    body: Vec<CompilerLabel>,
+    matched: Vec<CompilerLabel>,
+    fallback: CompilerLabel,
+    no_match: Option<CompilerLabel>,
+}
+
+fn switch_scaffold_instruction_count(
+    case_count: usize,
+    tested_count: usize,
+    has_default: bool,
+) -> Result<u64, LeafCompilationError> {
+    let cases = u64::try_from(case_count).map_err(|_| LeafCompilationError::CapacityExceeded {
+        domain: "switch scaffold instructions",
+    })?;
+    let tested =
+        u64::try_from(tested_count).map_err(|_| LeafCompilationError::CapacityExceeded {
+            domain: "switch scaffold instructions",
+        })?;
+    tested
+        .checked_mul(3)
+        .and_then(|count| {
+            cases
+                .checked_mul(2)
+                .and_then(|cases| count.checked_add(cases))
+        })
+        .and_then(|count| count.checked_add(1))
+        .and_then(|count| count.checked_add(if has_default { 0 } else { 2 }))
+        .ok_or(LeafCompilationError::CapacityExceeded {
+            domain: "switch scaffold instructions",
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -5142,6 +5776,20 @@ impl LoopJump {
         }
     }
 
+    const fn missing_label_invariant(self) -> &'static str {
+        match self {
+            Self::Break => "Oxc resolves labeled break to an enclosing statement",
+            Self::Continue => "Oxc resolves labeled continue to an enclosing iteration",
+        }
+    }
+
+    const fn invalid_labeled_target_invariant(self) -> &'static str {
+        match self {
+            Self::Break => "every labeled control region has a break target",
+            Self::Continue => "Oxc resolves labeled continue only to an iteration target",
+        }
+    }
+
     const fn scope_invariant(self) -> &'static str {
         match self {
             Self::Break => "break target scope encloses the abrupt statement",
@@ -5149,10 +5797,13 @@ impl LoopJump {
         }
     }
 
-    const fn target(self, control: &LoopControl) -> &CompilerLabel {
+    const fn target<'control>(
+        self,
+        control: &'control ControlRegion<'_>,
+    ) -> Option<&'control CompilerLabel> {
         match self {
-            Self::Break => &control.break_target,
-            Self::Continue => &control.continue_target,
+            Self::Break => Some(&control.break_target),
+            Self::Continue => control.continue_target.as_ref(),
         }
     }
 }
@@ -6665,6 +7316,7 @@ struct ResolvedStackAnchor {
 
 struct PlannedControlFlow {
     assembler: BytecodeAssembler,
+    max_instructions: u32,
     instruction_spans: Vec<Span>,
     label_spans: Vec<Span>,
     stack_anchors: Vec<StackAnchor>,
@@ -6688,6 +7340,7 @@ impl PlannedControlFlow {
         );
         Self {
             assembler: BytecodeAssembler::with_limits(assembler_limits),
+            max_instructions: limits.max_instructions_per_function(),
             instruction_spans: Vec::new(),
             label_spans: Vec::new(),
             stack_anchors: Vec::new(),
@@ -6712,6 +7365,37 @@ impl PlannedControlFlow {
         Ok(())
     }
 
+    fn ensure_additional_instruction_capacity(
+        &self,
+        additional: u64,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        let current = u64::try_from(self.instruction_spans.len()).map_err(|_| {
+            LeafCompilationError::CapacityExceeded {
+                domain: "planned instruction count",
+            }
+        })?;
+        let required =
+            current
+                .checked_add(additional)
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "planned instruction count",
+                })?;
+        let limit = u64::from(self.max_instructions);
+        if required > limit {
+            return Err(LeafCompilationError::BytecodeAssembly {
+                span: Some(span),
+                source: AssemblerError::LimitExceeded {
+                    resource: AssemblerResource::Instructions,
+                    instruction_index: self.max_instructions,
+                    limit,
+                    observed: limit + 1,
+                },
+            });
+        }
+        Ok(())
+    }
+
     fn new_label(&mut self, span: Span) -> Result<CompilerLabel, LeafCompilationError> {
         self.new_label_with_expected_depth(span, None)
     }
@@ -6725,6 +7409,11 @@ impl PlannedControlFlow {
         span: Span,
         expected_stack_depth: Option<u32>,
     ) -> Result<CompilerLabel, LeafCompilationError> {
+        self.label_spans
+            .try_reserve(1)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "label source spans",
+            })?;
         let assembler = self.assembler.new_label().map_err(|source| {
             LeafCompilationError::BytecodeAssembly {
                 span: Some(span),
@@ -6810,6 +7499,7 @@ impl PlannedControlFlow {
     fn finish(self) -> Result<FinishedControlFlow, LeafCompilationError> {
         let Self {
             assembler,
+            max_instructions: _,
             instruction_spans: spans,
             label_spans,
             stack_anchors,
@@ -7896,18 +8586,19 @@ mod tests {
                 let done = flow
                     .new_statement_label(loop_statement.span)
                     .expect("done label");
+                let controls = StatementControlStack::with_control(
+                    ControlRegion::iteration(Vec::new(), done.clone(), done.clone(), 1),
+                    loop_statement.span,
+                )
+                .expect("loop control");
                 let state = StatementPlanningState {
                     work: Vec::new(),
                     active_scopes: vec![function_scope, loop_scope, inner_scope],
-                    loop_controls: vec![LoopControl {
-                        break_target: done.clone(),
-                        continue_target: done.clone(),
-                        scope_depth: 1,
-                    }],
+                    controls,
                     completion: StatementCompletion::Discard,
                 };
                 context
-                    .plan_loop_jump(
+                    .plan_control_jump(
                         None,
                         break_statement.span,
                         LoopJump::Break,
@@ -8013,7 +8704,12 @@ mod tests {
                 let mut flow = PlannedControlFlow::new(VerificationLimits::default());
                 let mut work = Vec::new();
                 CompilationContext::schedule_for_statement(
-                    statement, scope, &mut flow, &mut work, 1,
+                    statement,
+                    scope,
+                    &mut flow,
+                    &mut work,
+                    1,
+                    Vec::new(),
                 )
                 .expect("iterative for schedule");
                 let execution = work.iter().rev().collect::<Vec<_>>();
@@ -8060,7 +8756,7 @@ mod tests {
                 let control = execution
                     .iter()
                     .find_map(|task| match task {
-                        StatementWork::PushLoop(control) => Some(control),
+                        StatementWork::PushControl(control) => Some(control),
                         _ => None,
                     })
                     .expect("loop control");
@@ -8070,7 +8766,11 @@ mod tests {
                 assert!(rotate_position < close_positions[1]);
                 assert!(close_positions[1] < update_position);
                 assert_eq!(
-                    control.continue_target.owner_span,
+                    control
+                        .continue_target
+                        .as_ref()
+                        .expect("iteration continue target")
+                        .owner_span,
                     statement.update.as_ref().expect("update").span()
                 );
                 assert_eq!(control.scope_depth, 2);
@@ -8173,26 +8873,31 @@ mod tests {
                 let mut flow = PlannedControlFlow::new(VerificationLimits::default());
                 let mut work = Vec::new();
                 CompilationContext::schedule_for_statement(
-                    statement, scope, &mut flow, &mut work, 1,
+                    statement,
+                    scope,
+                    &mut flow,
+                    &mut work,
+                    1,
+                    Vec::new(),
                 )
                 .expect("for schedule");
                 let control = work
                     .iter()
                     .find_map(|task| match task {
-                        StatementWork::PushLoop(control) => Some(control.clone()),
+                        StatementWork::PushControl(control) => Some(control.clone()),
                         _ => None,
                     })
                     .expect("loop control");
+                let continue_target = control
+                    .continue_target
+                    .as_ref()
+                    .expect("iteration continue target");
                 let test =
                     scheduled_statement_label(&work, statement.test.as_ref().expect("test").span());
                 let done = scheduled_statement_label(&work, statement.span);
 
-                flow.branch(
-                    BranchKind::Goto,
-                    &control.continue_target,
-                    continue_statement.span,
-                )
-                .expect("continue branch");
+                flow.branch(BranchKind::Goto, continue_target, continue_statement.span)
+                    .expect("continue branch");
                 flow.bind(&test).expect("test label");
                 flow.emit(PlannedInstruction::new(
                     FinalOpcode::Nop,
@@ -8202,11 +8907,11 @@ mod tests {
                 .expect("unreachable test");
                 flow.branch(
                     BranchKind::Goto,
-                    &control.continue_target,
+                    continue_target,
                     statement.test.as_ref().expect("test").span(),
                 )
                 .expect("test-to-rotation branch");
-                flow.bind(&control.continue_target).expect("rotation label");
+                flow.bind(continue_target).expect("rotation label");
                 context
                     .plan_scope_exit(executable.id(), scope, &layout, &mut flow)
                     .expect("loop-head rotation");

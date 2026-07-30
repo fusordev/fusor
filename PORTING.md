@@ -190,6 +190,23 @@ A milestone is complete only when all of its checked items pass in CI.
         terminated before verification. Compiler-owned labels retain their
         source spans, and every reachable statement anchor is independently
         checked at verified stack depth zero after branch relocation.
+  - [x] Generalize loop cleanup into iterative breakable control regions and
+        lower labeled statements plus `switch`. Chained labels follow Oxc's
+        ES semantics, including `continue` to any label in a chain directly
+        naming one iteration; this deliberately exceeds pinned QuickJS's
+        innermost-label-only limitation and is tracked as `QJS-OXC-002`.
+        A linear post-Oxc semantic pass still rejects chained `continue`
+        targets ending in a regular statement or `switch` with QuickJS's exact
+        syntax message. Active control targets use indexed lookup.
+        Switch evaluates its discriminant before its one Oxc-created lexical
+        scope, tests cases lazily in source order with strict equality, chooses
+        a middle `default` only after every test misses, and then falls through
+        source-ordered consequents. Match/no-match trampolines drop the retained
+        discriminant before every statement body, so verified statement
+        anchors remain at stack depth zero without a hidden local. Case
+        scheduling is incremental over `Arc`-shared labels and preflights its
+        guaranteed instruction scaffold before proportional allocation.
+        Labeled and unlabeled exits close every crossed captured scope.
   - [x] Add the captured-cell and classic-`for` substrate: compiler-owned
         capture layouts distinguish arguments, function-lifetime locals, and
         scoped locals; the staged verifier admits `close_loc` only for an
@@ -213,9 +230,9 @@ A milestone is complete only when all of its checked items pass in CI.
         before user code with last-declaration-wins semantics, including
         argument redeclarations; strict block declarations instantiate on
         every scope entry. All compiler traversal uses explicit iterative work
-        stacks. Labeled control, `for-in`, `for-of`, inferred
-        anonymous-function names, non-string atom namespaces, other value
-        families, and immutable-write throws remain fail-closed.
+        stacks. `for-in`, `for-of`, inferred anonymous-function names,
+        non-string atom namespaces, other value families, and immutable-write
+        throws remain fail-closed.
   - [x] Add exact binary64 Number constants to the compiler-owned heterogeneous
         pool. Number literals requiring pool storage and direct child templates
         share one immutable `Arc`-backed source-order index namespace with no

@@ -423,6 +423,34 @@ fn malformed_dynamic_source_throws_syntax_error_without_installation() {
 }
 
 #[test]
+fn invalid_chained_continue_throws_the_exact_syntax_error_without_installation() {
+    let source = "return Function('outer: inner: { continue outer; }');";
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(&mut context, &[], source);
+    let baseline = context.runtime_usage();
+
+    let error = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect_err("invalid chained continue target");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("chained continue rejection must be a JavaScript exception");
+    };
+
+    assert_eq!(exception.kind(), Some(ExceptionKind::SyntaxError));
+    assert_eq!(
+        exception
+            .message()
+            .expect("message")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "break/continue label not found"
+    );
+    assert_eq!(context.runtime_usage(), baseline);
+}
+
+#[test]
 fn directly_called_function_constructor_returns_a_javascript_syntax_error() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

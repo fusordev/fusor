@@ -2,10 +2,15 @@
 
 #![forbid(unsafe_code)]
 
+mod control_flow_differential;
 mod dynamic_function_differential;
 mod number_radix_differential;
 mod parser_differential;
 
+use control_flow_differential::{
+    CANDIDATE_WORKER_COMMAND, ControlFlowDifferentialOptions, DEFAULT_CONTROL_FLOW_CORPUS,
+    MAX_CONTROL_FLOW_TIMEOUT_MS, run_control_flow_candidate_worker, run_control_flow_differential,
+};
 use dynamic_function_differential::{
     DynamicFunctionDifferentialOptions, run_dynamic_function_differential,
 };
@@ -17,7 +22,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
@@ -70,6 +75,23 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Ok(Args::ControlFlowDifferential(options)) => {
+            match run_control_flow_differential(&options) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::FAILURE,
+                Err(error) => {
+                    eprintln!("xtask: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Ok(Args::ControlFlowCandidateWorker) => match run_control_flow_candidate_worker() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("xtask: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Err(error) => {
             eprintln!("xtask: {error}\n");
             print_usage();
@@ -86,18 +108,22 @@ Usage:
   cargo xtask parser-differential --oracle PATH [OPTIONS]
   cargo xtask dynamic-function-differential --oracle QJSC_PATH [OPTIONS]
   cargo xtask number-radix-differential --oracle QJS_PATH [OPTIONS]
+  cargo xtask control-flow-differential --oracle QJS_PATH [OPTIONS]
 
 Options:
   --corpus PATH       Corpus directory (runtime default: {DEFAULT_CORPUS};
                       parser default: {DEFAULT_PARSER_CORPUS};
                       dynamic Function default: {DEFAULT_DYNAMIC_FUNCTION_CORPUS};
-                      Number radix manifest default: {DEFAULT_NUMBER_RADIX_CORPUS})
+                      Number radix manifest default: {DEFAULT_NUMBER_RADIX_CORPUS};
+                      control-flow manifest default: {DEFAULT_CONTROL_FLOW_CORPUS})
   --timeout-ms N      Per-process timeout (default: {DEFAULT_TIMEOUT_MS})
   -h, --help          Show this help
 
 Dynamic Function --oracle must be the pinned QuickJS 2026-06-04 qjsc compiler.
 It is invoked with -c only; generated code is never compiled or executed.
 Number radix --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter.
+Control flow --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
+its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
 "
     );
 }
@@ -109,6 +135,8 @@ enum Args {
     ParserDifferential(ParserDifferentialOptions),
     DynamicFunctionDifferential(DynamicFunctionDifferentialOptions),
     NumberRadixDifferential(NumberRadixDifferentialOptions),
+    ControlFlowDifferential(ControlFlowDifferentialOptions),
+    ControlFlowCandidateWorker,
 }
 
 impl Args {
@@ -124,6 +152,13 @@ impl Args {
             return Ok(Self::Help);
         }
         let arguments = arguments.collect::<Vec<_>>();
+        if command == CANDIDATE_WORKER_COMMAND {
+            return if arguments.is_empty() {
+                Ok(Self::ControlFlowCandidateWorker)
+            } else {
+                Err("internal control-flow candidate worker accepts no arguments".to_owned())
+            };
+        }
         if arguments
             .iter()
             .any(|argument| argument == "-h" || argument == "--help")
@@ -143,6 +178,10 @@ impl Args {
             "number-radix-differential" => {
                 parse_number_radix_differential_options(arguments.into_iter())
                     .map(Self::NumberRadixDifferential)
+            }
+            "control-flow-differential" => {
+                parse_control_flow_differential_options(arguments.into_iter())
+                    .map(Self::ControlFlowDifferential)
             }
             unknown => Err(format!("unknown task `{unknown}`")),
         }
@@ -248,6 +287,41 @@ fn parse_number_radix_differential_options(
     }
 
     Ok(NumberRadixDifferentialOptions {
+        oracle: oracle.ok_or("missing required --oracle PATH")?,
+        corpus,
+        timeout,
+    })
+}
+
+fn parse_control_flow_differential_options(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<ControlFlowDifferentialOptions, String> {
+    let mut oracle = None;
+    let mut corpus = PathBuf::from(DEFAULT_CONTROL_FLOW_CORPUS);
+    let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    while let Some(option) = arguments.next() {
+        match option.to_string_lossy().as_ref() {
+            "--oracle" => oracle = Some(required_path(&mut arguments, "--oracle")?),
+            "--corpus" => corpus = required_path(&mut arguments, "--corpus")?,
+            "--timeout-ms" => {
+                timeout = required_timeout(&mut arguments)?;
+                let milliseconds = timeout.as_millis();
+                if milliseconds == 0 || milliseconds > u128::from(MAX_CONTROL_FLOW_TIMEOUT_MS) {
+                    return Err(format!(
+                        "control-flow --timeout-ms must be between 1 and {MAX_CONTROL_FLOW_TIMEOUT_MS}"
+                    ));
+                }
+            }
+            unknown => {
+                return Err(format!(
+                    "unknown control-flow-differential option `{unknown}`"
+                ));
+            }
+        }
+    }
+
+    Ok(ControlFlowDifferentialOptions {
         oracle: oracle.ok_or("missing required --oracle PATH")?,
         corpus,
         timeout,
@@ -394,7 +468,7 @@ pub(crate) fn run_program_with_arguments(
     arguments: &[&OsStr],
     timeout: Duration,
 ) -> Result<ProgramOutput, String> {
-    run_program_with_arguments_inner(executable, arguments, timeout, None)
+    run_program_with_arguments_inner(executable, arguments, None, timeout, None)
 }
 
 pub(crate) fn run_program_with_arguments_bounded(
@@ -403,23 +477,64 @@ pub(crate) fn run_program_with_arguments_bounded(
     timeout: Duration,
     max_stream_bytes: usize,
 ) -> Result<ProgramOutput, String> {
-    run_program_with_arguments_inner(executable, arguments, timeout, Some(max_stream_bytes))
+    run_program_with_arguments_inner(executable, arguments, None, timeout, Some(max_stream_bytes))
+}
+
+pub(crate) fn run_program_with_arguments_bounded_input(
+    executable: &Path,
+    arguments: &[&OsStr],
+    input: &[u8],
+    timeout: Duration,
+    max_stream_bytes: usize,
+) -> Result<ProgramOutput, String> {
+    run_program_with_arguments_inner(
+        executable,
+        arguments,
+        Some(input),
+        timeout,
+        Some(max_stream_bytes),
+    )
 }
 
 fn run_program_with_arguments_inner(
     executable: &Path,
     arguments: &[&OsStr],
+    input: Option<&[u8]>,
     timeout: Duration,
     max_stream_bytes: Option<usize>,
 ) -> Result<ProgramOutput, String> {
+    let input = if let Some(input) = input {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(input.len())
+            .map_err(|_| format!("cannot reserve {} bytes for child stdin", input.len()))?;
+        bytes.extend_from_slice(input);
+        Some(bytes)
+    } else {
+        None
+    };
+    let stdin = if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
     let mut child = Command::new(executable)
         .args(arguments)
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("failed to run {}: {error}", executable.display()))?;
 
+    let stdin_writer = if let Some(bytes) = input {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "failed to open child stdin".to_owned())?;
+        Some(thread::spawn(move || stdin.write_all(&bytes)))
+    } else {
+        None
+    };
     let stdout = child
         .stdout
         .take()
@@ -432,6 +547,14 @@ fn run_program_with_arguments_inner(
     let stderr_reader = thread::spawn(move || read_all(stderr, max_stream_bytes));
 
     let status = wait_with_timeout(&mut child, timeout)?;
+    if let Some(writer) = stdin_writer {
+        let input_result = writer
+            .join()
+            .map_err(|_| "stdin writer thread panicked".to_owned())?;
+        if status != Status::TimedOut {
+            input_result.map_err(|error| format!("failed to write child stdin: {error}"))?;
+        }
+    }
     let stdout = join_reader(stdout_reader, "stdout")?;
     let stderr = join_reader(stderr_reader, "stderr")?;
 
@@ -537,14 +660,16 @@ fn write_stream_difference(message: &mut String, name: &str, oracle: &[u8], cand
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, DifferentialOptions, Status, collect_javascript_files, read_all, wait_with_timeout,
+        Args, DifferentialOptions, Status, collect_javascript_files, read_all,
+        run_program_with_arguments_bounded_input, wait_with_timeout,
     };
+    use crate::control_flow_differential::ControlFlowDifferentialOptions;
     use crate::dynamic_function_differential::DynamicFunctionDifferentialOptions;
     use crate::number_radix_differential::NumberRadixDifferentialOptions;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::io::Cursor;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
@@ -628,6 +753,78 @@ mod tests {
     }
 
     #[test]
+    fn parses_control_flow_differential_options() {
+        let arguments = [
+            "control-flow-differential",
+            "--oracle",
+            "/tmp/qjs",
+            "--corpus",
+            "tests/control-flow/custom.json",
+            "--timeout-ms",
+            "425",
+        ]
+        .into_iter()
+        .map(OsString::from);
+
+        assert_eq!(
+            Args::parse(arguments),
+            Ok(Args::ControlFlowDifferential(
+                ControlFlowDifferentialOptions {
+                    oracle: PathBuf::from("/tmp/qjs"),
+                    corpus: PathBuf::from("tests/control-flow/custom.json"),
+                    timeout: Duration::from_millis(425),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_unbounded_control_flow_timeouts() {
+        for timeout in ["0", "60001"] {
+            let arguments = [
+                "control-flow-differential",
+                "--oracle",
+                "/tmp/qjs",
+                "--timeout-ms",
+                timeout,
+            ]
+            .into_iter()
+            .map(OsString::from);
+
+            assert_eq!(
+                Args::parse(arguments),
+                Err("control-flow --timeout-ms must be between 1 and 60000".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn parses_only_the_exact_internal_control_flow_worker_command() {
+        assert_eq!(
+            Args::parse(
+                [OsString::from(
+                    crate::control_flow_differential::CANDIDATE_WORKER_COMMAND
+                )]
+                .into_iter()
+            ),
+            Ok(Args::ControlFlowCandidateWorker)
+        );
+        for argument in ["unexpected", "--help"] {
+            assert_eq!(
+                Args::parse(
+                    [
+                        crate::control_flow_differential::CANDIDATE_WORKER_COMMAND,
+                        argument,
+                    ]
+                    .into_iter()
+                    .map(OsString::from)
+                ),
+                Err("internal control-flow candidate worker accepts no arguments".to_owned())
+            );
+        }
+    }
+
+    #[test]
     fn rejects_missing_required_options() {
         let arguments = ["differential"].into_iter().map(OsString::from);
         assert_eq!(
@@ -678,6 +875,23 @@ mod tests {
             wait_with_timeout(&mut child, Duration::from_millis(10)),
             Ok(Status::TimedOut)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_child_input_preserves_the_killable_timeout_path() {
+        let arguments = [OsStr::new("-c"), OsStr::new("while :; do :; done")];
+        let output = run_program_with_arguments_bounded_input(
+            Path::new("sh"),
+            &arguments,
+            b"return \"bounded\";",
+            Duration::from_millis(10),
+            32,
+        )
+        .expect("timed-out child with bounded input");
+        assert_eq!(output.status, Status::TimedOut);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
     }
 
     fn unique_temp_dir(label: &str) -> PathBuf {
