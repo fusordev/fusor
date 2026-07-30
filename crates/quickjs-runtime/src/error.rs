@@ -1,4 +1,4 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, sync::Arc};
 
 use quickjs_bytecode::{BytecodePc, FinalOpcode, FunctionTemplateId, SourceByteSpan};
 
@@ -133,6 +133,8 @@ pub enum RuntimeResource {
     FrameValues,
     /// Active interpreter frames.
     Frames,
+    /// Caller locations retained for one escaping JavaScript exception.
+    ExceptionFrames,
     /// A runtime-owned collection allocation.
     Collection,
     /// The deferred public-root release mailbox.
@@ -152,6 +154,7 @@ impl fmt::Display for RuntimeResource {
             Self::PublicRoots => "public roots",
             Self::FrameValues => "active frame values",
             Self::Frames => "active frames",
+            Self::ExceptionFrames => "exception stack frames",
             Self::Collection => "runtime collection",
             Self::ReleaseMailbox => "release mailbox",
         })
@@ -327,6 +330,66 @@ impl From<AtomError> for InstallError {
 pub enum ExceptionKind {
     /// A lexical binding was read or written before initialization.
     ReferenceError,
+    /// A value was used in an operation requiring another JavaScript type.
+    TypeError,
+}
+
+/// One verified caller location retained on an escaping JavaScript exception.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JsStackFrame {
+    function: FunctionTemplateId,
+    pc: BytecodePc,
+    source_name: Arc<str>,
+    source_text: Arc<str>,
+    source_span: SourceByteSpan,
+}
+
+impl JsStackFrame {
+    pub(crate) const fn new(
+        function: FunctionTemplateId,
+        pc: BytecodePc,
+        source_name: Arc<str>,
+        source_text: Arc<str>,
+        source_span: SourceByteSpan,
+    ) -> Self {
+        Self {
+            function,
+            pc,
+            source_name,
+            source_text,
+            source_span,
+        }
+    }
+
+    /// Returns the graph-local function template containing this call.
+    #[must_use]
+    pub const fn function(&self) -> FunctionTemplateId {
+        self.function
+    }
+
+    /// Returns the verified bytecode position of this call.
+    #[must_use]
+    pub const fn pc(&self) -> BytecodePc {
+        self.pc
+    }
+
+    /// Returns the retained source display name.
+    #[must_use]
+    pub fn source_name(&self) -> &str {
+        &self.source_name
+    }
+
+    /// Returns the immutable retained source artifact containing this call.
+    #[must_use]
+    pub fn source_text(&self) -> &str {
+        &self.source_text
+    }
+
+    /// Returns the exact retained call-expression span.
+    #[must_use]
+    pub const fn source_span(&self) -> SourceByteSpan {
+        self.source_span
+    }
 }
 
 /// One JavaScript abrupt completion with verified bytecode/source provenance.
@@ -336,26 +399,48 @@ pub struct JsException {
     message: JsString,
     function: FunctionTemplateId,
     pc: BytecodePc,
-    source_name: String,
+    source_name: Arc<str>,
+    source_text: Arc<str>,
     source_span: SourceByteSpan,
+    caller_frames: Vec<JsStackFrame>,
 }
 
 impl JsException {
-    pub(crate) fn reference_error(
-        message: JsString,
-        function: FunctionTemplateId,
-        pc: BytecodePc,
-        source_name: String,
-        source_span: SourceByteSpan,
-    ) -> Self {
+    pub(crate) fn reference_error(message: JsString, location: JsStackFrame) -> Self {
         Self {
             kind: ExceptionKind::ReferenceError,
             message,
-            function,
-            pc,
-            source_name,
-            source_span,
+            function: location.function,
+            pc: location.pc,
+            source_name: location.source_name,
+            source_text: location.source_text,
+            source_span: location.source_span,
+            caller_frames: Vec::new(),
         }
+    }
+
+    pub(crate) fn type_error(message: JsString, location: JsStackFrame) -> Self {
+        Self {
+            kind: ExceptionKind::TypeError,
+            message,
+            function: location.function,
+            pc: location.pc,
+            source_name: location.source_name,
+            source_text: location.source_text,
+            source_span: location.source_span,
+            caller_frames: Vec::new(),
+        }
+    }
+
+    pub(crate) fn try_reserve_caller_frames(
+        &mut self,
+        additional: usize,
+    ) -> Result<(), std::collections::TryReserveError> {
+        self.caller_frames.try_reserve_exact(additional)
+    }
+
+    pub(crate) fn push_caller_frame(&mut self, frame: JsStackFrame) {
+        self.caller_frames.push(frame);
     }
 
     /// Returns the exception category.
@@ -388,10 +473,26 @@ impl JsException {
         &self.source_name
     }
 
+    /// Returns the immutable retained source artifact containing the origin.
+    #[must_use]
+    pub fn source_text(&self) -> &str {
+        &self.source_text
+    }
+
     /// Returns the exact retained source span.
     #[must_use]
     pub const fn source_span(&self) -> SourceByteSpan {
         self.source_span
+    }
+
+    /// Returns caller call sites from the immediate caller outward.
+    ///
+    /// The exception's own location remains available through
+    /// [`Self::function`], [`Self::pc`], [`Self::source_name`],
+    /// [`Self::source_text`], and [`Self::source_span`].
+    #[must_use]
+    pub fn caller_frames(&self) -> &[JsStackFrame] {
+        &self.caller_frames
     }
 }
 
@@ -573,6 +674,7 @@ impl fmt::Display for ExecutionError {
             Self::Exception(exception) => {
                 let name = match exception.kind() {
                     ExceptionKind::ReferenceError => "ReferenceError",
+                    ExceptionKind::TypeError => "TypeError",
                 };
                 write!(
                     formatter,

@@ -3,7 +3,7 @@ use std::{collections::HashMap, error::Error, fmt, ops::Range, sync::Arc};
 use oxc_ast::{
     AstKind,
     ast::{
-        AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement,
+        AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement, CallExpression,
         ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForStatement,
         ForStatementInit, Function, FunctionBody, FunctionType, IfStatement, LogicalExpression,
         PropertyKind, ReturnStatement, SequenceExpression, SimpleAssignmentTarget, Statement,
@@ -2176,6 +2176,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         Expression::UpdateExpression(update) => {
                             self.plan_update_expression(update, layout, &mut work)?;
                         }
+                        Expression::CallExpression(call) => {
+                            Self::plan_call_expression(call, &mut work)?;
+                        }
                         Expression::FunctionExpression(function) => {
                             flow.emit(self.plan_function_closure(
                                 function,
@@ -2194,6 +2197,40 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn plan_call_expression<'expression>(
+        call: &'expression CallExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if call.optional || call.type_arguments.is_some() {
+            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, call.span);
+        }
+        if let Some(spread) = call.arguments.iter().find(|argument| argument.is_spread()) {
+            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, spread.span());
+        }
+
+        let argument_count = u16::try_from(call.arguments.len()).map_err(|_| {
+            LeafCompilationError::CapacityExceeded {
+                domain: "call arguments",
+            }
+        })?;
+        work.push(ExpressionWork::Emit(plan_direct_call(
+            argument_count,
+            call.span,
+        )));
+        for argument in call.arguments.iter().rev() {
+            let expression =
+                argument
+                    .as_expression()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "non-spread call argument is an expression",
+                        span: Some(argument.span()),
+                    })?;
+            work.push(ExpressionWork::Visit(expression));
+        }
+        work.push(ExpressionWork::Visit(&call.callee));
         Ok(())
     }
 
@@ -5119,6 +5156,17 @@ fn plan_push_integer(value: i32, span: Span) -> PlannedInstruction {
     PlannedInstruction::new(opcode, operands, span)
 }
 
+fn plan_direct_call(argument_count: u16, span: Span) -> PlannedInstruction {
+    let (opcode, operands) = match argument_count {
+        0 => (FinalOpcode::Call0, Operands::NPopX),
+        1 => (FinalOpcode::Call1, Operands::NPopX),
+        2 => (FinalOpcode::Call2, Operands::NPopX),
+        3 => (FinalOpcode::Call3, Operands::NPopX),
+        argument_count => (FinalOpcode::Call, Operands::NPop { argument_count }),
+    };
+    PlannedInstruction::new(opcode, operands, span)
+}
+
 const fn unary_opcode(operator: UnaryOperator) -> Option<FinalOpcode> {
     match operator {
         UnaryOperator::UnaryPlus => Some(FinalOpcode::Plus),
@@ -5270,8 +5318,8 @@ pub enum UnsupportedLeafFeature {
     UnsupportedBody,
     /// A declaration is not a simple `var`, `let`, or `const` binding.
     UnsupportedDeclaration,
-    /// An expression requires calls, properties, non-identifier mutation, or
-    /// another unsupported semantic family.
+    /// An expression requires method, optional, spread, or constructor calls,
+    /// properties, non-identifier mutation, or another unsupported family.
     UnsupportedExpression,
     /// A literal requires a constant, atom, `BigInt`, or `RegExp` pool entry.
     UnsupportedLiteral,

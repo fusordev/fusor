@@ -15,11 +15,13 @@ as immutable, `Arc`-backed `VerifiedBytecode`. A runtime context can
 transactionally install that authority into a same-runtime realm and host-call
 the resulting function. The admitted profile executes primitive constants,
 arguments, locals, captured cells, nested closures, TDZ checks, cell rotation,
-branches, returns, truthiness, `typeof`, strict equality, and nullish tests.
+branches, returns, direct ordinary JavaScript-to-JavaScript calls, truthiness,
+`typeof`, strict equality, and nullish tests. Nested calls and recursion use an
+explicit frame vector with cumulative frame/value ceilings and shared fuel.
 Installation scans every instruction in every template before mutation;
 BigInt, coercive numeric operations, object/dynamic operations, JavaScript
-call/construct opcodes, serialized bytecode, direct eval, and the exceptional
-typed-stack model remain deferred and fail closed.
+method/constructor/tail-call opcodes, serialized bytecode, direct eval, and the
+general exceptional typed-stack model remain deferred and fail closed.
 
 ## Contract
 

@@ -123,7 +123,7 @@ guard is used.
 
 `VerifiedBytecode` retains the staged graph, final metadata, resource usage,
 and a sorted conservative set of `ExecutionRequirement` families:
-`CoreValues`, `Numbers`, `Strings`, `BigInts`, `Closures`,
+`CoreValues`, `Numbers`, `Strings`, `BigInts`, `Closures`, `Calls`,
 `LexicalBindings`, `ObjectOperators`, and `DynamicOperators`. These are
 runtime implementation requirements, not a proof of whole-program value
 types. The immutable authority is shared through `Arc` and needs no lock.
@@ -702,7 +702,7 @@ frame-state matrix cells, and policy/capture transfer work are aggregate
 charges. Every input-proportional allocation after preflight is fallible and
 cannot silently retry with a larger profile. Final ownership moves the
 already-reserved metadata vector behind a fixed-size `Arc` header without
-copying it; only fixed-size ownership headers and the at-most-eight-entry
+copying it; only fixed-size ownership headers and the at-most-nine-entry
 execution-requirement set use bounded infallible allocation.
 
 A caller may lower the current profile. Raising it is available only through

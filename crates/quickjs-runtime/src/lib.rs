@@ -33,7 +33,7 @@ pub use atom::{
 };
 pub use error::{
     EngineFault, ExceptionKind, ExecutionError, HandleError, HandleKind, InstallError, JsException,
-    RuntimeError, RuntimeResource, ValueKind,
+    JsStackFrame, RuntimeError, RuntimeResource, ValueKind,
 };
 pub use number::JsNumber;
 pub use predefined_atoms::PredefinedAtom;

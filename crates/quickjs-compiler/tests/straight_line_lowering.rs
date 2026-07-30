@@ -412,11 +412,6 @@ fn unsupported_expression_families_fail_closed_at_the_exact_span() {
             "a.value",
         ),
         (
-            "function f(a){ return a(); }",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "a()",
-        ),
-        (
             "function f(){ return `value ${1}`; }",
             UnsupportedLeafFeature::UnsupportedLiteral,
             "`value ${1}`",

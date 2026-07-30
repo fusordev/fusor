@@ -31,8 +31,8 @@ use quickjs_bytecode::{
 };
 
 use crate::{
-    Context, EngineFault, ExecutionError, Function, HandleError, HandleKind, JsException, JsString,
-    JsValue, Runtime, RuntimeResource,
+    Context, EngineFault, ExecutionError, Function, HandleError, HandleKind, JsException,
+    JsStackFrame, JsString, JsValue, Runtime, RuntimeResource,
     ids::{BindingCellId, FunctionId, InstalledCodeId},
     runtime::{
         BindingCell, FrameBindingAddress, HeapFunction, InstalledCode, InstalledConstant,
@@ -74,17 +74,41 @@ struct Frame {
     code: InstalledCodeId,
     template: FunctionTemplateId,
     instruction: InstructionIndex,
-    arguments: Box<[FrameBinding]>,
-    locals: Box<[FrameBinding]>,
-    own_cells: Box<[Option<BindingCellId>]>,
-    own_cell_bindings: Box<[FrameBindingAddress]>,
-    environment: Box<[BindingCellId]>,
+    return_to: Option<InstructionIndex>,
+    reserved_values: u64,
+    arguments: Vec<FrameBinding>,
+    locals: Vec<FrameBinding>,
+    own_cells: Vec<Option<BindingCellId>>,
+    own_cell_bindings: Vec<FrameBindingAddress>,
+    environment: Vec<BindingCellId>,
     stack: Vec<StoredValue>,
+}
+
+#[derive(Clone, Copy)]
+struct FramePlan {
+    function: FunctionId,
+    code: InstalledCodeId,
+    template: FunctionTemplateId,
+    argument_count: usize,
+    local_count: usize,
+    stack_capacity: usize,
+    reserved_values: u64,
+    instruction: InstructionIndex,
 }
 
 enum Step {
     Continue,
+    Call {
+        function: FunctionId,
+        argument_count: usize,
+        return_to: InstructionIndex,
+    },
     Return(StoredValue),
+}
+
+enum FrameArguments<'a> {
+    Public(&'a [JsValue]),
+    Owned(Vec<StoredValue>),
 }
 
 #[derive(Clone, Copy)]
@@ -108,16 +132,17 @@ impl Context<'_> {
     /// Invokes one runtime-installed ordinary bytecode function.
     ///
     /// Execution starts only at verified instruction zero and advances only
-    /// through verified successor identities. The current host-invoked frame
-    /// and its control-flow traversal are iterative. JavaScript call/construct
-    /// opcodes remain outside this admitted profile.
+    /// through verified successor identities. Direct ordinary JavaScript calls
+    /// push runtime frames onto one explicit vector; Rust stack recursion is
+    /// never used. Method calls and constructors remain outside this profile.
     ///
     /// # Errors
     ///
     /// Rejects orphaned, foreign, or stale handles before frame mutation.
-    /// During execution it returns the admitted exact TDZ `ReferenceError`,
-    /// instruction interruption, resource/allocation failures, or internal
-    /// engine faults.
+    /// During execution it returns the admitted exact TDZ `ReferenceError` or
+    /// non-callable `TypeError`, with verified origin and caller provenance,
+    /// plus instruction interruption, resource/allocation failures, or
+    /// internal engine faults.
     pub fn call(
         &mut self,
         function: &Function,
@@ -152,59 +177,124 @@ impl Context<'_> {
             }
         }
 
-        let frame = create_frame(self.runtime, function_id, arguments)?;
-        let mut frames = Vec::new();
-        frames
-            .try_reserve_exact(1)
-            .map_err(|_| ExecutionError::AllocationFailed {
-                resource: RuntimeResource::Frames,
-                additional: 1,
-            })?;
-        frames.push(frame);
+        let plan = plan_frame(self.runtime, function_id, 0, 0)?;
+        let frame = create_frame(self.runtime, plan, FrameArguments::Public(arguments), None)?;
+        let value = execute_frames(self.runtime, frame, limits)?;
+        self.runtime.public_value(value)
+    }
+}
 
-        let mut executed = 0_u64;
-        loop {
-            if executed == limits.instruction_fuel {
-                return Err(ExecutionError::InstructionLimitExceeded {
-                    limit: limits.instruction_fuel,
-                    executed,
-                });
+fn execute_frames(
+    runtime: &mut Runtime,
+    initial: Frame,
+    limits: ExecutionLimits,
+) -> Result<StoredValue, ExecutionError> {
+    let mut active_frame_values = initial.reserved_values;
+    let mut frames = Vec::new();
+    frames
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    frames.push(initial);
+
+    let mut executed = 0_u64;
+    loop {
+        if executed == limits.instruction_fuel {
+            return Err(ExecutionError::InstructionLimitExceeded {
+                limit: limits.instruction_fuel,
+                executed,
+            });
+        }
+        let frame = frames.last_mut().ok_or(EngineFault::MissingInstruction {
+            function: FunctionTemplateId::new(0),
+            instruction: 0,
+        })?;
+        executed += 1;
+        let step = execute_one(runtime, frame);
+        let step = match step {
+            Ok(step) => step,
+            Err(ExecutionError::Exception(mut exception)) => {
+                attach_exception_callers(runtime, &frames, &mut exception)?;
+                return Err(ExecutionError::Exception(exception));
             }
-            let frame = frames.last_mut().ok_or(EngineFault::MissingInstruction {
-                function: FunctionTemplateId::new(0),
-                instruction: 0,
-            })?;
-            executed += 1;
-            match execute_one(self.runtime, frame)? {
-                Step::Continue => {}
-                Step::Return(value) => {
-                    frames.pop();
-                    if !frames.is_empty() {
-                        return Err(EngineFault::InvalidClosureEnvironment {
-                            function: FunctionTemplateId::new(0),
+            Err(error) => return Err(error),
+        };
+        match step {
+            Step::Continue => {}
+            Step::Call {
+                function,
+                argument_count,
+                return_to,
+            } => {
+                let plan = plan_frame(runtime, function, frames.len(), active_frame_values)?;
+                frames
+                    .try_reserve(1)
+                    .map_err(|_| ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::Frames,
+                        additional: 1,
+                    })?;
+                let arguments = take_direct_call_arguments(
+                    frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                        function: FunctionTemplateId::new(0),
+                        instruction: 0,
+                    })?,
+                    function,
+                    argument_count,
+                )?;
+                let child = create_frame(
+                    runtime,
+                    plan,
+                    FrameArguments::Owned(arguments),
+                    Some(return_to),
+                )?;
+                active_frame_values = active_frame_values.saturating_add(child.reserved_values);
+                frames.push(child);
+            }
+            Step::Return(value) => {
+                let finished = frames.pop().ok_or(EngineFault::MissingInstruction {
+                    function: FunctionTemplateId::new(0),
+                    instruction: 0,
+                })?;
+                active_frame_values = active_frame_values.saturating_sub(finished.reserved_values);
+                if let Some(parent) = frames.last_mut() {
+                    let return_to = finished.return_to.ok_or(EngineFault::RuntimeInvariant {
+                        message: "nested frame has no caller continuation",
+                    })?;
+                    if parent.stack.len() == parent.stack.capacity() {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "verified call result exceeds frame stack capacity",
                         }
                         .into());
                     }
-                    return self.runtime.public_value(value);
+                    parent.stack.push(value);
+                    parent.instruction = return_to;
+                    continue;
                 }
+                if finished.return_to.is_some() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "host frame has a caller continuation",
+                    }
+                    .into());
+                }
+                return Ok(value);
             }
         }
     }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "frame validation and failure-atomic allocation form one auditable boundary"
-)]
-fn create_frame(
+fn plan_frame(
     runtime: &Runtime,
     function_id: FunctionId,
-    supplied: &[JsValue],
-) -> Result<Frame, ExecutionError> {
+    active_frames: usize,
+    active_frame_values: u64,
+) -> Result<FramePlan, ExecutionError> {
+    let observed_frames = usize_to_u64(active_frames).saturating_add(1);
     check_execution_limit(
         RuntimeResource::Frames,
         u64::from(runtime.limits.max_active_frames),
-        1,
+        observed_frames,
     )?;
 
     let function = runtime
@@ -217,7 +307,6 @@ fn create_frame(
         })?;
     let code_id = function.code;
     let template_id = function.template;
-    let environment = copy_ids(&function.environment, RuntimeResource::FrameValues)?;
 
     let code = runtime
         .code
@@ -241,13 +330,13 @@ fn create_frame(
             .ok_or(EngineFault::InvalidClosureEnvironment {
                 function: template_id,
             })?;
-    if environment.len() != verified.metadata().closures().len() {
+    if function.environment.len() != verified.metadata().closures().len() {
         return Err(EngineFault::InvalidClosureEnvironment {
             function: template_id,
         }
         .into());
     }
-    for cell in environment.iter().copied() {
+    for cell in function.environment.iter().copied() {
         if !runtime.cells.contains(cell) {
             return Err(EngineFault::StaleHeapEdge {
                 edge: "closure cell",
@@ -267,50 +356,120 @@ fn create_frame(
         .checked_add(local_count)
         .and_then(|value| value.checked_add(stack_capacity))
         .map_or(u64::MAX, usize_to_u64);
+    let observed_frame_values = active_frame_values.saturating_add(frame_values);
     check_execution_limit(
         RuntimeResource::FrameValues,
         runtime.limits.max_active_frame_values,
-        frame_values,
+        observed_frame_values,
     )?;
-
-    let mut arguments = Vec::new();
-    arguments
-        .try_reserve_exact(argument_count)
-        .map_err(|_| ExecutionError::AllocationFailed {
-            resource: RuntimeResource::FrameValues,
-            additional: argument_count,
-        })?;
-    for index in 0..argument_count {
-        let value = supplied
-            .get(index)
-            .map(JsValue::stored)
-            .transpose()?
-            .map_or(StoredValue::Undefined, StoredValue::duplicate);
-        arguments.push(FrameBinding::Direct(SlotValue::Value(value)));
-    }
-
-    let mut locals = Vec::new();
-    locals
-        .try_reserve_exact(local_count)
-        .map_err(|_| ExecutionError::AllocationFailed {
-            resource: RuntimeResource::FrameValues,
-            additional: local_count,
-        })?;
-    for _ in 0..local_count {
-        locals.push(FrameBinding::Direct(SlotValue::Value(
-            StoredValue::Undefined,
-        )));
-    }
 
     let installed_index =
         usize::try_from(template_id.get()).map_err(|_| EngineFault::InvalidClosureEnvironment {
             function: template_id,
         })?;
+    if code.templates.get(installed_index).is_none() {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: template_id,
+        }
+        .into());
+    }
+    let instruction = control_flow.instruction_index_at(BytecodePc::ZERO).ok_or(
+        EngineFault::MissingInstruction {
+            function: template_id,
+            instruction: 0,
+        },
+    )?;
+
+    Ok(FramePlan {
+        function: function_id,
+        code: code_id,
+        template: template_id,
+        argument_count,
+        local_count,
+        stack_capacity,
+        reserved_values: frame_values,
+        instruction,
+    })
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "failure-atomic frame allocation and initialization remain one transaction"
+)]
+fn create_frame(
+    runtime: &Runtime,
+    plan: FramePlan,
+    supplied: FrameArguments<'_>,
+    return_to: Option<InstructionIndex>,
+) -> Result<Frame, ExecutionError> {
+    let function = runtime
+        .functions
+        .get(plan.function)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "function",
+            index: plan.function.index(),
+            generation: plan.function.generation(),
+        })?;
+    let environment = copy_ids(&function.environment, RuntimeResource::FrameValues)?;
+    let code = runtime
+        .code
+        .get(plan.code)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "installed code",
+            index: plan.code.index(),
+            generation: plan.code.generation(),
+        })?;
+
+    let mut arguments = Vec::new();
+    arguments
+        .try_reserve_exact(plan.argument_count)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: plan.argument_count,
+        })?;
+    match supplied {
+        FrameArguments::Public(supplied) => {
+            for index in 0..plan.argument_count {
+                let value = supplied
+                    .get(index)
+                    .map(JsValue::stored)
+                    .transpose()?
+                    .map_or(StoredValue::Undefined, StoredValue::duplicate);
+                arguments.push(FrameBinding::Direct(SlotValue::Value(value)));
+            }
+        }
+        FrameArguments::Owned(supplied) => {
+            let mut supplied = supplied.into_iter();
+            for _ in 0..plan.argument_count {
+                let value = supplied.next().unwrap_or(StoredValue::Undefined);
+                arguments.push(FrameBinding::Direct(SlotValue::Value(value)));
+            }
+        }
+    }
+
+    let mut locals = Vec::new();
+    locals
+        .try_reserve_exact(plan.local_count)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: plan.local_count,
+        })?;
+    for _ in 0..plan.local_count {
+        locals.push(FrameBinding::Direct(SlotValue::Value(
+            StoredValue::Undefined,
+        )));
+    }
+
+    let installed_index = usize::try_from(plan.template.get()).map_err(|_| {
+        EngineFault::InvalidClosureEnvironment {
+            function: plan.template,
+        }
+    })?;
     let installed =
         code.templates
             .get(installed_index)
             .ok_or(EngineFault::InvalidClosureEnvironment {
-                function: template_id,
+                function: plan.template,
             })?;
     let own_cell_bindings = copy_addresses(&installed.own_cell_bindings)?;
     let mut own_cells = Vec::new();
@@ -324,26 +483,22 @@ fn create_frame(
 
     let mut stack = Vec::new();
     stack
-        .try_reserve_exact(stack_capacity)
+        .try_reserve_exact(plan.stack_capacity)
         .map_err(|_| ExecutionError::AllocationFailed {
             resource: RuntimeResource::FrameValues,
-            additional: stack_capacity,
+            additional: plan.stack_capacity,
         })?;
-    let instruction = control_flow.instruction_index_at(BytecodePc::ZERO).ok_or(
-        EngineFault::MissingInstruction {
-            function: template_id,
-            instruction: 0,
-        },
-    )?;
 
     Ok(Frame {
-        function: function_id,
-        code: code_id,
-        template: template_id,
-        instruction,
-        arguments: arguments.into_boxed_slice(),
-        locals: locals.into_boxed_slice(),
-        own_cells: own_cells.into_boxed_slice(),
+        function: plan.function,
+        code: plan.code,
+        template: plan.template,
+        instruction: plan.instruction,
+        return_to,
+        reserved_values: plan.reserved_values,
+        arguments,
+        locals,
+        own_cells,
         own_cell_bindings,
         environment,
         stack,
@@ -483,6 +638,40 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
                 })?
                 .duplicate();
             frame.stack.push(value);
+        }
+        FinalOpcode::Call
+        | FinalOpcode::Call0
+        | FinalOpcode::Call1
+        | FinalOpcode::Call2
+        | FinalOpcode::Call3 => {
+            let argument_count = direct_call_argument_count(opcode, operands)?;
+            let required = argument_count.saturating_add(1);
+            if frame.stack.len() < required {
+                return Err(EngineFault::StackDepthMismatch {
+                    function: frame.template,
+                    pc: source_pc,
+                    expected: u32::try_from(required).unwrap_or(u32::MAX),
+                    actual: frame.stack.len(),
+                }
+                .into());
+            }
+            let callee_index = frame.stack.len() - required;
+            let StoredValue::Function(function) = &frame.stack[callee_index] else {
+                return Err(ExecutionError::Exception(not_callable_exception(
+                    runtime, frame, source_pc,
+                )?));
+            };
+            let return_to = verified_instruction.successors().fallthrough().ok_or(
+                EngineFault::InvalidSuccessor {
+                    function: frame.template,
+                    pc: source_pc,
+                },
+            )?;
+            return Ok(Step::Call {
+                function: *function,
+                argument_count,
+                return_to,
+            });
         }
         FinalOpcode::FClosure | FinalOpcode::FClosure8 => {
             let index = constant_index(operands).ok_or(EngineFault::MissingPoolEntry {
@@ -829,7 +1018,7 @@ fn create_closure(
         })?;
     if parent.code != frame.code
         || parent.template != frame.template
-        || parent.environment.as_ref() != frame.environment.as_ref()
+        || parent.environment.as_slice() != frame.environment.as_slice()
     {
         return Err(EngineFault::InvalidClosureEnvironment {
             function: frame.template,
@@ -1042,7 +1231,7 @@ fn create_closure(
     let Ok(function) = runtime.functions.try_insert(HeapFunction {
         code: frame.code,
         template: child,
-        environment: environment.into_boxed_slice(),
+        environment,
         public_roots: 0,
     }) else {
         rollback_new_cells(runtime, frame, &pending_cells, &new_cells);
@@ -1352,23 +1541,98 @@ fn tdz_exception(
     } else {
         JsString::from_utf8("lexical variable is not initialized")?
     };
-    let instruction_index = frame.instruction.get() as usize;
+    Ok(JsException::reference_error(
+        message,
+        instruction_location(runtime, frame, pc)?,
+    ))
+}
+
+fn not_callable_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    pc: BytecodePc,
+) -> Result<JsException, ExecutionError> {
+    Ok(JsException::type_error(
+        JsString::from_utf8("not a function")?,
+        instruction_location(runtime, frame, pc)?,
+    ))
+}
+
+fn instruction_location(
+    runtime: &Runtime,
+    frame: &Frame,
+    pc: BytecodePc,
+) -> Result<JsStackFrame, EngineFault> {
+    let function = code(runtime, frame.code)?
+        .authority
+        .function(frame.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })?;
     let mapping = function
         .metadata()
         .source()
         .mappings()
-        .get(instruction_index)
+        .get(frame.instruction.get() as usize)
         .ok_or(EngineFault::MissingPoolEntry {
             pool: "source mapping",
             index: frame.instruction.get(),
         })?;
-    Ok(JsException::reference_error(
-        message,
+    Ok(JsStackFrame::new(
         frame.template,
         pc,
-        function.metadata().source().display_name().to_owned(),
+        function.metadata().source().display_name_arc(),
+        function.metadata().source().text_arc(),
         mapping.span(),
     ))
+}
+
+fn attach_exception_callers(
+    runtime: &Runtime,
+    frames: &[Frame],
+    exception: &mut JsException,
+) -> Result<(), ExecutionError> {
+    let caller_count = frames.len().saturating_sub(1);
+    exception
+        .try_reserve_caller_frames(caller_count)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::ExceptionFrames,
+            additional: caller_count,
+        })?;
+    for caller in frames[..caller_count].iter().rev() {
+        let instruction = code(runtime, caller.code)?
+            .authority
+            .function(caller.template)
+            .and_then(|function| {
+                function
+                    .function()
+                    .control_flow()
+                    .instruction(caller.instruction)
+            })
+            .ok_or(EngineFault::MissingInstruction {
+                function: caller.template,
+                instruction: caller.instruction.get(),
+            })?;
+        if !matches!(
+            instruction.decoded().instruction().opcode(),
+            FinalOpcode::Call
+                | FinalOpcode::Call0
+                | FinalOpcode::Call1
+                | FinalOpcode::Call2
+                | FinalOpcode::Call3
+        ) {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "exception caller is not parked at a direct call",
+            }
+            .into());
+        }
+        exception.push_caller_frame(instruction_location(
+            runtime,
+            caller,
+            instruction.decoded().pc(),
+        )?);
+    }
+    Ok(())
 }
 
 fn frame_argument(frame: &Frame, index: u32) -> Result<&FrameBinding, EngineFault> {
@@ -1409,6 +1673,49 @@ fn frame_local_mut(frame: &mut Frame, index: u32) -> Result<&mut FrameBinding, E
             pool: "local",
             index,
         })
+}
+
+fn take_direct_call_arguments(
+    frame: &mut Frame,
+    expected_function: FunctionId,
+    argument_count: usize,
+) -> Result<Vec<StoredValue>, ExecutionError> {
+    let required = argument_count.saturating_add(1);
+    if frame.stack.len() < required {
+        return Err(EngineFault::StackDepthMismatch {
+            function: frame.template,
+            pc: BytecodePc::ZERO,
+            expected: u32::try_from(required).unwrap_or(u32::MAX),
+            actual: frame.stack.len(),
+        }
+        .into());
+    }
+    let mut arguments = Vec::new();
+    arguments
+        .try_reserve_exact(argument_count)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: argument_count,
+        })?;
+    for _ in 0..argument_count {
+        arguments.push(pop(frame)?);
+    }
+    arguments.reverse();
+    match pop(frame)? {
+        StoredValue::Function(actual) if actual == expected_function => Ok(arguments),
+        StoredValue::Function(_) => Err(EngineFault::RuntimeInvariant {
+            message: "parked direct-call callee changed before frame creation",
+        }
+        .into()),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_) => Err(EngineFault::RuntimeInvariant {
+            message: "validated direct-call callee changed value kind",
+        }
+        .into()),
+    }
 }
 
 fn pop(frame: &mut Frame) -> Result<StoredValue, EngineFault> {
@@ -1457,6 +1764,20 @@ fn constant_index(operands: Operands) -> Option<u32> {
         Operands::Const(index) => Some(index),
         Operands::Const8(index) => Some(u32::from(index)),
         _ => None,
+    }
+}
+
+fn direct_call_argument_count(
+    opcode: FinalOpcode,
+    operands: Operands,
+) -> Result<usize, EngineFault> {
+    match (opcode, operands) {
+        (FinalOpcode::Call, Operands::NPop { argument_count }) => Ok(usize::from(argument_count)),
+        (FinalOpcode::Call0, Operands::NPopX) => Ok(0),
+        (FinalOpcode::Call1, Operands::NPopX) => Ok(1),
+        (FinalOpcode::Call2, Operands::NPopX) => Ok(2),
+        (FinalOpcode::Call3, Operands::NPopX) => Ok(3),
+        _ => Err(EngineFault::UnsupportedDispatch { opcode }),
     }
 }
 
@@ -1554,7 +1875,7 @@ const fn implied_integer(opcode: FinalOpcode) -> Option<i32> {
 fn copy_ids(
     values: &[BindingCellId],
     resource: RuntimeResource,
-) -> Result<Box<[BindingCellId]>, ExecutionError> {
+) -> Result<Vec<BindingCellId>, ExecutionError> {
     let mut copied = Vec::new();
     copied
         .try_reserve_exact(values.len())
@@ -1563,12 +1884,12 @@ fn copy_ids(
             additional: values.len(),
         })?;
     copied.extend_from_slice(values);
-    Ok(copied.into_boxed_slice())
+    Ok(copied)
 }
 
 fn copy_addresses(
     values: &[FrameBindingAddress],
-) -> Result<Box<[FrameBindingAddress]>, ExecutionError> {
+) -> Result<Vec<FrameBindingAddress>, ExecutionError> {
     let mut copied = Vec::new();
     copied
         .try_reserve_exact(values.len())
@@ -1577,7 +1898,7 @@ fn copy_addresses(
             additional: values.len(),
         })?;
     copied.extend_from_slice(values);
-    Ok(copied.into_boxed_slice())
+    Ok(copied)
 }
 
 fn unsupported_dispatch<T>(opcode: FinalOpcode) -> Result<T, ExecutionError> {

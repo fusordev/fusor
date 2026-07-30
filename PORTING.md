@@ -274,12 +274,26 @@ A milestone is complete only when all of its checked items pass in CI.
         `typeof`, strict equality, and nullish tests across compact/full
         encodings. Frames and all traversals use explicit vectors. BigInt,
         coercive numeric operations, object/dynamic operations, and
-        JavaScript call/construct opcodes remain fail-closed.
+        JavaScript method/construct/tail-call opcodes remain fail-closed.
+  - [x] Add direct ordinary JavaScript-to-JavaScript calls end to end:
+        lowering evaluates the callee then arguments left-to-right and emits
+        `call0`–`call3` or full `call`; final authority records the explicit
+        `Calls` requirement; runtime dispatch parks callers at their verified
+        call PCs and pushes child frames onto the existing vector. Missing
+        formals become `undefined`, presently unobservable extra arguments are
+        evaluated then discarded, frame/value ceilings and instruction fuel
+        are cumulative, recursive execution never consumes the Rust stack,
+        and non-callable values throw exact `TypeError: not a function`.
+        Escaping child exceptions retain immediate-to-outer caller PCs and
+        source spans. Methods, optional/spread/apply, constructors, tail calls,
+        observable `this`/`arguments`, and direct eval remain fail-closed.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
       stack traces, iterators, and generators.
   - [x] First escaping exception path: local/captured TDZ access returns a
         structured `ReferenceError` with the exact QuickJS message, function
         template, verified bytecode PC, source name, and retained source span.
+  - [x] Direct-call failures add `TypeError: not a function`; child exceptions
+        preserve their origin and retain verified caller call-site frames.
 - [ ] Deterministic debug/line tables.
 
 ### M3 — values and object model

@@ -5,13 +5,13 @@ use quickjs_bytecode::{
     BytecodePc, BytecodeVerificationErrorKind, ClosureVariableDefinition, CompilerAtom,
     CompilerBindingKind, CompilerBindingPolicy, CompilerCaptureLayout, CompilerCapturedBinding,
     CompilerClosureSource, CompilerConstantKind, CompilerConstantLayout,
-    CompilerInitializationPolicy, CompilerSource, CompilerString, CompilerWritePolicy, FinalOpcode,
-    FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId, Operands,
-    PcSourceSpan, ScopeLink, SourceByteSpan, UnverifiedCompilerBytecodeGraph,
-    UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph,
-    UnverifiedFunctionHeader, UnverifiedFunctionMetadata, VariableDefinition, VerificationLimits,
-    VerifiedBytecode, VerifiedControlFlow, verify_compiler_bytecode_graph,
-    verify_compiler_control_flow, verify_compiler_function_graph,
+    CompilerInitializationPolicy, CompilerSource, CompilerString, CompilerWritePolicy,
+    ExecutionRequirement, FinalOpcode, FunctionGraphVerificationLimits, FunctionIndexDomains,
+    FunctionTemplateId, Operands, PcSourceSpan, ScopeLink, SourceByteSpan,
+    UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody,
+    UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader, UnverifiedFunctionMetadata,
+    VariableDefinition, VerificationLimits, VerifiedBytecode, VerifiedControlFlow,
+    verify_compiler_bytecode_graph, verify_compiler_control_flow, verify_compiler_function_graph,
 };
 
 fn atom(text: &str) -> CompilerAtom {
@@ -147,6 +147,203 @@ fn verified_single(
         single_input(instructions, atoms, variables, source),
         BytecodeGraphVerificationLimits::default(),
     )
+}
+
+#[test]
+fn final_authority_admits_only_direct_calls_and_records_the_requirement() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Call0, Operands::NPopX),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Call1, Operands::NPopX),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Call2, Operands::NPopX),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Call3, Operands::NPopX),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Call, Operands::NPop { argument_count: 4 }),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let text = "function f(argument){var local;return undefined}";
+    let mappings = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26,
+        27,
+    ]
+    .map(|pc| {
+        (
+            pc,
+            SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length")),
+        )
+    });
+    let variables = [
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(1)),
+            ScopeLink::End,
+            parameter_policy(),
+            false,
+            None,
+        ),
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(2)),
+            ScopeLink::End,
+            var_policy(),
+            false,
+            None,
+        ),
+    ];
+
+    let verified = verified_single(
+        &instructions,
+        &[atom("f"), atom("argument"), atom("local")],
+        &variables,
+        source(
+            text,
+            SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length")),
+            Some(SourceByteSpan::new(9, 10)),
+            &mappings,
+        ),
+    )
+    .expect("all direct ordinary call encodings gain final authority");
+
+    assert_eq!(
+        verified.requirements(),
+        [
+            ExecutionRequirement::CoreValues,
+            ExecutionRequirement::Strings,
+            ExecutionRequirement::Calls,
+        ]
+    );
+}
+
+#[test]
+fn final_authority_keeps_non_direct_call_families_fail_closed() {
+    assert_final_authority_rejects_call_family(
+        &[
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (
+                FinalOpcode::CallMethod,
+                Operands::NPop { argument_count: 0 },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        FinalOpcode::CallMethod,
+        &[0, 1, 2, 5],
+    );
+    assert_final_authority_rejects_call_family(
+        &[
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (
+                FinalOpcode::CallConstructor,
+                Operands::NPop { argument_count: 0 },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        FinalOpcode::CallConstructor,
+        &[0, 1, 2, 5],
+    );
+    assert_final_authority_rejects_call_family(
+        &[
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Apply, Operands::U16(0)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        FinalOpcode::Apply,
+        &[0, 1, 2, 3, 6],
+    );
+    assert_final_authority_rejects_call_family(
+        &[
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::TailCall, Operands::NPop { argument_count: 0 }),
+        ],
+        FinalOpcode::TailCall,
+        &[0, 1],
+    );
+    assert_final_authority_rejects_call_family(
+        &[
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (
+                FinalOpcode::TailCallMethod,
+                Operands::NPop { argument_count: 0 },
+            ),
+        ],
+        FinalOpcode::TailCallMethod,
+        &[0, 1, 2],
+    );
+}
+
+#[track_caller]
+fn assert_final_authority_rejects_call_family(
+    instructions: &[(FinalOpcode, Operands)],
+    rejected: FinalOpcode,
+    pcs: &[u32],
+) {
+    let text = "function f(argument){var local;return undefined}";
+    let variables = [
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(1)),
+            ScopeLink::End,
+            parameter_policy(),
+            false,
+            None,
+        ),
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(2)),
+            ScopeLink::End,
+            var_policy(),
+            false,
+            None,
+        ),
+    ];
+    let mappings = pcs
+        .iter()
+        .copied()
+        .map(|pc| {
+            (
+                pc,
+                SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length")),
+            )
+        })
+        .collect::<Vec<_>>();
+    let error = verified_single(
+        instructions,
+        &[atom("f"), atom("argument"), atom("local")],
+        &variables,
+        source(
+            text,
+            SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length")),
+            Some(SourceByteSpan::new(9, 10)),
+            &mappings,
+        ),
+    )
+    .expect_err("non-direct call families remain outside final authority");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::UnsupportedCompilerOpcode { opcode, .. }
+                if *opcode == rejected
+        ),
+        "{rejected}"
+    );
 }
 
 fn single_input(
@@ -370,11 +567,14 @@ fn complete_ordinary_metadata_grants_send_sync_execution_authority() {
         0
     );
     assert_eq!(function.metadata().variables(), variables);
-    assert_eq!(function.metadata().source().display_name(), "fixture.js");
-    assert_eq!(
-        function.metadata().source().function_source(),
-        "function f(a){let x=1;return x}"
-    );
+    let source = function.metadata().source();
+    assert_eq!(source.display_name(), "fixture.js");
+    assert_eq!(source.function_source(), "function f(a){let x=1;return x}");
+    assert!(Arc::ptr_eq(
+        &source.display_name_arc(),
+        &source.display_name_arc()
+    ));
+    assert!(Arc::ptr_eq(&source.text_arc(), &source.text_arc()));
 }
 
 #[test]
@@ -675,34 +875,6 @@ fn policy_analysis_rejects_unchecked_tdz_reads_and_noncompiler_opcodes() {
     assert!(matches!(
         error.kind(),
         BytecodeVerificationErrorKind::BindingPolicyViolation { .. }
-    ));
-
-    let error = verified_single(
-        &[
-            (FinalOpcode::Undefined, Operands::None),
-            (FinalOpcode::Call0, Operands::NPopX),
-            (FinalOpcode::Return, Operands::None),
-        ],
-        &[atom("f"), atom("a"), atom("x")],
-        &variables,
-        source(
-            "function f(a){return a()}",
-            SourceByteSpan::new(0, 25),
-            Some(SourceByteSpan::new(9, 10)),
-            &[
-                (0, SourceByteSpan::new(21, 22)),
-                (1, SourceByteSpan::new(21, 24)),
-                (2, SourceByteSpan::new(14, 24)),
-            ],
-        ),
-    )
-    .expect_err("the initial compiler profile excludes calls");
-    assert!(matches!(
-        error.kind(),
-        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
-            opcode: FinalOpcode::Call0,
-            ..
-        }
     ));
 
     let immutable_variables = [

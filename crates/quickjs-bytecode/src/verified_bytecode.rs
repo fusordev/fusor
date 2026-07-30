@@ -456,10 +456,22 @@ impl VerifiedCompilerSource {
         &self.display_name
     }
 
+    /// Clones the immutable retained display-name owner.
+    #[must_use]
+    pub fn display_name_arc(&self) -> Arc<str> {
+        Arc::clone(&self.display_name)
+    }
+
     /// Returns the complete retained source unit.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Clones the immutable retained source-text owner.
+    #[must_use]
+    pub fn text_arc(&self) -> Arc<str> {
+        Arc::clone(&self.text)
     }
 
     /// Returns the verified function byte span.
@@ -541,6 +553,8 @@ pub enum ExecutionRequirement {
     BigInts,
     /// Nested function templates and closure environments.
     Closures,
+    /// Direct ordinary JavaScript calls with an `undefined` receiver.
+    Calls,
     /// Lexical initialization, TDZ, or captured scoped locals.
     LexicalBindings,
     /// `in` or `instanceof` object semantics.
@@ -1361,10 +1375,10 @@ pub fn verify_compiler_bytecode_graph(
         })
     })?;
     let mut requirements = Vec::new();
-    requirements.try_reserve_exact(8).map_err(|_| {
+    requirements.try_reserve_exact(9).map_err(|_| {
         BytecodeVerificationError::graph(BytecodeVerificationErrorKind::AllocationFailed {
             resource: BytecodeGraphResource::VerifiedMetadata,
-            requested: 8,
+            requested: 9,
         })
     })?;
     requirements.push(ExecutionRequirement::CoreValues);
@@ -2744,6 +2758,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushTrue
             | FinalOpcode::Drop
             | FinalOpcode::Dup
+            | FinalOpcode::Call
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
             | FinalOpcode::GetLoc
@@ -2852,6 +2867,10 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetVarRef1
             | FinalOpcode::SetVarRef2
             | FinalOpcode::SetVarRef3
+            | FinalOpcode::Call0
+            | FinalOpcode::Call1
+            | FinalOpcode::Call2
+            | FinalOpcode::Call3
             | FinalOpcode::IfFalse8
             | FinalOpcode::IfTrue8
             | FinalOpcode::Goto8
@@ -3583,6 +3602,13 @@ fn collect_requirements(
     }
     for instruction in function.control_flow().instructions() {
         match instruction.decoded().instruction().opcode() {
+            FinalOpcode::Call
+            | FinalOpcode::Call0
+            | FinalOpcode::Call1
+            | FinalOpcode::Call2
+            | FinalOpcode::Call3 => {
+                push_requirement(requirements, ExecutionRequirement::Calls);
+            }
             FinalOpcode::PushBigIntI32 => {
                 push_requirement(requirements, ExecutionRequirement::BigInts);
             }

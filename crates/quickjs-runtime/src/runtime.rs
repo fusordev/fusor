@@ -288,22 +288,22 @@ pub(crate) enum InstalledConstant {
 }
 
 pub(crate) struct InstalledTemplate {
-    pub(crate) atoms: Box<[Atom]>,
-    pub(crate) constants: Box<[InstalledConstant]>,
-    pub(crate) own_cell_bindings: Box<[FrameBindingAddress]>,
+    pub(crate) atoms: Vec<Atom>,
+    pub(crate) constants: Vec<InstalledConstant>,
+    pub(crate) own_cell_bindings: Vec<FrameBindingAddress>,
 }
 
 pub(crate) struct InstalledCode {
     pub(crate) authority: Arc<VerifiedBytecode>,
     pub(crate) realm: RealmId,
-    pub(crate) templates: Box<[InstalledTemplate]>,
+    pub(crate) templates: Vec<InstalledTemplate>,
     pub(crate) live_functions: u64,
 }
 
 pub(crate) struct HeapFunction {
     pub(crate) code: InstalledCodeId,
     pub(crate) template: FunctionTemplateId,
-    pub(crate) environment: Box<[BindingCellId]>,
+    pub(crate) environment: Vec<BindingCellId>,
     pub(crate) public_roots: u32,
 }
 
@@ -785,7 +785,7 @@ impl Runtime {
                 .variable_reference_count();
             let bindings =
                 if capture_count == 0 {
-                    Box::new([]) as Box<[FrameBindingAddress]>
+                    Vec::new()
                 } else {
                     let layout = capture_layout.ok_or(InstallError::AuthorityInvariant {
                         message: "captured bindings have no compiler capture layout",
@@ -808,7 +808,7 @@ impl Runtime {
                             }
                         },
                     ));
-                    bindings.into_boxed_slice()
+                    bindings
                 };
             if bindings.len() != capture_count as usize {
                 return Err(InstallError::AuthorityInvariant {
@@ -817,8 +817,8 @@ impl Runtime {
             }
 
             templates.push(InstalledTemplate {
-                atoms: atoms.into_boxed_slice(),
-                constants: constants.into_boxed_slice(),
+                atoms,
+                constants,
                 own_cell_bindings: bindings,
             });
         }
@@ -1004,7 +1004,7 @@ impl Context<'_> {
         let Ok(code) = self.runtime.code.try_insert(InstalledCode {
             authority,
             realm: self.realm,
-            templates: templates.into_boxed_slice(),
+            templates,
             live_functions: 1,
         }) else {
             self.runtime.mailbox.cancel_reserved_root();
@@ -1017,7 +1017,7 @@ impl Context<'_> {
         let Ok(root) = self.runtime.functions.try_insert(HeapFunction {
             code,
             template: root_template,
-            environment: Box::new([]),
+            environment: Vec::new(),
             public_roots: 1,
         }) else {
             let removed = self.runtime.code.remove(code);
@@ -1081,6 +1081,10 @@ fn preflight_opcodes(authority: &VerifiedBytecode) -> Result<(), InstallError> {
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "whole-graph capability admission remains one exhaustive opcode audit"
+)]
 const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
     matches!(
         opcode,
@@ -1094,6 +1098,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushTrue
             | FinalOpcode::Drop
             | FinalOpcode::Dup
+            | FinalOpcode::Call
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
             | FinalOpcode::GetLoc
@@ -1174,6 +1179,10 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetVarRef1
             | FinalOpcode::SetVarRef2
             | FinalOpcode::SetVarRef3
+            | FinalOpcode::Call0
+            | FinalOpcode::Call1
+            | FinalOpcode::Call2
+            | FinalOpcode::Call3
             | FinalOpcode::IfFalse8
             | FinalOpcode::IfTrue8
             | FinalOpcode::Goto8
