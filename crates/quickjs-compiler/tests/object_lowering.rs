@@ -733,25 +733,160 @@ fn strict_direct_call_remains_receiverless() {
 }
 
 #[test]
+fn computed_member_reads_and_simple_assignments_use_quickjs_stack_shapes() {
+    let source = "function access(object,key,value){object[key]=value;return object[key];}";
+    let compiled = compile(source, "access");
+
+    assert_eq!(
+        instructions(&compiled),
+        [
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::GetArg1, Operands::NoneArg),
+            (FinalOpcode::GetArg2, Operands::NoneArg),
+            (FinalOpcode::Insert3, Operands::None),
+            (FinalOpcode::PutArrayEl, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::GetArg1, Operands::NoneArg),
+            (FinalOpcode::GetArrayEl, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 4);
+
+    let computed_operations = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                instruction.decoded().instruction().opcode(),
+                FinalOpcode::PutArrayEl | FinalOpcode::GetArrayEl
+            )
+        })
+        .map(|instruction| source_slice_at(&compiled, source, instruction.decoded().pc()))
+        .collect::<Vec<_>>();
+    assert_eq!(computed_operations, ["object[key]", "object[key]"]);
+}
+
+#[test]
+fn computed_data_properties_convert_keys_before_values_and_keep_proto_ordinary() {
+    let source = r#"function make(key,value){return {[key]:value,["__proto__"]:1};}"#;
+    let compiled = compile(source, "make");
+
+    assert_eq!(
+        instructions(&compiled),
+        [
+            (FinalOpcode::Object, Operands::None),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::ToPropKey, Operands::None),
+            (FinalOpcode::GetArg1, Operands::NoneArg),
+            (FinalOpcode::DefineArrayEl, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (
+                FinalOpcode::PushAtomValue,
+                Operands::Atom(AtomPoolIndex::new(0)),
+            ),
+            (FinalOpcode::ToPropKey, Operands::None),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::DefineArrayEl, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(
+        atom_code_units(&compiled, 0),
+        "__proto__".encode_utf16().collect::<Vec<_>>()
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 3);
+}
+
+#[test]
+fn computed_data_key_anchor_survives_complex_rhs_control_flow_and_assignment_shuffles() {
+    let source = "function make(key,condition,target,other,one,two){\
+        return {[key]:condition?(target[other]=one):(target[other]=two)};\
+    }";
+    let tree = compile_tree(source, "make");
+    let opcodes = tree_instructions(tree.root())
+        .into_iter()
+        .map(|(opcode, _)| opcode)
+        .collect::<Vec<_>>();
+
+    let key_conversion = opcodes
+        .iter()
+        .position(|opcode| *opcode == FinalOpcode::ToPropKey)
+        .expect("computed key conversion");
+    let branch = opcodes
+        .iter()
+        .position(|opcode| matches!(opcode, FinalOpcode::IfFalse | FinalOpcode::IfFalse8))
+        .expect("conditional RHS branch");
+    let definition = opcodes
+        .iter()
+        .position(|opcode| *opcode == FinalOpcode::DefineArrayEl)
+        .expect("computed data definition");
+
+    assert!(key_conversion < branch);
+    assert!(branch < definition);
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|opcode| **opcode == FinalOpcode::Insert3)
+            .count(),
+        2
+    );
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|opcode| **opcode == FinalOpcode::PutArrayEl)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn computed_methods_getters_and_setters_use_typed_computed_definitions() {
+    let source = "function make(key){return {\
+        [key](){return 1;},\
+        get [key](){return 2;},\
+        set [key](value){}\
+    };}";
+    let tree = compile_tree(source, "make");
+    let root = tree.root();
+
+    assert_eq!(
+        tree_instructions(root),
+        [
+            (FinalOpcode::Object, Operands::None),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (FinalOpcode::DefineMethodComputed, Operands::U8(4)),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::FClosure8, Operands::Const8(1)),
+            (FinalOpcode::DefineMethodComputed, Operands::U8(5)),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::FClosure8, Operands::Const8(2)),
+            (FinalOpcode::DefineMethodComputed, Operands::U8(6)),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(root.control_flow().computed_stack_size(), 3);
+}
+
+#[test]
 fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
     let cases = [
         (
-            "function make(key,value){return {[key]:value};}",
+            "function make(object,key){return object?.[key];}",
             UnsupportedLeafFeature::UnsupportedExpression,
             "key",
         ),
         (
-            "function make(object,key){return object[key];}",
+            "function make(object,key,value){return object[key]+=value;}",
             UnsupportedLeafFeature::UnsupportedExpression,
             "key",
         ),
         (
-            "function make(object,key,value){return object[key]=value;}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "key",
-        ),
-        (
-            "function make(object,key){return object[key]();}",
+            "function make(object,key,value){return object[key]&&=value;}",
             UnsupportedLeafFeature::UnsupportedExpression,
             "key",
         ),
@@ -761,14 +896,19 @@ fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
             "...value",
         ),
         (
-            "function make(){return {[\"method\"](){return 1;}};}",
+            "function make(object,key){return object[key]++;}",
             UnsupportedLeafFeature::UnsupportedExpression,
-            "\"method\"",
+            "key",
         ),
         (
-            "function make(){return {[1](){return 1;}};}",
+            "function make(object,key){return delete object[key];}",
             UnsupportedLeafFeature::UnsupportedExpression,
-            "1",
+            "object[key]",
+        ),
+        (
+            "function make(key){return {[key]:function(){}};}",
+            UnsupportedLeafFeature::InferredFunctionName,
+            "function(){}",
         ),
         (
             "function make(){return {async \"method\"(){return 1;}};}",
@@ -834,4 +974,22 @@ fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
             "expected diagnostic span containing {expected_fragment:?}, found {highlighted:?}: {source}"
         );
     }
+}
+
+#[test]
+fn anonymous_class_computed_data_properties_remain_fail_closed_before_lowering() {
+    let source = "function make(key){return {[key]:class {}};}";
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let Err(CompilerError::Unsupported { feature, span }) = CompilationContext::new(unit)
+            else {
+                panic!("anonymous computed class data must remain fail closed");
+            };
+            assert_eq!(feature, UnsupportedFeature::ClassSyntheticSlots);
+            assert_eq!(&source[span.start as usize..span.end as usize], "class {}");
+        },
+    )
+    .expect("front-end acceptance");
 }

@@ -696,6 +696,8 @@ pub enum ExecutionRequirement {
     Closures,
     /// Ordinary objects, static property access, and own data properties.
     OrdinaryObjects,
+    /// Runtime conversion and lookup of computed property keys.
+    DynamicPropertyKeys,
     /// Ordinary JavaScript calls, including receiver-aware method calls.
     Calls,
     /// Explicit JavaScript abrupt completions.
@@ -1406,6 +1408,12 @@ pub enum BytecodeVerificationErrorKind {
         /// Final bytecode position of `define_method`.
         pc: BytecodePc,
     },
+    /// `define_array_el` did not receive a key converted by `to_propkey`
+    /// before its value was evaluated on the same fresh object literal.
+    DefineArrayElementKeyMismatch {
+        /// Final bytecode position of `define_array_el`.
+        pc: BytecodePc,
+    },
     /// An ordinary-method template closure is not consumed by its one
     /// compiler-shaped `define_method` site.
     OrdinaryMethodTemplatePlacementMismatch {
@@ -1649,6 +1657,10 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::DefineMethodTargetMismatch { pc } => write!(
                 formatter,
                 "define_method at PC {pc} does not target one fresh object literal"
+            ),
+            Self::DefineArrayElementKeyMismatch { pc } => write!(
+                formatter,
+                "define_array_el at PC {pc} does not use a key converted before its value on one fresh object literal"
             ),
             Self::OrdinaryMethodTemplatePlacementMismatch { pc, child } => write!(
                 formatter,
@@ -3501,7 +3513,7 @@ fn verify_method_definitions(
         for (index, verified) in instructions.iter().enumerate() {
             let decoded = verified.decoded();
             let instruction = decoded.instruction();
-            if instruction.opcode() == FinalOpcode::DefineMethod
+            if is_method_definition_opcode(instruction.opcode())
                 && method_definition_pair(
                     graph,
                     parent,
@@ -3570,9 +3582,14 @@ fn verify_method_definitions(
             *count = count.saturating_add(1);
         }
         if instructions.iter().any(|instruction| {
-            instruction.decoded().instruction().opcode() == FinalOpcode::DefineMethod
+            matches!(
+                instruction.decoded().instruction().opcode(),
+                FinalOpcode::DefineMethod
+                    | FinalOpcode::DefineMethodComputed
+                    | FinalOpcode::DefineArrayEl
+            )
         }) {
-            verify_method_target_provenance(parent_id, parent, limits, usage)?;
+            verify_object_definition_provenance(parent_id, parent, limits, usage)?;
         }
     }
 
@@ -3604,10 +3621,12 @@ fn method_definition_pair(
 ) -> Option<(FunctionTemplateId, u8)> {
     let definition = instructions.get(definition_index)?;
     let definition_instruction = definition.decoded().instruction();
-    let (FinalOpcode::DefineMethod, Operands::AtomU8 { value: flags, .. }) = (
+    let ((FinalOpcode::DefineMethod, Operands::AtomU8 { value: flags, .. })
+    | (FinalOpcode::DefineMethodComputed, Operands::U8(flags))) = (
         definition_instruction.opcode(),
         definition_instruction.operands(),
-    ) else {
+    )
+    else {
         return None;
     };
     if !(4..=6).contains(&flags) || predecessor_counts.get(definition_index) != Some(&1) {
@@ -3645,17 +3664,25 @@ fn method_definition_pair(
     Some((*child, flags))
 }
 
+const fn is_method_definition_opcode(opcode: FinalOpcode) -> bool {
+    matches!(
+        opcode,
+        FinalOpcode::DefineMethod | FinalOpcode::DefineMethodComputed
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MethodObjectProvenance {
+enum ObjectDefinitionProvenance {
     Unknown,
     FreshObject(u32),
+    ConvertedPropertyKey(u32),
 }
 
 #[allow(
     clippy::too_many_lines,
     reason = "the bounded CFG worklist and exact operand-stack transfer form one fresh-object certificate"
 )]
-fn verify_method_target_provenance(
+fn verify_object_definition_provenance(
     id: FunctionTemplateId,
     function: &VerifiedCompilerFunction,
     limits: BytecodeGraphVerificationLimits,
@@ -3665,7 +3692,7 @@ fn verify_method_target_provenance(
     let mut entries = try_filled_vec(
         id,
         instructions.len(),
-        None::<Vec<MethodObjectProvenance>>,
+        None::<Vec<ObjectDefinitionProvenance>>,
         BytecodeGraphResource::FrameStateEntries,
     )?;
     let mut queued = try_filled_vec(
@@ -3706,7 +3733,7 @@ fn verify_method_target_provenance(
         queued[index] = false;
         let entry = entries[index]
             .as_deref()
-            .ok_or_else(|| method_target_error(id, instructions[index].decoded().pc()))?;
+            .ok_or_else(|| object_definition_error(id, instructions[index].decoded().pc()))?;
         charge_policy_transfers(
             id,
             &mut evaluations,
@@ -3716,15 +3743,39 @@ fn verify_method_target_provenance(
         )?;
         let mut state = try_copy_slice(id, entry, BytecodeGraphResource::FrameStateEntries)?;
         let decoded = instructions[index].decoded();
-        if decoded.instruction().opcode() == FinalOpcode::DefineMethod
-            && !matches!(
-                state.get(state.len().saturating_sub(2)),
-                Some(MethodObjectProvenance::FreshObject(_))
-            )
-        {
-            return Err(method_target_error(id, decoded.pc()));
+        match decoded.instruction().opcode() {
+            FinalOpcode::DefineMethod
+                if !matches!(
+                    state.get(state.len().saturating_sub(2)),
+                    Some(ObjectDefinitionProvenance::FreshObject(_))
+                ) =>
+            {
+                return Err(method_target_error(id, decoded.pc()));
+            }
+            FinalOpcode::DefineMethodComputed
+                if !matches!(
+                    state.get(state.len().saturating_sub(3)),
+                    Some(ObjectDefinitionProvenance::FreshObject(_))
+                ) =>
+            {
+                return Err(method_target_error(id, decoded.pc()));
+            }
+            FinalOpcode::DefineArrayEl => {
+                let object = state.get(state.len().saturating_sub(3));
+                let key = state.get(state.len().saturating_sub(2));
+                if !matches!(
+                    (object, key),
+                    (
+                        Some(ObjectDefinitionProvenance::FreshObject(object_site)),
+                        Some(ObjectDefinitionProvenance::ConvertedPropertyKey(key_site))
+                    ) if object_site == key_site
+                ) {
+                    return Err(define_array_element_key_error(id, decoded.pc()));
+                }
+            }
+            _ => {}
         }
-        if !transfer_method_object_provenance(id, index, decoded, &mut state)? {
+        if !transfer_object_definition_provenance(id, index, decoded, &mut state)? {
             continue;
         }
 
@@ -3744,7 +3795,7 @@ fn verify_method_target_provenance(
                 usage.policy_transfers,
                 limits.max_policy_transfers,
             )?;
-            propagate_method_object_provenance(
+            propagate_object_definition_provenance(
                 id,
                 decoded.pc(),
                 successor,
@@ -3765,16 +3816,16 @@ fn verify_method_target_provenance(
     )
 }
 
-fn transfer_method_object_provenance(
+fn transfer_object_definition_provenance(
     id: FunctionTemplateId,
     instruction_index: usize,
     decoded: crate::DecodedInstruction,
-    state: &mut Vec<MethodObjectProvenance>,
+    state: &mut Vec<ObjectDefinitionProvenance>,
 ) -> Result<bool, BytecodeVerificationError> {
     let instruction = decoded.instruction();
     let effect = instruction
         .stack_effect()
-        .map_err(|_| method_target_error(id, decoded.pc()))?;
+        .map_err(|_| object_definition_error(id, decoded.pc()))?;
     let pops = effect.pops() as usize;
     let pushes = effect.pushes() as usize;
     if state.len() < pops {
@@ -3784,7 +3835,7 @@ fn transfer_method_object_provenance(
         .len()
         .checked_sub(pops)
         .and_then(|length| length.checked_add(pushes))
-        .ok_or_else(|| method_target_error(id, decoded.pc()))?;
+        .ok_or_else(|| object_definition_error(id, decoded.pc()))?;
     if output_len > state.len() {
         let additional = output_len - state.len();
         state.try_reserve(additional).map_err(|_| {
@@ -3799,49 +3850,107 @@ fn transfer_method_object_provenance(
     }
 
     match instruction.opcode() {
-        FinalOpcode::Object => state.push(MethodObjectProvenance::FreshObject(usize_to_u32(
+        FinalOpcode::Object => state.push(ObjectDefinitionProvenance::FreshObject(usize_to_u32(
             instruction_index,
         ))),
         FinalOpcode::Dup => {
             let value = *state
                 .last()
-                .ok_or_else(|| method_target_error(id, decoded.pc()))?;
-            state.push(value);
+                .ok_or_else(|| object_definition_error(id, decoded.pc()))?;
+            state.push(shuffled_object_definition_provenance(value));
         }
         FinalOpcode::Insert2 => {
             let left_index = state.len() - 2;
-            let left = state[left_index];
-            let right = state[left_index + 1];
+            let left = shuffled_object_definition_provenance(state[left_index]);
+            let right = shuffled_object_definition_provenance(state[left_index + 1]);
             state[left_index] = right;
             state[left_index + 1] = left;
             state.push(right);
         }
-        FinalOpcode::GetField2 => {
-            state.push(MethodObjectProvenance::Unknown);
+        FinalOpcode::Insert3 => {
+            let first_index = state.len() - 3;
+            let first = shuffled_object_definition_provenance(state[first_index]);
+            let second = shuffled_object_definition_provenance(state[first_index + 1]);
+            let third = shuffled_object_definition_provenance(state[first_index + 2]);
+            state[first_index] = third;
+            state[first_index + 1] = first;
+            state[first_index + 2] = second;
+            state.push(third);
         }
+        FinalOpcode::GetField2 => {
+            state.push(ObjectDefinitionProvenance::Unknown);
+        }
+        FinalOpcode::GetArrayEl2 => {
+            let base = state[state.len() - 2];
+            state.truncate(state.len() - 2);
+            state.push(base);
+            state.push(ObjectDefinitionProvenance::Unknown);
+        }
+        FinalOpcode::ToPropKey => convert_property_key_provenance(state),
         FinalOpcode::DefineField | FinalOpcode::DefineMethod => {
             let base = state[state.len() - 2];
             state.truncate(state.len() - 2);
             state.push(base);
         }
+        FinalOpcode::DefineArrayEl => {
+            let base = state[state.len() - 3];
+            let key = state[state.len() - 2];
+            state.truncate(state.len() - 3);
+            state.push(base);
+            state.push(key);
+        }
+        FinalOpcode::DefineMethodComputed => {
+            let base = state[state.len() - 3];
+            state.truncate(state.len() - 3);
+            state.push(base);
+        }
         _ => {
             state.truncate(state.len() - pops);
-            state.resize(output_len, MethodObjectProvenance::Unknown);
+            state.resize(output_len, ObjectDefinitionProvenance::Unknown);
         }
     }
     if state.len() != output_len {
-        return Err(method_target_error(id, decoded.pc()));
+        return Err(object_definition_error(id, decoded.pc()));
     }
     Ok(true)
 }
 
+// A converted key is also a temporal anchor: the fresh object must remain
+// immediately below that exact stack slot while the value is evaluated.
+// Copying or moving the marker would let a value evaluated earlier be rotated
+// across the pair and masquerade as the compiler's post-conversion RHS.
+const fn shuffled_object_definition_provenance(
+    value: ObjectDefinitionProvenance,
+) -> ObjectDefinitionProvenance {
+    match value {
+        ObjectDefinitionProvenance::ConvertedPropertyKey(_) => ObjectDefinitionProvenance::Unknown,
+        value => value,
+    }
+}
+
+fn convert_property_key_provenance(state: &mut [ObjectDefinitionProvenance]) {
+    let key_index = state.len() - 1;
+    let converted = key_index
+        .checked_sub(1)
+        .and_then(|object_index| state.get(object_index))
+        .and_then(|provenance| match provenance {
+            ObjectDefinitionProvenance::FreshObject(site) => Some(*site),
+            _ => None,
+        })
+        .map_or(
+            ObjectDefinitionProvenance::Unknown,
+            ObjectDefinitionProvenance::ConvertedPropertyKey,
+        );
+    state[key_index] = converted;
+}
+
 #[allow(clippy::too_many_arguments)]
-fn propagate_method_object_provenance(
+fn propagate_object_definition_provenance(
     id: FunctionTemplateId,
     source_pc: BytecodePc,
     successor: InstructionIndex,
-    output: &[MethodObjectProvenance],
-    entries: &mut [Option<Vec<MethodObjectProvenance>>],
+    output: &[ObjectDefinitionProvenance],
+    entries: &mut [Option<Vec<ObjectDefinitionProvenance>>],
     queued: &mut [bool],
     work: &mut VecDeque<usize>,
     state_limit: u64,
@@ -3866,10 +3975,14 @@ fn propagate_method_object_provenance(
             for (target, incoming) in existing.iter_mut().zip(output) {
                 let merged = match (*target, *incoming) {
                     (
-                        MethodObjectProvenance::FreshObject(left),
-                        MethodObjectProvenance::FreshObject(right),
+                        ObjectDefinitionProvenance::FreshObject(left),
+                        ObjectDefinitionProvenance::FreshObject(right),
                     ) if left == right => *target,
-                    _ => MethodObjectProvenance::Unknown,
+                    (
+                        ObjectDefinitionProvenance::ConvertedPropertyKey(left),
+                        ObjectDefinitionProvenance::ConvertedPropertyKey(right),
+                    ) if left == right => *target,
+                    _ => ObjectDefinitionProvenance::Unknown,
                 };
                 changed |= merged != *target;
                 *target = merged;
@@ -3879,8 +3992,8 @@ fn propagate_method_object_provenance(
         Some(existing) => {
             let changed = existing
                 .iter()
-                .any(|value| *value != MethodObjectProvenance::Unknown);
-            existing.fill(MethodObjectProvenance::Unknown);
+                .any(|value| *value != ObjectDefinitionProvenance::Unknown);
+            existing.fill(ObjectDefinitionProvenance::Unknown);
             changed
         }
     };
@@ -3930,6 +4043,20 @@ fn method_target_error(id: FunctionTemplateId, pc: BytecodePc) -> BytecodeVerifi
         id,
         BytecodeVerificationErrorKind::DefineMethodTargetMismatch { pc },
     )
+}
+
+fn define_array_element_key_error(
+    id: FunctionTemplateId,
+    pc: BytecodePc,
+) -> BytecodeVerificationError {
+    BytecodeVerificationError::function(
+        id,
+        BytecodeVerificationErrorKind::DefineArrayElementKeyMismatch { pc },
+    )
+}
+
+fn object_definition_error(id: FunctionTemplateId, pc: BytecodePc) -> BytecodeVerificationError {
+    method_target_error(id, pc)
 }
 
 fn parent_definition_for_reference<'metadata>(
@@ -3986,10 +4113,9 @@ fn verify_supported_opcodes(
                 && authority_kind != CompilerExecutableKind::DynamicFunctionScript)
             || matches!(
                 (opcode, instruction.operands()),
-                (
-                    FinalOpcode::DefineMethod,
-                    Operands::AtomU8 { value, .. }
-                ) if !(4..=6).contains(&value)
+                (FinalOpcode::DefineMethod, Operands::AtomU8 { value, .. })
+                    | (FinalOpcode::DefineMethodComputed, Operands::U8(value))
+                    if !(4..=6).contains(&value)
             )
         {
             return Err(BytecodeVerificationError::function(
@@ -4021,6 +4147,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Drop
             | FinalOpcode::Dup
             | FinalOpcode::Insert2
+            | FinalOpcode::Insert3
             | FinalOpcode::CallConstructor
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
@@ -4048,9 +4175,15 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CloseLoc
             | FinalOpcode::GetField
             | FinalOpcode::GetField2
+            | FinalOpcode::GetArrayEl
+            | FinalOpcode::GetArrayEl2
             | FinalOpcode::PutField
+            | FinalOpcode::PutArrayEl
+            | FinalOpcode::ToPropKey
             | FinalOpcode::DefineField
+            | FinalOpcode::DefineArrayEl
             | FinalOpcode::DefineMethod
+            | FinalOpcode::DefineMethodComputed
             | FinalOpcode::IfFalse
             | FinalOpcode::IfTrue
             | FinalOpcode::Goto
@@ -5029,6 +5162,15 @@ fn collect_requirements(
             | FinalOpcode::DefineField
             | FinalOpcode::DefineMethod => {
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
+            }
+            FinalOpcode::GetArrayEl
+            | FinalOpcode::GetArrayEl2
+            | FinalOpcode::PutArrayEl
+            | FinalOpcode::ToPropKey
+            | FinalOpcode::DefineArrayEl
+            | FinalOpcode::DefineMethodComputed => {
+                push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
+                push_requirement(requirements, ExecutionRequirement::DynamicPropertyKeys);
             }
             FinalOpcode::Throw => {
                 push_requirement(requirements, ExecutionRequirement::AbruptCompletions);

@@ -4,12 +4,13 @@ use oxc_ast::{
     AstKind,
     ast::{
         AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement, CallExpression,
-        ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForStatement,
-        ForStatementInit, Function, FunctionBody, FunctionType, IdentifierReference, IfStatement,
-        LogicalExpression, NewExpression, ObjectExpression, ObjectPropertyKind, Program,
-        PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement, SequenceExpression,
-        SimpleAssignmentTarget, Statement, StaticMemberExpression, ThrowStatement, UnaryExpression,
-        UpdateExpression, VariableDeclaration, VariableDeclarationKind, WhileStatement,
+        ComputedMemberExpression, ConditionalExpression, DoWhileStatement, Expression,
+        ExpressionStatement, ForStatement, ForStatementInit, Function, FunctionBody, FunctionType,
+        IdentifierReference, IfStatement, LogicalExpression, NewExpression, ObjectExpression,
+        ObjectProperty, ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind,
+        ReturnStatement, SequenceExpression, SimpleAssignmentTarget, Statement,
+        StaticMemberExpression, ThrowStatement, UnaryExpression, UpdateExpression,
+        VariableDeclaration, VariableDeclarationKind, WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
@@ -2602,7 +2603,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     identifier.span,
                 )?;
                 if let Some(initializer) = &declarator.init {
-                    if let Some(span) = anonymous_function_definition_span(initializer) {
+                    if let Some(span) = anonymous_named_evaluation_span(initializer) {
                         return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
                     }
                     self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
@@ -2642,7 +2643,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
             match &declarator.init {
                 Some(initializer) => {
-                    if let Some(span) = anonymous_function_definition_span(initializer) {
+                    if let Some(span) = anonymous_named_evaluation_span(initializer) {
                         return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
                     }
                     self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
@@ -2735,6 +2736,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the iterative expression dispatcher keeps one explicit work-stack loop"
+    )]
     fn plan_expression<'expression>(
         &self,
         expression: &'expression Expression<'arena>,
@@ -2801,6 +2806,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         }
                         Expression::StaticMemberExpression(member) => {
                             Self::plan_static_member_read(member, constants, &mut work)?;
+                        }
+                        Expression::ComputedMemberExpression(member) => {
+                            Self::plan_computed_member_read(member, &mut work)?;
                         }
                         Expression::AssignmentExpression(assignment) => {
                             self.plan_assignment_expression(
@@ -2924,8 +2932,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 domain: "call arguments",
             }
         })?;
-        let static_member = Self::static_member_callee(&call.callee)?;
-        work.push(ExpressionWork::Emit(if static_member.is_some() {
+        let member = Self::member_callee(&call.callee)?;
+        work.push(ExpressionWork::Emit(if member.is_some() {
             PlannedInstruction::new(
                 FinalOpcode::CallMethod,
                 Operands::NPop { argument_count },
@@ -2944,15 +2952,25 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     })?;
             work.push(ExpressionWork::Visit(expression));
         }
-        if let Some(member) = static_member {
-            work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                FinalOpcode::GetField2,
-                Operands::Atom(constants.property_atom_index(member.property.span)?),
-                member.span,
-            )));
-            work.push(ExpressionWork::Visit(&member.object));
-        } else {
-            work.push(ExpressionWork::Visit(&call.callee));
+        match member {
+            Some(MemberCallee::Static(member)) => {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::GetField2,
+                    Operands::Atom(constants.property_atom_index(member.property.span)?),
+                    member.span,
+                )));
+                work.push(ExpressionWork::Visit(&member.object));
+            }
+            Some(MemberCallee::Computed(member)) => {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::GetArrayEl2,
+                    Operands::None,
+                    member.span,
+                )));
+                work.push(ExpressionWork::Visit(&member.expression));
+                work.push(ExpressionWork::Visit(&member.object));
+            }
+            None => work.push(ExpressionWork::Visit(&call.callee)),
         }
         Ok(())
     }
@@ -3004,9 +3022,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
-    fn static_member_callee<'expression>(
+    fn member_callee<'expression>(
         callee: &'expression Expression<'arena>,
-    ) -> Result<Option<&'expression StaticMemberExpression<'arena>>, LeafCompilationError> {
+    ) -> Result<Option<MemberCallee<'expression, 'arena>>, LeafCompilationError> {
         let mut expression = callee;
         loop {
             match expression {
@@ -3014,9 +3032,15 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     expression = &parenthesized.expression;
                 }
                 Expression::StaticMemberExpression(member) if !member.optional => {
-                    return Ok(Some(member));
+                    return Ok(Some(MemberCallee::Static(member)));
                 }
                 Expression::StaticMemberExpression(member) => {
+                    return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+                }
+                Expression::ComputedMemberExpression(member) if !member.optional => {
+                    return Ok(Some(MemberCallee::Computed(member)));
+                }
+                Expression::ComputedMemberExpression(member) => {
                     return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
                 }
                 _ => return Ok(None),
@@ -3039,19 +3063,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     property.span(),
                 );
             };
-            if property.computed || property.shorthand {
+            if property.shorthand {
                 return unsupported(UnsupportedLeafFeature::UnsupportedExpression, property.span);
             }
-            let Some(key) = compiled_static_property_key(&property.key)? else {
-                return unsupported(
-                    if property.method || property.kind != PropertyKind::Init {
-                        UnsupportedLeafFeature::ObjectMethodOrAccessor
-                    } else {
-                        UnsupportedLeafFeature::UnsupportedExpression
-                    },
-                    property.key.span(),
-                );
-            };
             let method_kind = match (property.method, property.kind) {
                 (true, PropertyKind::Init) => Some(ObjectMethodKind::Method),
                 (false, PropertyKind::Get) => Some(ObjectMethodKind::Getter),
@@ -3063,6 +3077,27 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         property.span,
                     );
                 }
+            };
+            if property.computed {
+                self.plan_computed_object_property(
+                    property,
+                    method_kind,
+                    layout,
+                    tree_layout,
+                    constants,
+                    work,
+                )?;
+                continue;
+            }
+            let Some(key) = compiled_static_property_key(&property.key)? else {
+                return unsupported(
+                    if property.method || property.kind != PropertyKind::Init {
+                        UnsupportedLeafFeature::ObjectMethodOrAccessor
+                    } else {
+                        UnsupportedLeafFeature::UnsupportedExpression
+                    },
+                    property.key.span(),
+                );
             };
             if let Some(kind) = method_kind {
                 let Expression::FunctionExpression(function) = &property.value else {
@@ -3090,7 +3125,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             if key.value.code_units().eq("__proto__".encode_utf16()) {
                 return unsupported(UnsupportedLeafFeature::UnsupportedExpression, key.span);
             }
-            if let Some(span) = anonymous_function_definition_span(&property.value) {
+            if let Some(span) = anonymous_named_evaluation_span(&property.value) {
                 return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
             }
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -3108,6 +3143,66 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    fn plan_computed_object_property<'expression>(
+        &self,
+        property: &'expression ObjectProperty<'arena>,
+        method_kind: Option<ObjectMethodKind>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let key = property
+            .key
+            .as_expression()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "computed object property key is an expression",
+                span: Some(property.key.span()),
+            })?;
+        if let Some(kind) = method_kind {
+            let Expression::FunctionExpression(function) = &property.value else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "object method or accessor value is a function expression",
+                    span: Some(property.value.span()),
+                });
+            };
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::DefineMethodComputed,
+                Operands::U8(kind.define_method_flags()),
+                property.span,
+            )));
+            work.push(ExpressionWork::Emit(self.plan_function_closure(
+                function,
+                layout.executable,
+                tree_layout,
+                constants,
+            )?));
+            work.push(ExpressionWork::Visit(key));
+            return Ok(());
+        }
+        if let Some(span) = anonymous_named_evaluation_span(&property.value) {
+            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            property.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::DefineArrayEl,
+            Operands::None,
+            property.span,
+        )));
+        work.push(ExpressionWork::Visit(&property.value));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ToPropKey,
+            Operands::None,
+            key.span(),
+        )));
+        work.push(ExpressionWork::Visit(key));
+        Ok(())
+    }
+
     fn plan_static_member_read<'expression>(
         member: &'expression StaticMemberExpression<'arena>,
         constants: &CompiledConstantPool,
@@ -3121,6 +3216,23 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Operands::Atom(constants.property_atom_index(member.property.span)?),
             member.span,
         )));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
+    fn plan_computed_member_read<'expression>(
+        member: &'expression ComputedMemberExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetArrayEl,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Visit(&member.expression));
         work.push(ExpressionWork::Visit(&member.object));
         Ok(())
     }
@@ -3182,6 +3294,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(PlannedInstruction::new(opcode, operands, span))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "identifier assignment forms share one ordered work-stack planner"
+    )]
     fn plan_assignment_expression<'expression>(
         &self,
         assignment: &'expression AssignmentExpression<'arena>,
@@ -3191,11 +3307,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
-        if let Some(span) = anonymous_function_definition_span(&assignment.right) {
+        if let Some(span) = anonymous_named_evaluation_span(&assignment.right) {
             return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
         }
         if let AssignmentTarget::StaticMemberExpression(member) = &assignment.left {
             return Self::plan_static_member_assignment(assignment, member, constants, work);
+        }
+        if let AssignmentTarget::ComputedMemberExpression(member) = &assignment.left {
+            return Self::plan_computed_member_assignment(assignment, member, work);
         }
         let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &assignment.left else {
             return unsupported(
@@ -3416,6 +3535,33 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             assignment.span,
         )));
         work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
+    fn plan_computed_member_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression ComputedMemberExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if assignment.operator != AssignmentOperator::Assign || member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                assignment.left.span(),
+            );
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutArrayEl,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Visit(&member.expression));
         work.push(ExpressionWork::Visit(&member.object));
         Ok(())
     }
@@ -4864,6 +5010,12 @@ enum ObjectMethodKind {
     Method,
     Getter,
     Setter,
+}
+
+#[derive(Clone, Copy)]
+enum MemberCallee<'expression, 'arena> {
+    Static(&'expression StaticMemberExpression<'arena>),
+    Computed(&'expression ComputedMemberExpression<'arena>),
 }
 
 impl ObjectMethodKind {
@@ -6948,12 +7100,13 @@ fn plan_put_slot(slot: FrameSlot, span: Span) -> PlannedInstruction {
     PlannedInstruction::new(opcode, operands, span)
 }
 
-fn anonymous_function_definition_span(mut expression: &Expression<'_>) -> Option<Span> {
+fn anonymous_named_evaluation_span(mut expression: &Expression<'_>) -> Option<Span> {
     while let Expression::ParenthesizedExpression(parenthesized) = expression {
         expression = &parenthesized.expression;
     }
     match expression {
         Expression::FunctionExpression(function) if function.id.is_none() => Some(function.span),
+        Expression::ClassExpression(class) if class.id.is_none() => Some(class.span),
         _ => None,
     }
 }

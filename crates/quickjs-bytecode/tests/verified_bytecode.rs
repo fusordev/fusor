@@ -566,6 +566,195 @@ fn final_authority_admits_ordinary_object_properties_and_method_calls() {
 }
 
 #[test]
+fn final_authority_admits_computed_properties_and_records_dynamic_keys() {
+    let text = "function f(argument){var local;return undefined}";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let variables = [
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(1)),
+            ScopeLink::End,
+            parameter_policy(),
+            false,
+            None,
+        ),
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(2)),
+            ScopeLink::End,
+            var_policy(),
+            false,
+            None,
+        ),
+    ];
+    let instructions = [
+        (FinalOpcode::Object, Operands::None),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(3)),
+        ),
+        (FinalOpcode::ToPropKey, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::DefineArrayEl, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Dup, Operands::None),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(3)),
+        ),
+        (FinalOpcode::GetArrayEl, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Dup, Operands::None),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(3)),
+        ),
+        (FinalOpcode::GetArrayEl2, Operands::None),
+        (
+            FinalOpcode::CallMethod,
+            Operands::NPop { argument_count: 0 },
+        ),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Dup, Operands::None),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(3)),
+        ),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Insert3, Operands::None),
+        (FinalOpcode::PutArrayEl, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let pcs = [
+        0, 1, 6, 7, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 28, 29, 30, 35, 36, 37, 38, 39,
+    ];
+
+    let verified = verified_single(
+        &instructions,
+        &[atom("f"), atom("argument"), atom("local"), atom("key")],
+        &variables,
+        source(
+            text,
+            function_span,
+            Some(SourceByteSpan::new(9, 10)),
+            &pcs.map(|pc| (pc, function_span)),
+        ),
+    )
+    .expect("the bounded computed-property opcode family gains final authority");
+
+    assert_eq!(
+        verified.requirements(),
+        [
+            ExecutionRequirement::CoreValues,
+            ExecutionRequirement::Numbers,
+            ExecutionRequirement::Strings,
+            ExecutionRequirement::OrdinaryObjects,
+            ExecutionRequirement::DynamicPropertyKeys,
+            ExecutionRequirement::Calls,
+        ]
+    );
+}
+
+#[test]
+fn final_authority_requires_object_data_keys_to_be_converted_before_the_value() {
+    let text = "function f(argument){var local;return undefined}";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let variables = [
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(1)),
+            ScopeLink::End,
+            parameter_policy(),
+            false,
+            None,
+        ),
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(2)),
+            ScopeLink::End,
+            var_policy(),
+            false,
+            None,
+        ),
+    ];
+    let cases = [
+        (
+            vec![
+                (FinalOpcode::Object, Operands::None),
+                (
+                    FinalOpcode::PushAtomValue,
+                    Operands::Atom(AtomPoolIndex::new(3)),
+                ),
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (FinalOpcode::DefineArrayEl, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            vec![0, 1, 6, 7, 8, 9],
+        ),
+        (
+            vec![
+                (FinalOpcode::Object, Operands::None),
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (
+                    FinalOpcode::PushAtomValue,
+                    Operands::Atom(AtomPoolIndex::new(3)),
+                ),
+                (FinalOpcode::ToPropKey, Operands::None),
+                (FinalOpcode::Insert2, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::DefineArrayEl, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            vec![0, 1, 2, 7, 8, 9, 10, 11, 12],
+        ),
+        (
+            vec![
+                (FinalOpcode::Object, Operands::None),
+                (
+                    FinalOpcode::PushAtomValue,
+                    Operands::Atom(AtomPoolIndex::new(3)),
+                ),
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (FinalOpcode::Insert3, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ToPropKey, Operands::None),
+                (FinalOpcode::Insert3, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Insert3, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::DefineArrayEl, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            vec![0, 1, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        ),
+    ];
+
+    for (instructions, pcs) in cases {
+        let error = verified_single(
+            &instructions,
+            &[atom("f"), atom("argument"), atom("local"), atom("key")],
+            &variables,
+            source(
+                text,
+                function_span,
+                Some(SourceByteSpan::new(9, 10)),
+                &pcs.into_iter()
+                    .map(|pc| (pc, function_span))
+                    .collect::<Vec<_>>(),
+            ),
+        )
+        .expect_err("define_array_el requires a key converted before its value");
+        assert!(
+            matches!(
+                error.kind(),
+                BytecodeVerificationErrorKind::DefineArrayElementKeyMismatch { .. }
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
 fn final_authority_admits_only_enumerable_static_define_method_kinds() {
     for (flags, arguments) in [(4, 0), (5, 0), (6, 1)] {
         let instructions = [
@@ -618,11 +807,9 @@ fn final_authority_admits_only_enumerable_static_define_method_kinds() {
 }
 
 #[test]
-fn final_authority_rejects_non_enumerable_or_computed_method_definitions() {
+fn final_authority_rejects_non_enumerable_method_definitions() {
     for flags in 0..=2 {
-        let instructions = [
-            (FinalOpcode::Object, Operands::None),
-            (FinalOpcode::FClosure8, Operands::Const8(0)),
+        for (opcode, operands) in [
             (
                 FinalOpcode::DefineMethod,
                 Operands::AtomU8 {
@@ -630,27 +817,74 @@ fn final_authority_rejects_non_enumerable_or_computed_method_definitions() {
                     value: flags,
                 },
             ),
+            (FinalOpcode::DefineMethodComputed, Operands::U8(flags)),
+        ] {
+            let mut instructions = vec![(FinalOpcode::Object, Operands::None)];
+            if opcode == FinalOpcode::DefineMethodComputed {
+                instructions.push((
+                    FinalOpcode::PushAtomValue,
+                    Operands::Atom(AtomPoolIndex::new(1)),
+                ));
+            }
+            instructions.extend([
+                (FinalOpcode::FClosure8, Operands::Const8(0)),
+                (opcode, operands),
+                (FinalOpcode::Return, Operands::None),
+            ]);
+            let error = verify_compiler_bytecode_graph(
+                define_method_input(
+                    &instructions,
+                    CompilerExecutableKind::OrdinaryMethod,
+                    u32::from(flags == 2),
+                ),
+                BytecodeGraphVerificationLimits::default(),
+            )
+            .expect_err("non-enumerable class-style flags remain outside object-literal authority");
+            assert!(matches!(
+                error.kind(),
+                BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                    opcode: rejected,
+                    ..
+                } if *rejected == opcode
+            ));
+        }
+    }
+}
+
+#[test]
+fn final_authority_admits_typed_computed_method_kinds() {
+    for (flags, arguments) in [(4, 0), (5, 0), (6, 1)] {
+        let computed = [
+            (FinalOpcode::Object, Operands::None),
+            (
+                FinalOpcode::PushAtomValue,
+                Operands::Atom(AtomPoolIndex::new(1)),
+            ),
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (FinalOpcode::DefineMethodComputed, Operands::U8(flags)),
             (FinalOpcode::Return, Operands::None),
         ];
-        let error = verify_compiler_bytecode_graph(
-            define_method_input(
-                &instructions,
-                CompilerExecutableKind::OrdinaryMethod,
-                u32::from(flags == 2),
-            ),
+        let verified = verify_compiler_bytecode_graph(
+            define_method_input(&computed, CompilerExecutableKind::OrdinaryMethod, arguments),
             BytecodeGraphVerificationLimits::default(),
         )
-        .expect_err("non-enumerable class-style flags remain outside object-literal authority");
-        assert!(matches!(
-            error.kind(),
-            BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
-                opcode: FinalOpcode::DefineMethod,
-                ..
-            }
-        ));
+        .expect("computed method, getter, and setter definitions gain authority");
+        assert_eq!(
+            verified.requirements(),
+            [
+                ExecutionRequirement::CoreValues,
+                ExecutionRequirement::Strings,
+                ExecutionRequirement::Closures,
+                ExecutionRequirement::OrdinaryObjects,
+                ExecutionRequirement::DynamicPropertyKeys,
+            ]
+        );
     }
+}
 
-    let computed = [
+#[test]
+fn final_authority_rejects_untyped_or_nonadjacent_computed_method_closures() {
+    let wrong_kind = [
         (FinalOpcode::Object, Operands::None),
         (
             FinalOpcode::PushAtomValue,
@@ -661,17 +895,103 @@ fn final_authority_rejects_non_enumerable_or_computed_method_definitions() {
         (FinalOpcode::Return, Operands::None),
     ];
     let error = verify_compiler_bytecode_graph(
-        define_method_input(&computed, CompilerExecutableKind::OrdinaryMethod, 0),
+        define_method_input(&wrong_kind, CompilerExecutableKind::OrdinaryFunction, 0),
         BytecodeGraphVerificationLimits::default(),
     )
-    .expect_err("computed method definition remains fail-closed");
-    assert!(matches!(
-        error.kind(),
-        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
-            opcode: FinalOpcode::DefineMethodComputed,
-            ..
-        }
-    ));
+    .expect_err("a computed method requires an ordinary-method child");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::DefineMethodTemplateMismatch { .. }
+        ),
+        "{error:?}"
+    );
+
+    let nonadjacent = [
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(1)),
+        ),
+        (FinalOpcode::DefineMethodComputed, Operands::U8(4)),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(&nonadjacent, CompilerExecutableKind::OrdinaryMethod, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("the method closure must immediately precede its computed definition");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::OrdinaryMethodTemplatePlacementMismatch { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn final_authority_rejects_nonfresh_or_multiply_owned_computed_method_targets() {
+    let nonfresh = [
+        (FinalOpcode::GetArg0, Operands::NoneArg),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(1)),
+        ),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::DefineMethodComputed, Operands::U8(4)),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input_with_root_arguments(
+            &nonfresh,
+            CompilerExecutableKind::OrdinaryMethod,
+            0,
+            1,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a computed method cannot mutate an arbitrary argument");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::DefineMethodTargetMismatch { .. }
+        ),
+        "{error:?}"
+    );
+
+    let duplicate = [
+        (FinalOpcode::Object, Operands::None),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(1)),
+        ),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::DefineMethodComputed, Operands::U8(4)),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(1)),
+        ),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::DefineMethodComputed, Operands::U8(4)),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(&duplicate, CompilerExecutableKind::OrdinaryMethod, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("one method template cannot back two computed definition sites");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::OrdinaryMethodTemplateOwnershipMismatch {
+                definitions: 2,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
 }
 
 #[test]

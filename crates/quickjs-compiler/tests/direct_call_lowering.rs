@@ -286,6 +286,48 @@ fn constructor_calls_support_empty_arguments_and_static_member_callees() {
 }
 
 #[test]
+fn computed_member_calls_keep_the_receiver_and_evaluate_arguments_after_lookup() {
+    let source = "function invoke(holder,key,first,second){return (holder[key])(first(),second);}";
+    let compiled = compile(source, "invoke");
+    let instructions = decoded(&compiled);
+
+    assert_eq!(
+        instructions
+            .iter()
+            .map(|(_, opcode, operands)| (*opcode, *operands))
+            .collect::<Vec<_>>(),
+        [
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::GetArg1, Operands::NoneArg),
+            (FinalOpcode::GetArrayEl2, Operands::None),
+            (FinalOpcode::GetArg2, Operands::NoneArg),
+            (FinalOpcode::Call0, Operands::NPopX),
+            (FinalOpcode::GetArg3, Operands::NoneArg),
+            (
+                FinalOpcode::CallMethod,
+                Operands::NPop { argument_count: 2 },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 4);
+
+    let lookup = instructions
+        .iter()
+        .find(|(_, opcode, _)| *opcode == FinalOpcode::GetArrayEl2)
+        .expect("computed receiver lookup");
+    assert_eq!(source_slice_at(&compiled, source, lookup.0), "holder[key]");
+    let call = instructions
+        .iter()
+        .find(|(_, opcode, _)| *opcode == FinalOpcode::CallMethod)
+        .expect("receiver-aware call");
+    assert_eq!(
+        source_slice_at(&compiled, source, call.0),
+        "(holder[key])(first(),second)"
+    );
+}
+
+#[test]
 fn optional_and_spread_calls_and_constructors_remain_fail_closed() {
     let cases = [
         ("function invoke(fn){return fn?.();}", "fn?.()"),

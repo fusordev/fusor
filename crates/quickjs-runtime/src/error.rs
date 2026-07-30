@@ -41,6 +41,8 @@ pub enum ValueKind {
     Number,
     /// An ECMAScript String.
     String,
+    /// An ECMAScript Symbol.
+    Symbol,
     /// An ordinary bytecode function object.
     Function,
     /// An ordinary JavaScript object.
@@ -55,6 +57,7 @@ impl fmt::Display for ValueKind {
             Self::Boolean => "Boolean",
             Self::Number => "Number",
             Self::String => "String",
+            Self::Symbol => "Symbol",
             Self::Function => "function",
             Self::Object => "object",
         })
@@ -807,6 +810,8 @@ impl Error for DynamicFunctionCompileFailure {
 pub enum ExecutionError {
     /// A public handle was orphaned, foreign, stale, or had the wrong kind.
     Handle(HandleError),
+    /// Runtime-local property-key atom interning failed.
+    Atom(AtomError),
     /// A JavaScript exception escaped the current function.
     Exception(JsException),
     /// The host compiler could not produce verified dynamic-Function bytecode.
@@ -847,6 +852,7 @@ impl fmt::Display for ExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Handle(source) => source.fmt(formatter),
+            Self::Atom(source) => source.fmt(formatter),
             Self::Exception(exception) => exception.fmt(formatter),
             Self::DynamicFunctionCompilation(source) => source.fmt(formatter),
             Self::DynamicFunctionInstallation(source) => source.fmt(formatter),
@@ -879,6 +885,7 @@ impl Error for ExecutionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Handle(source) => Some(source),
+            Self::Atom(source) => Some(source),
             Self::DynamicFunctionCompilation(source) => Some(source),
             Self::DynamicFunctionInstallation(source) => Some(source),
             Self::String(source) => Some(source),
@@ -894,6 +901,12 @@ impl Error for ExecutionError {
 impl From<HandleError> for ExecutionError {
     fn from(source: HandleError) -> Self {
         Self::Handle(source)
+    }
+}
+
+impl From<AtomError> for ExecutionError {
+    fn from(source: AtomError) -> Self {
+        Self::Atom(source)
     }
 }
 

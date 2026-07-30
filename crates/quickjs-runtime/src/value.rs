@@ -30,7 +30,7 @@ use std::{
 };
 
 use crate::{
-    HandleError, HandleKind, JsNumber, JsString, ValueKind,
+    Atom, HandleError, HandleKind, JsNumber, JsString, ValueKind,
     ids::{FunctionId, ObjectId},
 };
 
@@ -56,6 +56,7 @@ pub(crate) enum PrimitiveValue {
     Boolean(bool),
     Number(JsNumber),
     String(JsString),
+    Symbol(Atom),
 }
 
 impl PrimitiveValue {
@@ -66,6 +67,7 @@ impl PrimitiveValue {
             Self::Boolean(value) => StoredValue::Boolean(value),
             Self::Number(value) => StoredValue::Number(value),
             Self::String(value) => StoredValue::String(value),
+            Self::Symbol(value) => StoredValue::Symbol(value),
         }
     }
 }
@@ -82,6 +84,7 @@ pub(crate) enum StoredValue {
     Boolean(bool),
     Number(JsNumber),
     String(JsString),
+    Symbol(Atom),
     Function(FunctionId),
     Object(ObjectId),
 }
@@ -94,6 +97,7 @@ impl StoredValue {
             Self::Boolean(value) => RootTarget::Primitive(PrimitiveValue::Boolean(value)),
             Self::Number(value) => RootTarget::Primitive(PrimitiveValue::Number(value)),
             Self::String(value) => RootTarget::Primitive(PrimitiveValue::String(value)),
+            Self::Symbol(value) => RootTarget::Primitive(PrimitiveValue::Symbol(value)),
             Self::Function(function) => RootTarget::Heap(HeapReference::Function(function)),
             Self::Object(object) => RootTarget::Heap(HeapReference::Object(object)),
         }
@@ -106,6 +110,7 @@ impl StoredValue {
             Self::Boolean(_) => ValueKind::Boolean,
             Self::Number(_) => ValueKind::Number,
             Self::String(_) => ValueKind::String,
+            Self::Symbol(_) => ValueKind::Symbol,
             Self::Function(_) => ValueKind::Function,
             Self::Object(_) => ValueKind::Object,
         }
@@ -118,6 +123,7 @@ impl StoredValue {
             Self::Boolean(value) => Self::Boolean(*value),
             Self::Number(value) => Self::Number(*value),
             Self::String(value) => Self::String(value.clone()),
+            Self::Symbol(value) => Self::Symbol(value.clone()),
             Self::Function(value) => Self::Function(*value),
             Self::Object(value) => Self::Object(*value),
         }
@@ -132,7 +138,7 @@ impl StoredValue {
                 value != 0.0 && !value.is_nan()
             }
             Self::String(value) => !value.is_empty(),
-            Self::Function(_) | Self::Object(_) => true,
+            Self::Symbol(_) | Self::Function(_) | Self::Object(_) => true,
         }
     }
 
@@ -142,6 +148,7 @@ impl StoredValue {
             (Self::Boolean(left), Self::Boolean(right)) => left == right,
             (Self::Number(left), Self::Number(right)) => left.strict_equals(*right),
             (Self::String(left), Self::String(right)) => left == right,
+            (Self::Symbol(left), Self::Symbol(right)) => left.is_same_identity(right),
             (Self::Function(left), Self::Function(right)) => left == right,
             (Self::Object(left), Self::Object(right)) => left == right,
             (
@@ -150,6 +157,7 @@ impl StoredValue {
                 | Self::Boolean(_)
                 | Self::Number(_)
                 | Self::String(_)
+                | Self::Symbol(_)
                 | Self::Function(_)
                 | Self::Object(_),
                 _,
@@ -159,9 +167,12 @@ impl StoredValue {
 
     pub(crate) const fn heap_reference(&self) -> Option<HeapReference> {
         match self {
-            Self::Undefined | Self::Null | Self::Boolean(_) | Self::Number(_) | Self::String(_) => {
-                None
-            }
+            Self::Undefined
+            | Self::Null
+            | Self::Boolean(_)
+            | Self::Number(_)
+            | Self::String(_)
+            | Self::Symbol(_) => None,
             Self::Function(function) => Some(HeapReference::Function(*function)),
             Self::Object(object) => Some(HeapReference::Object(*object)),
         }
@@ -355,6 +366,18 @@ impl JsValue {
     pub fn as_string(&self) -> Result<Option<&JsString>, HandleError> {
         Ok(match self.stored()? {
             StoredValue::String(value) => Some(value),
+            _ => None,
+        })
+    }
+
+    /// Returns the Symbol identity, or `None` for another live value kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an orphaned handle.
+    pub fn as_symbol(&self) -> Result<Option<&Atom>, HandleError> {
+        Ok(match self.stored()? {
+            StoredValue::Symbol(value) => Some(value),
             _ => None,
         })
     }

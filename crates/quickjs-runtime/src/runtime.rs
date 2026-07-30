@@ -35,8 +35,8 @@ use quickjs_bytecode::{
 };
 
 use crate::{
-    Atom, AtomLimits, AtomTable, AtomUsage, DynamicFunctionScriptError, ExecutionLimits, Function,
-    HandleError, HandleKind, InstallError, JsNumber, JsString, JsValue,
+    Atom, AtomError, AtomLimits, AtomTable, AtomUsage, DynamicFunctionScriptError, ExecutionLimits,
+    Function, HandleError, HandleKind, InstallError, JsNumber, JsString, JsValue,
     OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey, PropertyLayout,
     PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
@@ -751,7 +751,7 @@ impl Runtime {
         let empty_name = predefined_string(&self.atoms, PredefinedAtom::EmptyString);
         let to_string_name = predefined_string(&self.atoms, PredefinedAtom::ToString);
         let value_of_name = predefined_string(&self.atoms, PredefinedAtom::ValueOf);
-        let call_name = JsString::from_utf8("call").map_err(crate::AtomError::from)?;
+        let call_name = JsString::from_utf8("call").map_err(AtomError::from)?;
 
         let mut global_record = ObjectRecord::empty(None);
         global_record
@@ -1489,6 +1489,17 @@ impl Runtime {
 
     pub(crate) fn predefined_symbol_property_key(&self, atom: PredefinedAtom) -> PropertyKey {
         PropertyKey::from_validated_symbol(self.atoms.predefined(atom))
+    }
+
+    pub(crate) fn property_key_from_string(
+        &mut self,
+        value: &JsString,
+    ) -> Result<PropertyKey, AtomError> {
+        self.atoms.property_key_from_string(value)
+    }
+
+    pub(crate) fn property_key_from_symbol(&self, value: &Atom) -> Result<PropertyKey, AtomError> {
+        self.atoms.property_key_from_symbol(value)
     }
 
     pub(crate) fn realm_function_prototype(
@@ -2404,6 +2415,7 @@ impl Runtime {
                                 resource,
                                 additional,
                             },
+                            crate::ExecutionError::Atom(source) => InstallError::Atom(source),
                             crate::ExecutionError::String(_)
                             | crate::ExecutionError::Handle(_)
                             | crate::ExecutionError::DynamicFunctionCompilation(_)
@@ -2645,6 +2657,22 @@ impl Context<'_> {
     #[must_use]
     pub fn string(&self, value: JsString) -> JsValue {
         JsValue::primitive(&self.runtime.mailbox, PrimitiveValue::String(value))
+    }
+
+    /// Creates a fresh runtime-local Symbol with an optional description.
+    ///
+    /// `None` and `Some(empty_string)` remain observably distinct. Each call
+    /// creates a new identity even when descriptions are equal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured atom limit, allocation, or string-copy error.
+    pub fn symbol(&mut self, description: Option<&JsString>) -> Result<JsValue, AtomError> {
+        let symbol = self.runtime.atoms.new_unique_symbol(description)?;
+        Ok(JsValue::primitive(
+            &self.runtime.mailbox,
+            PrimitiveValue::Symbol(symbol),
+        ))
     }
 
     /// Transactionally installs complete verified bytecode and materializes
@@ -3078,6 +3106,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Drop
             | FinalOpcode::Dup
             | FinalOpcode::Insert2
+            | FinalOpcode::Insert3
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
             | FinalOpcode::CallConstructor
@@ -3105,9 +3134,15 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CloseLoc
             | FinalOpcode::GetField
             | FinalOpcode::GetField2
+            | FinalOpcode::GetArrayEl
+            | FinalOpcode::GetArrayEl2
             | FinalOpcode::PutField
+            | FinalOpcode::PutArrayEl
+            | FinalOpcode::ToPropKey
             | FinalOpcode::DefineField
+            | FinalOpcode::DefineArrayEl
             | FinalOpcode::DefineMethod
+            | FinalOpcode::DefineMethodComputed
             | FinalOpcode::IfFalse
             | FinalOpcode::IfTrue
             | FinalOpcode::Goto
