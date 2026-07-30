@@ -458,6 +458,45 @@ impl AtomTable {
         removed
     }
 
+    /// Drops one transaction-owned string atom and removes its exact weak
+    /// interner slot when no other owner retained the identity.
+    pub(crate) fn rollback_interned_string(&mut self, atom: Atom) {
+        debug_assert_eq!(atom.kind(), AtomKind::String);
+        debug_assert_eq!(atom.predefined_atom(), None);
+        debug_assert!(
+            atom.0
+                .owner
+                .upgrade()
+                .is_some_and(|owner| { Arc::ptr_eq(&owner, &self.state) })
+        );
+        let description = atom
+            .description()
+            .expect("string atom has a description")
+            .clone();
+        let key = BucketKey {
+            namespace: InternNamespace::String,
+            content_hash: self.content_hash(InternNamespace::String, &description),
+        };
+        let identity = Arc::as_ptr(&atom.0);
+        drop(atom);
+
+        let mut remove_bucket = false;
+        let removed = self.buckets.get_mut(&key).is_some_and(|bucket| {
+            let Some(index) = bucket.iter().position(|entry| {
+                std::ptr::eq(entry.as_ptr(), identity) && entry.strong_count() == 0
+            }) else {
+                return false;
+            };
+            bucket.swap_remove(index);
+            remove_bucket = bucket.is_empty();
+            true
+        });
+        if remove_bucket {
+            self.buckets.remove(&key);
+        }
+        self.decrease_interner_slots(u32::from(removed));
+    }
+
     /// Content-interns a JavaScript string atom.
     ///
     /// An interner miss is copied into a compact string leaf so a small atom
@@ -1272,6 +1311,41 @@ mod tests {
 
         let reinterned = table.intern_string(&description).unwrap();
         assert!(!weak.ptr_eq(&Arc::downgrade(&reinterned.0)));
+    }
+
+    #[test]
+    fn rollback_removes_only_a_newly_dead_interned_slot() {
+        let mut table = table();
+        let startup = table.usage();
+        let description = string("transactional atom");
+        let atom = table.intern_string(&description).unwrap();
+
+        table.rollback_interned_string(atom);
+
+        assert_eq!(table.usage(), startup);
+    }
+
+    #[test]
+    fn rollback_preserves_an_interned_atom_owned_elsewhere() {
+        let mut table = table();
+        let startup = table.usage();
+        let description = string("shared transactional atom");
+        let retained = table.intern_string(&description).unwrap();
+        let transaction = retained.clone();
+        let live = table.usage();
+
+        table.rollback_interned_string(transaction);
+
+        assert_eq!(table.usage(), live);
+        assert_eq!(table.intern_string(&description).unwrap(), retained);
+        drop(retained);
+        assert_eq!(table.usage().live_atoms, startup.live_atoms);
+        assert_eq!(
+            table.usage().live_description_code_units,
+            startup.live_description_code_units
+        );
+        assert_eq!(table.collect_dead(), 1);
+        assert_eq!(table.usage(), startup);
     }
 
     #[test]

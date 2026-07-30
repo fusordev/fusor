@@ -168,6 +168,7 @@ struct DynamicFunctionReturn {
 
 enum NativeContinuation {
     FunctionSource(FunctionSourceContinuation),
+    FunctionCall,
 }
 
 impl NativeContinuation {
@@ -175,6 +176,7 @@ impl NativeContinuation {
         match self {
             Self::FunctionSource(state) => usize_to_u64(state.arguments.len())
                 .saturating_add(u64::from(state.construction.is_some())),
+            Self::FunctionCall => 0,
         }
     }
 }
@@ -224,10 +226,52 @@ enum FunctionSourcePropertyLookup {
 struct NativeCall {
     function: FunctionId,
     receiver: StoredValue,
-    arguments: Vec<StoredValue>,
+    arguments: CallArguments,
     return_to: Option<InstructionIndex>,
     origin: JsStackFrame,
     continuations: Vec<NativeContinuation>,
+}
+
+struct CallArguments {
+    values: Vec<StoredValue>,
+    next: usize,
+}
+
+impl CallArguments {
+    const fn empty() -> Self {
+        Self {
+            values: Vec::new(),
+            next: 0,
+        }
+    }
+
+    const fn from_values(values: Vec<StoredValue>) -> Self {
+        Self { values, next: 0 }
+    }
+
+    fn take_first_or_undefined(&mut self) -> StoredValue {
+        let Some(value) = self.values.get_mut(self.next) else {
+            return StoredValue::Undefined;
+        };
+        self.next = self.next.saturating_add(1);
+        std::mem::replace(value, StoredValue::Undefined)
+    }
+
+    fn into_remaining_iter(self) -> impl Iterator<Item = StoredValue> {
+        self.values.into_iter().skip(self.next)
+    }
+
+    fn into_remaining_values(mut self) -> Vec<StoredValue> {
+        if self.next != 0 {
+            self.values.drain(..self.next);
+        }
+        self.values
+    }
+
+    #[cfg(test)]
+    fn remaining(&self) -> &[StoredValue] {
+        self.values.get(self.next..).unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -351,7 +395,7 @@ struct PendingException {
 
 enum FrameArguments<'a> {
     Public(&'a [JsValue]),
-    Owned(Vec<StoredValue>),
+    Owned(CallArguments),
 }
 
 #[derive(Clone, Copy)]
@@ -534,7 +578,7 @@ impl Context<'_> {
             self.runtime,
             plan,
             receiver,
-            FrameArguments::Owned(Vec::new()),
+            FrameArguments::Owned(CallArguments::empty()),
             None,
             None,
         )?;
@@ -1019,6 +1063,7 @@ fn resume_native_continuations(
                     dynamic_budget,
                 )?
             }
+            NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
         };
         match dispatch {
             NativeDispatch::Immediate(next) => value = next,
@@ -1157,7 +1202,7 @@ fn execute_native_entry(
         })?;
     let inputs = CallInputs {
         receiver: StoredValue::Undefined,
-        arguments,
+        arguments: CallArguments::from_values(arguments),
         new_target: None,
     };
     let dispatch = dispatch_native_call(
@@ -1218,8 +1263,7 @@ fn dispatch_native_call(
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     dynamic_budget: &mut DynamicCompilationBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    if inputs.new_target.is_some() && native.kind != NativeFunctionKind::OrdinaryFunctionConstructor
-    {
+    if inputs.new_target.is_some() && !native.kind.is_constructor() {
         let Some(origin) = origin else {
             return Err(NativeFailure::Execution(
                 EngineFault::RuntimeInvariant {
@@ -1231,7 +1275,13 @@ fn dispatch_native_call(
         return Err(NativeFailure::Abrupt(PendingException {
             payload: PendingExceptionPayload::EngineError {
                 kind: ExceptionKind::TypeError,
-                message: JsString::from_utf8("not a constructor")?,
+                message: JsString::from_utf8(
+                    if native.kind == NativeFunctionKind::FunctionPrototypeCall {
+                        "call is not a constructor"
+                    } else {
+                        "not a constructor"
+                    },
+                )?,
             },
             origin,
         }));
@@ -1239,6 +1289,36 @@ fn dispatch_native_call(
     match native.kind {
         NativeFunctionKind::FunctionPrototype => {
             Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+        }
+        NativeFunctionKind::FunctionPrototypeCall => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            let StoredValue::Function(function) = inputs.receiver else {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("not a function")?,
+                    },
+                    origin,
+                }));
+            };
+            let mut arguments = inputs.arguments;
+            let receiver = arguments.take_first_or_undefined();
+            let mut continuations = Vec::new();
+            continuations
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::Frames,
+                    additional: 1,
+                })?;
+            continuations.push(NativeContinuation::FunctionCall);
+            Ok(NativeDispatch::Call(NativeCall {
+                function,
+                receiver,
+                arguments,
+                return_to,
+                origin,
+                continuations,
+            }))
         }
         NativeFunctionKind::OrdinaryFunctionConstructor => {
             let Some(compiler) = compiler else {
@@ -1253,7 +1333,7 @@ fn dispatch_native_call(
             begin_function_source_conversion(
                 runtime,
                 native,
-                inputs.arguments,
+                inputs.arguments.into_remaining_values(),
                 inputs.new_target,
                 return_to,
                 origin,
@@ -1640,7 +1720,7 @@ fn function_source_method_call(
     Ok(NativeDispatch::Call(NativeCall {
         function,
         receiver,
-        arguments,
+        arguments: CallArguments::from_values(arguments),
         return_to,
         origin,
         continuations,
@@ -1783,7 +1863,7 @@ fn finish_ordinary_function_constructor(
         runtime,
         plan,
         StoredValue::Object(global),
-        FrameArguments::Owned(Vec::new()),
+        FrameArguments::Owned(CallArguments::empty()),
         return_to,
         None,
     ) {
@@ -2319,7 +2399,7 @@ fn create_frame(
             }
         }
         FrameArguments::Owned(supplied) => {
-            let mut supplied = supplied.into_iter();
+            let mut supplied = supplied.into_remaining_iter();
             for _ in 0..plan.argument_count {
                 let value = supplied.next().unwrap_or(StoredValue::Undefined);
                 arguments.push(FrameBinding::Direct(SlotValue::Value(value)));
@@ -2725,7 +2805,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
                         function,
                         inputs: CallInputSource::Prepared(CallInputs {
                             receiver,
-                            arguments: Vec::new(),
+                            arguments: CallArguments::empty(),
                             new_target: None,
                         }),
                         return_to,
@@ -4603,7 +4683,7 @@ fn frame_local_mut(frame: &mut Frame, index: u32) -> Result<&mut FrameBinding, E
 
 struct CallInputs {
     receiver: StoredValue,
-    arguments: Vec<StoredValue>,
+    arguments: CallArguments,
     new_target: Option<FunctionId>,
 }
 
@@ -4687,7 +4767,7 @@ fn take_call_inputs(
     };
     Ok(CallInputs {
         receiver,
-        arguments,
+        arguments: CallArguments::from_values(arguments),
         new_target,
     })
 }
@@ -4993,8 +5073,8 @@ mod tests {
 
         assert_eq!(call.function, constructor);
         assert!(matches!(call.receiver, StoredValue::Object(id) if id == object));
-        assert_eq!(call.arguments.len(), 1);
-        let StoredValue::String(hint) = &call.arguments[0] else {
+        assert_eq!(call.arguments.remaining().len(), 1);
+        let StoredValue::String(hint) = &call.arguments.remaining()[0] else {
             panic!("hint must be a string");
         };
         assert_eq!(hint.to_utf8_lossy().expect("UTF-8"), "string");
@@ -5478,7 +5558,7 @@ mod tests {
         };
 
         assert_eq!(call.function, constructor);
-        assert!(call.arguments.is_empty());
+        assert!(call.arguments.remaining().is_empty());
         assert!(matches!(call.receiver, StoredValue::Object(id) if id == object));
     }
 

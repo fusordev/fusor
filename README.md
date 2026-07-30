@@ -48,16 +48,22 @@ undefined/null/Boolean/Number/String source coercions are implemented.
 Realm-owned `Object.prototype.toString`, `Object.prototype.valueOf`, and
 `Function.prototype.toString` cover the currently representable object and
 function values with exact intrinsic descriptors and retained function source.
+Realm-owned `Function.prototype.call` has its exact descriptor, name, length,
+prototype, native source, and nonconstructability. It forwards the raw target
+receiver and remaining arguments through an O(1) owned argument window, and
+zero-value native continuations keep nested `.call` dispatch iterative and
+frame-bounded.
 Function source arguments now run resumable `ToPrimitive` with the string hint:
 `Symbol.toPrimitive`, `toString`, and `valueOf` are observed in exact order,
 data or accessor-backed lookup preserves the original receiver, native or
 verified-bytecode getters and methods resume on the same iterative frame
-vector, and throws stop conversion before parsing. Primitive boxing,
-persistent global lexical collisions, and
-`Function.prototype.call`/`apply`/`bind`/`Symbol.hasInstance` remain
-fail-closed. Per-session compilation-count and generated-source limits bound
-nested construction. No dynamic-Function path uses eval or captures a caller
-lexical frame.
+vector, and throws stop conversion before parsing. `call` preserves the target
+realm's strict/sloppy receiver rules and forwards the Oxc compiler service when
+its target is the ordinary `Function` constructor. Sloppy primitive boxing,
+persistent global lexical collisions, and `Function.prototype.apply`/`bind`/
+`Symbol.hasInstance` remain fail-closed. Per-session compilation-count and
+generated-source limits bound nested construction. No dynamic-Function path
+uses eval or captures a caller lexical frame.
 
 ## Contract
 

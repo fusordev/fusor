@@ -162,6 +162,42 @@ fn global_function_call_compiles_executes_and_calls_the_result() {
 }
 
 #[test]
+fn function_prototype_call_forwards_the_dynamic_function_compiler_service() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "return Function.call(null,'value','return value;')(13);",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function.prototype.call dynamic target");
+
+    assert_number(&result, 13);
+}
+
+#[test]
+fn function_prototype_call_lets_the_target_normalize_a_sloppy_nullish_receiver() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "return Function('this.callMarker=21;return callMarker;').call(null);",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("sloppy target receiver");
+
+    assert_number(&result, 21);
+}
+
+#[test]
 fn new_function_uses_constructor_dispatch_and_returns_a_callable() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -504,6 +540,52 @@ fn function_prototype_is_callable_but_not_constructable() {
             .to_utf8_lossy()
             .expect("UTF-8"),
         "not a constructor"
+    );
+}
+
+#[test]
+fn function_prototype_call_has_native_source_and_is_not_constructable() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let source = dynamic_function(
+        &mut runtime.context(&realm).expect("context"),
+        &[],
+        "return Function.prototype.call.toString();",
+    );
+    let construct = dynamic_function(
+        &mut runtime.context(&realm).expect("context"),
+        &[],
+        "return new Function.prototype.call();",
+    );
+    let mut context = runtime.context(&realm).expect("context");
+
+    let source = context
+        .call(&source, &[], ExecutionLimits::default())
+        .expect("native source");
+    assert_eq!(
+        source
+            .as_string()
+            .expect("live source")
+            .expect("source string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "function call() {\n    [native code]\n}"
+    );
+
+    let error = context
+        .call(&construct, &[], ExecutionLimits::default())
+        .expect_err("call is not a constructor");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("nonconstructor must throw");
+    };
+    assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
+    assert_eq!(
+        exception
+            .message()
+            .expect("message")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "call is not a constructor"
     );
 }
 

@@ -347,8 +347,16 @@ A milestone is complete only when all of its checked items pass in CI.
     - [x] Replace compatible configurable global accessors transactionally
           during dynamic function declaration installation, including complete
           descriptor rollback and getter/setter GC edges.
+    - [x] Add realm-owned `Function.prototype.call` with the exact method and
+          property descriptors, dynamic non-predefined atom, native source,
+          nonconstructability, and property-only GC root. Forward the raw
+          target receiver and remaining arguments through an O(1) owned
+          argument window and the iterative native/bytecode dispatcher.
+          Zero-value identity continuations charge every nested call boundary
+          against frame limits, preserve target throws and bytecode callers,
+          and carry the dynamic-Function compiler service unchanged.
     - [ ] Add persistent global lexical collision checks and
-          `Function.prototype.call`/`apply`/`bind`/`Symbol.hasInstance`.
+          `Function.prototype.apply`/`bind`/`Symbol.hasInstance`.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
       stack traces, iterators, and generators.
   - [x] First escaping exception path: local/captured TDZ access returns a
@@ -362,6 +370,10 @@ A milestone is complete only when all of its checked items pass in CI.
         path while unwinding the existing frame vector; provenance allocation
         precedes publication of an escaping heap root; cloned exceptions share
         one `Arc` root header; and handler/finally opcodes remain fail-closed.
+  - [ ] Represent synthetic native caller frames. In particular, each
+        `Function.prototype.call` continuation is frame-accounted but cannot
+        yet render QuickJS's intervening `call (native)` entry through the
+        current verified-source-only `JsStackFrame`.
 - [ ] Deterministic debug/line tables.
 
 ### M3 — values and object model

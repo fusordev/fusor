@@ -360,7 +360,11 @@ the pinned post-completion `newTarget.prototype` adjustment are implemented.
 The realm also owns nonconstructable `Object.prototype.toString`,
 `Object.prototype.valueOf`, and `Function.prototype.toString` natives with
 exact data-property flags; bytecode function stringification returns retained
-verified source. Object/function source arguments use an executor-owned
+verified source. It also owns a nonconstructable `Function.prototype.call`
+native with exact `name = "call"`, `length = 1`, native source, and property
+flags. The ordinary non-predefined `call` atom is interned transactionally;
+the Function-prototype property is the method's only realm-rooted edge.
+Object/function source arguments use an executor-owned
 continuation with one retained slot per input. It performs
 `Symbol.toPrimitive("string")`, then ordinary `toString`/`valueOf`, suspends
 across native or verified-bytecode accessor and method calls, counts suspended
@@ -368,7 +372,7 @@ state against frame/value ceilings, and resumes without Rust recursion.
 Accessor lookup stops at the first descriptor, invokes inherited getters with
 the original source object, and treats a missing getter as `undefined`.
 Primitive boxing, persistent global lexical collision checks, and
-`Function.prototype.call`/`apply`/`bind`/`Symbol.hasInstance` stay fail closed.
+`Function.prototype.apply`/`bind`/`Symbol.hasInstance` stay fail closed.
 The path never emits `eval`/`apply_eval` and rejects direct eval anywhere in
 generated code. Direct and indirect eval remain wholly unimplemented.
 GeneratorFunction, AsyncFunction, and AsyncGeneratorFunction also remain fail
@@ -434,7 +438,12 @@ values, ordinary objects, stack operations, arguments and locals, imported
 captures, closure creation, TDZ checks, `close_loc` cell rotation, branches,
 returns, truthiness, `typeof`, strict equality, the nullish predicate, direct
 `call` plus `call0`–`call3`, static-property method calls, and explicit
-`throw`. Object literals create realm-owned ordinary objects, define static
+`throw`. `Function.prototype.call` forwards its callable receiver, raw
+`thisArg`, and remaining arguments through an owned argument cursor. Each
+native forwarding boundary attaches one zero-value identity continuation, so
+self-targeting call chains remain on the same iterative dispatcher while
+counting exactly against the active-frame ceiling. Object literals create
+realm-owned ordinary objects, define static
 data properties in source order, and support static reads and simple writes
 across ordinary objects and function objects. Missing reads produce
 `undefined`; nullish access and strict primitive writes produce exact
@@ -580,9 +589,9 @@ until zombie-state and resurrection rules are complete.
   fail closed.
 - Object literals inherit their realm's internal `Object.prototype`, which
   currently owns exact `toString` and `valueOf` native data properties.
-  `Function.prototype` likewise owns exact `toString`; all three method
-  functions belong to the realm, inherit `Function.prototype`, and participate
-  in the iterative heap trace. Ordinary objects and function objects share
+  `Function.prototype` likewise owns exact `toString` and `call`; all four
+  method functions belong to the realm, inherit `Function.prototype`, and
+  participate in the iterative heap trace. Ordinary objects and function objects share
   typed data/accessor property storage, and both getter and setter function
   edges are traced. `DefineField` creates configurable, writable, enumerable
   data properties; duplicate literal keys replace one slot without double
@@ -608,7 +617,10 @@ The current implementation keeps distinct domains:
   and exact direct-call `TypeError: not a function` payloads remain distinct
   from arbitrary explicit `throw` values. Every record retains the origin
   function/bytecode PC/source artifact plus caller call sites while explicit
-  frames unwind;
+  frames unwind. Zero-value `Function.prototype.call` continuations preserve
+  the target and outer verified call site, but the current source-only
+  `JsStackFrame` cannot yet render QuickJS's intervening `call (native)` stack
+  entry;
 - compile diagnostics: stable code, canonical message, severity, source span,
   labels, notes, and help;
 - verifier errors: function, bytecode PC, opcode, and violated invariant;
@@ -627,7 +639,9 @@ primitive-versus-`HeapReference` split covering both functions and ordinary
 objects, and the release mailbox carries the typed heap reference. Catch/finally,
 JavaScript Error objects, and catchable engine-created errors remain pending;
 ordinary host/resource/engine failures are not mislabeled as JavaScript
-throws. Miette remains presentation, not semantic truth.
+throws. Synthetic native-frame provenance, including one visible frame for
+each nested `Function.prototype.call`, remains part of the pending JavaScript
+Error/stack model. Miette remains presentation, not semantic truth.
 
 The leaf compiler maps instruction-local verifier failures back through its
 strictly ordered final-PC table with exact `BytecodePc` lookup. It never treats

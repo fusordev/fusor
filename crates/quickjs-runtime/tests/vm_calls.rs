@@ -99,6 +99,262 @@ fn every_direct_call_encoding_executes_and_can_feed_the_next_callee() {
 }
 
 #[test]
+fn function_prototype_call_forwards_receiver_and_arguments() {
+    let authority = compile(
+        "function run(){\
+            let receiver={};\
+            function target(first,second){\
+                \"use strict\";\
+                if(this===receiver){if(first===7){return second;}}\
+                return 0;\
+            }\
+            return target.call(receiver,7,9);\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("Function.prototype.call");
+
+    assert_number(&result, 9);
+}
+
+#[test]
+fn function_prototype_call_supplies_undefined_when_this_argument_is_missing() {
+    let authority = compile(
+        "function run(){\
+            function target(){\"use strict\";return this;}\
+            return target.call();\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("missing thisArg");
+
+    assert_eq!(result.kind().expect("live value"), ValueKind::Undefined);
+}
+
+#[test]
+fn function_prototype_call_preserves_strict_null_and_primitive_receivers() {
+    let authority = compile(
+        "function run(){\
+            function target(expected){\"use strict\";return this===expected;}\
+            if(!target.call(null,null)){return false;}\
+            return target.call(7,7);\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("strict receivers");
+
+    assert_eq!(result.as_boolean().expect("live value"), Some(true));
+}
+
+#[test]
+fn function_prototype_call_can_target_itself_with_bounded_native_continuations() {
+    let authority = compile(
+        "function run(){\
+            let receiver={};\
+            function target(value){\
+                \"use strict\";\
+                if(this===receiver){return value;}\
+                return 0;\
+            }\
+            return target.call.call(target,receiver,11);\
+        }",
+        "run",
+    );
+    let mut constrained =
+        Runtime::try_new(RuntimeLimits::default().with_max_active_frames(3)).expect("runtime");
+    let constrained_realm = constrained.create_realm().expect("realm");
+    let constrained_run = constrained
+        .context(&constrained_realm)
+        .expect("context")
+        .instantiate(authority.clone())
+        .expect("run");
+    assert!(matches!(
+        constrained
+            .context(&constrained_realm)
+            .expect("context")
+            .call(&constrained_run, &[], ExecutionLimits::default())
+            .expect_err("two call continuations and two bytecode frames exceed the limit"),
+        ExecutionError::LimitExceeded {
+            resource: quickjs_runtime::RuntimeResource::Frames,
+            limit: 3,
+            observed: 4,
+        }
+    ));
+
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_active_frames(4)).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("iterative call trampoline");
+
+    assert_number(&result, 11);
+}
+
+#[test]
+fn function_prototype_call_continuation_retains_no_frame_values() {
+    let authority = compile(
+        "function run(){\
+            function target(value){\"use strict\";return value;}\
+            return target.call(null,17);\
+        }",
+        "run",
+    );
+    let expected = reserved_frame_values(&authority, FunctionTemplateId::new(0))
+        .checked_add(reserved_frame_values(
+            &authority,
+            FunctionTemplateId::new(1),
+        ))
+        .expect("small frame usage");
+    let mut constrained =
+        Runtime::try_new(RuntimeLimits::default().with_max_active_frame_values(expected - 1))
+            .expect("runtime");
+    let constrained_realm = constrained.create_realm().expect("realm");
+    let constrained_run = constrained
+        .context(&constrained_realm)
+        .expect("context")
+        .instantiate(authority.clone())
+        .expect("run");
+    assert!(matches!(
+        constrained
+            .context(&constrained_realm)
+            .expect("context")
+            .call(&constrained_run, &[], ExecutionLimits::default())
+            .expect_err("target frame exceeds the exact value limit"),
+        ExecutionError::LimitExceeded {
+            resource: quickjs_runtime::RuntimeResource::FrameValues,
+            limit,
+            observed,
+        } if limit == expected - 1 && observed == expected
+    ));
+
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_active_frame_values(expected))
+            .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("zero-value continuation");
+
+    assert_number(&result, 17);
+}
+
+#[test]
+fn function_prototype_call_forwards_into_native_targets() {
+    let authority = compile(
+        "function run(){\
+            let receiver={};\
+            return receiver.valueOf.call(receiver)===receiver;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("native target");
+
+    assert_eq!(result.as_boolean().expect("live value"), Some(true));
+}
+
+#[test]
+fn function_prototype_call_rejects_a_non_callable_receiver_at_the_call_site() {
+    let source = "function run(){function target(){}return target.call.call(1);}";
+    let authority = compile(source, "run");
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let ExecutionError::Exception(exception) = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect_err("number is not callable")
+    else {
+        panic!("expected JavaScript exception");
+    };
+
+    assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
+    assert_eq!(
+        exception
+            .message()
+            .expect("engine message")
+            .to_utf8_lossy()
+            .expect("message"),
+        "not a function"
+    );
+    assert!(exception.caller_frames().is_empty());
+    let span = exception.source_span();
+    assert_eq!(
+        &source[span.start() as usize..span.end() as usize],
+        "target.call.call(1)"
+    );
+}
+
+#[test]
+fn function_prototype_call_preserves_target_throw_provenance() {
+    let source = "function run(){\
+        function target(){throw 37;}\
+        return target.call();\
+    }";
+    let authority = compile(source, "run");
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let ExecutionError::Exception(exception) = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect_err("target throw")
+    else {
+        panic!("expected JavaScript exception");
+    };
+    let thrown = exception
+        .thrown_value()
+        .expect("explicit throw")
+        .as_number()
+        .expect("live throw")
+        .expect("number throw");
+
+    assert!(thrown.strict_equals(JsNumber::from_i32(37)));
+    assert_eq!(exception.caller_frames().len(), 1);
+    let caller = &exception.caller_frames()[0];
+    let span = caller.source_span();
+    assert_eq!(
+        &source[span.start() as usize..span.end() as usize],
+        "target.call()"
+    );
+}
+
+#[test]
 fn higher_order_calls_cross_installed_code_and_realms_in_one_runtime() {
     let apply = compile(
         "function apply(callback,value){return callback(value);}",

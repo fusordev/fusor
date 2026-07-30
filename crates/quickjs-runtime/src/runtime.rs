@@ -378,10 +378,17 @@ pub(crate) struct BytecodeFunction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeFunctionKind {
     FunctionPrototype,
+    FunctionPrototypeCall,
     OrdinaryFunctionConstructor,
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
     FunctionPrototypeToString,
+}
+
+impl NativeFunctionKind {
+    pub(crate) const fn is_constructor(self) -> bool {
+        matches!(self, Self::OrdinaryFunctionConstructor)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -700,12 +707,12 @@ impl Runtime {
         check_limit(
             RuntimeResource::HeapFunctions,
             self.limits.max_heap_functions,
-            usize_to_u64(self.functions.len()).saturating_add(5),
+            usize_to_u64(self.functions.len()).saturating_add(6),
         )?;
         check_limit(
             RuntimeResource::ObjectProperties,
             self.limits.max_object_properties,
-            self.object_properties.saturating_add(16),
+            self.object_properties.saturating_add(19),
         )?;
         self.realms
             .try_reserve(1)
@@ -720,10 +727,10 @@ impl Runtime {
                 additional: 2,
             })?;
         self.functions
-            .try_reserve(5)
+            .try_reserve(6)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::HeapFunctions,
-                additional: 5,
+                additional: 6,
             })?;
 
         let function_key =
@@ -744,6 +751,7 @@ impl Runtime {
         let empty_name = predefined_string(&self.atoms, PredefinedAtom::EmptyString);
         let to_string_name = predefined_string(&self.atoms, PredefinedAtom::ToString);
         let value_of_name = predefined_string(&self.atoms, PredefinedAtom::ValueOf);
+        let call_name = JsString::from_utf8("call").map_err(crate::AtomError::from)?;
 
         let mut global_record = ObjectRecord::empty(None);
         global_record
@@ -760,10 +768,10 @@ impl Runtime {
             }
         })?;
         let mut function_prototype_record = ObjectRecord::empty(None);
-        function_prototype_record.try_reserve_data(4).map_err(|_| {
+        function_prototype_record.try_reserve_data(5).map_err(|_| {
             RuntimeError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
-                additional: 4,
+                additional: 5,
             }
         })?;
         let mut function_constructor_record = ObjectRecord::empty(None);
@@ -794,6 +802,13 @@ impl Runtime {
                 additional: 2,
             }
         })?;
+        let mut function_call_record = ObjectRecord::empty(None);
+        function_call_record
+            .try_reserve_data(2)
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 2,
+            })?;
 
         let object_prototype = self
             .objects
@@ -915,6 +930,46 @@ impl Runtime {
                 public_roots: 0,
             })
             .expect("the realm transaction reserved all intrinsic function slots");
+        function_call_record.replace_prototype(Some(HeapReference::Function(function_prototype)));
+        let function_call = self
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: id,
+                    kind: NativeFunctionKind::FunctionPrototypeCall,
+                }),
+                object: function_call_record,
+                public_roots: 0,
+            })
+            .expect("the realm transaction reserved all intrinsic function slots");
+        // `call` is not a predefined QuickJS atom. Publish it only after every
+        // heap and property buffer has been reserved, then retain an exact
+        // rollback token until the realm graph is committed.
+        let call_atom = match self.atoms.intern_string(&call_name) {
+            Ok(atom) => atom,
+            Err(error) => {
+                let removed = self.functions.remove(function_call);
+                debug_assert!(removed.is_some());
+                let removed = self.functions.remove(function_to_string);
+                debug_assert!(removed.is_some());
+                let removed = self.functions.remove(object_value_of);
+                debug_assert!(removed.is_some());
+                let removed = self.functions.remove(object_to_string);
+                debug_assert!(removed.is_some());
+                let removed = self.functions.remove(function_constructor);
+                debug_assert!(removed.is_some());
+                let removed = self.functions.remove(function_prototype);
+                debug_assert!(removed.is_some());
+                let removed = self.realms.remove(id);
+                debug_assert!(removed.is_some());
+                let removed = self.objects.remove(global_object);
+                debug_assert!(removed.is_some());
+                let removed = self.objects.remove(object_prototype);
+                debug_assert!(removed.is_some());
+                return Err(error.into());
+            }
+        };
+        let call_key = PropertyKey::from_validated_atom(call_atom.clone());
 
         let property_result = (|| {
             let object_prototype_node = self
@@ -956,6 +1011,11 @@ impl Runtime {
                 PropertyLayout::data(true, false, true),
                 StoredValue::Function(function_to_string),
             )?;
+            function_prototype_node.object.append_data(
+                call_key,
+                PropertyLayout::data(true, false, true),
+                StoredValue::Function(function_call),
+            )?;
 
             let function_constructor_node = self
                 .functions
@@ -977,10 +1037,11 @@ impl Runtime {
                 StoredValue::String(function_name),
             )?;
 
-            for (function, name) in [
-                (object_to_string, to_string_name.clone()),
-                (object_value_of, value_of_name),
-                (function_to_string, to_string_name),
+            for (function, name, length) in [
+                (object_to_string, to_string_name.clone(), 0),
+                (object_value_of, value_of_name, 0),
+                (function_to_string, to_string_name, 0),
+                (function_call, call_name, 1),
             ] {
                 let method = self
                     .functions
@@ -989,7 +1050,7 @@ impl Runtime {
                 method.object.append_data(
                     length_key.clone(),
                     PropertyLayout::data(false, false, true),
-                    StoredValue::Number(JsNumber::from_i32(0)),
+                    StoredValue::Number(JsNumber::from_i32(length)),
                 )?;
                 method.object.append_data(
                     name_key.clone(),
@@ -1009,6 +1070,8 @@ impl Runtime {
                 )
         })();
         if property_result.is_err() {
+            let removed = self.functions.remove(function_call);
+            debug_assert!(removed.is_some());
             let removed = self.functions.remove(function_to_string);
             debug_assert!(removed.is_some());
             let removed = self.functions.remove(object_value_of);
@@ -1025,6 +1088,7 @@ impl Runtime {
             debug_assert!(removed.is_some());
             let removed = self.objects.remove(object_prototype);
             debug_assert!(removed.is_some());
+            self.atoms.rollback_interned_string(call_atom);
             return Err(RuntimeError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
                 additional: 1,
@@ -1038,7 +1102,7 @@ impl Runtime {
             function_prototype,
             function_constructor,
         };
-        self.object_properties += 16;
+        self.object_properties += 19;
         Ok(Realm(Arc::new(RealmHandle {
             owner: Arc::downgrade(&self.mailbox),
             id,
@@ -3172,8 +3236,9 @@ mod tests {
         dynamic_function_declaration_property_layout, global_function_replacement_layout,
     };
     use crate::{
-        JsNumber, JsString, PredefinedAtom, PropertyKey, PropertyLayout, RuntimeError,
-        RuntimeResource,
+        AtomError, AtomLimits, AtomUsage, JsNumber, JsString, PREDEFINED_ATOM_COUNT,
+        PREDEFINED_DESCRIPTION_CODE_UNITS, PREDEFINED_INTERNER_SLOTS, PredefinedAtom, PropertyKey,
+        PropertyLayout, RuntimeError, RuntimeResource,
         object::{ObjectRecord, OwnProperty},
         value::{HeapReference, StoredValue},
     };
@@ -3187,6 +3252,11 @@ mod tests {
         let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
         let realm = runtime.create_realm().expect("realm");
         let realm_id = realm.0.id;
+        let call_name = JsString::from_utf8("call").expect("call");
+        let call_key = runtime
+            .atoms
+            .property_key_from_string(&call_name)
+            .expect("call key");
         let state = runtime.realms.get(realm_id).expect("realm state");
         let RealmIntrinsics::Ready {
             function_prototype,
@@ -3198,9 +3268,17 @@ mod tests {
 
         assert_eq!(runtime.usage().realms(), 1);
         assert_eq!(runtime.usage().heap_objects(), 2);
-        assert_eq!(runtime.usage().heap_functions(), 5);
-        assert_eq!(runtime.usage().object_properties(), 16);
+        assert_eq!(runtime.usage().heap_functions(), 6);
+        assert_eq!(runtime.usage().object_properties(), 19);
         assert_eq!(runtime.usage().installed_code(), 0);
+        assert_eq!(
+            runtime.atom_usage(),
+            AtomUsage {
+                live_atoms: PREDEFINED_ATOM_COUNT + 1,
+                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 4,
+                interner_slots: PREDEFINED_INTERNER_SLOTS + 1,
+            }
+        );
 
         let prototype = runtime
             .functions
@@ -3267,6 +3345,45 @@ mod tests {
             NativeFunctionKind::FunctionPrototypeToString,
             PredefinedAtom::ToString,
             0,
+        );
+        let (call_layout, call_value) = prototype
+            .object
+            .own_data_property(&call_key)
+            .expect("Function.prototype.call");
+        assert_eq!(
+            call_layout,
+            PropertyLayout::data(true, false, true),
+            "Function.prototype.call descriptor"
+        );
+        let StoredValue::Function(function_call) = call_value else {
+            panic!("Function.prototype.call is not a function");
+        };
+        assert_native_method_named(
+            &runtime,
+            function_call,
+            function_prototype,
+            realm_id,
+            NativeFunctionKind::FunctionPrototypeCall,
+            &call_name,
+            1,
+        );
+        let call_native = runtime
+            .functions
+            .get(function_call)
+            .and_then(HeapFunction::native)
+            .expect("native Function.prototype.call");
+        assert!(!call_native.kind.is_constructor());
+        assert!(
+            !has_own_property(
+                &runtime
+                    .functions
+                    .get(function_call)
+                    .expect("Function.prototype.call")
+                    .object,
+                &runtime,
+                PredefinedAtom::Prototype,
+            ),
+            "Function.prototype.call must not have an own prototype"
         );
 
         let object_prototype = &runtime
@@ -3345,6 +3462,58 @@ mod tests {
     }
 
     #[test]
+    fn function_call_is_realm_owned_while_its_dynamic_atom_is_reused() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let first = runtime.create_realm().expect("first realm");
+        let second = runtime.create_realm().expect("second realm");
+        let call_name = JsString::from_utf8("call").expect("call");
+        let call_key = runtime
+            .atoms
+            .property_key_from_string(&call_name)
+            .expect("call key");
+        let mut calls = Vec::new();
+        for realm in [first.0.id, second.0.id] {
+            let RealmIntrinsics::Ready {
+                function_prototype, ..
+            } = runtime.realms.get(realm).expect("realm").intrinsics
+            else {
+                panic!("realm intrinsics remained uninitialized");
+            };
+            let call = function_property_by_key(
+                &runtime
+                    .functions
+                    .get(function_prototype)
+                    .expect("Function.prototype")
+                    .object,
+                &call_key,
+                PropertyLayout::data(true, false, true),
+            );
+            let node = runtime.functions.get(call).expect("call");
+            assert_eq!(
+                node.object.prototype(),
+                Some(HeapReference::Function(function_prototype))
+            );
+            assert!(matches!(
+                node.implementation,
+                FunctionImplementation::Native(ref native)
+                    if native.realm == realm
+                        && native.kind == NativeFunctionKind::FunctionPrototypeCall
+            ));
+            calls.push(call);
+        }
+
+        assert_ne!(calls[0], calls[1]);
+        assert_eq!(
+            runtime.atom_usage(),
+            AtomUsage {
+                live_atoms: PREDEFINED_ATOM_COUNT + 1,
+                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 4,
+                interner_slots: PREDEFINED_INTERNER_SLOTS + 1,
+            }
+        );
+    }
+
+    #[test]
     fn function_intrinsic_creation_is_failure_atomic_at_each_limit() {
         for (limits, expected_resource, limit, observed) in [
             (
@@ -3354,16 +3523,16 @@ mod tests {
                 2,
             ),
             (
-                RuntimeLimits::default().with_max_heap_functions(4),
+                RuntimeLimits::default().with_max_heap_functions(5),
                 RuntimeResource::HeapFunctions,
-                4,
                 5,
+                6,
             ),
             (
-                RuntimeLimits::default().with_max_object_properties(15),
+                RuntimeLimits::default().with_max_object_properties(18),
                 RuntimeResource::ObjectProperties,
-                15,
-                16,
+                18,
+                19,
             ),
         ] {
             let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -3382,6 +3551,33 @@ mod tests {
     }
 
     #[test]
+    fn function_call_atom_limit_failure_is_failure_atomic() {
+        let atom_limits = AtomLimits::new(
+            PREDEFINED_ATOM_COUNT,
+            PREDEFINED_DESCRIPTION_CODE_UNITS,
+            PREDEFINED_INTERNER_SLOTS,
+        );
+        let mut runtime = Runtime::try_new(RuntimeLimits::default().with_atom_limits(atom_limits))
+            .expect("runtime");
+        let atoms_before = runtime.atom_usage();
+
+        let error = runtime
+            .create_realm()
+            .expect_err("call atom must exceed limit");
+
+        assert!(matches!(
+            error,
+            RuntimeError::Atom(AtomError::LiveAtomLimit {
+                current: PREDEFINED_ATOM_COUNT,
+                additional: 1,
+                maximum: PREDEFINED_ATOM_COUNT,
+            })
+        ));
+        assert_eq!(runtime.usage(), RuntimeUsage::default());
+        assert_eq!(runtime.atom_usage(), atoms_before);
+    }
+
+    #[test]
     fn realm_function_intrinsics_remain_roots_during_collection() {
         let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
         let realm = runtime.create_realm().expect("realm");
@@ -3395,7 +3591,7 @@ mod tests {
         let report = runtime.collect_cycles().expect("collection");
 
         assert_eq!(report.functions(), 0);
-        assert_eq!(runtime.usage().heap_functions(), 5);
+        assert_eq!(runtime.usage().heap_functions(), 6);
         assert_eq!(runtime.usage().installed_code(), 0);
         assert_eq!(
             runtime
@@ -3405,6 +3601,48 @@ mod tests {
                 .intrinsics,
             expected_intrinsics
         );
+    }
+
+    #[test]
+    fn function_call_is_collected_after_its_realm_prototype_edge_is_replaced() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let call_name = JsString::from_utf8("call").expect("call");
+        let call_key = runtime
+            .atoms
+            .property_key_from_string(&call_name)
+            .expect("call key");
+        let RealmIntrinsics::Ready {
+            function_prototype, ..
+        } = runtime.realms.get(realm_id).expect("realm").intrinsics
+        else {
+            panic!("realm intrinsics remained uninitialized");
+        };
+        let function_call = function_property_by_key(
+            &runtime
+                .functions
+                .get(function_prototype)
+                .expect("Function.prototype")
+                .object,
+            &call_key,
+            PropertyLayout::data(true, false, true),
+        );
+        assert!(
+            runtime
+                .functions
+                .get_mut(function_prototype)
+                .expect("Function.prototype")
+                .object
+                .replace_existing_data(&call_key, StoredValue::Undefined)
+        );
+
+        let report = runtime.collect_cycles().expect("collection");
+
+        assert_eq!(report.functions(), 1);
+        assert!(runtime.functions.get(function_call).is_none());
+        assert_eq!(runtime.usage().heap_functions(), 5);
+        assert_eq!(runtime.usage().object_properties(), 17);
     }
 
     #[test]
@@ -3501,7 +3739,7 @@ mod tests {
         assert!(runtime.functions.get(getter).is_some());
         assert!(runtime.functions.get(setter).is_some());
         assert!(runtime.functions.get(orphan).is_none());
-        assert_eq!(runtime.usage().object_properties(), 17);
+        assert_eq!(runtime.usage().object_properties(), 20);
     }
 
     #[test]
@@ -3608,7 +3846,7 @@ mod tests {
 
         runtime.rollback_root_environment(realm_id, &environment);
 
-        assert_eq!(runtime.usage().object_properties(), 17);
+        assert_eq!(runtime.usage().object_properties(), 20);
         assert!(matches!(
             runtime
                 .objects
@@ -3652,6 +3890,24 @@ mod tests {
         function
     }
 
+    fn has_own_property(record: &ObjectRecord, runtime: &Runtime, atom: PredefinedAtom) -> bool {
+        let key = PropertyKey::from_validated_atom(runtime.atoms.predefined(atom));
+        record.own_property(&key).is_some()
+    }
+
+    fn function_property_by_key(
+        record: &ObjectRecord,
+        key: &PropertyKey,
+        expected_layout: PropertyLayout,
+    ) -> crate::ids::FunctionId {
+        let (layout, value) = record.own_data_property(key).expect("function property");
+        assert_eq!(layout, expected_layout);
+        let StoredValue::Function(function) = value else {
+            panic!("property is not a function");
+        };
+        function
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn assert_native_method(
         runtime: &Runtime,
@@ -3660,6 +3916,33 @@ mod tests {
         realm: crate::ids::RealmId,
         kind: NativeFunctionKind,
         name: PredefinedAtom,
+        length: i32,
+    ) {
+        let expected_name = runtime
+            .atoms
+            .predefined(name)
+            .description()
+            .expect("predefined method name")
+            .clone();
+        assert_native_method_named(
+            runtime,
+            function,
+            function_prototype,
+            realm,
+            kind,
+            &expected_name,
+            length,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_native_method_named(
+        runtime: &Runtime,
+        function: crate::ids::FunctionId,
+        function_prototype: crate::ids::FunctionId,
+        realm: crate::ids::RealmId,
+        kind: NativeFunctionKind,
+        expected_name: &JsString,
         length: i32,
     ) {
         let method = runtime.functions.get(function).expect("native method");
@@ -3679,18 +3962,12 @@ mod tests {
             PropertyLayout::data(false, false, true),
             |value| matches!(value, StoredValue::Number(number) if number.strict_equals(JsNumber::from_i32(length))),
         );
-        let expected_name = runtime
-            .atoms
-            .predefined(name)
-            .description()
-            .expect("predefined method name")
-            .clone();
         assert_data_property(
             &method.object,
             runtime,
             PredefinedAtom::Name,
             PropertyLayout::data(false, false, true),
-            |value| matches!(value, StoredValue::String(actual) if actual == expected_name),
+            |value| matches!(value, StoredValue::String(actual) if actual == *expected_name),
         );
     }
 }
