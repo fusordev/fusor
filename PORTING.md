@@ -448,19 +448,25 @@ A milestone is complete only when all of its checked items pass in CI.
         every realm installs the exact global constructor, false-branded
         prototype, native `toString`/`valueOf` methods, descriptors, prototype
         edges, and GC roots. Call conversion uses truthiness without observable
-        coercion; construction honors data-valued `newTarget.prototype`;
+        coercion; construction honors data or accessor-backed
+        `newTarget.prototype`;
         primitive reads walk the realm prototype with the raw receiver; strict
         writes reject and sloppy writes disappear; strict calls retain
         primitives while sloppy calls allocate exactly one wrapper per frame.
-        Internal branding, `Object.prototype` boxing and data-valued tagging,
+        Internal branding, `Object.prototype` boxing and resumable tagging,
         prototype-sensitive `ToPrimitive`, exact receiver and nonconstructor
         errors, cross-realm ownership, and allocation-limit rollback are
         covered.
-  - [ ] Make intrinsic property reads resumable for accessor-backed
-        `newTarget.prototype` during construction and accessor-backed
-        `Symbol.toStringTag` during `Object.prototype.toString`; current
-        synchronous internal reads reject these paths instead of skipping or
-        approximating them.
+  - [x] Make the Boolean intrinsic reads resumable for accessor-backed
+        `newTarget.prototype` construction and accessor-backed
+        `Symbol.toStringTag` during `Object.prototype.toString`. Both native and
+        bytecode getters run through typed iterative continuations with exact
+        receiver, throw, frame/value-limit, and fallback behavior. Boolean
+        construction allocates only after a successful Get; Boolean
+        `Object.prototype.toString` receivers are boxed before the Get.
+        Active-frame-aware reachability collection reclaims unescaped temporary
+        wrappers within the same execution while preserving heap-, closure-,
+        and exception-escaped receiver identities.
   - [ ] Add Number/String/Symbol wrapper payload consumers and prototypes, the
         remaining conversion hints and built-in entry points, BigInt numeric
         domains, and the remaining conversion/formatting surface.

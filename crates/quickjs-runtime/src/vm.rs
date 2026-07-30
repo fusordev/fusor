@@ -37,12 +37,12 @@ use crate::{
     ArrayIndex, Context, DynamicFunctionCompileFailure, EngineFault, ExceptionKind, ExecutionError,
     Function, HandleError, HandleKind, JsException, JsNumber, JsStackFrame, JsString,
     JsStringError, JsValue, OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
-    PredefinedAtom, PropertyKey, PropertyLayout, Runtime, RuntimeResource,
+    PredefinedAtom, PropertyKey, PropertyLayout, Runtime, RuntimeError, RuntimeResource,
     conversion::{number_to_int32, number_to_uint32, string_to_number},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     object::OwnProperty,
     runtime::{
-        BindingCell, BytecodeFunction, EnvironmentBinding, FrameBindingAddress,
+        BindingCell, BytecodeFunction, CollectionRoot, EnvironmentBinding, FrameBindingAddress,
         FunctionImplementation, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
         InstalledTemplate, NativeFunction, NativeFunctionKind, RealmGlobalBindingState,
         check_execution_limit, global_declaration_error, usize_to_u64,
@@ -150,6 +150,7 @@ struct Frame {
     return_to: Option<CallReturn>,
     dynamic_return: Option<DynamicFunctionReturn>,
     native_returns: Vec<NativeContinuation>,
+    transient_cleanup_pending: bool,
     ordinary_constructor: bool,
     reserved_values: u64,
     arguments: Vec<FrameBinding>,
@@ -170,6 +171,7 @@ enum NativeContinuation {
     FunctionSource(FunctionSourceContinuation),
     PropertyKey(PropertyKeyContinuation),
     OperatorPrimitive(OperatorPrimitiveContinuation),
+    IntrinsicGet(IntrinsicGetContinuation),
     FunctionCall,
 }
 
@@ -180,7 +182,54 @@ impl NativeContinuation {
                 .saturating_add(u64::from(state.construction.is_some())),
             Self::PropertyKey(state) => state.retained_values(),
             Self::OperatorPrimitive(state) => state.retained_values(),
+            Self::IntrinsicGet(state) => state.retained_values(),
             Self::FunctionCall => 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum IntrinsicGetContinuation {
+    BooleanConstructor {
+        new_target: FunctionId,
+        value: bool,
+    },
+    ObjectPrototypeToString {
+        default_tag: ObjectPrototypeTag,
+        temporary_receiver: Option<ObjectId>,
+    },
+}
+
+impl IntrinsicGetContinuation {
+    const fn retained_values(&self) -> u64 {
+        match self {
+            Self::BooleanConstructor { .. } => 1,
+            Self::ObjectPrototypeToString {
+                temporary_receiver, ..
+            } => {
+                if temporary_receiver.is_some() {
+                    1
+                } else {
+                    0
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ObjectPrototypeTag {
+    Boolean,
+    Function,
+    Object,
+}
+
+impl ObjectPrototypeTag {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Boolean => "Boolean",
+            Self::Function => "Function",
+            Self::Object => "Object",
         }
     }
 }
@@ -388,6 +437,205 @@ impl CallArguments {
     #[cfg(test)]
     fn remaining(&self) -> &[StoredValue] {
         self.values.get(self.next..).unwrap_or_default()
+    }
+}
+
+fn trace_stored_value_root(value: &StoredValue, mark: &mut dyn FnMut(CollectionRoot)) {
+    if let Some(reference) = value.heap_reference() {
+        mark(CollectionRoot::Heap(reference));
+    }
+}
+
+fn trace_slot_value_root(value: &SlotValue, mark: &mut dyn FnMut(CollectionRoot)) {
+    if let SlotValue::Value(value) = value {
+        trace_stored_value_root(value, mark);
+    }
+}
+
+fn trace_frame_binding_root(binding: &FrameBinding, mark: &mut dyn FnMut(CollectionRoot)) {
+    match binding {
+        FrameBinding::Direct(value) => trace_slot_value_root(value, mark),
+        FrameBinding::Captured(cell) => mark(CollectionRoot::BindingCell(*cell)),
+    }
+}
+
+fn trace_property_key_target_roots(
+    target: &PropertyKeyTarget,
+    mark: &mut dyn FnMut(CollectionRoot),
+) {
+    match target {
+        PropertyKeyTarget::ToKey => {}
+        PropertyKeyTarget::Read { base, .. } => trace_stored_value_root(base, mark),
+        PropertyKeyTarget::Write { base, value, .. } => {
+            trace_stored_value_root(base, mark);
+            trace_stored_value_root(value, mark);
+        }
+        PropertyKeyTarget::DefineMethod { base, function, .. } => {
+            trace_stored_value_root(base, mark);
+            trace_stored_value_root(function, mark);
+        }
+    }
+}
+
+fn trace_operator_primitive_target_roots(
+    target: &OperatorPrimitiveTarget,
+    mark: &mut dyn FnMut(CollectionRoot),
+) {
+    match target {
+        OperatorPrimitiveTarget::Unary { .. } => {}
+        OperatorPrimitiveTarget::BinaryRight { right, .. } => {
+            trace_stored_value_root(right, mark);
+        }
+        OperatorPrimitiveTarget::BinaryFinish { left, .. } => {
+            trace_stored_value_root(left, mark);
+        }
+        OperatorPrimitiveTarget::EqualityFinish { other, .. } => {
+            trace_stored_value_root(other, mark);
+        }
+    }
+}
+
+fn trace_native_continuation_roots(
+    continuation: &NativeContinuation,
+    mark: &mut dyn FnMut(CollectionRoot),
+) {
+    match continuation {
+        NativeContinuation::FunctionSource(state) => {
+            for argument in &state.arguments {
+                trace_stored_value_root(argument, mark);
+            }
+            if let Some(construction) = state.construction {
+                mark(CollectionRoot::Heap(HeapReference::Function(construction)));
+            }
+        }
+        NativeContinuation::PropertyKey(state) => {
+            trace_stored_value_root(&state.receiver, mark);
+            trace_property_key_target_roots(&state.target, mark);
+        }
+        NativeContinuation::OperatorPrimitive(state) => {
+            trace_stored_value_root(&state.receiver, mark);
+            trace_operator_primitive_target_roots(&state.target, mark);
+        }
+        NativeContinuation::IntrinsicGet(state) => match state {
+            IntrinsicGetContinuation::BooleanConstructor { new_target, .. } => {
+                mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
+            }
+            IntrinsicGetContinuation::ObjectPrototypeToString {
+                temporary_receiver, ..
+            } => {
+                if let Some(receiver) = temporary_receiver {
+                    mark(CollectionRoot::Heap(HeapReference::Object(*receiver)));
+                }
+            }
+        },
+        NativeContinuation::FunctionCall => {}
+    }
+}
+
+fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRoot)) {
+    mark(CollectionRoot::Heap(HeapReference::Function(
+        frame.function,
+    )));
+    trace_stored_value_root(&frame.receiver, mark);
+    for binding in frame.arguments.iter().chain(&frame.locals) {
+        trace_frame_binding_root(binding, mark);
+    }
+    for cell in frame.own_cells.iter().flatten() {
+        mark(CollectionRoot::BindingCell(*cell));
+    }
+    for binding in &frame.environment {
+        if let EnvironmentBinding::Captured(cell) = binding {
+            mark(CollectionRoot::BindingCell(*cell));
+        }
+    }
+    for value in &frame.stack {
+        trace_stored_value_root(value, mark);
+    }
+    for continuation in &frame.native_returns {
+        trace_native_continuation_roots(continuation, mark);
+    }
+    if let Some(dynamic) = &frame.dynamic_return {
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            dynamic.root.function,
+        )));
+        if let Some(construction) = dynamic.construction {
+            mark(CollectionRoot::Heap(HeapReference::Function(construction)));
+        }
+    }
+}
+
+fn collect_cycles_with_execution_roots(
+    runtime: &mut Runtime,
+    frames: &[Frame],
+    continuations: &[NativeContinuation],
+    values: &[StoredValue],
+) -> Result<(), ExecutionError> {
+    runtime
+        .collect_cycles_with_roots(|mark| {
+            for frame in frames {
+                trace_frame_roots(frame, mark);
+            }
+            for continuation in continuations {
+                trace_native_continuation_roots(continuation, mark);
+            }
+            for value in values {
+                trace_stored_value_root(value, mark);
+            }
+        })
+        .map(|_| ())
+        .map_err(runtime_collection_execution_error)
+}
+
+fn runtime_collection_execution_error(error: RuntimeError) -> ExecutionError {
+    match error {
+        RuntimeError::LimitExceeded {
+            resource,
+            limit,
+            observed,
+        } => ExecutionError::LimitExceeded {
+            resource,
+            limit,
+            observed,
+        },
+        RuntimeError::AllocationFailed {
+            resource,
+            additional,
+        } => ExecutionError::AllocationFailed {
+            resource,
+            additional,
+        },
+        RuntimeError::Atom(source) => ExecutionError::Atom(source),
+    }
+}
+
+fn native_continuations_have_temporary_receiver(continuations: &[NativeContinuation]) -> bool {
+    continuations.iter().any(|continuation| {
+        matches!(
+            continuation,
+            NativeContinuation::IntrinsicGet(IntrinsicGetContinuation::ObjectPrototypeToString {
+                temporary_receiver: Some(_),
+                ..
+            })
+        )
+    })
+}
+
+fn frames_have_temporary_receiver(frames: &[Frame]) -> bool {
+    frames.iter().any(|frame| {
+        frame.transient_cleanup_pending
+            || native_continuations_have_temporary_receiver(&frame.native_returns)
+    })
+}
+
+fn native_dispatch_has_temporary_receiver(dispatch: &NativeDispatch) -> bool {
+    match dispatch {
+        NativeDispatch::Immediate(_) | NativeDispatch::Pair(_, _) => false,
+        NativeDispatch::Frame(frame) => {
+            native_continuations_have_temporary_receiver(&frame.native_returns)
+        }
+        NativeDispatch::Call(call) => {
+            native_continuations_have_temporary_receiver(&call.continuations)
+        }
     }
 }
 
@@ -817,11 +1065,37 @@ fn execute_prepared_frames_with_dynamic_budget(
         compiler,
         dynamic_budget,
     );
+    let reclaim_temporary_receivers = frames_have_temporary_receiver(&frames);
     let cleanup = retire_active_dynamic_roots(runtime, &mut frames);
-    match cleanup {
-        Ok(()) => result,
-        Err(fault) => Err(fault.into()),
+    if let Err(fault) = cleanup {
+        if reclaim_temporary_receivers {
+            frames.clear();
+            if runtime.collection_pending {
+                let _ = runtime.collect_cycles();
+            }
+        }
+        return Err(fault.into());
     }
+    if result.is_err() {
+        if reclaim_temporary_receivers {
+            frames.clear();
+            if runtime.collection_pending {
+                let _ = runtime.collect_cycles();
+            }
+        }
+        return result;
+    }
+    if reclaim_temporary_receivers {
+        let collection = runtime
+            .collect_cycles_with_roots(|mark| {
+                if let Ok(value) = &result {
+                    trace_stored_value_root(value, mark);
+                }
+            })
+            .map_err(runtime_collection_execution_error);
+        collection?;
+    }
+    result
 }
 
 #[allow(
@@ -909,6 +1183,7 @@ fn execute_frame_loop(
                         Ok(dispatch) => resolve_native_dispatch(
                             runtime,
                             dispatch,
+                            frames,
                             active_frames,
                             *active_frame_values,
                             compiler,
@@ -943,6 +1218,15 @@ fn execute_frame_loop(
                             .into());
                         }
                         Err(NativeFailure::Abrupt(pending)) => {
+                            let caller_frames = exception_caller_frames(runtime, frames)?;
+                            let exception = finish_exception(runtime, pending, caller_frames)?;
+                            return Err(ExecutionError::Exception(exception));
+                        }
+                        Err(NativeFailure::AbruptAfterTransient(pending)) => {
+                            let frame = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                                message: "transient native throw has no executing frame",
+                            })?;
+                            frame.transient_cleanup_pending = true;
                             let caller_frames = exception_caller_frames(runtime, frames)?;
                             let exception = finish_exception(runtime, pending, caller_frames)?;
                             return Err(ExecutionError::Exception(exception));
@@ -1010,15 +1294,22 @@ fn execute_frame_loop(
                 return_to,
             } => {
                 let active_frames = active_execution_frames(frames);
-                frames
-                    .try_reserve(1)
-                    .map_err(|_| ExecutionError::AllocationFailed {
+                if frames.try_reserve(1).is_err() {
+                    if native_dispatch_has_temporary_receiver(&dispatch) {
+                        let frame = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                            message: "transient native dispatch has no executing frame",
+                        })?;
+                        frame.transient_cleanup_pending = true;
+                    }
+                    return Err(ExecutionError::AllocationFailed {
                         resource: RuntimeResource::Frames,
                         additional: 1,
-                    })?;
+                    });
+                }
                 let dispatch = resolve_native_dispatch(
                     runtime,
                     dispatch,
+                    frames,
                     active_frames,
                     *active_frame_values,
                     compiler,
@@ -1051,6 +1342,15 @@ fn execute_frame_loop(
                         .into());
                     }
                     Err(NativeFailure::Abrupt(pending)) => {
+                        let caller_frames = exception_caller_frames(runtime, frames)?;
+                        let exception = finish_exception(runtime, pending, caller_frames)?;
+                        return Err(ExecutionError::Exception(exception));
+                    }
+                    Err(NativeFailure::AbruptAfterTransient(pending)) => {
+                        let frame = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                            message: "transient native throw has no executing frame",
+                        })?;
+                        frame.transient_cleanup_pending = true;
                         let caller_frames = exception_caller_frames(runtime, frames)?;
                         let exception = finish_exception(runtime, pending, caller_frames)?;
                         return Err(ExecutionError::Exception(exception));
@@ -1092,18 +1392,26 @@ fn execute_frame_loop(
                 };
                 let native_returns = std::mem::take(&mut finished.native_returns);
                 if !native_returns.is_empty() {
-                    frames
-                        .try_reserve(1)
-                        .map_err(|_| ExecutionError::AllocationFailed {
+                    if frames.try_reserve(1).is_err() {
+                        if native_continuations_have_temporary_receiver(&native_returns) {
+                            if let Some(frame) = frames.last_mut() {
+                                frame.transient_cleanup_pending = true;
+                            } else if runtime.collection_pending {
+                                let _ = runtime.collect_cycles();
+                            }
+                        }
+                        return Err(ExecutionError::AllocationFailed {
                             resource: RuntimeResource::Frames,
                             additional: 1,
-                        })?;
+                        });
+                    }
                     let active_frames = active_execution_frames(frames);
                     let dispatch = resume_native_continuations(
                         runtime,
                         native_returns,
                         value,
                         return_to,
+                        frames,
                         active_frames,
                         *active_frame_values,
                         compiler,
@@ -1113,6 +1421,7 @@ fn execute_frame_loop(
                         Ok(dispatch) => resolve_native_dispatch(
                             runtime,
                             dispatch,
+                            frames,
                             active_frames,
                             *active_frame_values,
                             compiler,
@@ -1146,6 +1455,15 @@ fn execute_frame_loop(
                             .into());
                         }
                         Err(NativeFailure::Abrupt(pending)) => {
+                            let caller_frames = exception_caller_frames(runtime, frames)?;
+                            let exception = finish_exception(runtime, pending, caller_frames)?;
+                            return Err(ExecutionError::Exception(exception));
+                        }
+                        Err(NativeFailure::AbruptAfterTransient(pending)) => {
+                            let frame = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                                message: "transient native throw has no executing frame",
+                            })?;
+                            frame.transient_cleanup_pending = true;
                             let caller_frames = exception_caller_frames(runtime, frames)?;
                             let exception = finish_exception(runtime, pending, caller_frames)?;
                             return Err(ExecutionError::Exception(exception));
@@ -1185,6 +1503,7 @@ enum NativeDispatch {
 
 enum NativeFailure {
     Abrupt(PendingException),
+    AbruptAfterTransient(PendingException),
     Execution(ExecutionError),
 }
 
@@ -1276,6 +1595,7 @@ fn resume_native_continuations(
     mut continuations: Vec<NativeContinuation>,
     mut value: StoredValue,
     return_to: Option<CallReturn>,
+    active_root_frames: &[Frame],
     active_frames: usize,
     active_frame_values: u64,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
@@ -1312,6 +1632,9 @@ fn resume_native_continuations(
             NativeContinuation::OperatorPrimitive(state) => {
                 advance_operator_primitive_conversion(runtime, state, Some(value), return_to)?
             }
+            NativeContinuation::IntrinsicGet(state) => {
+                finish_intrinsic_get(runtime, state, value, active_root_frames, &continuations)?
+            }
             NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
         };
         match dispatch {
@@ -1344,16 +1667,58 @@ fn resume_native_continuations(
 )]
 fn resolve_native_dispatch(
     runtime: &mut Runtime,
-    mut dispatch: NativeDispatch,
+    dispatch: NativeDispatch,
+    active_root_frames: &[Frame],
     active_frames: usize,
     active_frame_values: u64,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     dynamic_budget: &mut DynamicCompilationBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    let mut saw_temporary_receiver = false;
+    let result = resolve_native_dispatch_inner(
+        runtime,
+        dispatch,
+        active_root_frames,
+        active_frames,
+        active_frame_values,
+        compiler,
+        dynamic_budget,
+        &mut saw_temporary_receiver,
+    );
+    match result {
+        Err(NativeFailure::Execution(error)) => {
+            if saw_temporary_receiver && runtime.collection_pending {
+                let _ = collect_cycles_with_execution_roots(runtime, active_root_frames, &[], &[]);
+            }
+            Err(NativeFailure::Execution(error))
+        }
+        Err(NativeFailure::Abrupt(pending)) if saw_temporary_receiver => {
+            Err(NativeFailure::AbruptAfterTransient(pending))
+        }
+        result => result,
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the iterative native-to-bytecode transition carries explicit frame and dynamic-compilation budgets"
+)]
+fn resolve_native_dispatch_inner(
+    runtime: &mut Runtime,
+    mut dispatch: NativeDispatch,
+    active_root_frames: &[Frame],
+    active_frames: usize,
+    active_frame_values: u64,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    dynamic_budget: &mut DynamicCompilationBudget,
+    saw_temporary_receiver: &mut bool,
+) -> Result<NativeDispatch, NativeFailure> {
     loop {
         let NativeDispatch::Call(call) = dispatch else {
             return Ok(dispatch);
         };
+        *saw_temporary_receiver |=
+            native_continuations_have_temporary_receiver(&call.continuations);
         let suspended_frames = active_frames.saturating_add(call.continuations.len());
         let suspended_values =
             active_frame_values.saturating_add(native_continuation_values(&call.continuations));
@@ -1400,6 +1765,7 @@ fn resolve_native_dispatch(
                     call.continuations,
                     value,
                     call.return_to,
+                    active_root_frames,
                     active_frames,
                     active_frame_values,
                     compiler,
@@ -1484,9 +1850,15 @@ fn execute_native_entry(
         &mut dynamic_budget,
     );
     let dispatch = match dispatch {
-        Ok(dispatch) => {
-            resolve_native_dispatch(runtime, dispatch, 0, 0, compiler, &mut dynamic_budget)
-        }
+        Ok(dispatch) => resolve_native_dispatch(
+            runtime,
+            dispatch,
+            &prepared_frames,
+            0,
+            0,
+            compiler,
+            &mut dynamic_budget,
+        ),
         Err(error) => Err(error),
     };
     match dispatch {
@@ -1513,6 +1885,21 @@ fn execute_native_entry(
         Err(NativeFailure::Execution(error)) => Err(error),
         Err(NativeFailure::Abrupt(pending)) => {
             let exception = finish_exception(runtime, pending, Vec::new())?;
+            Err(ExecutionError::Exception(exception))
+        }
+        Err(NativeFailure::AbruptAfterTransient(pending)) => {
+            let exception = match finish_exception(runtime, pending, Vec::new()) {
+                Ok(exception) => exception,
+                Err(error) => {
+                    if runtime.collection_pending {
+                        let _ = runtime.collect_cycles();
+                    }
+                    return Err(error);
+                }
+            };
+            if runtime.collection_pending {
+                let _ = runtime.collect_cycles();
+            }
             Err(ExecutionError::Exception(exception))
         }
     }
@@ -1609,10 +1996,13 @@ fn dispatch_native_call(
                 dynamic_budget,
             )
         }
-        NativeFunctionKind::ObjectPrototypeToString => {
-            let value = object_prototype_to_string(runtime, native.realm, &inputs.receiver)?;
-            Ok(NativeDispatch::Immediate(StoredValue::String(value)))
-        }
+        NativeFunctionKind::ObjectPrototypeToString => begin_object_prototype_to_string(
+            runtime,
+            native.realm,
+            inputs.receiver,
+            return_to,
+            origin,
+        ),
         NativeFunctionKind::ObjectPrototypeValueOf => match inputs.receiver {
             value @ (StoredValue::Function(_) | StoredValue::Object(_)) => {
                 Ok(NativeDispatch::Immediate(value))
@@ -1653,8 +2043,7 @@ fn dispatch_native_call(
             let Some(new_target) = inputs.new_target else {
                 return Ok(NativeDispatch::Immediate(StoredValue::Boolean(value)));
             };
-            let object = create_boolean_constructor_wrapper(runtime, new_target, value)?;
-            Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+            begin_boolean_constructor_wrapper(runtime, new_target, value, return_to, origin)
         }
         NativeFunctionKind::BooleanPrototypeToString => {
             let value = boolean_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
@@ -1719,17 +2108,163 @@ fn boolean_receiver_value(
     }))
 }
 
-fn create_boolean_constructor_wrapper(
+fn begin_boolean_constructor_wrapper(
     runtime: &mut Runtime,
     new_target: FunctionId,
     value: bool,
-) -> Result<ObjectId, NativeFailure> {
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
     let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
-    let requested =
-        read_heap_property(runtime, HeapReference::Function(new_target), &prototype_key)?;
+    begin_intrinsic_get(
+        runtime,
+        HeapReference::Function(new_target),
+        StoredValue::Function(new_target),
+        &prototype_key,
+        IntrinsicGetContinuation::BooleanConstructor { new_target, value },
+        return_to,
+        origin,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the generic resumable Get boundary preserves its receiver, continuation target, caller continuation, and source origin"
+)]
+fn begin_intrinsic_get(
+    runtime: &mut Runtime,
+    reference: HeapReference,
+    receiver: StoredValue,
+    key: &PropertyKey,
+    continuation: IntrinsicGetContinuation,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
+    match read_heap_property_for_receiver(runtime, reference, receiver, key)? {
+        PropertyReadOutcome::Value(value) => {
+            finish_intrinsic_get(runtime, continuation, value, &[], &[])
+        }
+        PropertyReadOutcome::Getter { function, receiver } => {
+            intrinsic_getter_call(function, receiver, continuation, return_to, origin)
+        }
+        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
+            message: "heap-only intrinsic Get produced a primitive property failure",
+        }
+        .into()),
+    }
+}
+
+fn intrinsic_getter_call(
+    function: FunctionId,
+    receiver: StoredValue,
+    continuation: IntrinsicGetContinuation,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let continuations = reserve_intrinsic_get_continuation()?;
+    Ok(intrinsic_getter_call_with_reserved_continuation(
+        function,
+        receiver,
+        continuation,
+        return_to,
+        origin,
+        continuations,
+    ))
+}
+
+fn reserve_intrinsic_get_continuation() -> Result<Vec<NativeContinuation>, NativeFailure> {
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    Ok(continuations)
+}
+
+fn intrinsic_getter_call_with_reserved_continuation(
+    function: FunctionId,
+    receiver: StoredValue,
+    continuation: IntrinsicGetContinuation,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+    mut continuations: Vec<NativeContinuation>,
+) -> NativeDispatch {
+    debug_assert!(continuations.capacity() >= 1);
+    continuations.push(NativeContinuation::IntrinsicGet(continuation));
+    NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::empty(),
+        return_to,
+        origin: origin.unwrap_or_else(native_function_host_origin),
+        continuations,
+    })
+}
+
+fn finish_intrinsic_get(
+    runtime: &mut Runtime,
+    continuation: IntrinsicGetContinuation,
+    value: StoredValue,
+    active_root_frames: &[Frame],
+    outer_continuations: &[NativeContinuation],
+) -> Result<NativeDispatch, NativeFailure> {
+    match continuation {
+        IntrinsicGetContinuation::BooleanConstructor {
+            new_target,
+            value: boolean_value,
+        } => finish_boolean_constructor_wrapper(runtime, new_target, boolean_value, &value),
+        IntrinsicGetContinuation::ObjectPrototypeToString {
+            default_tag,
+            temporary_receiver,
+        } => {
+            if temporary_receiver.is_none() {
+                return finish_object_prototype_to_string(default_tag, value);
+            }
+
+            // Release the intrinsic's temporary receiver before allocating the
+            // result string, exactly as QuickJS releases its local boxed value
+            // immediately after Get. The getter completion remains a root
+            // until it has been consumed, so `return this` and heap graphs
+            // reachable only through the completion cannot be reclaimed early.
+            let completion_holds_heap =
+                matches!(value, StoredValue::Function(_) | StoredValue::Object(_));
+            let cleanup = collect_cycles_with_execution_roots(
+                runtime,
+                active_root_frames,
+                outer_continuations,
+                std::slice::from_ref(&value),
+            );
+            let result = finish_object_prototype_to_string(default_tag, value);
+
+            // Collection scratch allocation is host bookkeeping, not a
+            // JavaScript operation. It must never replace a completed getter,
+            // a successful result, or the formatting failure that already won.
+            // Retry after consuming a heap-valued completion so a receiver
+            // kept alive only by `tag` is released at the same boundary.
+            if cleanup.is_err() || completion_holds_heap {
+                let _ = collect_cycles_with_execution_roots(
+                    runtime,
+                    active_root_frames,
+                    outer_continuations,
+                    &[],
+                );
+            }
+            result
+        }
+    }
+}
+
+fn finish_boolean_constructor_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    boolean_value: bool,
+    requested: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
     let prototype = match requested {
-        StoredValue::Function(function) => HeapReference::Function(function),
-        StoredValue::Object(object) => HeapReference::Object(object),
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
         StoredValue::Undefined
         | StoredValue::Null
         | StoredValue::Boolean(_)
@@ -1740,9 +2275,10 @@ fn create_boolean_constructor_wrapper(
             HeapReference::Object(runtime.realm_boolean_prototype(realm)?)
         }
     };
-    runtime
-        .allocate_boxed_boolean_with_prototype(prototype, value)
-        .map_err(NativeFailure::Execution)
+    let object = runtime
+        .allocate_boxed_boolean_with_prototype(prototype, boolean_value)
+        .map_err(NativeFailure::Execution)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
 }
 
 #[allow(
@@ -3262,25 +3798,37 @@ fn finish_ordinary_function_constructor(
     Ok(NativeDispatch::Frame(frame))
 }
 
-fn object_prototype_to_string(
-    runtime: &Runtime,
+fn begin_object_prototype_to_string(
+    runtime: &mut Runtime,
     realm: RealmId,
-    receiver: &StoredValue,
-) -> Result<JsString, NativeFailure> {
-    let (reference, default_tag) = match receiver {
-        StoredValue::Undefined => return Ok(JsString::from_utf8("[object Undefined]")?),
-        StoredValue::Null => return Ok(JsString::from_utf8("[object Null]")?),
-        StoredValue::Boolean(_) => (
-            HeapReference::Object(runtime.realm_boolean_prototype(realm)?),
-            "Boolean",
+    receiver: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (reference, default_tag) = match &receiver {
+        StoredValue::Undefined => {
+            let tag = JsString::from_utf8("Undefined")?;
+            return format_object_prototype_to_string(&tag);
+        }
+        StoredValue::Null => {
+            let tag = JsString::from_utf8("Null")?;
+            return format_object_prototype_to_string(&tag);
+        }
+        StoredValue::Boolean(value) => {
+            return begin_boxed_boolean_object_prototype_to_string(
+                runtime, realm, *value, return_to, origin,
+            );
+        }
+        StoredValue::Function(function) => (
+            HeapReference::Function(*function),
+            ObjectPrototypeTag::Function,
         ),
-        StoredValue::Function(function) => (HeapReference::Function(*function), "Function"),
         StoredValue::Object(object) => (
             HeapReference::Object(*object),
             if runtime.boxed_boolean(*object)?.is_some() {
-                "Boolean"
+                ObjectPrototypeTag::Boolean
             } else {
-                "Object"
+                ObjectPrototypeTag::Object
             },
         ),
         StoredValue::Number(_) | StoredValue::String(_) | StoredValue::Symbol(_) => {
@@ -3293,7 +3841,93 @@ fn object_prototype_to_string(
         }
     };
     let to_string_tag = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag);
-    let tag = match read_heap_property(runtime, reference, &to_string_tag)? {
+    begin_intrinsic_get(
+        runtime,
+        reference,
+        receiver,
+        &to_string_tag,
+        IntrinsicGetContinuation::ObjectPrototypeToString {
+            default_tag,
+            temporary_receiver: None,
+        },
+        return_to,
+        origin,
+    )
+}
+
+fn begin_boxed_boolean_object_prototype_to_string(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    value: bool,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let continuations = reserve_intrinsic_get_continuation()?;
+    let to_string_tag = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag);
+    let collection_pending = runtime.collection_pending;
+    let temporary = runtime.allocate_boxed_boolean(realm, value)?;
+    let receiver = StoredValue::Object(temporary);
+    let continuation = IntrinsicGetContinuation::ObjectPrototypeToString {
+        default_tag: ObjectPrototypeTag::Boolean,
+        temporary_receiver: Some(temporary),
+    };
+    let outcome = match read_heap_property_for_receiver(
+        runtime,
+        HeapReference::Object(temporary),
+        receiver,
+        &to_string_tag,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            remove_unobservable_temporary_boolean(runtime, temporary, collection_pending);
+            return Err(error.into());
+        }
+    };
+    match outcome {
+        PropertyReadOutcome::Value(tag) => {
+            remove_unobservable_temporary_boolean(runtime, temporary, collection_pending);
+            finish_object_prototype_to_string(ObjectPrototypeTag::Boolean, tag)
+        }
+        PropertyReadOutcome::Getter { function, receiver } => {
+            Ok(intrinsic_getter_call_with_reserved_continuation(
+                function,
+                receiver,
+                continuation,
+                return_to,
+                origin,
+                continuations,
+            ))
+        }
+        PropertyReadOutcome::Failed(_) => {
+            remove_unobservable_temporary_boolean(runtime, temporary, collection_pending);
+            Err(EngineFault::RuntimeInvariant {
+                message: "Boolean boxing intrinsic Get produced a primitive property failure",
+            }
+            .into())
+        }
+    }
+}
+
+fn remove_unobservable_temporary_boolean(
+    runtime: &mut Runtime,
+    temporary: ObjectId,
+    collection_pending: bool,
+) {
+    let removed = runtime.objects.remove(temporary);
+    debug_assert!(
+        removed
+            .as_ref()
+            .is_some_and(|object| object.record.property_count() == 0),
+        "unobservable Boolean wrapper must remain property-free"
+    );
+    runtime.collection_pending = collection_pending;
+}
+
+fn finish_object_prototype_to_string(
+    default_tag: ObjectPrototypeTag,
+    value: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let tag = match value {
         StoredValue::String(tag) => tag,
         StoredValue::Undefined
         | StoredValue::Null
@@ -3301,11 +3935,16 @@ fn object_prototype_to_string(
         | StoredValue::Number(_)
         | StoredValue::Symbol(_)
         | StoredValue::Function(_)
-        | StoredValue::Object(_) => JsString::from_utf8(default_tag)?,
+        | StoredValue::Object(_) => JsString::from_utf8(default_tag.name())?,
     };
-    Ok(JsString::from_utf8("[object ")?
-        .concat(&tag)?
-        .concat(&JsString::from_utf8("]")?)?)
+    format_object_prototype_to_string(&tag)
+}
+
+fn format_object_prototype_to_string(tag: &JsString) -> Result<NativeDispatch, NativeFailure> {
+    let value = JsString::from_utf8("[object ")?
+        .concat(tag)?
+        .concat(&JsString::from_utf8("]")?)?;
+    Ok(NativeDispatch::Immediate(StoredValue::String(value)))
 }
 
 fn function_to_string(
@@ -3947,6 +4586,7 @@ fn create_frame(
         return_to,
         dynamic_return,
         native_returns: Vec::new(),
+        transient_cleanup_pending: false,
         ordinary_constructor: false,
         reserved_values: plan.reserved_values,
         arguments,
@@ -4889,6 +5529,10 @@ fn native_step(
             return_to,
         }),
         Err(NativeFailure::Abrupt(pending)) => Ok(Step::Abrupt(pending)),
+        Err(NativeFailure::AbruptAfterTransient(_)) => Err(EngineFault::RuntimeInvariant {
+            message: "unresolved native step returned a resolver-only transient throw",
+        }
+        .into()),
         Err(NativeFailure::Execution(error)) => Err(error),
     }
 }

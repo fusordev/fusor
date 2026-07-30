@@ -36,13 +36,17 @@ false-branded `Boolean.prototype`, and `toString`/`valueOf` methods. Primitive
 Boolean property access walks that realm prototype without allocating,
 construction creates a branded wrapper, strict receivers remain primitive,
 and sloppy receivers are boxed once at frame creation. `Object.prototype`
-tagging and boxing recognize the same internal brand, including data-valued
-`Symbol.toStringTag` overrides. Accessor-backed `newTarget.prototype` and
-`Symbol.toStringTag` reads, plus Number, String, and Symbol wrappers, remain
-deferred and fail closed. Nested calls, recursion,
-getter/setter dispatch, and abrupt unwinding use an explicit frame vector with
-cumulative frame/value ceilings and shared fuel. Installation scans every
-instruction in every template before mutation. BigInt values and mixed numeric
+tagging and boxing recognize the same internal brand. Boolean construction
+runs a resumable `newTarget.prototype` Get with `newTarget` as the receiver and
+allocates only after it completes. `Object.prototype.toString` boxes Boolean
+primitives before its resumable `Symbol.toStringTag` Get, uses only primitive
+String overrides, otherwise preserves the built-in tag, and reclaims an
+unescaped temporary wrapper before execution continues without invalidating
+heap-, closure-, or exception-escaped identities. Number, String, and Symbol
+wrappers remain deferred and fail closed. Nested calls, recursion, getter/setter
+dispatch, and abrupt unwinding use an explicit frame vector with cumulative
+frame/value ceilings and shared fuel. Installation scans every instruction in
+every template before mutation. BigInt values and mixed numeric
 domains, arrays and other exotic objects, shorthand/spread and `__proto__`
 data-initializer semantics, anonymous data-function inferred names,
 async/generator methods, `super`/home-object semantics, realm-global accessor

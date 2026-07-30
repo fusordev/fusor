@@ -1349,6 +1349,17 @@ impl Runtime {
         reason = "the mark and two-phase dead-set transaction remains together for auditability"
     )]
     pub fn collect_cycles(&mut self) -> Result<CollectionReport, RuntimeError> {
+        self.collect_cycles_with_roots(|_| {})
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the mark and two-phase dead-set transaction remains together for auditability"
+    )]
+    pub(crate) fn collect_cycles_with_roots(
+        &mut self,
+        trace_additional_roots: impl FnOnce(&mut dyn FnMut(CollectionRoot)),
+    ) -> Result<CollectionReport, RuntimeError> {
         self.drain_releases();
 
         let mut marked_functions = HashSet::new();
@@ -1449,6 +1460,28 @@ impl Runtime {
                 );
             }
         }
+        trace_additional_roots(&mut |root| {
+            let live = match root {
+                CollectionRoot::Heap(HeapReference::Function(function)) => {
+                    self.functions.contains(function)
+                }
+                CollectionRoot::Heap(HeapReference::Object(object)) => {
+                    self.objects.contains(object)
+                }
+                CollectionRoot::BindingCell(cell) => self.cells.contains(cell),
+            };
+            debug_assert!(live, "execution root must name a live heap node");
+            if !live {
+                return;
+            }
+            mark_collection_root(
+                root,
+                &mut marked_functions,
+                &mut marked_objects,
+                &mut marked_cells,
+                &mut work,
+            );
+        });
 
         while let Some(node) = work.pop() {
             match node {
@@ -2753,10 +2786,35 @@ impl Runtime {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum CollectionRoot {
+    Heap(HeapReference),
+    BindingCell(BindingCellId),
+}
+
 enum GraphNode {
     Function(FunctionId),
     Object(ObjectId),
     Cell(BindingCellId),
+}
+
+fn mark_collection_root(
+    root: CollectionRoot,
+    marked_functions: &mut HashSet<FunctionId>,
+    marked_objects: &mut HashSet<ObjectId>,
+    marked_cells: &mut HashSet<BindingCellId>,
+    work: &mut Vec<GraphNode>,
+) {
+    match root {
+        CollectionRoot::Heap(reference) => {
+            mark_heap_reference(reference, marked_functions, marked_objects, work);
+        }
+        CollectionRoot::BindingCell(cell) => {
+            if marked_cells.insert(cell) {
+                work.push(GraphNode::Cell(cell));
+            }
+        }
+    }
 }
 
 fn mark_heap_reference(

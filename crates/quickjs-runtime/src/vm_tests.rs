@@ -252,6 +252,7 @@ fn object_symbol_to_primitive_result_throws_before_ordinary_fallback() {
         call.continuations,
         StoredValue::Object(result),
         call.return_to,
+        &[],
         0,
         0,
         Some(&compiler),
@@ -284,9 +285,7 @@ fn boolean_constructor_wrapper_uses_new_target_prototype_and_realm_fallback() {
     let function_prototype = runtime
         .realm_function_prototype(realm)
         .expect("Function.prototype");
-    let Ok(wrapper) = create_boolean_constructor_wrapper(&mut runtime, new_target, true) else {
-        panic!("function-valued newTarget.prototype");
-    };
+    let wrapper = immediate_boolean_wrapper(&mut runtime, new_target, true);
     assert_eq!(
         runtime.boxed_boolean(wrapper).expect("live wrapper"),
         Some(true)
@@ -311,9 +310,7 @@ fn boolean_constructor_wrapper_uses_new_target_prototype_and_realm_fallback() {
         StoredValue::Object(custom_prototype),
     );
     assert!(replaced.is_some());
-    let Ok(wrapper) = create_boolean_constructor_wrapper(&mut runtime, new_target, false) else {
-        panic!("object-valued newTarget.prototype");
-    };
+    let wrapper = immediate_boolean_wrapper(&mut runtime, new_target, false);
     assert_eq!(
         runtime
             .object_record(HeapReference::Object(wrapper))
@@ -332,9 +329,7 @@ fn boolean_constructor_wrapper_uses_new_target_prototype_and_realm_fallback() {
         StoredValue::Number(JsNumber::from_i32(1)),
     );
     assert!(replaced.is_some());
-    let Ok(wrapper) = create_boolean_constructor_wrapper(&mut runtime, new_target, true) else {
-        panic!("primitive newTarget.prototype fallback");
-    };
+    let wrapper = immediate_boolean_wrapper(&mut runtime, new_target, true);
     assert_eq!(
         runtime
             .object_record(HeapReference::Object(wrapper))
@@ -346,6 +341,959 @@ fn boolean_constructor_wrapper_uses_new_target_prototype_and_realm_fallback() {
                 .expect("Boolean.prototype")
         ))
     );
+}
+
+#[test]
+fn boolean_constructor_suspends_for_accessor_backed_new_target_prototype() {
+    let (mut runtime, realm, boolean_constructor, native, new_target) =
+        runtime_with_boolean_constructor_prototype_getter(
+            "function getter(){\"use strict\";return this.valueOf;}",
+        );
+    let custom_prototype = source_object(&mut runtime, realm);
+    let value_of_key = runtime.predefined_property_key(PredefinedAtom::ValueOf);
+    runtime
+        .append_data_property(
+            HeapReference::Function(new_target),
+            value_of_key,
+            PropertyLayout::data(true, true, true),
+            StoredValue::Object(custom_prototype),
+        )
+        .expect("newTarget receiver marker");
+
+    let heap_objects_before_get = runtime.usage().heap_objects();
+    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let Ok(dispatch) = dispatch_native_call(
+        &mut runtime,
+        boolean_constructor,
+        native,
+        CallInputs {
+            receiver: StoredValue::Undefined,
+            arguments: CallArguments::from_values(vec![StoredValue::Boolean(true)]),
+            new_target: Some(new_target),
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("accessor-backed Boolean construction must start");
+    };
+    let NativeDispatch::Call(call) = dispatch else {
+        panic!("newTarget.prototype getter must suspend Boolean construction");
+    };
+    assert!(matches!(
+        call.receiver,
+        StoredValue::Function(function) if function == new_target
+    ));
+    assert!(matches!(
+        call.continuations.as_slice(),
+        [NativeContinuation::IntrinsicGet(
+            IntrinsicGetContinuation::BooleanConstructor {
+                new_target: retained_target,
+                value: true,
+            }
+        )] if *retained_target == new_target
+    ));
+    assert_eq!(native_continuation_values(&call.continuations), 1);
+    assert_eq!(runtime.usage().heap_objects(), heap_objects_before_get);
+    let Ok(dispatch) = resolve_native_dispatch(
+        &mut runtime,
+        NativeDispatch::Call(call),
+        &[],
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("getter dispatch must resolve");
+    };
+    let NativeDispatch::Frame(frame) = dispatch else {
+        panic!("bytecode getter must produce an execution frame");
+    };
+    let result = execute_prepared_frames_with_dynamic_budget(
+        &mut runtime,
+        vec![frame],
+        ExecutionLimits::default(),
+        None,
+        None,
+        &mut budget,
+    )
+    .expect("resumed Boolean construction");
+    let StoredValue::Object(wrapper) = result else {
+        panic!("Boolean construction must return a wrapper");
+    };
+
+    assert_eq!(
+        runtime.boxed_boolean(wrapper).expect("live wrapper"),
+        Some(true)
+    );
+    assert_eq!(
+        runtime
+            .object_record(HeapReference::Object(wrapper))
+            .expect("wrapper")
+            .prototype(),
+        Some(HeapReference::Object(custom_prototype))
+    );
+}
+
+#[test]
+fn boolean_constructor_getter_throw_precedes_wrapper_allocation() {
+    let (mut runtime, _realm, boolean_constructor, native, new_target) =
+        runtime_with_boolean_constructor_prototype_getter("function getter(){throw 41;}");
+
+    let heap_objects_before_get = runtime.usage().heap_objects();
+    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let Ok(dispatch) = dispatch_native_call(
+        &mut runtime,
+        boolean_constructor,
+        native,
+        CallInputs {
+            receiver: StoredValue::Undefined,
+            arguments: CallArguments::from_values(vec![StoredValue::Boolean(true)]),
+            new_target: Some(new_target),
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("throwing prototype getter must start");
+    };
+    assert_eq!(runtime.usage().heap_objects(), heap_objects_before_get);
+    let Ok(dispatch) =
+        resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+    else {
+        panic!("throwing getter dispatch must resolve");
+    };
+    let NativeDispatch::Frame(frame) = dispatch else {
+        panic!("bytecode getter must produce an execution frame");
+    };
+    let error = execute_prepared_frames_with_dynamic_budget(
+        &mut runtime,
+        vec![frame],
+        ExecutionLimits::default(),
+        None,
+        None,
+        &mut budget,
+    )
+    .expect_err("prototype getter throw must escape");
+    assert_eq!(runtime.usage().heap_objects(), heap_objects_before_get);
+    let ExecutionError::Exception(exception) = error else {
+        panic!("getter throw must remain a JavaScript exception");
+    };
+    assert_eq!(exception.kind(), None);
+    let thrown = exception.thrown_value().expect("explicit getter throw");
+    let number = thrown
+        .as_number()
+        .expect("live thrown value")
+        .expect("number throw");
+    assert!(number.strict_equals(JsNumber::from_i32(41)));
+}
+
+#[test]
+fn boolean_constructor_accessor_continuation_obeys_frame_and_value_limits() {
+    let (mut runtime, _realm, constructor, native, new_target) =
+        runtime_with_boolean_constructor_prototype_getter(
+            "function getter(){\"use strict\";return this;}",
+        );
+    runtime.limits.max_active_frames = 1;
+    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let dispatch =
+        begin_test_boolean_construction(&mut runtime, constructor, native, new_target, &mut budget);
+    let Err(error) = resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+    else {
+        panic!("getter plus intrinsic continuation must exceed one active frame");
+    };
+    assert!(matches!(
+        error,
+        NativeFailure::Execution(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::Frames,
+            limit: 1,
+            observed: 2,
+        })
+    ));
+
+    let (mut runtime, _realm, constructor, native, new_target) =
+        runtime_with_boolean_constructor_prototype_getter(
+            "function getter(){\"use strict\";return this;}",
+        );
+    runtime.limits.max_active_frame_values = 2;
+    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let dispatch =
+        begin_test_boolean_construction(&mut runtime, constructor, native, new_target, &mut budget);
+    let Err(error) = resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+    else {
+        panic!("getter receiver plus retained newTarget must exceed two frame values");
+    };
+    assert!(matches!(
+        error,
+        NativeFailure::Execution(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::FrameValues,
+            limit: 2,
+            observed: 3,
+        })
+    ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn object_prototype_to_string_boxes_boolean_before_symbol_tag_getter() {
+    let getter_authority = compile_test_function(
+        "function getter(){\"use strict\";return typeof this;}",
+        "getter",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let getter = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(getter_authority)
+        .expect("getter");
+    let realm = runtime.context(&realm).expect("context").realm;
+    let (to_string, native) = object_prototype_to_string_native(&runtime, realm);
+    let boolean_prototype = runtime
+        .realm_boolean_prototype(realm)
+        .expect("Boolean.prototype");
+    let tag_key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag);
+    runtime
+        .append_accessor_property(
+            HeapReference::Object(boolean_prototype),
+            tag_key,
+            PropertyLayout::accessor(true, true),
+            Some(getter.id().expect("getter id")),
+            None,
+        )
+        .expect("Boolean @@toStringTag getter");
+
+    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let Ok(dispatch) = dispatch_native_call(
+        &mut runtime,
+        to_string,
+        native,
+        CallInputs {
+            receiver: StoredValue::Boolean(true),
+            arguments: CallArguments::empty(),
+            new_target: None,
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("Boolean @@toStringTag access must start");
+    };
+    let NativeDispatch::Call(call) = dispatch else {
+        panic!("Boolean @@toStringTag getter must suspend toString");
+    };
+    let StoredValue::Object(boxed_receiver) = call.receiver else {
+        panic!("@@toStringTag getter must receive a boxed Boolean");
+    };
+    assert_eq!(
+        runtime
+            .boxed_boolean(boxed_receiver)
+            .expect("boxed receiver"),
+        Some(true)
+    );
+    assert_eq!(
+        runtime
+            .object_record(HeapReference::Object(boxed_receiver))
+            .expect("boxed receiver")
+            .prototype(),
+        Some(HeapReference::Object(boolean_prototype))
+    );
+    assert!(matches!(
+        call.continuations.as_slice(),
+        [NativeContinuation::IntrinsicGet(
+            IntrinsicGetContinuation::ObjectPrototypeToString {
+                default_tag: ObjectPrototypeTag::Boolean,
+                temporary_receiver: Some(temporary_receiver),
+            }
+        )] if *temporary_receiver == boxed_receiver
+    ));
+    assert_eq!(native_continuation_values(&call.continuations), 1);
+
+    let Ok(dispatch) = resolve_native_dispatch(
+        &mut runtime,
+        NativeDispatch::Call(call),
+        &[],
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("Boolean tag getter dispatch must resolve");
+    };
+    let NativeDispatch::Frame(frame) = dispatch else {
+        panic!("bytecode tag getter must produce an execution frame");
+    };
+    let result = execute_prepared_frames_with_dynamic_budget(
+        &mut runtime,
+        vec![frame],
+        ExecutionLimits::default(),
+        None,
+        None,
+        &mut budget,
+    )
+    .expect("resumed Object.prototype.toString");
+    let StoredValue::String(result) = result else {
+        panic!("Object.prototype.toString must return a string");
+    };
+    assert_eq!(result.to_utf8_lossy().expect("UTF-8"), "[object object]");
+}
+
+#[test]
+fn object_prototype_to_string_boolean_boxing_is_limit_checked_and_transient() {
+    let mut limited = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = limited.create_realm().expect("realm");
+    let realm = limited.context(&realm).expect("context").realm;
+    let (to_string, native) = object_prototype_to_string_native(&limited, realm);
+    let usage_before = limited.usage();
+    limited.limits.max_heap_objects = usage_before.heap_objects();
+    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let Err(error) = dispatch_native_call(
+        &mut limited,
+        to_string,
+        native,
+        CallInputs {
+            receiver: StoredValue::Boolean(true),
+            arguments: CallArguments::empty(),
+            new_target: None,
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("Boolean ToObject must honor the heap-object limit");
+    };
+    let NativeFailure::Execution(ExecutionError::LimitExceeded {
+        resource,
+        limit,
+        observed,
+    }) = error
+    else {
+        panic!("Boolean ToObject must report the exact heap-object limit");
+    };
+    assert_eq!(resource, RuntimeResource::HeapObjects);
+    assert_eq!(limit, usage_before.heap_objects());
+    assert_eq!(observed, usage_before.heap_objects() + 1);
+    assert_eq!(limited.usage(), usage_before);
+
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm = runtime.context(&realm).expect("context").realm;
+    let (to_string, native) = object_prototype_to_string_native(&runtime, realm);
+    let usage_before = runtime.usage();
+    runtime.limits.max_heap_objects = usage_before.heap_objects() + 1;
+    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let Ok(NativeDispatch::Immediate(StoredValue::String(result))) = dispatch_native_call(
+        &mut runtime,
+        to_string,
+        native,
+        CallInputs {
+            receiver: StoredValue::Boolean(true),
+            arguments: CallArguments::empty(),
+            new_target: None,
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("Boolean ToObject must finish immediately without a tag getter");
+    };
+    assert_eq!(result.to_utf8_lossy().expect("UTF-8"), "[object Boolean]");
+    assert_eq!(runtime.usage(), usage_before);
+}
+
+#[test]
+fn object_prototype_to_string_reclaims_unescaped_boolean_receivers_within_one_execution() {
+    let (mut runtime, realm, repeat, _getter, to_string) =
+        runtime_with_boolean_tag_getter_and_invoker(
+            RuntimeLimits::default(),
+            "function getter(){\
+                 \"use strict\";\
+                 let unreachable={valueOf:this};\
+                 return 7;\
+             }",
+            "function repeat(target){\
+                 let survivor={valueOf:\"alive\"};\
+                 target.call(true);\
+                 target.call(false);\
+                 let prefix=survivor.valueOf;\
+                 survivor=null;\
+                 return prefix+target.call(true);\
+             }",
+            "repeat",
+        );
+    let baseline = runtime.usage();
+    runtime.limits.max_heap_objects = baseline.heap_objects() + 3;
+
+    let result = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &repeat,
+            std::slice::from_ref(&to_string),
+            ExecutionLimits::default(),
+        )
+        .expect("repeated Boolean tagging");
+
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string result")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "alive[object Boolean]"
+    );
+    assert_eq!(runtime.usage(), baseline);
+}
+
+#[test]
+fn object_prototype_to_string_resumes_native_symbol_tag_getters_without_leaking() {
+    let repeat_authority = compile_test_function(
+        "function repeat(target){\
+             target.call(true);\
+             return target.call(false);\
+         }",
+        "repeat",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let repeat = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(repeat_authority)
+        .expect("repeat");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+    let StoredValue::Function(native_getter) = read_heap_property(
+        &runtime,
+        HeapReference::Object(object_prototype),
+        &runtime.predefined_property_key(PredefinedAtom::ValueOf),
+    )
+    .expect("Object.prototype.valueOf") else {
+        panic!("Object.prototype.valueOf must be callable");
+    };
+    let boolean_prototype = runtime
+        .realm_boolean_prototype(realm_id)
+        .expect("Boolean.prototype");
+    runtime
+        .append_accessor_property(
+            HeapReference::Object(boolean_prototype),
+            runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag),
+            PropertyLayout::accessor(true, true),
+            Some(native_getter),
+            None,
+        )
+        .expect("native Object.prototype.valueOf @@toStringTag getter");
+    let (to_string, _) = object_prototype_to_string_native(&runtime, realm_id);
+    let to_string = runtime
+        .public_value(StoredValue::Function(to_string))
+        .expect("Object.prototype.toString root");
+    runtime.collect_cycles().expect("settle setup roots");
+    let baseline = runtime.usage();
+    runtime.limits.max_heap_objects = baseline.heap_objects() + 1;
+
+    let result = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &repeat,
+            std::slice::from_ref(&to_string),
+            ExecutionLimits::default(),
+        )
+        .expect("native tag getter");
+
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string result")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "[object Boolean]"
+    );
+    assert_eq!(runtime.usage(), baseline);
+}
+
+#[test]
+fn object_prototype_to_string_reclaims_boolean_receiver_after_native_getter_throw() {
+    let invoke_authority = compile_test_function(
+        "function invoke(target){return target.call(true);}",
+        "invoke",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let invoke = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(invoke_authority)
+        .expect("invoke");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let function_prototype = runtime
+        .realm_function_prototype(realm_id)
+        .expect("Function.prototype");
+    let StoredValue::Function(native_getter) = read_heap_property(
+        &runtime,
+        HeapReference::Function(function_prototype),
+        &runtime.predefined_property_key(PredefinedAtom::ToString),
+    )
+    .expect("Function.prototype.toString") else {
+        panic!("Function.prototype.toString must be callable");
+    };
+    let boolean_prototype = runtime
+        .realm_boolean_prototype(realm_id)
+        .expect("Boolean.prototype");
+    runtime
+        .append_accessor_property(
+            HeapReference::Object(boolean_prototype),
+            runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag),
+            PropertyLayout::accessor(true, true),
+            Some(native_getter),
+            None,
+        )
+        .expect("throwing native Boolean @@toStringTag getter");
+    let (to_string, _) = object_prototype_to_string_native(&runtime, realm_id);
+    let to_string = runtime
+        .public_value(StoredValue::Function(to_string))
+        .expect("Object.prototype.toString root");
+    let baseline = runtime.usage();
+    runtime.limits.max_heap_objects = baseline.heap_objects() + 1;
+
+    let error = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &invoke,
+            std::slice::from_ref(&to_string),
+            ExecutionLimits::default(),
+        )
+        .expect_err("native tag getter receiver error");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("native getter failure must remain a JavaScript exception");
+    };
+
+    assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
+    assert_eq!(runtime.usage(), baseline);
+}
+
+#[test]
+fn object_prototype_to_string_preserves_a_boolean_receiver_escaped_to_the_heap() {
+    let maker_authority = compile_test_function(
+        "function make(holder){\
+             return function getter(){\
+                 \"use strict\";\
+                 holder.valueOf=this;\
+                 return \"Escaped\";\
+             };\
+         }",
+        "make",
+    );
+    let invoke_authority = compile_test_function(
+        "function invoke(target){return target.call(false);}",
+        "invoke",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let boolean_prototype = runtime
+        .realm_boolean_prototype(realm_id)
+        .expect("Boolean.prototype");
+    let public_boolean_prototype = runtime
+        .public_value(StoredValue::Object(boolean_prototype))
+        .expect("Boolean.prototype root");
+    let (maker, invoke) = {
+        let mut context = runtime.context(&realm).expect("context");
+        (
+            context.instantiate(maker_authority).expect("maker"),
+            context.instantiate(invoke_authority).expect("invoker"),
+        )
+    };
+    let getter = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &maker,
+            std::slice::from_ref(&public_boolean_prototype),
+            ExecutionLimits::default(),
+        )
+        .expect("getter closure")
+        .into_function()
+        .expect("getter");
+    runtime
+        .append_accessor_property(
+            HeapReference::Object(boolean_prototype),
+            runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag),
+            PropertyLayout::accessor(true, true),
+            Some(getter.id().expect("getter id")),
+            None,
+        )
+        .expect("Boolean @@toStringTag getter");
+    let (to_string, _) = object_prototype_to_string_native(&runtime, realm_id);
+    let to_string = runtime
+        .public_value(StoredValue::Function(to_string))
+        .expect("Object.prototype.toString root");
+    runtime.collect_cycles().expect("settle setup roots");
+    let baseline = runtime.usage();
+    runtime.limits.max_heap_objects = baseline.heap_objects() + 1;
+
+    let result = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &invoke,
+            std::slice::from_ref(&to_string),
+            ExecutionLimits::default(),
+        )
+        .expect("escaped Boolean tag receiver");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string result")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "[object Escaped]"
+    );
+    let StoredValue::Object(wrapper) = read_heap_property(
+        &runtime,
+        HeapReference::Object(boolean_prototype),
+        &runtime.predefined_property_key(PredefinedAtom::ValueOf),
+    )
+    .expect("escaped wrapper") else {
+        panic!("Boolean.prototype.valueOf must retain the boxed receiver");
+    };
+
+    assert_eq!(
+        runtime.boxed_boolean(wrapper).expect("live wrapper"),
+        Some(false)
+    );
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 1);
+    assert_eq!(runtime.usage().public_roots(), baseline.public_roots());
+}
+
+#[test]
+fn object_prototype_to_string_preserves_a_boolean_receiver_captured_by_the_getter() {
+    let maker_authority = compile_test_function(
+        "function make(){\
+             let saved;\
+             return function getter(read){\
+                 \"use strict\";\
+                 if(read)return saved;\
+                 saved=this;\
+                 return \"Captured\";\
+             };\
+         }",
+        "make",
+    );
+    let invoke_authority = compile_test_function(
+        "function invoke(target){return target.call(false);}",
+        "invoke",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let (maker, invoke) = {
+        let mut context = runtime.context(&realm).expect("context");
+        (
+            context.instantiate(maker_authority).expect("maker"),
+            context.instantiate(invoke_authority).expect("invoker"),
+        )
+    };
+    let getter = runtime
+        .context(&realm)
+        .expect("context")
+        .call(&maker, &[], ExecutionLimits::default())
+        .expect("getter closure")
+        .into_function()
+        .expect("getter");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let boolean_prototype = runtime
+        .realm_boolean_prototype(realm_id)
+        .expect("Boolean.prototype");
+    runtime
+        .append_accessor_property(
+            HeapReference::Object(boolean_prototype),
+            runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag),
+            PropertyLayout::accessor(true, true),
+            Some(getter.id().expect("getter id")),
+            None,
+        )
+        .expect("Boolean @@toStringTag getter");
+    let (to_string, _) = object_prototype_to_string_native(&runtime, realm_id);
+    let to_string = runtime
+        .public_value(StoredValue::Function(to_string))
+        .expect("Object.prototype.toString root");
+    runtime.collect_cycles().expect("settle setup roots");
+    let baseline = runtime.usage();
+    runtime.limits.max_heap_objects = baseline.heap_objects() + 1;
+
+    let result = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &invoke,
+            std::slice::from_ref(&to_string),
+            ExecutionLimits::default(),
+        )
+        .expect("captured Boolean tag receiver");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string result")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "[object Captured]"
+    );
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 1);
+    assert_eq!(runtime.usage().public_roots(), baseline.public_roots());
+
+    let wrapper = {
+        let mut context = runtime.context(&realm).expect("context");
+        let read = context.boolean(true);
+        context
+            .call(&getter, &[read], ExecutionLimits::default())
+            .expect("captured wrapper")
+    };
+    let wrapper = wrapper.object_id().expect("boxed Boolean result");
+    assert_eq!(
+        runtime.boxed_boolean(wrapper).expect("live wrapper"),
+        Some(false)
+    );
+    assert!(matches!(
+        read_heap_property(
+            &runtime,
+            HeapReference::Object(boolean_prototype),
+            &runtime.predefined_property_key(PredefinedAtom::ValueOf),
+        )
+        .expect("Boolean.prototype.valueOf"),
+        StoredValue::Function(_)
+    ));
+}
+
+#[test]
+fn object_prototype_to_string_reclaims_boolean_receiver_after_getter_throw() {
+    let (mut runtime, realm, invoke, _getter, to_string) =
+        runtime_with_boolean_tag_getter_and_invoker(
+            RuntimeLimits::default(),
+            "function getter(){\"use strict\";throw 41;}",
+            "function invoke(target){return target.call(true);}",
+            "invoke",
+        );
+    let baseline = runtime.usage();
+    runtime.limits.max_heap_objects = baseline.heap_objects() + 1;
+
+    let error = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &invoke,
+            std::slice::from_ref(&to_string),
+            ExecutionLimits::default(),
+        )
+        .expect_err("tag getter throw");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("getter throw must remain a JavaScript exception");
+    };
+    let thrown = exception
+        .thrown_value()
+        .expect("explicit getter throw")
+        .as_number()
+        .expect("live throw")
+        .expect("number throw");
+
+    assert!(thrown.strict_equals(JsNumber::from_i32(41)));
+    assert_eq!(runtime.usage(), baseline);
+}
+
+#[test]
+fn object_prototype_to_string_reclaims_boolean_receiver_after_getter_frame_limit() {
+    let getter_authority =
+        compile_test_function("function getter(){return \"Boolean\";}", "getter");
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_active_frames(1)).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let getter = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(getter_authority)
+        .expect("getter");
+    let realm = runtime.context(&realm).expect("context").realm;
+    let (to_string, native) = object_prototype_to_string_native(&runtime, realm);
+    let boolean_prototype = runtime
+        .realm_boolean_prototype(realm)
+        .expect("Boolean.prototype");
+    runtime
+        .append_accessor_property(
+            HeapReference::Object(boolean_prototype),
+            runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag),
+            PropertyLayout::accessor(true, true),
+            Some(getter.id().expect("getter id")),
+            None,
+        )
+        .expect("Boolean @@toStringTag getter");
+    let baseline = runtime.usage();
+    runtime.limits.max_heap_objects = baseline.heap_objects() + 1;
+
+    for _ in 0..2 {
+        let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+        let Ok(dispatch) = dispatch_native_call(
+            &mut runtime,
+            to_string,
+            native,
+            CallInputs {
+                receiver: StoredValue::Boolean(true),
+                arguments: CallArguments::empty(),
+                new_target: None,
+            },
+            None,
+            Some(native_function_host_origin()),
+            0,
+            0,
+            None,
+            &mut budget,
+        ) else {
+            panic!("Boolean tag getter dispatch must start");
+        };
+        assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 1);
+        let Err(error) =
+            resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+        else {
+            panic!("getter frame must exceed the limit");
+        };
+        assert!(matches!(
+            error,
+            NativeFailure::Execution(ExecutionError::LimitExceeded {
+                resource: RuntimeResource::Frames,
+                limit: 1,
+                observed: 2,
+            })
+        ));
+        assert_eq!(runtime.usage(), baseline);
+    }
+}
+
+#[test]
+fn object_prototype_to_string_reclaims_boolean_receiver_after_getter_value_limit() {
+    let getter_authority =
+        compile_test_function("function getter(){return \"Boolean\";}", "getter");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_active_frame_values(1))
+        .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let getter = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(getter_authority)
+        .expect("getter");
+    let realm = runtime.context(&realm).expect("context").realm;
+    let (to_string, native) = object_prototype_to_string_native(&runtime, realm);
+    let boolean_prototype = runtime
+        .realm_boolean_prototype(realm)
+        .expect("Boolean.prototype");
+    runtime
+        .append_accessor_property(
+            HeapReference::Object(boolean_prototype),
+            runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag),
+            PropertyLayout::accessor(true, true),
+            Some(getter.id().expect("getter id")),
+            None,
+        )
+        .expect("Boolean @@toStringTag getter");
+    let baseline = runtime.usage();
+    runtime.limits.max_heap_objects = baseline.heap_objects() + 1;
+    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let Ok(dispatch) = dispatch_native_call(
+        &mut runtime,
+        to_string,
+        native,
+        CallInputs {
+            receiver: StoredValue::Boolean(true),
+            arguments: CallArguments::empty(),
+            new_target: None,
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("Boolean tag getter dispatch must start");
+    };
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 1);
+    let Err(error) = resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+    else {
+        panic!("getter receiver and continuation must exceed one frame value");
+    };
+    let NativeFailure::Execution(ExecutionError::LimitExceeded {
+        resource,
+        limit,
+        observed,
+    }) = error
+    else {
+        panic!("getter frame-value failure must remain a limit error");
+    };
+    assert_eq!(resource, RuntimeResource::FrameValues);
+    assert_eq!(limit, 1);
+    assert_eq!(observed, 3);
+    assert_eq!(runtime.usage(), baseline);
+}
+
+#[test]
+fn object_prototype_to_string_preserves_a_thrown_boolean_receiver() {
+    let (mut runtime, realm, invoke, _getter, to_string) =
+        runtime_with_boolean_tag_getter_and_invoker(
+            RuntimeLimits::default(),
+            "function getter(){\"use strict\";throw this;}",
+            "function invoke(target){return target.call(true);}",
+            "invoke",
+        );
+    let baseline = runtime.usage();
+    runtime.limits.max_heap_objects = baseline.heap_objects() + 1;
+
+    let error = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &invoke,
+            std::slice::from_ref(&to_string),
+            ExecutionLimits::default(),
+        )
+        .expect_err("tag getter throw");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("getter throw must remain a JavaScript exception");
+    };
+    let wrapper = exception
+        .thrown_value()
+        .expect("explicit getter throw")
+        .object_id()
+        .expect("boxed Boolean throw");
+
+    assert_eq!(
+        runtime.boxed_boolean(wrapper).expect("live wrapper"),
+        Some(true)
+    );
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 1);
+    assert_eq!(runtime.usage().public_roots(), baseline.public_roots() + 1);
+
+    drop(exception);
+    runtime.collect_cycles().expect("collection");
+    assert_eq!(runtime.usage(), baseline);
 }
 
 #[test]
@@ -1862,6 +2810,55 @@ fn runtime_with_function_constructor() -> (Runtime, RealmId, FunctionId, NativeF
     (runtime, realm, constructor, native)
 }
 
+fn runtime_with_boolean_constructor_prototype_getter(
+    getter_source: &str,
+) -> (Runtime, RealmId, FunctionId, NativeFunction, FunctionId) {
+    let getter_authority = compile_test_function(getter_source, "getter");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let getter = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(getter_authority)
+        .expect("getter");
+    let realm = runtime.context(&realm).expect("context").realm;
+    let global = runtime.realm_global_object(realm).expect("global object");
+    let boolean_key = runtime.predefined_property_key(PredefinedAtom::Boolean);
+    let function_key = runtime.predefined_property_key(PredefinedAtom::Function);
+    let StoredValue::Function(boolean_constructor) =
+        read_heap_property(&runtime, HeapReference::Object(global), &boolean_key)
+            .expect("Boolean constructor")
+    else {
+        panic!("global Boolean is not callable");
+    };
+    let StoredValue::Function(new_target) =
+        read_heap_property(&runtime, HeapReference::Object(global), &function_key)
+            .expect("Function constructor")
+    else {
+        panic!("global Function is not callable");
+    };
+    let native = runtime
+        .functions
+        .get(boolean_constructor)
+        .and_then(HeapFunction::native)
+        .copied()
+        .expect("native Boolean");
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let replaced = runtime
+        .functions
+        .get_mut(new_target)
+        .expect("new target function")
+        .object
+        .replace_existing_with_accessor(
+            &prototype_key,
+            PropertyLayout::accessor(false, false),
+            Some(getter.id().expect("getter id")),
+            None,
+        );
+    assert!(matches!(replaced, Some(OwnProperty::Data { .. })));
+    (runtime, realm, boolean_constructor, native, new_target)
+}
+
 fn source_object(runtime: &mut Runtime, realm: RealmId) -> ObjectId {
     let prototype = runtime
         .realm_object_prototype(realm)
@@ -1869,6 +2866,115 @@ fn source_object(runtime: &mut Runtime, realm: RealmId) -> ObjectId {
     runtime
         .allocate_ordinary_object(prototype)
         .expect("source object")
+}
+
+fn immediate_boolean_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    value: bool,
+) -> ObjectId {
+    let Ok(NativeDispatch::Immediate(StoredValue::Object(wrapper))) =
+        begin_boolean_constructor_wrapper(
+            runtime,
+            new_target,
+            value,
+            None,
+            Some(native_function_host_origin()),
+        )
+    else {
+        panic!("data-valued newTarget.prototype must construct immediately");
+    };
+    wrapper
+}
+
+fn begin_test_boolean_construction(
+    runtime: &mut Runtime,
+    constructor: FunctionId,
+    native: NativeFunction,
+    new_target: FunctionId,
+    budget: &mut DynamicCompilationBudget,
+) -> NativeDispatch {
+    let Ok(dispatch) = dispatch_native_call(
+        runtime,
+        constructor,
+        native,
+        CallInputs {
+            receiver: StoredValue::Undefined,
+            arguments: CallArguments::from_values(vec![StoredValue::Boolean(true)]),
+            new_target: Some(new_target),
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        budget,
+    ) else {
+        panic!("accessor-backed Boolean construction must start");
+    };
+    dispatch
+}
+
+fn object_prototype_to_string_native(
+    runtime: &Runtime,
+    realm: RealmId,
+) -> (FunctionId, NativeFunction) {
+    let object_prototype = runtime
+        .realm_object_prototype(realm)
+        .expect("Object.prototype");
+    let to_string_key = runtime.predefined_property_key(PredefinedAtom::ToString);
+    let StoredValue::Function(to_string) = read_heap_property(
+        runtime,
+        HeapReference::Object(object_prototype),
+        &to_string_key,
+    )
+    .expect("Object.prototype.toString") else {
+        panic!("Object.prototype.toString is not callable");
+    };
+    let native = runtime
+        .functions
+        .get(to_string)
+        .and_then(HeapFunction::native)
+        .copied()
+        .expect("native Object.prototype.toString");
+    (to_string, native)
+}
+
+fn runtime_with_boolean_tag_getter_and_invoker(
+    limits: RuntimeLimits,
+    getter_source: &str,
+    invoker_source: &str,
+    invoker_name: &str,
+) -> (Runtime, crate::Realm, Function, Function, JsValue) {
+    let getter_authority = compile_test_function(getter_source, "getter");
+    let invoker_authority = compile_test_function(invoker_source, invoker_name);
+    let mut runtime = Runtime::try_new(limits).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let (getter, invoker) = {
+        let mut context = runtime.context(&realm).expect("context");
+        (
+            context.instantiate(getter_authority).expect("getter"),
+            context.instantiate(invoker_authority).expect("invoker"),
+        )
+    };
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let (to_string, _) = object_prototype_to_string_native(&runtime, realm_id);
+    let boolean_prototype = runtime
+        .realm_boolean_prototype(realm_id)
+        .expect("Boolean.prototype");
+    runtime
+        .append_accessor_property(
+            HeapReference::Object(boolean_prototype),
+            runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag),
+            PropertyLayout::accessor(true, true),
+            Some(getter.id().expect("getter id")),
+            None,
+        )
+        .expect("Boolean @@toStringTag getter");
+    let to_string = runtime
+        .public_value(StoredValue::Function(to_string))
+        .expect("Object.prototype.toString root");
+    (runtime, realm, invoker, getter, to_string)
 }
 
 fn assert_native_type_error(error: NativeFailure, expected: &str) {

@@ -1,8 +1,8 @@
 use quickjs::{DynamicFunctionLimits, construct_dynamic_function};
 use quickjs_frontend::{DynamicFunctionKind, DynamicFunctionSource, SourceFragment};
 use quickjs_runtime::{
-    Context, ExceptionKind, ExecutionError, ExecutionLimits, JsException, JsValue, PredefinedAtom,
-    Runtime, RuntimeLimits,
+    Context, ExceptionKind, ExecutionError, ExecutionLimits, JsException, JsNumber, JsValue,
+    PredefinedAtom, Runtime, RuntimeLimits,
 };
 
 fn compile_function(
@@ -341,6 +341,58 @@ fn object_prototype_to_string_observes_boolean_to_string_tag_data_property() {
         .call(&run, &[to_string_tag], ExecutionLimits::default())
         .expect("Boolean @@toStringTag");
     assert!(boolean(&result));
+}
+
+#[test]
+fn object_prototype_to_string_executes_symbol_tag_getters_once_and_falls_back() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = compile_function(
+        &mut context,
+        &["toStringTag"],
+        "let reads=0;\
+         let tagged={get [toStringTag](){reads=reads+1;return \"Tagged\";}};\
+         let fallback={get [toStringTag](){reads=reads+1;return 7;}};\
+         let object={};\
+         return object.toString.call(tagged)===\"[object Tagged]\"\
+             && object.toString.call(fallback)===\"[object Object]\"\
+             && reads===2;",
+    );
+    let to_string_tag = context
+        .well_known_symbol(PredefinedAtom::SymbolToStringTag)
+        .expect("Symbol.toStringTag");
+
+    let result = context
+        .call(&run, &[to_string_tag], ExecutionLimits::default())
+        .expect("accessor-backed @@toStringTag");
+    assert!(boolean(&result));
+}
+
+#[test]
+fn object_prototype_to_string_propagates_symbol_tag_getter_throw() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = compile_function(
+        &mut context,
+        &["toStringTag"],
+        "let tagged={get [toStringTag](){throw 37;}};\
+         return ({}).toString.call(tagged);",
+    );
+    let to_string_tag = context
+        .well_known_symbol(PredefinedAtom::SymbolToStringTag)
+        .expect("Symbol.toStringTag");
+
+    let exception =
+        escaping_exception(context.call(&run, &[to_string_tag], ExecutionLimits::default()));
+    assert_eq!(exception.kind(), None);
+    let thrown = exception.thrown_value().expect("explicit getter throw");
+    let number = thrown
+        .as_number()
+        .expect("live thrown value")
+        .expect("number throw");
+    assert!(number.strict_equals(JsNumber::from_i32(37)));
 }
 
 #[test]

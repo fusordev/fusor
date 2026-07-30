@@ -653,11 +653,17 @@ until zombie-state and resurrection rules are complete.
   trace. Boolean wrappers store a typed internal payload rather than inferring
   their brand from the prototype; the same object representation reserves
   typed Number, String, and Symbol payload variants for later intrinsic
-  families. Boolean construction accepts data-valued object/function
+  families. Boolean construction accepts data- or accessor-valued
   `newTarget.prototype` and falls back to the new target realm's
   `Boolean.prototype` for primitives. Accessor-backed `newTarget.prototype`
-  and accessor-backed `Symbol.toStringTag` still fail closed at the synchronous
-  intrinsic-read boundary; both require resumable native `Get` continuations.
+  and `Object.prototype.toString` `Symbol.toStringTag` reads execute through
+  typed native `Get` continuations. The former retains and charges the new
+  target and allocates its wrapper only after the getter completes; the latter
+  precomputes its built-in tag, boxes primitive Booleans before the Get, and
+  retains the exact temporary receiver while its getter runs. Completion
+  traces realm, public, active-frame, captured-cell, and outer-continuation
+  roots before reclaiming unreachable temporary graphs, so a genuinely escaped
+  wrapper survives while repeated unescaped boxing remains within heap limits.
   Ordinary objects and function objects share typed data/accessor property
   storage, and both getter and setter function edges are traced.
   `DefineField` creates configurable, writable, enumerable data properties;
