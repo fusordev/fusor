@@ -1109,7 +1109,9 @@ dependencies = [
 name = "xtask"
 version = "0.0.0"
 dependencies = [
+ "quickjs",
  "quickjs-frontend",
+ "quickjs-runtime",
  "serde_json",
 ]
 

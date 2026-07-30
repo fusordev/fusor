@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "sample_seed": "0x6a09e667f3bcc909",
+  "sample_count": 256,
+  "boundary_bits": [
+    "0x0000000000000000",
+    "0x8000000000000000",
+    "0x0000000000000001",
+    "0x8000000000000001",
+    "0x000fffffffffffff",
+    "0x800fffffffffffff",
+    "0x0010000000000000",
+    "0x8010000000000000",
+    "0x3fefffffffffffff",
+    "0x3ff0000000000000",
+    "0x3ff0000000000001",
+    "0xbff0000000000000",
+    "0x3fb999999999999a",
+    "0x3fd5555555555555",
+    "0x433fffffffffffff",
+    "0x4340000000000000",
+    "0x7fefffffffffffff",
+    "0xffefffffffffffff",
+    "0x7ff0000000000000",
+    "0xfff0000000000000",
+    "0x7ff8000000000000"
+  ]
+}

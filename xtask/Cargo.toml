@@ -7,7 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+quickjs = { path = "../crates/quickjs" }
 quickjs-frontend = { path = "../crates/quickjs-frontend" }
+quickjs-runtime = { path = "../crates/quickjs-runtime" }
 serde_json.workspace = true
 
 [lints]

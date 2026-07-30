@@ -1,8 +1,8 @@
 use quickjs::{DynamicFunctionLimits, construct_dynamic_function};
 use quickjs_frontend::{DynamicFunctionKind, DynamicFunctionSource, SourceFragment};
 use quickjs_runtime::{
-    Context, EngineFault, ExceptionKind, ExecutionError, ExecutionLimits, JsException, JsNumber,
-    JsValue, PredefinedAtom, Runtime, RuntimeLimits,
+    Context, ExceptionKind, ExecutionError, ExecutionLimits, JsException, JsNumber, JsValue,
+    PredefinedAtom, Runtime, RuntimeLimits,
 };
 
 fn compile_function(
@@ -37,6 +37,15 @@ fn number(value: &JsValue) -> JsNumber {
     value.as_number().expect("live value").expect("Number")
 }
 
+fn string(value: &JsValue) -> String {
+    value
+        .as_string()
+        .expect("live value")
+        .expect("String")
+        .to_utf8_lossy()
+        .expect("UTF-8")
+}
+
 fn escaping_exception(result: Result<JsValue, ExecutionError>) -> JsException {
     match result {
         Err(ExecutionError::Exception(exception)) => exception,
@@ -46,8 +55,16 @@ fn escaping_exception(result: Result<JsValue, ExecutionError>) -> JsException {
 }
 
 fn assert_type_error(result: Result<JsValue, ExecutionError>, expected_message: &str) {
+    assert_error_kind(result, ExceptionKind::TypeError, expected_message);
+}
+
+fn assert_error_kind(
+    result: Result<JsValue, ExecutionError>,
+    expected_kind: ExceptionKind,
+    expected_message: &str,
+) {
     let exception = escaping_exception(result);
-    assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
+    assert_eq!(exception.kind(), Some(expected_kind));
     assert_eq!(
         exception
             .message()
@@ -101,19 +118,133 @@ fn number_call_construct_and_intrinsic_metadata_are_complete_for_the_core_vertic
 }
 
 #[test]
-fn number_to_string_radix_coercion_and_non_decimal_formatting_remain_fail_closed() {
+fn number_to_string_formats_radices_fractions_and_special_values() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");
-    for body in ["return (15).toString(16);", "return (15).toString(\"10\");"] {
+    let run = compile_function(
+        &mut context,
+        &[],
+        "return (255).toString(2)+\"|\"\
+             +(255).toString(8)+\"|\"\
+             +(255).toString(16)+\"|\"\
+             +(255).toString(36)+\"|\"\
+             +(0.1).toString(2)+\"|\"\
+             +(0.1).toString(3)+\"|\"\
+             +(0.1).toString(16)+\"|\"\
+             +(1/3).toString(3)+\"|\"\
+             +(1/3).toString(36)+\"|\"\
+             +(255).toString(void 0)+\"|\"\
+             +Number.prototype.toString.call(-0,2)+\"|\"\
+             +Number.prototype.toString.call(Number(void 0),2)+\"|\"\
+             +Number.prototype.toString.call(1/0,2)+\"|\"\
+             +Number.prototype.toString.call(-1/0,36);",
+    );
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("radix formatting");
+    assert_eq!(
+        string(&result),
+        "11111111|377|ff|73|\
+         0.0001100110011001100110011001100110011001100110011001101|\
+         0.0022002200220022002200220022002201|\
+         0.1999999999999a|0.1|0.c|255|0|NaN|Infinity|-Infinity"
+    );
+}
+
+#[test]
+fn number_to_string_coerces_radix_resumably_with_the_number_hint() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = compile_function(
+        &mut context,
+        &["toPrimitive"],
+        "let log=\"\";\
+         let exotic={\
+             get [toPrimitive](){\
+                 log=log+\"g\";\
+                 return function convert(hint){\
+                     log=log+\"c\"+hint;\
+                     return \"16.9\";\
+                 };\
+             }\
+         };\
+         let fallback={\
+             valueOf(){log=log+\"v\";return {};},\
+             toString(){log=log+\"t\";return \"8\";}\
+         };\
+         return (255).toString(exotic)+\"|\"\
+             +(255).toString(fallback)+\"|\"\
+             +(255).toString(\"0x10\")+\"|\"\
+             +(35).toString(36.9)+\"|\"+log;",
+    );
+    let to_primitive = context
+        .well_known_symbol(PredefinedAtom::SymbolToPrimitive)
+        .expect("Symbol.toPrimitive");
+
+    let result = context
+        .call(&run, &[to_primitive], ExecutionLimits::default())
+        .expect("resumable radix coercion");
+    assert_eq!(string(&result), "ff|377|ff|z|gcnumbervt");
+}
+
+#[test]
+fn number_to_string_uses_exact_radix_errors_and_conversion_order() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    for body in [
+        "return (1).toString(1);",
+        "return (1).toString(37);",
+        "return (1).toString(null);",
+        "return (1).toString(false);",
+        "return (1).toString(Number(void 0));",
+        "return (1).toString(1/0);",
+        "return (1).toString(4294967298);",
+        "return (1).toString({valueOf(){return void 0;}});",
+    ] {
         let run = compile_function(&mut context, &[], body);
-        assert!(matches!(
+        assert_error_kind(
             context.call(&run, &[], ExecutionLimits::default()),
-            Err(ExecutionError::EngineFault(EngineFault::RuntimeInvariant {
-                message: "Number.prototype.toString radix coercion and non-decimal formatting are not implemented",
-            }))
-        ));
+            ExceptionKind::RangeError,
+            "radix must be between 2 and 36",
+        );
     }
+
+    let receiver_first = compile_function(
+        &mut context,
+        &[],
+        "return Number.prototype.toString.call({}, {valueOf(){throw 41;}});",
+    );
+    assert_type_error(
+        context.call(&receiver_first, &[], ExecutionLimits::default()),
+        "not a number",
+    );
+
+    let throwing_radix = compile_function(
+        &mut context,
+        &[],
+        "return (1).toString({valueOf(){throw 42;}});",
+    );
+    let exception =
+        escaping_exception(context.call(&throwing_radix, &[], ExecutionLimits::default()));
+    assert_eq!(exception.kind(), None);
+    assert!(
+        number(exception.thrown_value().expect("explicit throw"))
+            .strict_equals(JsNumber::from_i32(42))
+    );
+
+    let symbol_radix = compile_function(&mut context, &["symbol"], "return (1).toString(symbol);");
+    let symbol = context
+        .well_known_symbol(PredefinedAtom::SymbolIterator)
+        .expect("Symbol.iterator");
+    assert_type_error(
+        context.call(&symbol_radix, &[symbol], ExecutionLimits::default()),
+        "cannot convert symbol to number",
+    );
 }
 
 #[test]
@@ -281,6 +412,24 @@ fn number_prototype_methods_have_exact_nonconstructor_errors() {
 }
 
 #[test]
+fn unbound_number_to_string_keeps_the_exact_receiver_error() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let extract = compile_function(&mut context, &[], "return Number.prototype.toString;");
+    let method = context
+        .call(&extract, &[], ExecutionLimits::default())
+        .expect("extract Number.prototype.toString")
+        .into_function()
+        .expect("method");
+
+    assert_type_error(
+        context.call(&method, &[], ExecutionLimits::default()),
+        "not a number",
+    );
+}
+
+#[test]
 fn number_primitive_lookup_and_sloppy_receiver_boxing_use_the_intrinsic() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -425,6 +574,42 @@ fn number_boxing_and_primitive_lookup_use_the_callee_realm() {
         .call(&bridge, &[target.as_value()], ExecutionLimits::default())
         .expect("cross-realm Number boxing");
     assert!(boolean(&result));
+}
+
+#[test]
+fn number_to_string_accepts_cross_realm_brands_and_primitive_receivers() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let home_realm = runtime.create_realm().expect("home realm");
+    let invoking_realm = runtime.create_realm().expect("invoking realm");
+    let (method, boxed) = {
+        let mut context = runtime.context(&home_realm).expect("home context");
+        let extract = compile_function(&mut context, &[], "return Number.prototype.toString;");
+        let construct = compile_function(&mut context, &[], "return new Number(31);");
+        let method = context
+            .call(&extract, &[], ExecutionLimits::default())
+            .expect("extract Number.prototype.toString")
+            .into_function()
+            .expect("method");
+        let boxed = context
+            .call(&construct, &[], ExecutionLimits::default())
+            .expect("boxed Number");
+        (method, boxed)
+    };
+    let mut context = runtime.context(&invoking_realm).expect("invoking context");
+    let bridge = compile_function(
+        &mut context,
+        &["method", "boxed"],
+        "return method.call(boxed,16)+\"|\"+method.call(31,16);",
+    );
+
+    let result = context
+        .call(
+            &bridge,
+            &[method.as_value(), boxed],
+            ExecutionLimits::default(),
+        )
+        .expect("cross-realm Number toString");
+    assert_eq!(string(&result), "1f|1f");
 }
 
 #[test]

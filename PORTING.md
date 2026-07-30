@@ -488,8 +488,12 @@ A milestone is complete only when all of its checked items pass in CI.
         behavior, callee-realm boxing, cross-realm brands,
         `Object.prototype` boxing/tagging, signed zero, NaN, resource limits,
         GC roots, and failure-atomic realm creation are covered.
-        Radix argument coercion, non-decimal formatting, the remaining Number
-        static and prototype surface, and BigInt-to-Number stay fail closed.
+        `Number.prototype.toString` supports resumable Number-hint radix
+        coercion, exact range errors, and shortest-round-trip fixed formatting
+        in bases 2 through 36. A bounded exact-bit differential checks all
+        radices for the manifest's boundary words plus a fixed-seed sample
+        through the public facade. The remaining Number static and prototype
+        surface and BigInt-to-Number stay fail closed.
   - [ ] Add String/Symbol wrapper payload consumers and prototypes, the
         remaining conversion hints and built-in entry points, BigInt numeric
         domains, and the remaining conversion/formatting surface.

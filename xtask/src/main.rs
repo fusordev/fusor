@@ -3,10 +3,14 @@
 #![forbid(unsafe_code)]
 
 mod dynamic_function_differential;
+mod number_radix_differential;
 mod parser_differential;
 
 use dynamic_function_differential::{
     DynamicFunctionDifferentialOptions, run_dynamic_function_differential,
+};
+use number_radix_differential::{
+    DEFAULT_NUMBER_RADIX_CORPUS, NumberRadixDifferentialOptions, run_number_radix_differential,
 };
 use parser_differential::{ParserDifferentialOptions, run_parser_differential};
 use std::env;
@@ -56,6 +60,16 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Ok(Args::NumberRadixDifferential(options)) => {
+            match run_number_radix_differential(&options) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::FAILURE,
+                Err(error) => {
+                    eprintln!("xtask: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Err(error) => {
             eprintln!("xtask: {error}\n");
             print_usage();
@@ -71,16 +85,19 @@ Usage:
   cargo xtask differential --oracle PATH --candidate PATH [OPTIONS]
   cargo xtask parser-differential --oracle PATH [OPTIONS]
   cargo xtask dynamic-function-differential --oracle QJSC_PATH [OPTIONS]
+  cargo xtask number-radix-differential --oracle QJS_PATH [OPTIONS]
 
 Options:
   --corpus PATH       Corpus directory (runtime default: {DEFAULT_CORPUS};
                       parser default: {DEFAULT_PARSER_CORPUS};
-                      dynamic Function default: {DEFAULT_DYNAMIC_FUNCTION_CORPUS})
+                      dynamic Function default: {DEFAULT_DYNAMIC_FUNCTION_CORPUS};
+                      Number radix manifest default: {DEFAULT_NUMBER_RADIX_CORPUS})
   --timeout-ms N      Per-process timeout (default: {DEFAULT_TIMEOUT_MS})
   -h, --help          Show this help
 
 Dynamic Function --oracle must be the pinned QuickJS 2026-06-04 qjsc compiler.
 It is invoked with -c only; generated code is never compiled or executed.
+Number radix --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter.
 "
     );
 }
@@ -91,6 +108,7 @@ enum Args {
     Differential(DifferentialOptions),
     ParserDifferential(ParserDifferentialOptions),
     DynamicFunctionDifferential(DynamicFunctionDifferentialOptions),
+    NumberRadixDifferential(NumberRadixDifferentialOptions),
 }
 
 impl Args {
@@ -121,6 +139,10 @@ impl Args {
             "dynamic-function-differential" => {
                 parse_dynamic_function_differential_options(arguments.into_iter())
                     .map(Self::DynamicFunctionDifferential)
+            }
+            "number-radix-differential" => {
+                parse_number_radix_differential_options(arguments.into_iter())
+                    .map(Self::NumberRadixDifferential)
             }
             unknown => Err(format!("unknown task `{unknown}`")),
         }
@@ -199,6 +221,33 @@ fn parse_dynamic_function_differential_options(
     }
 
     Ok(DynamicFunctionDifferentialOptions {
+        oracle: oracle.ok_or("missing required --oracle PATH")?,
+        corpus,
+        timeout,
+    })
+}
+
+fn parse_number_radix_differential_options(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<NumberRadixDifferentialOptions, String> {
+    let mut oracle = None;
+    let mut corpus = PathBuf::from(DEFAULT_NUMBER_RADIX_CORPUS);
+    let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    while let Some(option) = arguments.next() {
+        match option.to_string_lossy().as_ref() {
+            "--oracle" => oracle = Some(required_path(&mut arguments, "--oracle")?),
+            "--corpus" => corpus = required_path(&mut arguments, "--corpus")?,
+            "--timeout-ms" => timeout = required_timeout(&mut arguments)?,
+            unknown => {
+                return Err(format!(
+                    "unknown number-radix-differential option `{unknown}`"
+                ));
+            }
+        }
+    }
+
+    Ok(NumberRadixDifferentialOptions {
         oracle: oracle.ok_or("missing required --oracle PATH")?,
         corpus,
         timeout,
@@ -491,6 +540,7 @@ mod tests {
         Args, DifferentialOptions, Status, collect_javascript_files, read_all, wait_with_timeout,
     };
     use crate::dynamic_function_differential::DynamicFunctionDifferentialOptions;
+    use crate::number_radix_differential::NumberRadixDifferentialOptions;
     use std::ffi::OsString;
     use std::fs;
     use std::io::Cursor;
@@ -546,6 +596,32 @@ mod tests {
                     oracle: PathBuf::from("/tmp/qjsc"),
                     corpus: PathBuf::from("fixtures"),
                     timeout: Duration::from_millis(125),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn parses_number_radix_differential_options() {
+        let arguments = [
+            "number-radix-differential",
+            "--oracle",
+            "/tmp/qjs",
+            "--corpus",
+            "tests/number-radix/custom.json",
+            "--timeout-ms",
+            "375",
+        ]
+        .into_iter()
+        .map(OsString::from);
+
+        assert_eq!(
+            Args::parse(arguments),
+            Ok(Args::NumberRadixDifferential(
+                NumberRadixDifferentialOptions {
+                    oracle: PathBuf::from("/tmp/qjs"),
+                    corpus: PathBuf::from("tests/number-radix/custom.json"),
+                    timeout: Duration::from_millis(375),
                 }
             ))
         );

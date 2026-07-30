@@ -27,6 +27,8 @@ use std::fmt;
 
 use crate::string::{JsString, JsStringError, MAX_STRING_CODE_UNITS};
 
+mod radix;
+
 /// An ECMAScript Number with the pinned `QuickJS` integer fast-path invariant.
 ///
 /// JavaScript exposes one binary64 Number domain. Exact signed 32-bit values
@@ -123,6 +125,22 @@ impl JsNumber {
         match self.0 {
             NumberRepr::Int(value) => format_i32_for_javascript(value),
             NumberRepr::Float(value) => format_binary64_for_javascript(value),
+        }
+    }
+
+    /// Formats this Number in a validated radix from 2 through 36.
+    ///
+    /// Base ten retains the ordinary JavaScript decimal thresholds. Other
+    /// radices use the pinned `QuickJS` free-format algorithm and never emit an
+    /// exponent.
+    pub(crate) fn to_radix_string(self, radix: u32) -> Result<JsString, JsStringError> {
+        debug_assert!((2..=36).contains(&radix));
+        if radix == 10 {
+            return self.to_javascript_string();
+        }
+        match self.0 {
+            NumberRepr::Int(value) => radix::format_i32_radix(value, radix),
+            NumberRepr::Float(value) => radix::format_binary64_radix(value, radix),
         }
     }
 

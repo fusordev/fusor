@@ -373,6 +373,9 @@ enum OperatorPrimitiveTarget {
     NumberIntrinsic {
         new_target: Option<FunctionId>,
     },
+    NumberToString {
+        number: JsNumber,
+    },
 }
 
 impl OperatorPrimitiveTarget {
@@ -382,6 +385,7 @@ impl OperatorPrimitiveTarget {
             Self::BinaryRight { .. }
             | Self::BinaryFinish { .. }
             | Self::EqualityFinish { .. }
+            | Self::NumberToString { .. }
             | Self::NumberIntrinsic {
                 new_target: Some(_),
             } => 1,
@@ -498,7 +502,7 @@ fn trace_operator_primitive_target_roots(
     mark: &mut dyn FnMut(CollectionRoot),
 ) {
     match target {
-        OperatorPrimitiveTarget::Unary { .. } => {}
+        OperatorPrimitiveTarget::Unary { .. } | OperatorPrimitiveTarget::NumberToString { .. } => {}
         OperatorPrimitiveTarget::BinaryRight { right, .. } => {
             trace_stored_value_root(right, mark);
         }
@@ -2105,21 +2109,21 @@ fn dispatch_native_call(
             )
         }
         NativeFunctionKind::NumberPrototypeToString => {
-            let value = number_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
+            let number = number_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
             let mut arguments = inputs.arguments;
             match arguments.take_first() {
-                None | Some(StoredValue::Undefined) => {}
-                Some(StoredValue::Number(radix)) if radix.same_value(JsNumber::from_i32(10)) => {}
-                Some(_) => {
-                    return Err(EngineFault::RuntimeInvariant {
-                        message: "Number.prototype.toString radix coercion and non-decimal formatting are not implemented",
-                    }
-                    .into());
-                }
+                None | Some(StoredValue::Undefined) => Ok(NativeDispatch::Immediate(
+                    StoredValue::String(number.to_radix_string(10)?),
+                )),
+                Some(radix) => begin_operator_primitive_conversion(
+                    runtime,
+                    radix,
+                    OperatorPrimitiveHint::Number,
+                    OperatorPrimitiveTarget::NumberToString { number },
+                    return_to,
+                    origin.unwrap_or_else(native_function_host_origin),
+                ),
             }
-            Ok(NativeDispatch::Immediate(StoredValue::String(
-                value.to_javascript_string()?,
-            )))
         }
         NativeFunctionKind::NumberPrototypeValueOf => {
             let value = number_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
@@ -3271,7 +3275,42 @@ fn finish_operator_primitive_target(
                 },
             )
         }
+        OperatorPrimitiveTarget::NumberToString { number } => {
+            let radix = operator_to_number(value, origin)?;
+            finish_number_to_string_radix(number, radix, origin)
+        }
     }
+}
+
+fn finish_number_to_string_radix(
+    number: JsNumber,
+    radix: JsNumber,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let radix = saturated_i32_from_number(radix);
+    let Some(radix) = u32::try_from(radix)
+        .ok()
+        .filter(|radix| (2..=36).contains(radix))
+    else {
+        return Err(NativeFailure::Abrupt(PendingException {
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::RangeError,
+                message: JsString::from_utf8("radix must be between 2 and 36")?,
+            },
+            origin: origin.clone(),
+        }));
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::String(
+        number.to_radix_string(radix)?,
+    )))
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Rust float-to-int casts exactly provide QuickJS JS_ToInt32Sat semantics: truncation, saturation, and NaN to zero"
+)]
+fn saturated_i32_from_number(number: JsNumber) -> i32 {
+    number.as_f64() as i32
 }
 
 const fn binary_operator_converts_left_to_number_first(opcode: FinalOpcode) -> bool {

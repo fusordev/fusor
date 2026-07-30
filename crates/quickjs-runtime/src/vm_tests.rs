@@ -1572,6 +1572,72 @@ fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
         .retained_values(),
         2
     );
+    assert_eq!(
+        continuation(OperatorPrimitiveTarget::NumberToString {
+            number: JsNumber::from_i32(1),
+        })
+        .retained_values(),
+        2
+    );
+}
+
+#[test]
+fn number_to_string_radix_conversion_obeys_frame_and_value_limits() {
+    let (mut runtime, to_string, native, radix) =
+        runtime_with_number_to_string_radix_method(RuntimeLimits::default());
+    runtime.limits.max_active_frames = 1;
+    let baseline = runtime.usage();
+    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let dispatch = begin_test_number_to_string(&mut runtime, to_string, native, radix, &mut budget);
+    let NativeDispatch::Call(call) = &dispatch else {
+        panic!("radix valueOf must suspend Number.prototype.toString");
+    };
+    assert!(matches!(
+        call.continuations.as_slice(),
+        [NativeContinuation::OperatorPrimitive(
+            OperatorPrimitiveContinuation {
+                target: OperatorPrimitiveTarget::NumberToString { number },
+                ..
+            }
+        )] if number.same_value(JsNumber::from_i32(31))
+    ));
+    assert_eq!(native_continuation_values(&call.continuations), 2);
+    let Err(error) = resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+    else {
+        panic!("radix method plus continuation must exceed one active frame");
+    };
+    assert!(matches!(
+        error,
+        NativeFailure::Execution(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::Frames,
+            limit: 1,
+            observed: 2,
+        })
+    ));
+    assert_eq!(runtime.usage(), baseline);
+
+    let (mut runtime, to_string, native, radix) =
+        runtime_with_number_to_string_radix_method(RuntimeLimits::default());
+    runtime.limits.max_active_frame_values = 2;
+    let baseline = runtime.usage();
+    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let dispatch = begin_test_number_to_string(&mut runtime, to_string, native, radix, &mut budget);
+    let Err(error) = resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+    else {
+        panic!("radix receiver plus retained Number must exceed two frame values");
+    };
+    let NativeFailure::Execution(ExecutionError::LimitExceeded {
+        resource,
+        limit,
+        observed,
+    }) = error
+    else {
+        panic!("radix frame-value failure must remain a limit error");
+    };
+    assert_eq!(resource, RuntimeResource::FrameValues);
+    assert_eq!(limit, 2);
+    assert_eq!(observed, 4);
+    assert_eq!(runtime.usage(), baseline);
 }
 
 #[test]
@@ -3154,6 +3220,78 @@ fn object_prototype_to_string_native(
         .copied()
         .expect("native Object.prototype.toString");
     (to_string, native)
+}
+
+fn runtime_with_number_to_string_radix_method(
+    limits: RuntimeLimits,
+) -> (Runtime, FunctionId, NativeFunction, ObjectId) {
+    let value_of_authority = compile_test_function("function valueOf(){return 16;}", "valueOf");
+    let mut runtime = Runtime::try_new(limits).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let value_of = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(value_of_authority)
+        .expect("valueOf");
+    let realm = runtime.context(&realm).expect("context").realm;
+    let number_prototype = runtime
+        .realm_number_prototype(realm)
+        .expect("Number.prototype");
+    let to_string_key = runtime.predefined_property_key(PredefinedAtom::ToString);
+    let StoredValue::Function(to_string) = read_heap_property(
+        &runtime,
+        HeapReference::Object(number_prototype),
+        &to_string_key,
+    )
+    .expect("Number.prototype.toString") else {
+        panic!("Number.prototype.toString is not callable");
+    };
+    let native = runtime
+        .functions
+        .get(to_string)
+        .and_then(HeapFunction::native)
+        .copied()
+        .expect("native Number.prototype.toString");
+    let radix = source_object(&mut runtime, realm);
+    runtime
+        .append_data_property(
+            HeapReference::Object(radix),
+            runtime.predefined_property_key(PredefinedAtom::ValueOf),
+            PropertyLayout::data(true, true, true),
+            StoredValue::Function(value_of.id().expect("valueOf id")),
+        )
+        .expect("radix valueOf");
+    drop(value_of);
+    runtime.drain_releases();
+    (runtime, to_string, native, radix)
+}
+
+fn begin_test_number_to_string(
+    runtime: &mut Runtime,
+    to_string: FunctionId,
+    native: NativeFunction,
+    radix: ObjectId,
+    budget: &mut DynamicCompilationBudget,
+) -> NativeDispatch {
+    let Ok(dispatch) = dispatch_native_call(
+        runtime,
+        to_string,
+        native,
+        CallInputs {
+            receiver: StoredValue::Number(JsNumber::from_i32(31)),
+            arguments: CallArguments::from_values(vec![StoredValue::Object(radix)]),
+            new_target: None,
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        budget,
+    ) else {
+        panic!("resumable radix conversion must start");
+    };
+    dispatch
 }
 
 fn runtime_with_boolean_tag_getter_and_invoker(

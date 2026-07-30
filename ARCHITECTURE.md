@@ -398,8 +398,10 @@ state against frame/value ceilings, and resumes without Rust recursion.
 Accessor lookup stops at the first descriptor, invokes inherited getters with
 the original source object, and treats a missing getter as `undefined`.
 Boolean and Number boxing are implemented by the typed wrapper graph described
-below; String/Symbol boxing, Number radix argument coercion and non-decimal
-formatting, persistent global lexical collision checks, and
+below. `Number.prototype.toString` reuses the Number-hint conversion
+continuation for observable radix coercion and formats validated bases 2
+through 36 without exponent notation outside base ten. String/Symbol boxing,
+persistent global lexical collision checks, and
 `Function.prototype.apply`/`bind`/`Symbol.hasInstance` stay fail closed.
 The path never emits `eval`/`apply_eval` and rejects direct eval anywhere in
 generated code. Direct and indirect eval remain wholly unimplemented.
@@ -517,15 +519,21 @@ operates on UTF-16 without replacing lone surrogates, implements the pinned
 whitespace and decimal/radix grammar, and feeds exact `ToInt32`/`ToUint32`.
 Postfix updates return a verifier-accounted old/new pair so the lvalue write
 consumes only the new Number. Number-to-String formatting is fallible end to
-end, and concatenation that exceeds the JavaScript String limit raises the
-exact `InternalError` instead of escaping as a host allocation error. BigInt
-values and mixed numeric domains,
+end. Decimal output keeps the pinned notation thresholds; bases 2 through 36
+use a fixed-limb shortest-round-trip formatter and fixed notation. Observable
+radix conversion resumes through the Number-hint operator state machine,
+applies saturated signed-32-bit conversion, and reports the exact range error.
+The checked Number-radix differential manifest exercises exact binary64 words
+against the pinned `qjs`, covers each boundary word in all bases 2 through 36,
+and adds a bounded fixed-seed sample through the public facade and verified VM.
+Concatenation that exceeds the JavaScript String limit raises the exact
+`InternalError` instead of escaping as a host allocation error. BigInt values
+and mixed numeric domains,
 async/generator methods, `super`/home-object semantics, realm-global setter
 dispatch, prototype mutation, proxies and other exotics, derived/class and
-nonordinary constructor forms, optional/spread/apply/tail calls, Number radix
-argument coercion and non-decimal formatting, the remaining Number built-ins,
-String/Symbol sloppy-`this` boxing and wrapper/prototype conversions,
-serialized input, raw function slots, catch handlers, finally
+nonordinary constructor forms, optional/spread/apply/tail calls, the remaining
+Number built-ins, String/Symbol sloppy-`this` boxing and wrapper/prototype
+conversions, serialized input, raw function slots, catch handlers, finally
 return addresses, iterator markers, and packed exceptional stack values remain
 fail closed. Ordinary
 accessors are typed slots: `GetField`
@@ -673,6 +681,10 @@ until zombie-state and resurrection rules are complete.
   Number conversion completes before that observable Get. Accessor-backed
   `newTarget.prototype` and `Object.prototype.toString`
   `Symbol.toStringTag` reads execute through typed native `Get` continuations.
+  `Number.prototype.toString` validates its receiver before radix conversion;
+  nontrivial radix objects resume through the same typed conversion machinery,
+  and the retained Number is charged to the suspended frame without adding a
+  heap edge.
   Constructor continuations retain and charge the new target and allocate a
   wrapper only after the getter completes; tag continuations precompute the
   built-in tag, box primitive Booleans or Numbers before the Get, and retain

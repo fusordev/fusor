@@ -375,6 +375,8 @@ impl From<AtomError> for InstallError {
 pub enum ExceptionKind {
     /// An implementation limit was exceeded by otherwise valid JavaScript.
     InternalError,
+    /// A numeric value was outside the range accepted by an operation.
+    RangeError,
     /// A lexical binding was read or written before initialization.
     ReferenceError,
     /// Source supplied to a dynamic JavaScript compiler was not valid.
@@ -574,6 +576,7 @@ impl fmt::Display for JsException {
             ExceptionPayload::EngineError { kind, message } => {
                 let name = match kind {
                     ExceptionKind::InternalError => "InternalError",
+                    ExceptionKind::RangeError => "RangeError",
                     ExceptionKind::ReferenceError => "ReferenceError",
                     ExceptionKind::SyntaxError => "SyntaxError",
                     ExceptionKind::TypeError => "TypeError",
@@ -1078,5 +1081,26 @@ mod tests {
         );
 
         assert_eq!(exception.to_string(), "SyntaxError: unexpected token");
+    }
+
+    #[test]
+    fn range_exceptions_render_the_javascript_error_name() {
+        let exception = JsException::engine_error(
+            ExceptionKind::RangeError,
+            string("radix must be between 2 and 36"),
+            JsStackFrame::new(
+                FunctionTemplateId::new(0),
+                BytecodePc::ZERO,
+                Arc::from("<caller>"),
+                Arc::from("(1).toString(1)"),
+                SourceByteSpan::new(0, 15),
+            ),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            exception.to_string(),
+            "RangeError: radix must be between 2 and 36"
+        );
     }
 }

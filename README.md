@@ -43,20 +43,21 @@ Boolean and Number primitives before its resumable `Symbol.toStringTag` Get,
 uses only primitive String overrides, otherwise preserves the built-in tag,
 and reclaims an unescaped temporary wrapper before execution continues without
 invalidating heap-, closure-, or exception-escaped identities.
-Number call/construct conversion, signed zero, NaN, default decimal
-stringification, and exact Number receiver checks are covered; radix argument
-coercion and non-decimal formatting remain fail-closed. String and Symbol
-wrappers remain deferred and fail closed. Nested calls, recursion,
+Number call/construct conversion, signed zero, NaN, exact Number receiver
+checks, and stringification in every radix from 2 through 36 are covered.
+Radix arguments use resumable Number-hint coercion, saturated signed-32-bit
+conversion, and exact `RangeError` behavior; non-decimal finite values use
+fixed shortest-round-trip output. String and Symbol wrappers remain deferred
+and fail closed. Nested calls, recursion,
 getter/setter dispatch, and abrupt unwinding use an explicit frame vector with
 cumulative frame/value ceilings and shared fuel. Installation scans every
 instruction in every template before mutation. BigInt values and mixed numeric
 domains, arrays and other exotic objects, shorthand/spread and `__proto__`
 data-initializer semantics, anonymous data-function inferred names,
 async/generator methods, `super`/home-object semantics, realm-global accessor
-writes, optional/spread/apply calls, Number radix argument coercion and
-non-decimal formatting, the remaining Number built-ins, String/Symbol wrapper
-coercions, serialized bytecode, every form of eval, and catch/finally
-typed-stack semantics remain deferred and fail closed.
+writes, optional/spread/apply calls, the remaining Number built-ins,
+String/Symbol wrapper coercions, serialized bytecode, every form of eval, and
+catch/finally typed-stack semantics remain deferred and fail closed.
 Ordinary `new` calls now execute constructor-capable bytecode functions and
 materialize their `name`, `length`, and
 `prototype.constructor` graph. The `quickjs` facade supplies one immutable
@@ -90,9 +91,9 @@ verified-bytecode getters and methods resume on the same iterative frame
 vector, and throws stop conversion before parsing. `call` preserves the target
 realm's strict/sloppy receiver rules and forwards the Oxc compiler service when
 its target is the ordinary `Function` constructor. Sloppy Boolean and Number
-boxing is implemented; String/Symbol boxing, Number radix argument coercion
-and non-decimal formatting, persistent global lexical collisions, and
-`Function.prototype.apply`/`bind`/`Symbol.hasInstance` remain fail-closed.
+boxing is implemented; String/Symbol boxing, persistent global lexical
+collisions, and `Function.prototype.apply`/`bind`/`Symbol.hasInstance` remain
+fail-closed.
 Per-session compilation-count and generated-source limits bound nested
 construction. No dynamic-Function path uses eval or captures a caller lexical
 frame.
@@ -153,6 +154,8 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo doc --workspace --no-deps
 cargo xtask parser-differential --oracle /path/to/quickjs-2026-06-04/qjs
+cargo xtask dynamic-function-differential --oracle /path/to/quickjs-2026-06-04/qjsc
+cargo xtask number-radix-differential --oracle /path/to/quickjs-2026-06-04/qjs
 ```
 
 The upstream C engine may be built separately as a development oracle for
@@ -162,6 +165,10 @@ matrix in [`tests/parser/manifest.json`](tests/parser/manifest.json) before
 running any fixture, and refuses undeclared fixtures or stale intentional
 differences. That matrix is an expanding compatibility gate; it is not yet a
 claim that every QuickJS grammar production has been covered.
+The Number radix task reconstructs exact binary64 bit patterns on both sides,
+checks every radix for exponent and mantissa boundaries, and adds a bounded
+fixed-seed sample from
+[`tests/number-radix/manifest.json`](tests/number-radix/manifest.json).
 
 ## License
 
