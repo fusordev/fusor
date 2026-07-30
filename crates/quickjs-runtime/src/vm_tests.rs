@@ -277,6 +277,14 @@ fn constructor_source_continuation_charges_its_new_target_heap_edge() {
     });
 
     assert_eq!(continuation.retained_values(), 2);
+    assert_eq!(
+        NativeContinuation::IntrinsicGet(IntrinsicGetContinuation::NumberConstructor {
+            new_target: constructor,
+            value: JsNumber::from_i32(1),
+        })
+        .retained_values(),
+        1
+    );
 }
 
 #[test]
@@ -339,6 +347,74 @@ fn boolean_constructor_wrapper_uses_new_target_prototype_and_realm_fallback() {
             runtime
                 .realm_boolean_prototype(realm)
                 .expect("Boolean.prototype")
+        ))
+    );
+}
+
+#[test]
+fn number_constructor_wrapper_uses_new_target_prototype_and_realm_fallback() {
+    let (mut runtime, realm, new_target, _native) = runtime_with_function_constructor();
+    let function_prototype = runtime
+        .realm_function_prototype(realm)
+        .expect("Function.prototype");
+    let negative_zero = JsNumber::from_f64(-0.0);
+    let wrapper = immediate_number_wrapper(&mut runtime, new_target, negative_zero);
+    assert!(
+        runtime
+            .boxed_number(wrapper)
+            .expect("live wrapper")
+            .expect("Number payload")
+            .same_value(negative_zero)
+    );
+    assert_eq!(
+        runtime
+            .object_record(HeapReference::Object(wrapper))
+            .expect("wrapper")
+            .prototype(),
+        Some(HeapReference::Function(function_prototype))
+    );
+
+    let custom_prototype = source_object(&mut runtime, realm);
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let constructor = runtime
+        .functions
+        .get_mut(new_target)
+        .expect("new target function");
+    let replaced = constructor.object.replace_existing_with_data(
+        &prototype_key,
+        PropertyLayout::data(false, false, false),
+        StoredValue::Object(custom_prototype),
+    );
+    assert!(replaced.is_some());
+    let wrapper = immediate_number_wrapper(&mut runtime, new_target, JsNumber::from_i32(7));
+    assert_eq!(
+        runtime
+            .object_record(HeapReference::Object(wrapper))
+            .expect("wrapper")
+            .prototype(),
+        Some(HeapReference::Object(custom_prototype))
+    );
+
+    let constructor = runtime
+        .functions
+        .get_mut(new_target)
+        .expect("new target function");
+    let replaced = constructor.object.replace_existing_with_data(
+        &prototype_key,
+        PropertyLayout::data(false, false, false),
+        StoredValue::Null,
+    );
+    assert!(replaced.is_some());
+    let wrapper = immediate_number_wrapper(&mut runtime, new_target, JsNumber::from_i32(9));
+    assert_eq!(
+        runtime
+            .object_record(HeapReference::Object(wrapper))
+            .expect("wrapper")
+            .prototype(),
+        Some(HeapReference::Object(
+            runtime
+                .realm_number_prototype(realm)
+                .expect("Number.prototype")
         ))
     );
 }
@@ -428,6 +504,102 @@ fn boolean_constructor_suspends_for_accessor_backed_new_target_prototype() {
     assert_eq!(
         runtime.boxed_boolean(wrapper).expect("live wrapper"),
         Some(true)
+    );
+    assert_eq!(
+        runtime
+            .object_record(HeapReference::Object(wrapper))
+            .expect("wrapper")
+            .prototype(),
+        Some(HeapReference::Object(custom_prototype))
+    );
+}
+
+#[test]
+fn number_constructor_suspends_for_accessor_backed_new_target_prototype() {
+    let (mut runtime, realm, number_constructor, native, new_target) =
+        runtime_with_number_constructor_prototype_getter(
+            "function getter(){\"use strict\";return this.valueOf;}",
+        );
+    let custom_prototype = source_object(&mut runtime, realm);
+    let value_of_key = runtime.predefined_property_key(PredefinedAtom::ValueOf);
+    runtime
+        .append_data_property(
+            HeapReference::Function(new_target),
+            value_of_key,
+            PropertyLayout::data(true, true, true),
+            StoredValue::Object(custom_prototype),
+        )
+        .expect("newTarget receiver marker");
+
+    let heap_objects_before_get = runtime.usage().heap_objects();
+    let negative_zero = JsNumber::from_f64(-0.0);
+    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let Ok(dispatch) = dispatch_native_call(
+        &mut runtime,
+        number_constructor,
+        native,
+        CallInputs {
+            receiver: StoredValue::Undefined,
+            arguments: CallArguments::from_values(vec![StoredValue::Number(negative_zero)]),
+            new_target: Some(new_target),
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("accessor-backed Number construction must start");
+    };
+    let NativeDispatch::Call(call) = dispatch else {
+        panic!("newTarget.prototype getter must suspend Number construction");
+    };
+    assert!(matches!(
+        call.continuations.as_slice(),
+        [NativeContinuation::IntrinsicGet(
+            IntrinsicGetContinuation::NumberConstructor {
+                new_target: retained_target,
+                value,
+            }
+        )] if *retained_target == new_target && value.same_value(negative_zero)
+    ));
+    assert_eq!(native_continuation_values(&call.continuations), 1);
+    assert_eq!(runtime.usage().heap_objects(), heap_objects_before_get);
+
+    let Ok(dispatch) = resolve_native_dispatch(
+        &mut runtime,
+        NativeDispatch::Call(call),
+        &[],
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("getter dispatch must resolve");
+    };
+    let NativeDispatch::Frame(frame) = dispatch else {
+        panic!("bytecode getter must produce an execution frame");
+    };
+    let result = execute_prepared_frames_with_dynamic_budget(
+        &mut runtime,
+        vec![frame],
+        ExecutionLimits::default(),
+        None,
+        None,
+        &mut budget,
+    )
+    .expect("resumed Number construction");
+    let StoredValue::Object(wrapper) = result else {
+        panic!("Number construction must return a wrapper");
+    };
+
+    assert!(
+        runtime
+            .boxed_number(wrapper)
+            .expect("live wrapper")
+            .expect("Number payload")
+            .same_value(negative_zero)
     );
     assert_eq!(
         runtime
@@ -1343,7 +1515,7 @@ fn property_key_continuations_charge_every_suspended_javascript_value() {
 
 #[test]
 fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
-    let (mut runtime, realm, _constructor, _native) = runtime_with_function_constructor();
+    let (mut runtime, realm, constructor, _native) = runtime_with_function_constructor();
     let object = source_object(&mut runtime, realm);
     let origin = native_function_host_origin();
     let continuation = |target| {
@@ -1384,6 +1556,18 @@ fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
         continuation(OperatorPrimitiveTarget::EqualityFinish {
             opcode: FinalOpcode::Eq,
             other: StoredValue::Undefined,
+        })
+        .retained_values(),
+        2
+    );
+    assert_eq!(
+        continuation(OperatorPrimitiveTarget::NumberIntrinsic { new_target: None })
+            .retained_values(),
+        1
+    );
+    assert_eq!(
+        continuation(OperatorPrimitiveTarget::NumberIntrinsic {
+            new_target: Some(constructor),
         })
         .retained_values(),
         2
@@ -2463,7 +2647,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         "make",
     );
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(32)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(43)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
         .context(&realm)
@@ -2484,8 +2668,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 32,
-            observed: 33,
+            limit: 43,
+            observed: 44,
         }
     ));
     let failed = runtime.usage();
@@ -2813,6 +2997,19 @@ fn runtime_with_function_constructor() -> (Runtime, RealmId, FunctionId, NativeF
 fn runtime_with_boolean_constructor_prototype_getter(
     getter_source: &str,
 ) -> (Runtime, RealmId, FunctionId, NativeFunction, FunctionId) {
+    runtime_with_primitive_constructor_prototype_getter(getter_source, PredefinedAtom::Boolean)
+}
+
+fn runtime_with_number_constructor_prototype_getter(
+    getter_source: &str,
+) -> (Runtime, RealmId, FunctionId, NativeFunction, FunctionId) {
+    runtime_with_primitive_constructor_prototype_getter(getter_source, PredefinedAtom::Number)
+}
+
+fn runtime_with_primitive_constructor_prototype_getter(
+    getter_source: &str,
+    constructor_atom: PredefinedAtom,
+) -> (Runtime, RealmId, FunctionId, NativeFunction, FunctionId) {
     let getter_authority = compile_test_function(getter_source, "getter");
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -2823,13 +3020,13 @@ fn runtime_with_boolean_constructor_prototype_getter(
         .expect("getter");
     let realm = runtime.context(&realm).expect("context").realm;
     let global = runtime.realm_global_object(realm).expect("global object");
-    let boolean_key = runtime.predefined_property_key(PredefinedAtom::Boolean);
+    let constructor_key = runtime.predefined_property_key(constructor_atom);
     let function_key = runtime.predefined_property_key(PredefinedAtom::Function);
-    let StoredValue::Function(boolean_constructor) =
-        read_heap_property(&runtime, HeapReference::Object(global), &boolean_key)
-            .expect("Boolean constructor")
+    let StoredValue::Function(constructor) =
+        read_heap_property(&runtime, HeapReference::Object(global), &constructor_key)
+            .expect("primitive constructor")
     else {
-        panic!("global Boolean is not callable");
+        panic!("global primitive constructor is not callable");
     };
     let StoredValue::Function(new_target) =
         read_heap_property(&runtime, HeapReference::Object(global), &function_key)
@@ -2839,10 +3036,10 @@ fn runtime_with_boolean_constructor_prototype_getter(
     };
     let native = runtime
         .functions
-        .get(boolean_constructor)
+        .get(constructor)
         .and_then(HeapFunction::native)
         .copied()
-        .expect("native Boolean");
+        .expect("native primitive constructor");
     let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
     let replaced = runtime
         .functions
@@ -2856,7 +3053,7 @@ fn runtime_with_boolean_constructor_prototype_getter(
             None,
         );
     assert!(matches!(replaced, Some(OwnProperty::Data { .. })));
-    (runtime, realm, boolean_constructor, native, new_target)
+    (runtime, realm, constructor, native, new_target)
 }
 
 fn source_object(runtime: &mut Runtime, realm: RealmId) -> ObjectId {
@@ -2875,6 +3072,25 @@ fn immediate_boolean_wrapper(
 ) -> ObjectId {
     let Ok(NativeDispatch::Immediate(StoredValue::Object(wrapper))) =
         begin_boolean_constructor_wrapper(
+            runtime,
+            new_target,
+            value,
+            None,
+            Some(native_function_host_origin()),
+        )
+    else {
+        panic!("data-valued newTarget.prototype must construct immediately");
+    };
+    wrapper
+}
+
+fn immediate_number_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    value: JsNumber,
+) -> ObjectId {
+    let Ok(NativeDispatch::Immediate(StoredValue::Object(wrapper))) =
+        begin_number_constructor_wrapper(
             runtime,
             new_target,
             value,

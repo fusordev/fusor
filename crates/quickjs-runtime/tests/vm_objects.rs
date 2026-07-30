@@ -1020,7 +1020,7 @@ fn thrown_object_remains_rooted_until_the_last_exception_value_clone_drops() {
 #[test]
 fn aggregate_object_limit_failure_is_atomic_and_runtime_is_reusable() {
     let authority = compile("function make(){return {};}", "make");
-    let mut runtime = runtime(RuntimeLimits::default().with_max_heap_objects(4));
+    let mut runtime = runtime(RuntimeLimits::default().with_max_heap_objects(5));
     let realm = runtime.create_realm().expect("realm");
     let (_make, baseline) = with_context(&mut runtime, &realm, |context| {
         let make = context.instantiate(authority).expect("make");
@@ -1036,8 +1036,8 @@ fn aggregate_object_limit_failure_is_atomic_and_runtime_is_reusable() {
             context.call(&make, &[], ExecutionLimits::default()),
             Err(ExecutionError::LimitExceeded {
                 resource: RuntimeResource::HeapObjects,
-                limit: 4,
-                observed: 5,
+                limit: 5,
+                observed: 6,
             })
         ));
         assert_eq!(
@@ -1067,7 +1067,7 @@ fn aggregate_object_limit_failure_is_atomic_and_runtime_is_reusable() {
 #[test]
 fn aggregate_property_limit_failure_is_atomic_and_runtime_is_reusable() {
     let authority = compile("function make(){return {value:1};}", "make");
-    let mut runtime = runtime(RuntimeLimits::default().with_max_object_properties(31));
+    let mut runtime = runtime(RuntimeLimits::default().with_max_object_properties(42));
     let realm = runtime.create_realm().expect("realm");
     let (make, first, baseline, before_failure) = with_context(&mut runtime, &realm, |context| {
         let make = context.instantiate(authority).expect("make");
@@ -1083,8 +1083,8 @@ fn aggregate_property_limit_failure_is_atomic_and_runtime_is_reusable() {
             context.call(&make, &[], ExecutionLimits::default()),
             Err(ExecutionError::LimitExceeded {
                 resource: RuntimeResource::ObjectProperties,
-                limit: 31,
-                observed: 32,
+                limit: 42,
+                observed: 43,
             })
         ));
         assert_eq!(

@@ -30,29 +30,33 @@ left-to-right resumable `ToPrimitive`, exact UTF-16 `StringToNumber`,
 results.
 Functions and ordinary objects use typed `Arc`-backed public roots, and the
 iterative collector traces their data properties, accessor functions,
-prototypes, closures, and binding cells. Boolean is the first implemented
-primitive-wrapper family: each realm owns the exact global constructor,
-false-branded `Boolean.prototype`, and `toString`/`valueOf` methods. Primitive
-Boolean property access walks that realm prototype without allocating,
-construction creates a branded wrapper, strict receivers remain primitive,
-and sloppy receivers are boxed once at frame creation. `Object.prototype`
-tagging and boxing recognize the same internal brand. Boolean construction
-runs a resumable `newTarget.prototype` Get with `newTarget` as the receiver and
-allocates only after it completes. `Object.prototype.toString` boxes Boolean
-primitives before its resumable `Symbol.toStringTag` Get, uses only primitive
-String overrides, otherwise preserves the built-in tag, and reclaims an
-unescaped temporary wrapper before execution continues without invalidating
-heap-, closure-, or exception-escaped identities. Number, String, and Symbol
-wrappers remain deferred and fail closed. Nested calls, recursion, getter/setter
-dispatch, and abrupt unwinding use an explicit frame vector with cumulative
-frame/value ceilings and shared fuel. Installation scans every instruction in
-every template before mutation. BigInt values and mixed numeric
+prototypes, closures, and binding cells. Boolean and the core Number vertical
+are implemented primitive-wrapper families: each realm owns exact global
+constructors, branded prototypes, and `toString`/`valueOf` methods. Primitive
+property access walks the owning realm prototype without allocating,
+construction creates a branded wrapper, strict receivers remain primitive, and
+sloppy receivers are boxed once at frame creation. `Object.prototype` tagging
+and boxing recognize the same internal brands. Construction runs a resumable
+`newTarget.prototype` Get with `newTarget` as the receiver and allocates only
+after conversion and the Get complete. `Object.prototype.toString` boxes
+Boolean and Number primitives before its resumable `Symbol.toStringTag` Get,
+uses only primitive String overrides, otherwise preserves the built-in tag,
+and reclaims an unescaped temporary wrapper before execution continues without
+invalidating heap-, closure-, or exception-escaped identities.
+Number call/construct conversion, signed zero, NaN, default decimal
+stringification, and exact Number receiver checks are covered; radix argument
+coercion and non-decimal formatting remain fail-closed. String and Symbol
+wrappers remain deferred and fail closed. Nested calls, recursion,
+getter/setter dispatch, and abrupt unwinding use an explicit frame vector with
+cumulative frame/value ceilings and shared fuel. Installation scans every
+instruction in every template before mutation. BigInt values and mixed numeric
 domains, arrays and other exotic objects, shorthand/spread and `__proto__`
 data-initializer semantics, anonymous data-function inferred names,
 async/generator methods, `super`/home-object semantics, realm-global accessor
-writes, optional/spread/apply calls, Number/String/Symbol wrapper coercions,
-serialized bytecode, every form of eval, and catch/finally typed-stack
-semantics remain deferred and fail closed.
+writes, optional/spread/apply calls, Number radix argument coercion and
+non-decimal formatting, the remaining Number built-ins, String/Symbol wrapper
+coercions, serialized bytecode, every form of eval, and catch/finally
+typed-stack semantics remain deferred and fail closed.
 Ordinary `new` calls now execute constructor-capable bytecode functions and
 materialize their `name`, `length`, and
 `prototype.constructor` graph. The `quickjs` facade supplies one immutable
@@ -85,9 +89,10 @@ data or accessor-backed lookup preserves the original receiver, native or
 verified-bytecode getters and methods resume on the same iterative frame
 vector, and throws stop conversion before parsing. `call` preserves the target
 realm's strict/sloppy receiver rules and forwards the Oxc compiler service when
-its target is the ordinary `Function` constructor. Sloppy Boolean boxing is
-implemented; Number/String/Symbol boxing, persistent global lexical collisions,
-and `Function.prototype.apply`/`bind`/`Symbol.hasInstance` remain fail-closed.
+its target is the ordinary `Function` constructor. Sloppy Boolean and Number
+boxing is implemented; String/Symbol boxing, Number radix argument coercion
+and non-decimal formatting, persistent global lexical collisions, and
+`Function.prototype.apply`/`bind`/`Symbol.hasInstance` remain fail-closed.
 Per-session compilation-count and generated-source limits bound nested
 construction. No dynamic-Function path uses eval or captures a caller lexical
 frame.

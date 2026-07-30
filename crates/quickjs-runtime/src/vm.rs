@@ -194,6 +194,10 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         value: bool,
     },
+    NumberConstructor {
+        new_target: FunctionId,
+        value: JsNumber,
+    },
     ObjectPrototypeToString {
         default_tag: ObjectPrototypeTag,
         temporary_receiver: Option<ObjectId>,
@@ -203,7 +207,7 @@ enum IntrinsicGetContinuation {
 impl IntrinsicGetContinuation {
     const fn retained_values(&self) -> u64 {
         match self {
-            Self::BooleanConstructor { .. } => 1,
+            Self::BooleanConstructor { .. } | Self::NumberConstructor { .. } => 1,
             Self::ObjectPrototypeToString {
                 temporary_receiver, ..
             } => {
@@ -221,6 +225,7 @@ impl IntrinsicGetContinuation {
 enum ObjectPrototypeTag {
     Boolean,
     Function,
+    Number,
     Object,
 }
 
@@ -229,6 +234,7 @@ impl ObjectPrototypeTag {
         match self {
             Self::Boolean => "Boolean",
             Self::Function => "Function",
+            Self::Number => "Number",
             Self::Object => "Object",
         }
     }
@@ -364,13 +370,21 @@ enum OperatorPrimitiveTarget {
         opcode: FinalOpcode,
         other: StoredValue,
     },
+    NumberIntrinsic {
+        new_target: Option<FunctionId>,
+    },
 }
 
 impl OperatorPrimitiveTarget {
     const fn retained_values(&self) -> u64 {
         match self {
-            Self::Unary { .. } => 0,
-            Self::BinaryRight { .. } | Self::BinaryFinish { .. } | Self::EqualityFinish { .. } => 1,
+            Self::Unary { .. } | Self::NumberIntrinsic { new_target: None } => 0,
+            Self::BinaryRight { .. }
+            | Self::BinaryFinish { .. }
+            | Self::EqualityFinish { .. }
+            | Self::NumberIntrinsic {
+                new_target: Some(_),
+            } => 1,
         }
     }
 }
@@ -415,12 +429,14 @@ impl CallArguments {
         Self { values, next: 0 }
     }
 
-    fn take_first_or_undefined(&mut self) -> StoredValue {
-        let Some(value) = self.values.get_mut(self.next) else {
-            return StoredValue::Undefined;
-        };
+    fn take_first(&mut self) -> Option<StoredValue> {
+        let value = self.values.get_mut(self.next)?;
         self.next = self.next.saturating_add(1);
-        std::mem::replace(value, StoredValue::Undefined)
+        Some(std::mem::replace(value, StoredValue::Undefined))
+    }
+
+    fn take_first_or_undefined(&mut self) -> StoredValue {
+        self.take_first().unwrap_or(StoredValue::Undefined)
     }
 
     fn into_remaining_iter(self) -> impl Iterator<Item = StoredValue> {
@@ -492,6 +508,11 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::EqualityFinish { other, .. } => {
             trace_stored_value_root(other, mark);
         }
+        OperatorPrimitiveTarget::NumberIntrinsic { new_target } => {
+            if let Some(new_target) = new_target {
+                mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
+            }
+        }
     }
 }
 
@@ -517,7 +538,8 @@ fn trace_native_continuation_roots(
             trace_operator_primitive_target_roots(&state.target, mark);
         }
         NativeContinuation::IntrinsicGet(state) => match state {
-            IntrinsicGetContinuation::BooleanConstructor { new_target, .. } => {
+            IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
+            | IntrinsicGetContinuation::NumberConstructor { new_target, .. } => {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }
             IntrinsicGetContinuation::ObjectPrototypeToString {
@@ -705,12 +727,13 @@ fn normalize_receiver(
         StoredValue::Boolean(value) => runtime
             .allocate_boxed_boolean(realm, value)
             .map(StoredValue::Object),
-        StoredValue::Number(_) | StoredValue::String(_) | StoredValue::Symbol(_) => {
-            Err(EngineFault::RuntimeInvariant {
-                message: "primitive sloppy receiver reached the pre-wrapper object profile",
-            }
-            .into())
+        StoredValue::Number(value) => runtime
+            .allocate_boxed_number(realm, value)
+            .map(StoredValue::Object),
+        StoredValue::String(_) | StoredValue::Symbol(_) => Err(EngineFault::RuntimeInvariant {
+            message: "primitive sloppy receiver reached the pre-wrapper object profile",
         }
+        .into()),
     }
 }
 
@@ -2011,6 +2034,10 @@ fn dispatch_native_call(
                 let object = runtime.allocate_boxed_boolean(native.realm, value)?;
                 Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
             }
+            StoredValue::Number(value) => {
+                let object = runtime.allocate_boxed_number(native.realm, value)?;
+                Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+            }
             StoredValue::Undefined | StoredValue::Null => {
                 let Some(origin) = origin else {
                     return Err(NativeFailure::Execution(
@@ -2028,14 +2055,12 @@ fn dispatch_native_call(
                     origin,
                 }))
             }
-            StoredValue::Number(_) | StoredValue::String(_) | StoredValue::Symbol(_) => {
-                Err(NativeFailure::Execution(
-                    EngineFault::RuntimeInvariant {
-                        message: "Object.prototype.valueOf primitive boxing is not implemented",
-                    }
-                    .into(),
-                ))
-            }
+            StoredValue::String(_) | StoredValue::Symbol(_) => Err(NativeFailure::Execution(
+                EngineFault::RuntimeInvariant {
+                    message: "Object.prototype.valueOf primitive boxing is not implemented",
+                }
+                .into(),
+            )),
         },
         NativeFunctionKind::BooleanConstructor => {
             let mut arguments = inputs.arguments;
@@ -2054,6 +2079,51 @@ fn dispatch_native_call(
         NativeFunctionKind::BooleanPrototypeValueOf => {
             let value = boolean_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(value)))
+        }
+        NativeFunctionKind::NumberConstructor => {
+            let mut arguments = inputs.arguments;
+            let Some(argument) = arguments.take_first() else {
+                let value = JsNumber::from_i32(0);
+                return inputs.new_target.map_or_else(
+                    || Ok(NativeDispatch::Immediate(StoredValue::Number(value))),
+                    |new_target| {
+                        begin_number_constructor_wrapper(
+                            runtime, new_target, value, return_to, origin,
+                        )
+                    },
+                );
+            };
+            begin_operator_primitive_conversion(
+                runtime,
+                argument,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::NumberIntrinsic {
+                    new_target: inputs.new_target,
+                },
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+            )
+        }
+        NativeFunctionKind::NumberPrototypeToString => {
+            let value = number_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
+            let mut arguments = inputs.arguments;
+            match arguments.take_first() {
+                None | Some(StoredValue::Undefined) => {}
+                Some(StoredValue::Number(radix)) if radix.same_value(JsNumber::from_i32(10)) => {}
+                Some(_) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Number.prototype.toString radix coercion and non-decimal formatting are not implemented",
+                    }
+                    .into());
+                }
+            }
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                value.to_javascript_string()?,
+            )))
+        }
+        NativeFunctionKind::NumberPrototypeValueOf => {
+            let value = number_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
+            Ok(NativeDispatch::Immediate(StoredValue::Number(value)))
         }
         NativeFunctionKind::FunctionPrototypeToString => {
             let StoredValue::Function(function) = inputs.receiver else {
@@ -2108,6 +2178,34 @@ fn boolean_receiver_value(
     }))
 }
 
+fn number_receiver_value(
+    runtime: &Runtime,
+    receiver: &StoredValue,
+    origin: Option<&JsStackFrame>,
+) -> Result<JsNumber, NativeFailure> {
+    let value = match receiver {
+        StoredValue::Number(value) => Some(*value),
+        StoredValue::Object(object) => runtime.boxed_number(*object)?,
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::Function(_) => None,
+    };
+    if let Some(value) = value {
+        return Ok(value);
+    }
+    let origin = origin.cloned().unwrap_or_else(native_function_host_origin);
+    Err(NativeFailure::Abrupt(PendingException {
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8("not a number")?,
+        },
+        origin,
+    }))
+}
+
 fn begin_boolean_constructor_wrapper(
     runtime: &mut Runtime,
     new_target: FunctionId,
@@ -2122,6 +2220,25 @@ fn begin_boolean_constructor_wrapper(
         StoredValue::Function(new_target),
         &prototype_key,
         IntrinsicGetContinuation::BooleanConstructor { new_target, value },
+        return_to,
+        origin,
+    )
+}
+
+fn begin_number_constructor_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    value: JsNumber,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    begin_intrinsic_get(
+        runtime,
+        HeapReference::Function(new_target),
+        StoredValue::Function(new_target),
+        &prototype_key,
+        IntrinsicGetContinuation::NumberConstructor { new_target, value },
         return_to,
         origin,
     )
@@ -2215,6 +2332,10 @@ fn finish_intrinsic_get(
             new_target,
             value: boolean_value,
         } => finish_boolean_constructor_wrapper(runtime, new_target, boolean_value, &value),
+        IntrinsicGetContinuation::NumberConstructor {
+            new_target,
+            value: number_value,
+        } => finish_number_constructor_wrapper(runtime, new_target, number_value, &value),
         IntrinsicGetContinuation::ObjectPrototypeToString {
             default_tag,
             temporary_receiver,
@@ -2277,6 +2398,31 @@ fn finish_boolean_constructor_wrapper(
     };
     let object = runtime
         .allocate_boxed_boolean_with_prototype(prototype, boolean_value)
+        .map_err(NativeFailure::Execution)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn finish_number_constructor_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    number_value: JsNumber,
+    requested: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = match requested {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            let realm = runtime.function_realm(new_target)?;
+            HeapReference::Object(runtime.realm_number_prototype(realm)?)
+        }
+    };
+    let object = runtime
+        .allocate_boxed_number_with_prototype(prototype, number_value)
         .map_err(NativeFailure::Execution)?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
 }
@@ -3110,6 +3256,21 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::EqualityFinish { opcode, other } => {
             begin_abstract_equality(runtime, value, other, opcode, return_to, origin.clone())
         }
+        OperatorPrimitiveTarget::NumberIntrinsic { new_target } => {
+            let value = operator_to_number(value, origin)?;
+            new_target.map_or_else(
+                || Ok(NativeDispatch::Immediate(StoredValue::Number(value))),
+                |new_target| {
+                    begin_number_constructor_wrapper(
+                        runtime,
+                        new_target,
+                        value,
+                        return_to,
+                        Some(origin.clone()),
+                    )
+                },
+            )
+        }
     }
 }
 
@@ -3819,6 +3980,11 @@ fn begin_object_prototype_to_string(
                 runtime, realm, *value, return_to, origin,
             );
         }
+        StoredValue::Number(value) => {
+            return begin_boxed_number_object_prototype_to_string(
+                runtime, realm, *value, return_to, origin,
+            );
+        }
         StoredValue::Function(function) => (
             HeapReference::Function(*function),
             ObjectPrototypeTag::Function,
@@ -3827,11 +3993,13 @@ fn begin_object_prototype_to_string(
             HeapReference::Object(*object),
             if runtime.boxed_boolean(*object)?.is_some() {
                 ObjectPrototypeTag::Boolean
+            } else if runtime.boxed_number(*object)?.is_some() {
+                ObjectPrototypeTag::Number
             } else {
                 ObjectPrototypeTag::Object
             },
         ),
-        StoredValue::Number(_) | StoredValue::String(_) | StoredValue::Symbol(_) => {
+        StoredValue::String(_) | StoredValue::Symbol(_) => {
             return Err(NativeFailure::Execution(
                 EngineFault::RuntimeInvariant {
                     message: "Object.prototype.toString primitive boxing is not implemented",
@@ -3879,13 +4047,13 @@ fn begin_boxed_boolean_object_prototype_to_string(
     ) {
         Ok(outcome) => outcome,
         Err(error) => {
-            remove_unobservable_temporary_boolean(runtime, temporary, collection_pending);
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
             return Err(error.into());
         }
     };
     match outcome {
         PropertyReadOutcome::Value(tag) => {
-            remove_unobservable_temporary_boolean(runtime, temporary, collection_pending);
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
             finish_object_prototype_to_string(ObjectPrototypeTag::Boolean, tag)
         }
         PropertyReadOutcome::Getter { function, receiver } => {
@@ -3899,7 +4067,7 @@ fn begin_boxed_boolean_object_prototype_to_string(
             ))
         }
         PropertyReadOutcome::Failed(_) => {
-            remove_unobservable_temporary_boolean(runtime, temporary, collection_pending);
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
             Err(EngineFault::RuntimeInvariant {
                 message: "Boolean boxing intrinsic Get produced a primitive property failure",
             }
@@ -3908,7 +4076,60 @@ fn begin_boxed_boolean_object_prototype_to_string(
     }
 }
 
-fn remove_unobservable_temporary_boolean(
+fn begin_boxed_number_object_prototype_to_string(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    value: JsNumber,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let continuations = reserve_intrinsic_get_continuation()?;
+    let to_string_tag = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag);
+    let collection_pending = runtime.collection_pending;
+    let temporary = runtime.allocate_boxed_number(realm, value)?;
+    let receiver = StoredValue::Object(temporary);
+    let continuation = IntrinsicGetContinuation::ObjectPrototypeToString {
+        default_tag: ObjectPrototypeTag::Number,
+        temporary_receiver: Some(temporary),
+    };
+    let outcome = match read_heap_property_for_receiver(
+        runtime,
+        HeapReference::Object(temporary),
+        receiver,
+        &to_string_tag,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
+            return Err(error.into());
+        }
+    };
+    match outcome {
+        PropertyReadOutcome::Value(tag) => {
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
+            finish_object_prototype_to_string(ObjectPrototypeTag::Number, tag)
+        }
+        PropertyReadOutcome::Getter { function, receiver } => {
+            Ok(intrinsic_getter_call_with_reserved_continuation(
+                function,
+                receiver,
+                continuation,
+                return_to,
+                origin,
+                continuations,
+            ))
+        }
+        PropertyReadOutcome::Failed(_) => {
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
+            Err(EngineFault::RuntimeInvariant {
+                message: "Number boxing intrinsic Get produced a primitive property failure",
+            }
+            .into())
+        }
+    }
+}
+
+fn remove_unobservable_temporary_wrapper(
     runtime: &mut Runtime,
     temporary: ObjectId,
     collection_pending: bool,
@@ -3918,7 +4139,7 @@ fn remove_unobservable_temporary_boolean(
         removed
             .as_ref()
             .is_some_and(|object| object.record.property_count() == 0),
-        "unobservable Boolean wrapper must remain property-free"
+        "unobservable primitive wrapper must remain property-free"
     );
     runtime.collection_pending = collection_pending;
 }
@@ -5895,7 +6116,12 @@ fn read_static_property(
             base.duplicate(),
             key,
         )?,
-        StoredValue::Number(_) => PropertyReadOutcome::Value(StoredValue::Undefined),
+        StoredValue::Number(_) => read_heap_property_for_receiver(
+            runtime,
+            HeapReference::Object(runtime.realm_number_prototype(realm)?),
+            base.duplicate(),
+            key,
+        )?,
         StoredValue::Symbol(atom) => {
             if property_key_has_string_name(key, "description") {
                 atom.description().map_or_else(
@@ -6096,7 +6322,18 @@ fn write_static_property(
                 strict,
             );
         }
-        StoredValue::Number(_) | StoredValue::String(_) | StoredValue::Symbol(_) => {
+        StoredValue::Number(_) => {
+            let prototype = runtime.realm_number_prototype(realm)?;
+            return write_primitive_property(
+                runtime,
+                HeapReference::Object(prototype),
+                base,
+                &key,
+                value,
+                strict,
+            );
+        }
+        StoredValue::String(_) | StoredValue::Symbol(_) => {
             return Ok(if strict {
                 PropertyWriteOutcome::Failed(PropertyFailure::NotObject)
             } else {

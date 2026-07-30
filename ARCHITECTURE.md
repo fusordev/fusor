@@ -357,9 +357,9 @@ the call; absent strict reads and writes throw exact `ReferenceError`s,
 `typeof` uses the non-throwing form, and sloppy assignment creates a global
 object property. Sloppy ordinary-function `this` is normalized once while its
 frame is created: objects are preserved, nullish receivers use the installed
-callee realm's global object, and Boolean values allocate a branded wrapper
-whose prototype comes from that realm. Strict functions retain the raw
-receiver. Number/String/Symbol boxing remains fail closed.
+callee realm's global object, and Boolean or Number values allocate a branded
+wrapper whose prototype comes from that realm. Strict functions retain the raw
+receiver. String/Symbol boxing remains fail closed.
 
 Program `var` and function declarations use typed constructor-realm
 global-object slots. Installation preflights the complete declaration set
@@ -397,8 +397,9 @@ across native or verified-bytecode accessor and method calls, counts suspended
 state against frame/value ceilings, and resumes without Rust recursion.
 Accessor lookup stops at the first descriptor, invokes inherited getters with
 the original source object, and treats a missing getter as `undefined`.
-Boolean boxing is implemented by the typed wrapper graph described below;
-Number/String/Symbol boxing, persistent global lexical collision checks, and
+Boolean and Number boxing are implemented by the typed wrapper graph described
+below; String/Symbol boxing, Number radix argument coercion and non-decimal
+formatting, persistent global lexical collision checks, and
 `Function.prototype.apply`/`bind`/`Symbol.hasInstance` stay fail closed.
 The path never emits `eval`/`apply_eval` and rejects direct eval anywhere in
 generated code. Direct and indirect eval remain wholly unimplemented.
@@ -502,10 +503,10 @@ lookup before arguments, and passes its base as the raw receiver; a sequence
 expression deliberately yields an unbound value. Sloppy ordinary-function
 frames normalize their receiver once against the installed callee realm before
 execution: nullish values become its global object, objects keep identity, and
-Boolean values become one branded wrapper reused by every `PushThis`. Strict
-functions keep the raw receiver. Number/String/Symbol sloppy receivers remain
-fail closed. Calls fill missing formals with `undefined` and share aggregate
-frame limits and instruction fuel.
+Boolean and Number values become one branded wrapper reused by every
+`PushThis`. Strict functions keep the raw receiver. String/Symbol sloppy
+receivers remain fail closed. Calls fill missing formals with `undefined` and
+share aggregate frame limits and instruction fuel.
 An escaping throw carries its exact JavaScript value through the same frame
 vector, allocates caller provenance before publishing any heap root, and
 preserves caller order from immediate to outermost. Dynamic operators use a
@@ -521,8 +522,9 @@ exact `InternalError` instead of escaping as a host allocation error. BigInt
 values and mixed numeric domains,
 async/generator methods, `super`/home-object semantics, realm-global setter
 dispatch, prototype mutation, proxies and other exotics, derived/class and
-nonordinary constructor forms, optional/spread/apply/tail calls,
-Number/String/Symbol sloppy-`this` boxing and wrapper/prototype conversions,
+nonordinary constructor forms, optional/spread/apply/tail calls, Number radix
+argument coercion and non-decimal formatting, the remaining Number built-ins,
+String/Symbol sloppy-`this` boxing and wrapper/prototype conversions,
 serialized input, raw function slots, catch handlers, finally
 return addresses, iterator markers, and packed exceptional stack values remain
 fail closed. Ordinary
@@ -659,21 +661,22 @@ until zombie-state and resurrection rules are complete.
 - Object literals inherit their realm's internal `Object.prototype`, which
   owns exact `toString` and `valueOf` native data properties.
   `Function.prototype` likewise owns exact `toString` and `call`.
-  Each realm additionally owns the global Boolean constructor, a
-  false-branded `Boolean.prototype` inheriting `Object.prototype`, and exact
-  `toString`/`valueOf` methods. The constructor and all six intrinsic method
-  functions inherit `Function.prototype` and participate in the iterative heap
-  trace. Boolean wrappers store a typed internal payload rather than inferring
-  their brand from the prototype; the same object representation reserves
-  typed Number, String, and Symbol payload variants for later intrinsic
-  families. Boolean construction accepts data- or accessor-valued
-  `newTarget.prototype` and falls back to the new target realm's
-  `Boolean.prototype` for primitives. Accessor-backed `newTarget.prototype`
-  and `Object.prototype.toString` `Symbol.toStringTag` reads execute through
-  typed native `Get` continuations. The former retains and charges the new
-  target and allocates its wrapper only after the getter completes; the latter
-  precomputes its built-in tag, boxes primitive Booleans before the Get, and
-  retains the exact temporary receiver while its getter runs. Completion
+  Each realm additionally owns global Boolean and Number constructors,
+  false-branded `Boolean.prototype`, positive-zero-branded `Number.prototype`,
+  and exact core `toString`/`valueOf` methods. These intrinsic functions inherit
+  `Function.prototype` and participate in the iterative heap trace. Boolean and
+  Number wrappers store typed internal payloads rather than inferring their
+  brands from the prototype; the same object representation reserves typed
+  String and Symbol payload variants for later intrinsic families. Both
+  constructors accept data- or accessor-valued `newTarget.prototype` and fall
+  back to the matching prototype in the new target's realm for primitives.
+  Number conversion completes before that observable Get. Accessor-backed
+  `newTarget.prototype` and `Object.prototype.toString`
+  `Symbol.toStringTag` reads execute through typed native `Get` continuations.
+  Constructor continuations retain and charge the new target and allocate a
+  wrapper only after the getter completes; tag continuations precompute the
+  built-in tag, box primitive Booleans or Numbers before the Get, and retain
+  the exact temporary receiver while its getter runs. Completion
   traces realm, public, active-frame, captured-cell, and outer-continuation
   roots before reclaiming unreachable temporary graphs, so a genuinely escaped
   wrapper survives while repeated unescaped boxing remains within heap limits.

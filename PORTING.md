@@ -314,8 +314,8 @@ A milestone is complete only when all of its checked items pass in CI.
         and non-callable values throw exact `TypeError: not a function`.
         Escaping child exceptions retain immediate-to-outer caller PCs and
         source spans. Static-property methods now use the same frame vector and
-        preserve their raw receiver; Boolean receivers now use the typed
-        wrapper path below, while Number/String/Symbol sloppy-`this`
+        preserve their raw receiver; Boolean and Number receivers now use the
+        typed wrapper path below, while String/Symbol sloppy-`this`
         normalization, optional/spread/apply, tail calls, `arguments`, and
         direct eval remain fail closed.
   - [x] Execute ordinary `Function(...)` and `new Function(...)` without eval:
@@ -338,8 +338,8 @@ A milestone is complete only when all of its checked items pass in CI.
           constructor realm, iterative propagation through nested functions,
           exact missing-name and `typeof` behavior, cross-realm ownership,
           and constructor-realm sloppy dynamic-function `this` normalization
-          without caller capture. Boolean receivers use the realm wrapper
-          below; Number/String/Symbol receiver boxing remains fail closed.
+          without caller capture. Boolean and Number receivers use their realm
+          wrappers below; String/Symbol receiver boxing remains fail closed.
     - [x] Add escaped Program declaration instantiation: indirect-eval `var`
           and function declarations create configurable global-object
           bindings while preserving compatible existing properties, with
@@ -359,9 +359,9 @@ A milestone is complete only when all of its checked items pass in CI.
           `Object.prototype.valueOf`, and `Function.prototype.toString`
           natives with exact method/name/length descriptors, GC reachability,
           current object/function tags and identity, retained verified
-          bytecode source, and the pinned native-source form. Boolean boxing
-          and data-valued tagging land below; Number/String/Symbol boxing and
-          observable object-valued native names remain fail closed.
+          bytecode source, and the pinned native-source form. Boolean and
+          Number boxing and data-valued tagging land below; String/Symbol
+          boxing and observable object-valued native names remain fail closed.
     - [x] Complete source-argument `ToPrimitive`: check
           `Symbol.toPrimitive` with the string hint, fall back to callable
           `toString` then `valueOf`, stop property lookup at data or accessor
@@ -479,7 +479,18 @@ A milestone is complete only when all of its checked items pass in CI.
         Active-frame-aware reachability collection reclaims unescaped temporary
         wrappers within the same execution while preserving heap-, closure-,
         and exception-escaped receiver identities.
-  - [ ] Add Number/String/Symbol wrapper payload consumers and prototypes, the
+  - [x] Add the core Number intrinsic vertical: every realm installs the exact
+        global constructor, positive-zero-branded prototype, decimal
+        `toString`, and exact `valueOf` graph. Calls distinguish a missing
+        argument from explicit `undefined`; construction completes resumable
+        Number-hint conversion before an observable `newTarget.prototype` Get
+        and wrapper allocation. Primitive lookup/write, strict/sloppy receiver
+        behavior, callee-realm boxing, cross-realm brands,
+        `Object.prototype` boxing/tagging, signed zero, NaN, resource limits,
+        GC roots, and failure-atomic realm creation are covered.
+        Radix argument coercion, non-decimal formatting, the remaining Number
+        static and prototype surface, and BigInt-to-Number stay fail closed.
+  - [ ] Add String/Symbol wrapper payload consumers and prototypes, the
         remaining conversion hints and built-in entry points, BigInt numeric
         domains, and the remaining conversion/formatting surface.
 - [ ] Complete property descriptors, interned shapes, mutable prototypes, and
