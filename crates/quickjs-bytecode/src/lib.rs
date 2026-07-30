@@ -1,5 +1,5 @@
-//! Safe opcode metadata, checked instruction codec, and bounded disassembly
-//! for the pure-Rust `QuickJS` port.
+//! Safe opcode metadata, a checked instruction codec, bounded disassembly, and
+//! compiler-bytecode verification for the pure-Rust `QuickJS` port.
 //!
 //! The opcode order, encoded sizes, operand formats, and base stack effects are
 //! translated from `quickjs-opcode.h` in the official 2026-06-04 release.
@@ -10,8 +10,20 @@
 //! Upstream private in-memory bytecode is native-endian and its object writer
 //! has a separate versioned format, so binary compatibility is not claimed.
 //!
-//! This crate describes and renders bytecode. It does not execute or otherwise
-//! trust it.
+//! Staged body and function-graph certificates remain non-executable. For the
+//! current ordinary Oxc compiler profile, final verification combines their
+//! code with exact binding, closure, function-initializer, child-name, and
+//! retained-source metadata as immutable, `Arc`-backed [`VerifiedBytecode`].
+//! The final pass uses bounded iterative CFG work lists to verify declaration
+//! initializer pairs and separate lexical value/captured-cell state; it needs
+//! no recursion guard.
+//!
+//! [`VerifiedBytecode`] is code-and-metadata authority, not a materialized
+//! runtime function or closure. A future VM must additionally supply a
+//! same-runtime realm and the exact closure environment. Serialized bytecode,
+//! the full exceptional typed-stack proof, direct eval, and incoming source-map
+//! chaining remain deferred and fail closed. Retained source structure is
+//! checked, but source authenticity remains a compiler-trusted invariant.
 
 #![forbid(unsafe_code)]
 
@@ -23,6 +35,7 @@ mod compiler_graph;
 mod compiler_string;
 mod disassembly;
 mod function;
+mod verified_bytecode;
 mod verifier;
 
 pub use assembler::{
@@ -52,6 +65,15 @@ pub use disassembly::{
 pub use function::{
     FunctionBitField, FunctionHeaderFlag, FunctionHeaderFlags, FunctionKind,
     FunctionKindRequirement, FunctionMode, UnverifiedFunctionHeader, VerifiedFunctionHeader,
+};
+pub use verified_bytecode::{
+    BindingPolicyViolationReason, BindingSlot, BytecodeGraphResource, BytecodeGraphUsage,
+    BytecodeGraphVerificationLimits, BytecodeVerificationError, BytecodeVerificationErrorKind,
+    ClosureVariableDefinition, CompilerBindingKind, CompilerBindingPolicy,
+    CompilerInitializationPolicy, CompilerSource, CompilerWritePolicy, ExecutionRequirement,
+    MetadataAtomField, PcSourceSpan, ScopeLink, SourceByteSpan, UnverifiedCompilerBytecodeGraph,
+    UnverifiedFunctionMetadata, VariableDefinition, VerifiedBytecode, VerifiedBytecodeFunction,
+    VerifiedCompilerSource, VerifiedFunctionMetadata, verify_compiler_bytecode_graph,
 };
 pub use verifier::{
     CompilerCaptureLayout, CompilerCapturedBinding, CompilerConstantKind, CompilerConstantLayout,

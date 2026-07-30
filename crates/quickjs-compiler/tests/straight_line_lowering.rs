@@ -122,7 +122,7 @@ fn multiple_lexicals_and_arithmetic_match_the_quickjs_final_opcode_oracle() {
     );
     assert_eq!(
         compiled.control_flow().domains(),
-        FunctionIndexDomains::new(0, 0, 2, 3, 0)
+        FunctionIndexDomains::new(6, 0, 2, 3, 0)
     );
     assert_eq!(compiled.control_flow().computed_stack_size(), 2);
     assert_eq!(
@@ -183,7 +183,7 @@ fn uninitialized_let_var_and_integer_return_match_the_quickjs_oracle() {
     );
     assert_eq!(
         compiled.control_flow().domains(),
-        FunctionIndexDomains::new(0, 0, 0, 2, 0)
+        FunctionIndexDomains::new(3, 0, 0, 2, 0)
     );
     assert_eq!(compiled.control_flow().computed_stack_size(), 1);
     assert_eq!(compiled.locals().len(), 2);
@@ -525,7 +525,7 @@ fn verifier_failures_keep_primary_and_related_source_spans() {
                 .find(|executable| executable.metadata().name() == Some("f"))
                 .expect("function executable");
             context
-                .compile_leaf(&executable, VerificationLimits::new(100, 10, 0, 0, 100, 1))
+                .compile_leaf(&executable, VerificationLimits::new(100, 10, 0, 3, 100, 1))
                 .expect_err("the second argument exceeds stack depth one")
         },
     )
@@ -561,7 +561,7 @@ fn verifier_source_mapping_uses_relocated_bytecode_pcs() {
                 .find(|executable| executable.metadata().name() == Some("f"))
                 .expect("function executable");
             context
-                .compile_leaf(&executable, VerificationLimits::new(100, 20, 0, 0, 100, 1))
+                .compile_leaf(&executable, VerificationLimits::new(100, 20, 0, 4, 100, 1))
                 .expect_err("the true branch exceeds stack depth one")
         },
     )
@@ -599,7 +599,7 @@ fn root_verifier_failures_do_not_fabricate_an_instruction_span() {
             context
                 .compile_leaf(
                     &executable,
-                    VerificationLimits::new(100, 10, 0, 0, 100, MAX_OPERAND_STACK_DEPTH + 1),
+                    VerificationLimits::new(100, 10, 0, 2, 100, MAX_OPERAND_STACK_DEPTH + 1),
                 )
                 .expect_err("the stack limit exceeds the structural maximum")
         },

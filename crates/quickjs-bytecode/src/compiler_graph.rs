@@ -767,6 +767,16 @@ pub enum FunctionGraphVerificationErrorKind {
         /// Repeated atom-pool index.
         duplicate: u32,
     },
+    /// A compiler function's atom pool contains an empty string.
+    EmptyAtom {
+        /// Rejected atom-pool index.
+        index: u32,
+    },
+    /// A compiler function's atom pool contains a tagged-integer spelling.
+    TaggedIntegerAtom {
+        /// Rejected atom-pool index.
+        index: u32,
+    },
     /// Actual constant-pool entries do not match the body domain.
     ConstantCountMismatch {
         /// Body-declared constant count.
@@ -885,6 +895,13 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
             Self::DuplicateAtom { first, duplicate } => write!(
                 formatter,
                 "atom slots {first} and {duplicate} contain the same string"
+            ),
+            Self::EmptyAtom { index } => {
+                write!(formatter, "atom slot {index} contains the empty string")
+            }
+            Self::TaggedIntegerAtom { index } => write!(
+                formatter,
+                "atom slot {index} contains a tagged-integer spelling"
             ),
             Self::ConstantCountMismatch { declared, entries } => write!(
                 formatter,
@@ -1092,7 +1109,7 @@ fn validate_function_records(
             ));
         }
         if let Some(atoms) = &function.atoms {
-            validate_unique_atoms(id, atoms)?;
+            validate_atoms(id, atoms)?;
         }
         validate_unique_closure_sources(id, &function.closure_sources)?;
         for (constant_index, (constant, declared)) in function
@@ -1220,7 +1237,7 @@ fn validate_unique_closure_sources(
     Ok(())
 }
 
-fn validate_unique_atoms(
+fn validate_atoms(
     function: FunctionTemplateId,
     atoms: &[CompilerAtom],
 ) -> Result<(), FunctionGraphVerificationError> {
@@ -1236,6 +1253,18 @@ fn validate_unique_atoms(
     })?;
     for (duplicate, atom) in atoms.iter().enumerate() {
         let duplicate = usize_to_u32(duplicate);
+        if atom.string().is_empty() {
+            return Err(FunctionGraphVerificationError::at_function(
+                function,
+                FunctionGraphVerificationErrorKind::EmptyAtom { index: duplicate },
+            ));
+        }
+        if atom.string().is_tagged_integer_atom() {
+            return Err(FunctionGraphVerificationError::at_function(
+                function,
+                FunctionGraphVerificationErrorKind::TaggedIntegerAtom { index: duplicate },
+            ));
+        }
         if let Some(&first) = seen.get(atom) {
             return Err(FunctionGraphVerificationError::at_function(
                 function,

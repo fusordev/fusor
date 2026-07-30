@@ -163,6 +163,7 @@ pub struct UnverifiedFunctionHeader {
 
 impl UnverifiedFunctionHeader {
     const STRIPPED_ORDINARY_SOURCE_FLAGS: u16 = (1 << 0) | (1 << 1) | (1 << 6) | (1 << 9);
+    const ORDINARY_SOURCE_FLAGS: u16 = Self::STRIPPED_ORDINARY_SOURCE_FLAGS | (1 << 10);
 
     /// Creates an unverified function header.
     #[must_use]
@@ -213,6 +214,28 @@ impl UnverifiedFunctionHeader {
     ) -> Self {
         Self::new(
             Self::STRIPPED_ORDINARY_SOURCE_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates an ordinary source-function header with retained debug source.
+    #[must_use]
+    pub const fn ordinary_source_function(strict: bool, defined_argument_count: u32) -> Self {
+        Self::ordinary_source_function_with_variable_references(strict, defined_argument_count, 0)
+    }
+
+    /// Creates an ordinary compiler header with retained debug source and a
+    /// typed capture layout.
+    #[must_use]
+    pub const fn ordinary_source_function_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::ORDINARY_SOURCE_FLAGS,
             if strict { 1 } else { 0 },
             defined_argument_count,
             variable_reference_count,

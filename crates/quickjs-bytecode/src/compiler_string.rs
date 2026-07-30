@@ -175,6 +175,39 @@ impl CompilerString {
             CompilerStringStorage::Utf16(units) => CompilerStringCodeUnits::Utf16(units.iter()),
         }
     }
+
+    /// Returns whether `QuickJS` represents this exact canonical decimal
+    /// spelling as a tagged-integer atom.
+    #[must_use]
+    pub fn is_tagged_integer_atom(&self) -> bool {
+        let mut units = self.code_units();
+        let Some(first) = units.next() else {
+            return false;
+        };
+        if first == u16::from(b'0') {
+            return units.next().is_none();
+        }
+        if !(u16::from(b'1')..=u16::from(b'9')).contains(&first) {
+            return false;
+        }
+        let mut integer = u32::from(first - u16::from(b'0'));
+        for unit in units {
+            if !(u16::from(b'0')..=u16::from(b'9')).contains(&unit) {
+                return false;
+            }
+            let Some(next) = integer
+                .checked_mul(10)
+                .and_then(|value| value.checked_add(u32::from(unit - u16::from(b'0'))))
+            else {
+                return false;
+            };
+            if next > i32::MAX as u32 {
+                return false;
+            }
+            integer = next;
+        }
+        true
+    }
 }
 
 /// A zero-allocation iterator over an immutable compiler string's UTF-16 units.

@@ -8,6 +8,14 @@ target is the official **2026-06-04** release and its ES2025 language surface.
 > The port is in its bootstrap phase. It is not yet a JavaScript engine and is
 > not a drop-in replacement for QuickJS.
 
+The current ordinary-function compiler profile now freezes its staged
+function graph, exact binding/closure metadata, and retained source snapshots
+as immutable, `Arc`-backed `VerifiedBytecode`. That type is code-and-metadata
+authority only: the project does not yet materialize it into a runtime
+realm/function/closure or execute it. Serialized bytecode, full exceptional
+typed-stack verification, direct eval, and incoming source-map chaining remain
+deferred and fail closed.
+
 ## Contract
 
 - No C or C++ source, bindgen output, or C compiler in the engine build or

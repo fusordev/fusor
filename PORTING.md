@@ -237,11 +237,32 @@ A milestone is complete only when all of its checked items pass in CI.
         before detailed scans; function targets, cycles, reachability, depth,
         and normalized capture sources are verified with iterative work
         queues. The immutable `Arc<VerifiedCompilerFunctionGraph>` is retained
-        with `CompiledFunctionTree`, while selected roots needing an omitted
-        parent environment fail closed. This intermediate certificate is not
-        VM execution authority; runtime-visible vardef/name/policy metadata,
-        other value and atom namespaces, and the complete typed-stack boundary
-        remain pending.
+        as a staged certificate with `CompiledFunctionTree`, while selected
+        roots needing an omitted parent environment fail closed.
+  - [x] Final-verify complete metadata for the current ordinary Oxc compiler
+        profile into immutable, `Arc`-backed `VerifiedBytecode`. The final pass
+        checks exact function headers, vardef names/policies/scope links,
+        dense own variable references, imported closure descriptors, child
+        ownership/names, and parent-edge closure name/policy/source agreement.
+        Function declarations name their exact child constant; one isolated
+        `fclosure*; put_arg*` or `fclosure*; put_loc*` pair must initialize it,
+        with function-instantiation pairs in the entry prefix and block pairs
+        following explicit lexical activation. An iterative CFG analysis
+        separates binding value state from captured-cell open/closed state and
+        rejects TDZ, initialization, write-policy, inactive-capture, and cell
+        rotation violations. Six aggregate limits bound definitions, closure
+        descriptors, retained source, source mappings, frame-state cells, and
+        policy-transfer work. The authority retains sorted conservative
+        runtime requirement families and exact source snapshots after Oxc
+        teardown. It is code/metadata authority only: same-runtime realm and
+        exact closure-environment materialization, serialized bytecode, full
+        exceptional typed-stack verification, incoming source-map chaining,
+        and direct eval remain pending.
+  - [x] Normalize strict block-function initialization in two private phases:
+        activate the lexical/captured cell, then install the declaration
+        closure in a verifier-isolated linear group before user code. This
+        preserves successful JavaScript behavior while making cell lifetime
+        explicit. Annex B remains rejected rather than approximated.
 - [ ] Abrupt completion, exceptions, stack traces, iterators, and generators.
 - [ ] Deterministic debug/line tables.
 

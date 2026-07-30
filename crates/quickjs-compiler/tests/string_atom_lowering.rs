@@ -70,13 +70,20 @@ fn ordinary_and_no_substitution_strings_share_deduplicated_atoms() {
     let compiled = compile_leaf("function f(){ return (\"hello\", `hello`, \"\"); }", "f");
 
     assert!(compiled.constants().is_empty());
-    assert_eq!(compiled.atoms().len(), 1);
+    assert_eq!(compiled.atoms().len(), 2);
     assert_eq!(
         compiled.atoms()[0]
             .string()
             .code_units()
             .collect::<Vec<_>>(),
         "hello".encode_utf16().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        compiled.atoms()[1]
+            .string()
+            .code_units()
+            .collect::<Vec<_>>(),
+        ['f' as u16]
     );
     assert_eq!(
         instructions(&compiled),
@@ -118,7 +125,7 @@ fn canonical_decimal_string_boundary_matches_quickjs_pool_routing() {
             "2147483647".encode_utf16().collect::<Vec<_>>(),
         ]
     );
-    assert_eq!(compiled.atoms().len(), 2);
+    assert_eq!(compiled.atoms().len(), 3);
     assert_eq!(
         compiled
             .atoms()
@@ -128,6 +135,7 @@ fn canonical_decimal_string_boundary_matches_quickjs_pool_routing() {
         [
             "2147483648".encode_utf16().collect::<Vec<_>>(),
             "00".encode_utf16().collect::<Vec<_>>(),
+            vec!['f' as u16],
         ]
     );
     assert_eq!(
@@ -161,7 +169,7 @@ fn atoms_preserve_latin1_wide_astral_and_lone_surrogate_code_units() {
     );
 
     assert!(compiled.constants().is_empty());
-    assert_eq!(compiled.atoms().len(), 6);
+    assert_eq!(compiled.atoms().len(), 7);
     assert_eq!(
         compiled.atoms()[0].string().latin1_units(),
         Some(&[0xff][..])
@@ -185,6 +193,13 @@ fn atoms_preserve_latin1_wide_astral_and_lone_surrogate_code_units() {
     assert_eq!(
         compiled.atoms()[5].string().utf16_units(),
         Some(&[0xfffd][..])
+    );
+    assert_eq!(
+        compiled.atoms()[6]
+            .string()
+            .code_units()
+            .collect::<Vec<_>>(),
+        ['f' as u16]
     );
 
     let atom_pushes = instructions(&compiled)
@@ -233,10 +248,14 @@ fn string_number_and_function_constants_keep_one_source_order_domain() {
             .collect::<Vec<_>>(),
         ['1' as u16]
     );
-    assert_eq!(outer.atoms().len(), 1);
+    assert_eq!(outer.atoms().len(), 2);
     assert_eq!(
         outer.atoms()[0].string().code_units().collect::<Vec<_>>(),
         ['x' as u16]
+    );
+    assert_eq!(
+        outer.atoms()[1].string().code_units().collect::<Vec<_>>(),
+        "outer".encode_utf16().collect::<Vec<_>>()
     );
 }
 
@@ -254,9 +273,13 @@ fn parent_and_child_functions_own_independent_atom_index_domains() {
         .function(child_constant.executable())
         .expect("nested function");
 
-    assert_eq!(outer.atoms().len(), 1);
+    assert_eq!(outer.atoms().len(), 2);
     assert_eq!(child.atoms().len(), 1);
     assert_eq!(outer.atoms()[0], child.atoms()[0]);
+    assert_eq!(
+        outer.atoms()[1].string().code_units().collect::<Vec<_>>(),
+        "outer".encode_utf16().collect::<Vec<_>>()
+    );
     assert_eq!(tree.function_graph().root().atoms(), outer.atoms());
     assert_eq!(
         tree.function_graph()
@@ -295,7 +318,7 @@ fn string_constants_cross_the_compact_boundary_and_atoms_do_not_shift_it() {
     let tree = compile_tree(&source, "outer");
     let outer = tree.root();
     assert_eq!(outer.constants().len(), 257);
-    assert_eq!(outer.atoms().len(), 1);
+    assert_eq!(outer.atoms().len(), 2);
     assert!(
         outer.constants()[..256]
             .iter()
@@ -345,7 +368,7 @@ fn directives_do_not_leave_dead_string_payloads_in_compiler_artifacts() {
 
     assert!(compiled.control_flow().function_header().mode().is_strict());
     assert!(compiled.constants().is_empty());
-    assert_eq!(compiled.atoms().len(), 1);
+    assert_eq!(compiled.atoms().len(), 2);
     assert_eq!(
         compiled.atoms()[0]
             .string()
@@ -353,11 +376,18 @@ fn directives_do_not_leave_dead_string_payloads_in_compiler_artifacts() {
             .collect::<Vec<_>>(),
         "value".encode_utf16().collect::<Vec<_>>()
     );
+    assert_eq!(
+        compiled.atoms()[1]
+            .string()
+            .code_units()
+            .collect::<Vec<_>>(),
+        ['f' as u16]
+    );
 
     let escaped = compile_leaf("function g(){ \"use\\x20strict\"; return \"value\"; }", "g");
     assert!(!escaped.control_flow().function_header().mode().is_strict());
     assert!(escaped.constants().is_empty());
-    assert_eq!(escaped.atoms().len(), 1);
+    assert_eq!(escaped.atoms().len(), 2);
 }
 
 #[test]

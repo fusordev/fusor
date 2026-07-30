@@ -18,15 +18,21 @@ use oxc_syntax::operator::{
 };
 use quickjs_bytecode::{
     AssemblerError, AssemblerLabel, AssemblerLimits, AtomPoolIndex, Binary64Constant, BranchKind,
-    BytecodeAssembler, BytecodePc, CompilerAtom, CompilerCaptureLayout, CompilerCapturedBinding,
-    CompilerClosureSource as CompilerGraphClosureSource, CompilerConstant as CompilerGraphConstant,
-    CompilerConstantKind, CompilerConstantLayout, CompilerConstantValue, CompilerString,
-    CompilerStringError, EncodeError, FinalOpcode, FunctionGraphVerificationError,
-    FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId,
-    MAX_FUNCTION_INDEX_ENTRIES, Operands, UnverifiedCompilerFunction,
+    BytecodeAssembler, BytecodeGraphVerificationLimits, BytecodePc, BytecodeVerificationError,
+    ClosureVariableDefinition as VerifiedClosureVariableDefinition, CompilerAtom,
+    CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
+    CompilerCapturedBinding, CompilerClosureSource as CompilerGraphClosureSource,
+    CompilerConstant as CompilerGraphConstant, CompilerConstantKind, CompilerConstantLayout,
+    CompilerConstantValue, CompilerInitializationPolicy as VerifiedInitializationPolicy,
+    CompilerSource, CompilerString, CompilerStringError,
+    CompilerWritePolicy as VerifiedWritePolicy, EncodeError, FinalOpcode,
+    FunctionGraphVerificationError, FunctionGraphVerificationLimits, FunctionIndexDomains,
+    FunctionTemplateId, MAX_FUNCTION_INDEX_ENTRIES, Operands, PcSourceSpan, ScopeLink,
+    SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction,
     UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader,
-    VerificationError, VerificationErrorKind, VerificationLimits, VerifiedCompilerFunctionGraph,
-    VerifiedControlFlow, verify_compiler_control_flow, verify_compiler_function_graph,
+    UnverifiedFunctionMetadata, VariableDefinition, VerificationError, VerificationErrorKind,
+    VerificationLimits, VerifiedBytecode, VerifiedCompilerFunctionGraph, VerifiedControlFlow,
+    verify_compiler_bytecode_graph, verify_compiler_control_flow, verify_compiler_function_graph,
 };
 use quickjs_frontend::{OxcStringDecodeError, ParsedUnit, Span, decode_oxc_cooked_string};
 
@@ -195,8 +201,9 @@ impl CompiledClosureVariable {
 
 /// Owned output from validated ordinary-function lowering.
 ///
-/// This artifact is deliberately not execution authority. Its control-flow
-/// certificate still requires the future whole-function verifier.
+/// This per-function staging artifact is deliberately not execution authority
+/// by itself. [`CompiledFunctionTree::verified_bytecode`] returns the final
+/// code-and-metadata authority for the complete selected subtree.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompiledFunction {
     executable: ExecutableId,
@@ -208,6 +215,7 @@ pub struct CompiledFunction {
     closure_variables: Arc<[CompiledClosureVariable]>,
     source_instructions: Arc<[SourceInstruction]>,
     control_flow: Arc<VerifiedControlFlow>,
+    metadata: UnverifiedFunctionMetadata,
 }
 
 impl CompiledFunction {
@@ -282,6 +290,7 @@ pub struct CompiledFunctionTree {
     source_text: Arc<str>,
     functions: Arc<[CompiledFunction]>,
     function_graph: Arc<VerifiedCompilerFunctionGraph>,
+    verified_bytecode: Arc<VerifiedBytecode>,
 }
 
 impl CompiledFunctionTree {
@@ -311,6 +320,12 @@ impl CompiledFunctionTree {
     #[must_use]
     pub fn function_graph(&self) -> &VerifiedCompilerFunctionGraph {
         &self.function_graph
+    }
+
+    /// Returns immutable execution authority for this complete function tree.
+    #[must_use]
+    pub fn verified_bytecode(&self) -> &VerifiedBytecode {
+        &self.verified_bytecode
     }
 
     /// Resolves one graph-local template identity to its compiler artifact.
@@ -378,6 +393,7 @@ pub struct CompilationContext<'unit, 'arena, 'scope> {
     unit: &'unit ParsedUnit<'arena, 'scope>,
     planned: PlannedStorage,
     source_text: Arc<str>,
+    source_name: Arc<str>,
     identity: Arc<ContextIdentity>,
 }
 
@@ -389,12 +405,32 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     /// Returns the storage planner's typed failure for unsupported dynamic
     /// binding behavior or inconsistent retained semantics.
     pub fn new(unit: &'unit ParsedUnit<'arena, 'scope>) -> Result<Self, CompilerError> {
+        Self::new_with_source_name(unit, Arc::from("<input>"))
+    }
+
+    /// Builds compiler state with an explicit retained source display name.
+    ///
+    /// # Errors
+    ///
+    /// Returns the storage planner's typed failure or rejects an empty source
+    /// identity before any compiled artifact is produced.
+    pub fn new_with_source_name(
+        unit: &'unit ParsedUnit<'arena, 'scope>,
+        source_name: Arc<str>,
+    ) -> Result<Self, CompilerError> {
+        if source_name.is_empty() {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "nonempty compiler source display name",
+                span: None,
+            });
+        }
         let planned = build_planned_storage(unit)?;
         let source_text = Arc::from(unit.program().source_text);
         Ok(Self {
             unit,
             planned,
             source_text,
+            source_name,
             identity: Arc::new(ContextIdentity),
         })
     }
@@ -502,6 +538,29 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         limits: VerificationLimits,
         graph_limits: FunctionGraphVerificationLimits,
     ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        self.compile_tree_with_all_limits(
+            selection,
+            limits,
+            graph_limits,
+            BytecodeGraphVerificationLimits::default(),
+        )
+    }
+
+    /// Lowers and final-verifies an ordinary function subtree with every
+    /// body, staged-graph, metadata, source, and frame-analysis limit explicit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::compile_tree`], including a
+    /// structured final-verifier failure when complete metadata is invalid or
+    /// a final resource budget is exceeded.
+    pub fn compile_tree_with_all_limits(
+        &self,
+        selection: &CompilationExecutable,
+        limits: VerificationLimits,
+        graph_limits: FunctionGraphVerificationLimits,
+        bytecode_limits: BytecodeGraphVerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
         let root = self.resolve_selection(selection)?;
         let tree_layout = self.function_tree_layout()?;
         let subtree = tree_layout.subtree_preorder(root)?;
@@ -516,12 +575,39 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             &functions,
             graph_limits,
         )?);
+        let verified_bytecode = Arc::new(
+            verify_compiler_bytecode_graph(
+                UnverifiedCompilerBytecodeGraph::new(
+                    Arc::clone(&function_graph),
+                    functions
+                        .iter()
+                        .map(|function| function.metadata.clone())
+                        .collect::<Vec<_>>()
+                        .into(),
+                ),
+                bytecode_limits,
+            )
+            .map_err(|source| {
+                let span = source
+                    .function_id()
+                    .and_then(|template| usize::try_from(template.get()).ok())
+                    .and_then(|index| functions.get(index))
+                    .and_then(|function| {
+                        function
+                            .storage_plan
+                            .executable(function.executable)
+                            .map(Executable::span)
+                    });
+                LeafCompilationError::BytecodeGraphVerification { span, source }
+            })?,
+        );
         Ok(CompiledFunctionTree {
             root,
             storage_plan: Arc::clone(&self.planned.plan),
             source_text: Arc::clone(&self.source_text),
             functions,
             function_graph,
+            verified_bytecode,
         })
     }
 
@@ -542,6 +628,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             constants,
             atoms,
             closure_variables,
+            function_name,
+            variable_definitions,
+            closure_definitions,
+            function_span,
+            function_name_span,
             flow,
         } = validated;
         let atom_count =
@@ -563,12 +654,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             capture_layout.bindings().len(),
             "function variable references",
         )?;
-        let header =
-            UnverifiedFunctionHeader::stripped_ordinary_source_function_with_variable_references(
-                strict,
-                argument_count,
-                variable_reference_count,
-            );
+        let header = UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
+            strict,
+            argument_count,
+            variable_reference_count,
+        );
         let constant_layout = CompilerConstantLayout::new(
             constants
                 .iter()
@@ -584,6 +674,24 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             constant_layout,
             limits,
         )?;
+        let source_mappings = source_instructions
+            .iter()
+            .map(|instruction| {
+                PcSourceSpan::new(instruction.pc(), source_byte_span(instruction.span()))
+            })
+            .collect::<Vec<_>>();
+        let metadata = UnverifiedFunctionMetadata::new(
+            function_name,
+            variable_definitions.into(),
+            closure_definitions.into(),
+            CompilerSource::new(
+                Arc::clone(&self.source_name),
+                Arc::clone(&self.source_text),
+                function_span,
+                function_name_span,
+                source_mappings.into(),
+            ),
+        );
 
         Ok(CompiledFunction {
             executable,
@@ -595,6 +703,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             closure_variables: closure_variables.into(),
             source_instructions: source_instructions.into(),
             control_flow: Arc::new(control_flow),
+            metadata,
         })
     }
 
@@ -695,6 +804,19 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         let capture_layout =
             self.compiler_capture_layout(executable_id, function_scope, &layout, tree_layout)?;
         let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
+        let function_name = executable
+            .name()
+            .map(|_| constants.metadata_atom_index(CompiledMetadataAtomKey::FunctionName))
+            .transpose()?;
+        let variable_definitions = self.compiled_variable_definitions(
+            executable_id,
+            function_scope,
+            &layout,
+            tree_layout,
+            constants,
+        )?;
+        let closure_definitions =
+            self.compiled_closure_definitions(&closure_variables, constants)?;
 
         Ok(ValidatedFunction {
             strict: executable.is_strict(),
@@ -713,6 +835,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             constants: Arc::clone(&constants.entries),
             atoms: Arc::clone(&constants.atoms),
             closure_variables,
+            function_name,
+            variable_definitions,
+            closure_definitions,
+            function_span: source_byte_span(function.span),
+            function_name_span: executable.name_span().map(source_byte_span),
             flow,
         })
     }
@@ -728,6 +855,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         let mut atom_candidates = (0..executables.len())
             .map(|_| Vec::new())
             .collect::<Vec<_>>();
+        let mut metadata_atom_candidates = (0..executables.len())
+            .map(|_| Vec::new())
+            .collect::<Vec<_>>();
         for child in executables {
             let Some(parent) = child.parent() else {
                 continue;
@@ -741,10 +871,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             });
         }
         self.record_literal_candidates(&mut candidates, &mut atom_candidates)?;
+        self.record_metadata_atom_candidates(&mut metadata_atom_candidates)?;
 
         let mut pools = Vec::with_capacity(executables.len());
-        for (index, (mut candidates, mut atoms)) in
-            candidates.into_iter().zip(atom_candidates).enumerate()
+        for (index, ((mut candidates, mut atoms), mut metadata_atoms)) in candidates
+            .into_iter()
+            .zip(atom_candidates)
+            .zip(metadata_atom_candidates)
+            .enumerate()
         {
             let executable =
                 executables
@@ -755,13 +889,97 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     })?;
             candidates.sort_unstable_by_key(CompiledConstantCandidate::order_key);
             atoms.sort_unstable_by_key(CompiledAtomCandidate::order_key);
+            metadata_atoms.sort_unstable_by_key(CompiledMetadataAtomCandidate::order_key);
             pools.push(CompiledConstantPool::from_candidates(
                 tree_layout.children(executable.id())?,
                 candidates,
                 atoms,
+                metadata_atoms,
             )?);
         }
         Ok(pools.into_boxed_slice())
+    }
+
+    fn record_metadata_atom_candidates(
+        &self,
+        candidates: &mut [Vec<CompiledMetadataAtomCandidate>],
+    ) -> Result<(), LeafCompilationError> {
+        for executable in self.planned.plan.executables() {
+            let owner = candidates.get_mut(executable.id().index()).ok_or(
+                LeafCompilationError::InvalidExecutable {
+                    executable: executable.id(),
+                },
+            )?;
+            if let Some(name) = executable.name() {
+                let span =
+                    executable
+                        .name_span()
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "named executable retains its name span",
+                            span: Some(executable.span()),
+                        })?;
+                owner.push(CompiledMetadataAtomCandidate {
+                    key: CompiledMetadataAtomKey::FunctionName,
+                    value: compiler_identifier_string(name, span)?,
+                    span,
+                });
+            } else if executable.name_span().is_some() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "anonymous executable has no name span",
+                    span: Some(executable.span()),
+                });
+            }
+            for binding in self.planned.plan.bindings_for(executable.id()).ok_or(
+                LeafCompilationError::InvalidExecutable {
+                    executable: executable.id(),
+                },
+            )? {
+                if !matches!(
+                    binding.placement(),
+                    StoragePlacement::Argument { .. } | StoragePlacement::Local
+                ) {
+                    continue;
+                }
+                let span = binding.declaration_spans().first().copied().ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "frame binding retains a declaration span",
+                        span: Some(executable.span()),
+                    },
+                )?;
+                owner.push(CompiledMetadataAtomCandidate {
+                    key: CompiledMetadataAtomKey::Binding(binding.id()),
+                    value: compiler_identifier_string(binding.name(), span)?,
+                    span,
+                });
+            }
+            for capture in self
+                .planned
+                .plan
+                .frame_captures_for(executable.id())
+                .ok_or(LeafCompilationError::InvalidExecutable {
+                    executable: executable.id(),
+                })?
+            {
+                let binding = self.planned.plan.binding(capture.binding()).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "captured metadata binding exists",
+                        span: Some(executable.span()),
+                    },
+                )?;
+                let span = binding.declaration_spans().first().copied().ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "captured binding retains a declaration span",
+                        span: Some(executable.span()),
+                    },
+                )?;
+                owner.push(CompiledMetadataAtomCandidate {
+                    key: CompiledMetadataAtomKey::Binding(binding.id()),
+                    value: compiler_identifier_string(binding.name(), span)?,
+                    span,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn record_literal_candidates(
@@ -1409,6 +1627,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(scope)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn plan_scope_entry(
         &self,
         scope: ScopeId,
@@ -1446,6 +1665,20 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         if function_scope {
             for entry in entries
                 .iter()
+                .rev()
+                .copied()
+                .filter(|entry| matches!(entry, ScopeEntryInitialization::Uninitialized { .. }))
+            {
+                self.emit_scope_entry_initialization(
+                    executable,
+                    entry,
+                    planning.tree_layout,
+                    planning.constants,
+                    flow,
+                )?;
+            }
+            for entry in entries
+                .iter()
                 .copied()
                 .filter(|entry| matches!(entry, ScopeEntryInitialization::Function { .. }))
             {
@@ -1456,6 +1689,28 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     planning.constants,
                     flow,
                 )?;
+            }
+        } else {
+            for entry in entries
+                .iter()
+                .rev()
+                .copied()
+                .filter(|entry| matches!(entry, ScopeEntryInitialization::Function { .. }))
+            {
+                let ScopeEntryInitialization::Function { slot, span, .. } = entry else {
+                    unreachable!("filtered above");
+                };
+                let FrameSlot::Local(slot) = slot else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "block function declaration uses a local slot",
+                        span: Some(span),
+                    });
+                };
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::SetLocUninitialized,
+                    Operands::Loc(slot.index()),
+                    span,
+                ))?;
             }
             for entry in entries
                 .iter()
@@ -1471,8 +1726,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     flow,
                 )?;
             }
-        } else {
-            for entry in entries.into_iter().rev() {
+            for entry in entries
+                .into_iter()
+                .rev()
+                .filter(|entry| matches!(entry, ScopeEntryInitialization::Function { .. }))
+            {
                 self.emit_scope_entry_initialization(
                     executable,
                     entry,
@@ -2436,7 +2694,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     fn compiler_capture_layout(
         &self,
         executable: ExecutableId,
-        function_scope: ScopeId,
+        _function_scope: ScopeId,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
     ) -> Result<CompilerCaptureLayout, LeafCompilationError> {
@@ -2468,11 +2726,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             let captured_binding = match frame_slot {
                 FrameSlot::Argument(slot) => CompilerCapturedBinding::Argument(u32::from(slot.0)),
                 FrameSlot::Local(slot) => {
-                    let scope = self.scope_for_binding(binding.id())?;
-                    if scope == function_scope {
-                        CompilerCapturedBinding::FunctionLocal(u32::from(slot.index()))
-                    } else {
+                    if binding_has_scope(binding.policy()) {
                         CompilerCapturedBinding::ScopedLocal(u32::from(slot.index()))
+                    } else {
+                        CompilerCapturedBinding::FunctionLocal(u32::from(slot.index()))
                     }
                 }
                 FrameSlot::Capture(_) => {
@@ -2485,6 +2742,232 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             captured.push(captured_binding);
         }
         Ok(CompilerCaptureLayout::new(Arc::from(captured)))
+    }
+
+    fn compiled_variable_definitions(
+        &self,
+        executable: ExecutableId,
+        function_scope: ScopeId,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+    ) -> Result<Vec<VariableDefinition>, LeafCompilationError> {
+        let executable_metadata = self
+            .planned
+            .plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let argument_count =
+            usize::try_from(executable_metadata.parameter_count()).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "function argument definitions",
+                }
+            })?;
+        let mut arguments = vec![None; argument_count];
+        let bindings = self
+            .planned
+            .plan
+            .bindings_for(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        for binding in bindings {
+            let StoragePlacement::Argument { parameter_index } = binding.placement() else {
+                continue;
+            };
+            let index = usize::try_from(parameter_index).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "function argument definitions",
+                }
+            })?;
+            let target =
+                arguments
+                    .get_mut(index)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "argument binding indexes its parameter position",
+                        span: binding.declaration_spans().first().copied(),
+                    })?;
+            if target.is_some() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "one compiler binding per simple parameter position",
+                    span: binding.declaration_spans().first().copied(),
+                });
+            }
+            *target = Some(Self::compiled_variable_definition(
+                binding,
+                ScopeLink::End,
+                false,
+                tree_layout,
+                constants,
+            )?);
+        }
+        if arguments.iter().any(Option::is_none) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "every simple parameter has an argument definition",
+                span: Some(executable_metadata.span()),
+            });
+        }
+
+        let scope_links = self.compiled_local_scope_links(function_scope, layout)?;
+        let capacity = argument_count.checked_add(layout.locals.len()).ok_or(
+            LeafCompilationError::CapacityExceeded {
+                domain: "function variable definitions",
+            },
+        )?;
+        let mut definitions = Vec::with_capacity(capacity);
+        definitions.extend(arguments.into_iter().flatten());
+        for (local, scope_next) in layout.locals.iter().zip(scope_links) {
+            let binding = self.planned.plan.binding(local.binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "local definition binding exists",
+                    span: Some(executable_metadata.span()),
+                },
+            )?;
+            definitions.push(Self::compiled_variable_definition(
+                binding,
+                scope_next,
+                binding_has_scope(binding.policy()),
+                tree_layout,
+                constants,
+            )?);
+        }
+        Ok(definitions)
+    }
+
+    fn compiled_variable_definition(
+        binding: &crate::storage::BindingStorage,
+        scope_next: ScopeLink,
+        has_scope: bool,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+    ) -> Result<VariableDefinition, LeafCompilationError> {
+        let variable_reference = tree_layout.variable_reference(binding.id()).map(u32::from);
+        if binding.is_frame_captured() != variable_reference.is_some() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "captured binding has one dense variable-reference index",
+                span: binding.declaration_spans().first().copied(),
+            });
+        }
+        let mut definition = VariableDefinition::new(
+            Some(constants.metadata_atom_index(CompiledMetadataAtomKey::Binding(binding.id()))?),
+            scope_next,
+            verified_storage_policy(binding)?,
+            has_scope,
+            variable_reference,
+        );
+        if let Some(initializer) = tree_layout.function_declaration(binding.id()) {
+            definition =
+                definition.with_function_initializer(constants.function_index(initializer)?);
+        }
+        Ok(definition)
+    }
+
+    fn compiled_local_scope_links(
+        &self,
+        function_scope: ScopeId,
+        layout: &FrameLayout,
+    ) -> Result<Vec<ScopeLink>, LeafCompilationError> {
+        let scoping = self.unit.semantic().scoping();
+        let mut groups = Vec::with_capacity(layout.locals.len());
+        let mut preceding = Vec::with_capacity(layout.locals.len());
+        let mut first_by_scope = HashMap::new();
+        for (index, local) in layout.locals.iter().enumerate() {
+            let binding = self.planned.plan.binding(local.binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "scope-linked local binding exists",
+                    span: None,
+                },
+            )?;
+            let semantic_scope = self.scope_for_binding(binding.id())?;
+            let group = if !binding_has_scope(binding.policy()) {
+                LogicalCompilerScope::Function
+            } else if semantic_scope == function_scope {
+                LogicalCompilerScope::Body
+            } else {
+                LogicalCompilerScope::Oxc(semantic_scope)
+            };
+            let index =
+                u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "function local scope links",
+                })?;
+            preceding.push(first_by_scope.insert(group, index));
+            groups.push(group);
+        }
+
+        let mut links = Vec::with_capacity(layout.locals.len());
+        for (index, (&group, same_scope)) in groups.iter().zip(preceding).enumerate() {
+            if let Some(previous) = same_scope {
+                links.push(ScopeLink::Local(previous));
+                continue;
+            }
+            let parent = match group {
+                LogicalCompilerScope::Function | LogicalCompilerScope::Body => None,
+                LogicalCompilerScope::Oxc(scope) => {
+                    let mut parent = scoping.scope_parent_id(scope);
+                    let mut found = None;
+                    while let Some(candidate) = parent {
+                        if candidate == function_scope {
+                            found = first_by_scope.get(&LogicalCompilerScope::Body).copied();
+                            break;
+                        }
+                        if let Some(first) = first_by_scope
+                            .get(&LogicalCompilerScope::Oxc(candidate))
+                            .copied()
+                        {
+                            found = Some(first);
+                            break;
+                        }
+                        parent = scoping.scope_parent_id(candidate);
+                    }
+                    found
+                }
+            };
+            let current =
+                u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "function local scope links",
+                })?;
+            if parent == Some(current) {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "local scope link does not target itself",
+                    span: None,
+                });
+            }
+            links.push(parent.map_or(ScopeLink::End, ScopeLink::Local));
+        }
+        Ok(links)
+    }
+
+    fn compiled_closure_definitions(
+        &self,
+        closures: &[CompiledClosureVariable],
+        constants: &CompiledConstantPool,
+    ) -> Result<Vec<VerifiedClosureVariableDefinition>, LeafCompilationError> {
+        closures
+            .iter()
+            .map(|closure| {
+                let binding = self.planned.plan.binding(closure.binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "closure metadata binding exists",
+                        span: None,
+                    },
+                )?;
+                let source = match closure.source {
+                    CompiledClosureSource::ParentVariableReference(index) => {
+                        CompilerGraphClosureSource::ParentVariableReference(u32::from(index))
+                    }
+                    CompiledClosureSource::ParentClosure(index) => {
+                        CompilerGraphClosureSource::ParentClosure(u32::from(index))
+                    }
+                };
+                Ok(VerifiedClosureVariableDefinition::new(
+                    Some(
+                        constants.metadata_atom_index(CompiledMetadataAtomKey::Binding(
+                            closure.binding,
+                        ))?,
+                    ),
+                    verified_storage_policy(binding)?,
+                    source,
+                ))
+            })
+            .collect()
     }
 
     fn compiled_closure_variables(
@@ -3132,6 +3615,13 @@ enum FrameSlot {
     Capture(u16),
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum LogicalCompilerScope {
+    Function,
+    Body,
+    Oxc(ScopeId),
+}
+
 #[derive(Clone, Copy)]
 enum ScopeEntryInitialization {
     Uninitialized {
@@ -3590,6 +4080,11 @@ struct ValidatedFunction {
     atoms: Arc<[CompilerAtom]>,
     constants: Arc<[CompiledConstant]>,
     closure_variables: Vec<CompiledClosureVariable>,
+    function_name: Option<AtomPoolIndex>,
+    variable_definitions: Vec<VariableDefinition>,
+    closure_definitions: Vec<VerifiedClosureVariableDefinition>,
+    function_span: SourceByteSpan,
+    function_name_span: Option<SourceByteSpan>,
     flow: PlannedControlFlow,
 }
 
@@ -3607,6 +4102,7 @@ struct CompiledConstantPool {
     function_indices: Box<[(ExecutableId, u32)]>,
     number_indices: Box<[(Span, u32)]>,
     string_indices: Box<[(Span, CompiledStringLocation)]>,
+    metadata_atom_indices: Box<[(CompiledMetadataAtomKey, u32)]>,
 }
 
 enum CompiledConstantCandidate {
@@ -3642,6 +4138,24 @@ struct CompiledAtomCandidate {
 impl CompiledAtomCandidate {
     const fn order_key(&self) -> (u32, u32) {
         (self.span.start, self.span.end)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum CompiledMetadataAtomKey {
+    FunctionName,
+    Binding(BindingId),
+}
+
+struct CompiledMetadataAtomCandidate {
+    key: CompiledMetadataAtomKey,
+    value: CompilerString,
+    span: Span,
+}
+
+impl CompiledMetadataAtomCandidate {
+    const fn order_key(&self) -> (CompiledMetadataAtomKey, u32, u32) {
+        (self.key, self.span.start, self.span.end)
     }
 }
 
@@ -3688,7 +4202,7 @@ fn freeze_constant_candidates(
                 frozen.number_indices.push((span, index));
             }
             CompiledConstantCandidate::String { value, span } => {
-                if value.is_empty() || !is_tagged_integer_string(&value) {
+                if value.is_empty() || !value.is_tagged_integer_atom() {
                     return Err(LeafCompilationError::SemanticInvariant {
                         invariant: "string value constants are nonempty tagged-integer spellings",
                         span: Some(span),
@@ -3725,11 +4239,11 @@ fn freeze_constant_candidates(
 fn freeze_atom_candidates(
     candidates: Vec<CompiledAtomCandidate>,
     string_indices: &mut Vec<(Span, CompiledStringLocation)>,
-) -> Result<Vec<CompilerAtom>, LeafCompilationError> {
+) -> Result<(Vec<CompilerAtom>, HashMap<CompilerString, u32>), LeafCompilationError> {
     let mut atoms = Vec::with_capacity(candidates.len());
     let mut interner = HashMap::with_capacity(candidates.len());
     for candidate in candidates {
-        if candidate.value.is_empty() || is_tagged_integer_string(&candidate.value) {
+        if candidate.value.is_empty() || candidate.value.is_tagged_integer_atom() {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "atom strings are nonempty non-tagged-integer spellings",
                 span: Some(candidate.span),
@@ -3756,7 +4270,51 @@ fn freeze_atom_candidates(
         };
         string_indices.push((candidate.span, CompiledStringLocation::Atom(atom_index)));
     }
-    Ok(atoms)
+    Ok((atoms, interner))
+}
+
+fn freeze_metadata_atom_candidates(
+    candidates: Vec<CompiledMetadataAtomCandidate>,
+    atoms: &mut Vec<CompilerAtom>,
+    interner: &mut HashMap<CompilerString, u32>,
+) -> Result<Vec<(CompiledMetadataAtomKey, u32)>, LeafCompilationError> {
+    let mut indices = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if candidate.value.is_empty() || candidate.value.is_tagged_integer_atom() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "metadata atom names are nonempty identifiers",
+                span: Some(candidate.span),
+            });
+        }
+        let atom_index = if let Some(&index) = interner.get(&candidate.value) {
+            index
+        } else {
+            let next_count =
+                atoms
+                    .len()
+                    .checked_add(1)
+                    .ok_or(LeafCompilationError::CapacityExceeded {
+                        domain: "atom pool entries",
+                    })?;
+            checked_function_entry_count(next_count, "atom pool entries")?;
+            let index =
+                u32::try_from(atoms.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "atom pool entries",
+                })?;
+            atoms.push(CompilerAtom::new(candidate.value.clone()));
+            interner.insert(candidate.value, index);
+            index
+        };
+        indices.push((candidate.key, atom_index));
+    }
+    indices.sort_unstable_by_key(|(key, _)| *key);
+    if indices.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(LeafCompilationError::SemanticInvariant {
+            invariant: "one metadata atom index per function field",
+            span: None,
+        });
+    }
+    Ok(indices)
 }
 
 fn validate_frozen_constant_candidates(
@@ -3806,6 +4364,7 @@ impl CompiledConstantPool {
         children: &[ExecutableId],
         candidates: Vec<CompiledConstantCandidate>,
         atom_candidates: Vec<CompiledAtomCandidate>,
+        metadata_atom_candidates: Vec<CompiledMetadataAtomCandidate>,
     ) -> Result<Self, LeafCompilationError> {
         let count = checked_function_entry_count(candidates.len(), "constant pool entries")?;
         if children.windows(2).any(|pair| pair[0] >= pair[1]) {
@@ -3820,7 +4379,13 @@ impl CompiledConstantPool {
             },
         )?;
         let mut frozen = freeze_constant_candidates(children, candidates, string_capacity)?;
-        let atoms = freeze_atom_candidates(atom_candidates, &mut frozen.string_indices)?;
+        let (mut atoms, mut atom_interner) =
+            freeze_atom_candidates(atom_candidates, &mut frozen.string_indices)?;
+        let metadata_atom_indices = freeze_metadata_atom_candidates(
+            metadata_atom_candidates,
+            &mut atoms,
+            &mut atom_interner,
+        )?;
         validate_frozen_constant_candidates(children, count, &mut frozen)?;
         Ok(Self {
             atoms: atoms.into(),
@@ -3828,7 +4393,22 @@ impl CompiledConstantPool {
             function_indices: frozen.function_indices.into_boxed_slice(),
             number_indices: frozen.number_indices.into_boxed_slice(),
             string_indices: frozen.string_indices.into_boxed_slice(),
+            metadata_atom_indices: metadata_atom_indices.into_boxed_slice(),
         })
+    }
+
+    fn metadata_atom_index(
+        &self,
+        key: CompiledMetadataAtomKey,
+    ) -> Result<AtomPoolIndex, LeafCompilationError> {
+        let position = self
+            .metadata_atom_indices
+            .binary_search_by_key(&key, |(candidate, _)| *candidate)
+            .map_err(|_| LeafCompilationError::SemanticInvariant {
+                invariant: "compiled metadata field has a function-local atom",
+                span: None,
+            })?;
+        Ok(AtomPoolIndex::new(self.metadata_atom_indices[position].1))
     }
 
     fn plan_number(
@@ -3891,7 +4471,7 @@ impl CompiledConstantPool {
                         span: Some(span),
                     });
                 };
-                if !is_tagged_integer_string(value) {
+                if !value.is_tagged_integer_atom() {
                     return Err(LeafCompilationError::SemanticInvariant {
                         invariant: "string constant retains its tagged-integer spelling",
                         span: Some(span),
@@ -3912,7 +4492,7 @@ impl CompiledConstantPool {
                         span: Some(span),
                     });
                 };
-                if atom.string().is_empty() || is_tagged_integer_string(atom.string()) {
+                if atom.string().is_empty() || atom.string().is_tagged_integer_atom() {
                     return Err(LeafCompilationError::SemanticInvariant {
                         invariant: "string atom retains its non-tagged spelling",
                         span: Some(span),
@@ -3950,6 +4530,14 @@ fn decode_compiler_string(
         .map_err(|source| LeafCompilationError::CompilerString { span, source })
 }
 
+fn compiler_identifier_string(
+    value: &str,
+    span: Span,
+) -> Result<CompilerString, LeafCompilationError> {
+    CompilerString::try_from_code_units(value.encode_utf16().collect::<Vec<_>>().into())
+        .map_err(|source| LeafCompilationError::CompilerString { span, source })
+}
+
 fn record_string_candidate(
     owner: ExecutableId,
     value: CompilerString,
@@ -3960,7 +4548,7 @@ fn record_string_candidate(
     if value.is_empty() {
         return Ok(());
     }
-    if is_tagged_integer_string(&value) {
+    if value.is_tagged_integer_atom() {
         constants
             .get_mut(owner.index())
             .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
@@ -3972,36 +4560,6 @@ fn record_string_candidate(
             .push(CompiledAtomCandidate { value, span });
     }
     Ok(())
-}
-
-fn is_tagged_integer_string(value: &CompilerString) -> bool {
-    let mut units = value.code_units();
-    let Some(first) = units.next() else {
-        return false;
-    };
-    if first == u16::from(b'0') {
-        return units.next().is_none();
-    }
-    if !(u16::from(b'1')..=u16::from(b'9')).contains(&first) {
-        return false;
-    }
-    let mut integer = u32::from(first - u16::from(b'0'));
-    for unit in units {
-        if !(u16::from(b'0')..=u16::from(b'9')).contains(&unit) {
-            return false;
-        }
-        let Some(next) = integer
-            .checked_mul(10)
-            .and_then(|value| value.checked_add(u32::from(unit - u16::from(b'0'))))
-        else {
-            return false;
-        };
-        if next > i32::MAX as u32 {
-            return false;
-        }
-        integer = next;
-    }
-    true
 }
 
 #[derive(Clone, Copy)]
@@ -4603,6 +5161,94 @@ fn unsupported<T>(feature: UnsupportedLeafFeature, span: Span) -> Result<T, Leaf
     Err(LeafCompilationError::Unsupported { feature, span })
 }
 
+fn verified_binding_policy(
+    policy: DeclarationPolicy,
+) -> Result<CompilerBindingPolicy, LeafCompilationError> {
+    let kind = match policy.kind() {
+        DeclarationKind::Parameter => VerifiedBindingKind::Parameter,
+        DeclarationKind::Var => VerifiedBindingKind::Var,
+        DeclarationKind::Let => VerifiedBindingKind::Let,
+        DeclarationKind::Const => VerifiedBindingKind::Const,
+        DeclarationKind::Function => VerifiedBindingKind::Function,
+        DeclarationKind::FunctionName => VerifiedBindingKind::FunctionName,
+        DeclarationKind::Catch => VerifiedBindingKind::Catch,
+        DeclarationKind::Import
+        | DeclarationKind::NamespaceImport
+        | DeclarationKind::SyntheticDefault => {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "ordinary function metadata excludes module bindings",
+                span: None,
+            });
+        }
+    };
+    let initialization = match policy.initialization() {
+        InitializationPolicy::Argument => VerifiedInitializationPolicy::Argument,
+        InitializationPolicy::UndefinedAtInstantiation => {
+            VerifiedInitializationPolicy::UndefinedAtInstantiation
+        }
+        InitializationPolicy::AtDeclaration => VerifiedInitializationPolicy::AtDeclaration,
+        InitializationPolicy::FunctionAtInstantiation => {
+            VerifiedInitializationPolicy::FunctionAtInstantiation
+        }
+        InitializationPolicy::FunctionAtScopeEntry => {
+            VerifiedInitializationPolicy::FunctionAtScopeEntry
+        }
+        InitializationPolicy::FunctionName => VerifiedInitializationPolicy::FunctionName,
+        InitializationPolicy::Catch => VerifiedInitializationPolicy::Catch,
+        InitializationPolicy::ModuleImport | InitializationPolicy::ModuleNamespace => {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "ordinary function metadata excludes module initialization",
+                span: None,
+            });
+        }
+    };
+    let writes = match policy.writes() {
+        WritePolicy::Mutable => VerifiedWritePolicy::Mutable,
+        WritePolicy::Immutable => VerifiedWritePolicy::Immutable,
+        WritePolicy::ImmutableInStrictCode => VerifiedWritePolicy::ImmutableInStrictCode,
+        WritePolicy::Internal => {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "ordinary function metadata excludes internal module cells",
+                span: None,
+            });
+        }
+    };
+    Ok(CompilerBindingPolicy::new(
+        kind,
+        initialization,
+        writes,
+        policy.has_temporal_dead_zone(),
+    ))
+}
+
+fn verified_storage_policy(
+    binding: &crate::storage::BindingStorage,
+) -> Result<CompilerBindingPolicy, LeafCompilationError> {
+    if matches!(binding.placement(), StoragePlacement::Argument { .. }) {
+        return Ok(CompilerBindingPolicy::new(
+            VerifiedBindingKind::Parameter,
+            VerifiedInitializationPolicy::Argument,
+            VerifiedWritePolicy::Mutable,
+            false,
+        ));
+    }
+    verified_binding_policy(binding.policy())
+}
+
+const fn binding_has_scope(policy: DeclarationPolicy) -> bool {
+    matches!(
+        policy.kind(),
+        DeclarationKind::Let | DeclarationKind::Const | DeclarationKind::Catch
+    ) || matches!(
+        policy.initialization(),
+        InitializationPolicy::FunctionAtScopeEntry
+    )
+}
+
+const fn source_byte_span(span: Span) -> SourceByteSpan {
+    SourceByteSpan::new(span.start, span.end)
+}
+
 /// Syntax or storage behavior outside the first ordinary leaf-function slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedLeafFeature {
@@ -4724,6 +5370,13 @@ pub enum LeafCompilationError {
         /// Exact aggregate or cross-function verifier failure.
         source: FunctionGraphVerificationError,
     },
+    /// Complete runtime metadata failed final bytecode verification.
+    BytecodeGraphVerification {
+        /// Source function span for a graph-local failure, when available.
+        span: Option<Span>,
+        /// Exact final-verifier failure.
+        source: BytecodeVerificationError,
+    },
 }
 
 impl fmt::Display for LeafCompilationError {
@@ -4803,6 +5456,13 @@ impl fmt::Display for LeafCompilationError {
                 }
                 Ok(())
             }
+            Self::BytecodeGraphVerification { span, source } => {
+                source.fmt(formatter)?;
+                if let Some(span) = span {
+                    write!(formatter, " at source {span:?}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -4814,6 +5474,7 @@ impl Error for LeafCompilationError {
             Self::BytecodeAssembly { source, .. } => Some(source),
             Self::BytecodeVerification { source, .. } => Some(source),
             Self::FunctionGraphVerification { source, .. } => Some(source),
+            Self::BytecodeGraphVerification { source, .. } => Some(source),
             Self::CookedStringDecoding { source, .. } => Some(source),
             Self::CompilerString { source, .. } => Some(source),
             Self::ForeignExecutable { .. }

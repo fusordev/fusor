@@ -35,7 +35,7 @@ does run `compute_stack_size`, and the result becomes the stored stack size
   where applicable, opcode where available, and the violated invariant.
   Failure never returns a partially verified function graph.
 
-Verification has five ordered phases:
+The eventual general serialized-bytecode/VM verifier has five ordered phases:
 
 1. charge graph and allocation limits;
 2. predecode the complete instruction stream;
@@ -49,39 +49,99 @@ Verification has five ordered phases:
 The body-level implemented slice returns `VerifiedControlFlow`, not
 `VerifiedBytecode`. It completely predecodes the function, validates every
 static operand domain represented by its body-only input and every successor
-even in unreachable code, validates the serialized execution-header flag and
-mode domains, retains its typed function kind and counts, and analyzes
-reachable ordinary JavaScript-value stack heights. The six suspension opcodes
-are accepted only for their compatible function-kind families, while ordinary
-and tail returns are limited to normal functions. Compiler bodies may attach a
-constant-kind layout that conditionally admits ordinary value loads and nested
-closure creation; serialized bodies still reject every constant opcode. The
-slice rejects opcodes whose correct verification needs actual constant values,
+even in unreachable code, validates execution-header flag and mode domains,
+retains its typed function kind and counts, and analyzes reachable ordinary
+JavaScript-value stack heights. The six suspension opcodes are accepted only
+for their compatible function-kind families, while ordinary and tail returns
+are limited to normal functions. Compiler bodies may attach a constant-kind
+layout that conditionally admits ordinary value loads and nested closure
+creation; serialized bodies still reject every constant opcode. The slice
+rejects opcodes whose correct verification needs actual constant values,
 verified child bodies, raw function slots, handler or iterator markers,
 finally return addresses, or packed stack offsets. Its opaque certificate has
-no execution API and cannot cross the VM trust boundary. The complete
-typed-stack and whole-function rules below remain mandatory before
-`VerifiedBytecode` exists.
+no execution API and cannot cross the VM trust boundary.
 
 The next compiler-only slice returns
 `VerifiedCompilerFunctionGraph`. It takes a flat `Arc`-backed graph, requires
 explicit body capture and constant layouts, owns exact content-interned
 function-local String atoms, the actual heterogeneous Number/String/function
 constant entries, function-template target identities, and normalized
-immediate-parent capture sources. It rejects duplicate atoms, duplicate
-normalized capture sources, cycles, and unreachable records, validates every
-shared-parent edge, and charges aggregate body, compact string-payload, and
-edge-work budgets. Every constant entry is counted and kind-checked, but only
-`Function` entries form graph edges or contribute to topology and nesting
-depth. Traversal and depth accounting use explicit work lists; they never
-depend on Rust call-stack depth and require no `recursion_guard` layer or
-dependency. A
-selected root with imported closure variables is rejected because no verified
-external environment was supplied. This certificate is still not
-`VerifiedBytecode`: it lacks vardef/name/policy metadata, other value and atom
-namespaces, typed handler/finally/iterator states, source/debug validation, and
-the runtime function metadata required for exact behavior. It exposes no VM
-execution entry point.
+immediate-parent capture sources. It rejects empty, tagged-integer, or
+duplicate atom payloads, duplicate normalized capture sources, cycles, and
+unreachable records, validates every shared-parent edge, and charges aggregate
+body, compact string-payload, and edge-work budgets. Every constant entry is
+counted and kind-checked, but only `Function` entries form graph edges or
+contribute to topology and nesting depth. Traversal and depth accounting use
+explicit work lists; they never depend on Rust call-stack depth and require no
+`recursion_guard` layer or dependency. A selected root with imported closure
+variables is rejected because no verified external environment was supplied.
+This certificate is still not `VerifiedBytecode` and exposes no VM execution
+entry point.
+
+The implemented final compiler-profile slice takes that `Arc`-backed graph
+plus one complete metadata record per function and returns `VerifiedBytecode`.
+It accepts only the current ordinary Oxc compiler profile. It validates and
+freezes:
+
+- the exact ordinary source-function header and frame counts;
+- ordered argument/local definitions, names, declaration initialization and
+  write policies, TDZ flags, lexical scope links, and dense own
+  variable-reference indices;
+- imported closure names, policies, and immediate-parent sources;
+- one owning constant edge per non-root function template, child function
+  names, and every parent-to-child closure name/policy/source relationship;
+- retained source display names and text, function/name byte spans, and one
+  exact source span at each final instruction PC; and
+- the supported compiler-opcode family and its complete metadata
+  relationships.
+
+Function-declaration metadata names the exact child constant that initializes
+each binding. Verification requires exactly one matching
+`fclosure*; put_arg*` or `fclosure*; put_loc*` pair, requires the store to have
+only that closure predecessor, isolates function-instantiation pairs in the
+entry prefix, and validates each scope-entry activation-and-initializer group.
+This prevents a branch from entering the store or a different child template
+from initializing the declared name.
+
+Strict block declarations deliberately use a narrow two-phase lexical
+normalization. The compiler first emits `set_loc_uninitialized` to activate
+the local or captured cell, then emits the declaration closure and store in an
+isolated linear group before any user instruction. The private intermediate
+state makes cell lifetime verifiable but does not change the result of
+successful JavaScript execution. Annex B block-function semantics remain
+rejected rather than being approximated.
+
+An iterative CFG work queue tracks binding value state
+(`inactive`/`uninitialized`/`initialized`) separately from captured-cell state
+(`closed`/`active`). It checks TDZ and initialization policy, immutable writes,
+scope activation, closure capture of scoped locals, and `close_loc` cell
+rotation across joins and backedges. This analysis is bounded by aggregate
+frame-state and policy-transfer budgets. Retained closure-edge evaluations
+from staged graph verification are charged to the final policy budget before
+metadata analysis. Every traversal is iterative and stack-safe; no recursion
+guard is used.
+
+`VerifiedBytecode` retains the staged graph, final metadata, resource usage,
+and a sorted conservative set of `ExecutionRequirement` families:
+`CoreValues`, `Numbers`, `Strings`, `BigInts`, `Closures`,
+`LexicalBindings`, `ObjectOperators`, and `DynamicOperators`. These are
+runtime implementation requirements, not a proof of whole-program value
+types. The immutable authority is shared through `Arc` and needs no lock.
+
+This type is the code-and-metadata authority for the admitted ordinary
+compiler profile, not a runtime function or closure. A future materializer
+must separately require a realm in the same runtime and the exact root or
+parent closure environment. Direct eval remains deferred and fail-closed.
+Serialized bytecode and its full exceptional typed-stack proof, including
+handlers, finally return addresses, and iterator markers, are not implemented.
+The complete typed-stack rules below remain the target for that wider
+boundary.
+
+Current source verification is structural: it proves UTF-8 boundaries,
+containment, exact instruction-PC correspondence, and metadata consistency. It
+does not authenticate that compiler-supplied text is the origin of the
+bytecode. Source authenticity and incoming generated-to-original source-map
+chaining remain compiler-trusted/deferred.
 
 Serialized bodies provide a stored maximum stack size, and
 `verify_control_flow` requires it to equal the recomputed reachable maximum.
@@ -103,8 +163,8 @@ function-lifetime local, or scoped local. A nonzero declared
 explicitly validated empty layout. Verification checks count equality,
 argument/local bounds, and unique frame-binding identities. Only compiler
 bytecode with a matching scoped-local entry may use `close_loc`. Serialized
-`close_loc` and every `make_*_ref` opcode remain fail-closed until the complete
-vardef and closure descriptors are available.
+`close_loc` and every `make_*_ref` opcode remain fail-closed pending a
+serialized graph verifier that owns complete vardef and closure descriptors.
 
 Compiler-generated bodies may also explicitly attach an immutable
 `CompilerConstantLayout`. Its dense entries classify each declared
@@ -127,8 +187,8 @@ does not retain an unused positive literal slot. A Number entry stores a
 `Binary64Constant`: every non-NaN bit pattern is exact, while NaN is
 canonicalized only as a deterministic compiler-artifact policy. This type must
 not be reused as the general runtime Number, `DataView`, or typed-array storage
-contract. Serialized constant operations remain fail-closed until the future
-whole-function verifier owns and validates their complete pool.
+contract. Serialized constant operations remain fail-closed until a serialized
+graph verifier owns and validates their complete pool.
 
 **Rust hardening.** The compiler applies one further source-language invariant
 to the returned certificate: each reachable structured-statement label must
@@ -258,16 +318,19 @@ fail-closed capability.
   data, but the reader must materialize or validate each function's local pool
   before body verification. An index has no meaning in a parent, child, or
   sibling function merely because the numeric position exists there.
-- The current compiler graph accepts only opaque owned String atoms and rejects
-  duplicate exact contents within each local pool. Future serialized entries
-  also carry explicit namespace/predefined metadata. Loading a verified
-  function later reinterns or creates each local entry exactly once in the
-  destination runtime. Verification itself never interns into a runtime.
+- The current compiler graph accepts only opaque owned, nonempty,
+  non-tagged-integer String atoms and rejects duplicate exact contents within
+  each local pool. Future serialized entries also carry explicit
+  namespace/predefined metadata. Loading a verified function later reinterns
+  or creates each local entry exactly once in the destination runtime.
+  Verification itself never interns into a runtime.
 - Nullable metadata atom fields use an explicit optional representation.
   Instruction operands and required metadata fields cannot encode null by
   smuggling a sentinel integer into `AtomPoolIndex`.
 - `vardefs.len() == arg_count + var_count`;
 - `defined_arg_count <= arg_count`;
+- the current final ordinary compiler profile requires
+  `defined_arg_count == arg_count`;
 - `var_ref_count <= arg_count + var_count`;
 - `arg_count`, `var_count`, `var_ref_count`, and `closure_var_count` are each
   at most 65,534; all sums must fit `usize`;
@@ -289,7 +352,7 @@ fail-closed capability.
 | Operand family | Required validation |
 | --- | --- |
 | `const`, `const8` | index is below `cpool.len()`; staged compiler input additionally requires a value-kind entry, while serialized input remains unsupported |
-| `fclosure`, `fclosure8` | constant exists and is a bytecode-function constant; body-only compiler verification validates the declared kind, `VerifiedCompilerFunctionGraph` resolves and verifies the actual compiler child target, and serialized input remains pending the complete `VerifiedBytecode` graph |
+| `fclosure`, `fclosure8` | constant exists and is a bytecode-function constant; body-only compiler verification validates the declared kind, `VerifiedCompilerFunctionGraph` resolves the actual compiler child target, final compiler-profile verification proves initializer and closure metadata, and serialized input remains pending its own complete graph verifier |
 | atom-bearing formats | `AtomPoolIndex::get()` is below the enclosing function's atom-pool length; the referenced entry's namespace is valid for the opcode |
 | `loc`, `loc8`, `none_loc` | index is below `var_count` |
 | `arg`, `none_arg` | index is below `arg_count` |
@@ -614,6 +677,12 @@ untrusted APIs start with this **provisional** default profile:
 | compiler branch-relaxation instruction visits | 33,554,432 |
 | total transfer-function evaluations | 33,554,432 |
 | closure-source evaluations across parent edges | 33,554,432 |
+| final metadata argument/local definitions | 1,048,576 |
+| final metadata imported closure definitions | 1,048,576 |
+| unique retained source/display-name bytes | 64 MiB |
+| final instruction source mappings | 8,388,608 |
+| final binding frame-state cells | 33,554,432 |
+| final binding-policy transfers | 33,554,432 |
 
 These values are **provisional Rust hardening policy**, not upstream QuickJS
 limits and not yet compatibility claims. Before the untrusted bytecode API is
@@ -625,6 +694,16 @@ transfer work; any changed numbers update this table and its limit tests. The
 current compiler applies the transfer-evaluation number independently as its
 pre-verification branch-relaxation visit limit, so both assembly and verifier
 graph work are bounded without sharing a mutable counter.
+
+The last six limits belong to `BytecodeGraphVerificationLimits` and are
+charged across the complete final compiler graph. Reused `Arc` source text and
+display names are charged once by identity; definition and mapping counts,
+frame-state matrix cells, and policy/capture transfer work are aggregate
+charges. Every input-proportional allocation after preflight is fallible and
+cannot silently retry with a larger profile. Final ownership moves the
+already-reserved metadata vector behind a fixed-size `Arc` header without
+copying it; only fixed-size ownership headers and the at-most-eight-entry
+execution-requirement set use bounded infallible allocation.
 
 A caller may lower the current profile. Raising it is available only through
 an explicit trusted configuration, never as an implicit retry after
@@ -677,7 +756,14 @@ The verifier is complete only when the following tests are automated.
 10. **Limits:** use deliberately small custom limits to hit every per-function
     and aggregate budget, nesting depth, shared-child accounting, graph cycle,
     `gosub` count, and worklist-step exhaustion without large allocations.
-11. **Fuzzing:** mutate compiler-produced bytes and serialized metadata.
+11. **Final compiler metadata:** reject count/name/policy/scope-link and dense
+    variable-reference mismatches, wrong parent closure metadata, wrong child
+    names, missing or duplicate function initializers, branches into an
+    initializer store, missing lexical activation, inactive captures, invalid
+    cell close/reopen backedges, malformed source spans/maps, and each of the
+    six final aggregate limits. Require deterministic sorted capability
+    families.
+12. **Fuzzing:** mutate compiler-produced bytes and serialized metadata.
     Verification must be deterministic, must not panic or allocate beyond the
     configured budget, and the VM must never receive a value unless
     verification succeeded.

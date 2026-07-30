@@ -55,7 +55,8 @@ The compilation pipeline is:
 8. Lower AST nodes into typed pseudo-instructions with copied source origins.
 9. Run QuickJS-derived variable resolution, label relaxation, peepholes, stack
    analysis, and debug-table construction.
-10. Verify and freeze the bytecode, then drop the Oxc allocator.
+10. Verify and freeze the current ordinary compiler profile as immutable,
+    `Arc`-backed `VerifiedBytecode`, then drop the Oxc allocator.
 
 `ParsedUnit` keeps Oxc's arena-backed `Program` and `ModuleRecord` beside the
 complete `Semantic` result. The `Program` header is allocated in the caller's
@@ -147,6 +148,15 @@ initialization and on every natural or `continue` edge before update, without
 re-running TDZ initialization. All scheduling remains iterative and uses
 explicit work stacks; there is no `recursion_guard` layer or dependency.
 
+Strict block-function declarations use a narrow two-phase lexical
+normalization: scope entry first activates the local or captured cell in an
+uninitialized internal state, then an adjacent `fclosure*; put_loc*` pair
+installs the declaration closure before any user instruction can observe the
+binding. This makes captured-cell lifetime explicit to the verifier while
+preserving successful JavaScript behavior. The intermediate state is not a
+source-visible TDZ extension. Annex B block-function semantics remain rejected
+rather than being approximated by this normalization.
+
 `compile_tree` freezes the selected subtree as a flat immutable
 `CompiledFunctionTree` in executable preorder. Compilation is child-first, but
 uses no Rust call-stack recursion. Each parent's immutable `Arc`-backed
@@ -191,6 +201,43 @@ families, non-string atom namespaces, raw class/function stack entries,
 inferred anonymous-function names, labeled control, `for-in`, and `for-of`
 stay rejected until their owned records and semantics exist.
 
+A final compiler-profile pass combines that staged graph with exact function
+metadata and source snapshots and returns immutable, `Arc`-backed
+`VerifiedBytecode`. It checks the ordinary source-function header, ordered
+argument/local definitions, declaration policies, lexical scope links, dense
+own variable-reference indices, one owning constant edge per non-root
+function template, imported closure descriptors, child names, and
+parent-to-child closure name/policy/source agreement. Every function
+declaration records its exact child constant. The verifier proves one matching
+`fclosure*; put_arg*` or `fclosure*; put_loc*` initializer, isolates
+function-instantiation initializers in the entry prefix, and validates the
+activation-plus-initializer group for scope-entry declarations so control flow
+cannot jump into the store.
+
+The same pass runs an iterative CFG analysis over separate binding-value and
+captured-cell states. It rejects reachable missing TDZ/scope activation,
+invalid initialization, immutable writes, capture of an inactive scoped
+binding, and invalid close/reopen behavior. Six aggregate budgets bound
+variable definitions, closure definitions, unique retained source bytes,
+instruction source mappings, abstract frame-state cells, and binding-policy
+transfers. Retained parent-edge closure checks are charged to the policy
+budget before metadata analysis. It also records a sorted conservative list
+of runtime capability families: core values, Numbers, Strings, BigInts,
+closures, lexical bindings, object operators, and dynamic operators. Those
+families describe
+implementation requirements; they are not a whole-program value-type proof.
+All final-verifier traversals use explicit work lists and fallible bounded
+allocation, so neither Rust call-stack depth nor a recursion guard is part of
+the trust boundary.
+
+`VerifiedBytecode` is the code-and-metadata authority for this current ordinary
+Oxc compiler profile. It is not yet a runtime function, realm, or closure.
+Materialization must additionally prove the destination runtime/realm identity
+and provide the exact root or parent closure environment. The immutable
+authority needs no lock. Serialized bytecode, the full exceptional typed-stack
+model, handlers/finally/iterators, direct eval, and the remaining compiler
+profiles still fail closed.
+
 `BytecodeAssembler` keeps symbolic label handles provenance-bound to one
 assembler through immutable `Arc` identity. Labels never enter final operands.
 The compiler wraps each handle with its owning Oxc span. Statement labels also
@@ -220,19 +267,19 @@ using a function entry as a raw pushed value remains fail-closed. Constant
 bounds are checked before kinds, and complete predecode/static operand
 validation still precedes reachable stack analysis. Serialized constant
 opcodes, serialized `close_loc`, and all reference-construction opcodes remain
-fail-closed until whole-function constant, vardef, child, and closure metadata
-is verified.
+fail-closed pending a serialized graph format and verifier that own complete
+constant, vardef, child, and closure metadata.
 
 Module functions, object methods/accessors, and named function expressions fail
 closed until their distinct surrounding-storage, header, and self-binding
 behavior is implemented. The compiled artifact keeps the exact source text,
 storage plan, local layout, exact atom and heterogeneous constant pools,
-normalized capture descriptors, source table, and certificate in immutable
-`Arc` storage after the Oxc arena is dropped. Lowering accepts only an opaque
-executable selection issued by that context, so a same-index selection from
-another context is rejected. Unsupported bodies, unresolved names,
-global/module references requiring atom-backed operations, and async/generator
-functions fail before byte emission.
+normalized capture descriptors, source table, and staged/final certificates
+in immutable `Arc` storage after the Oxc arena is dropped. Lowering accepts
+only an opaque executable selection issued by that context. A same-index
+selection from another context is rejected. Unsupported bodies, unresolved
+names, global/module references requiring atom-backed operations, and
+async/generator functions fail before byte emission.
 
 Every successful unit also owns a `ModuleSyntaxRecord` for the module data that
 must survive the Oxc allocator. Static requests remain in source occurrence
@@ -264,7 +311,8 @@ AST to contain exactly one function expression.
 The instruction set and compiler passes derive from `quickjs-opcode.h` and the
 corresponding QuickJS compiler/VM code.
 
-Only `VerifiedBytecode` may execute. Verification checks:
+No bytecode may execute without `VerifiedBytecode`. The complete
+VM/serialized boundary ultimately checks:
 
 - known opcodes and complete operand boundaries;
 - constant, atom, local, argument, closure, and module indices;
@@ -275,10 +323,11 @@ Only `VerifiedBytecode` may execute. Verification checks:
 - function metadata and child-function references;
 - source-map PCs on valid instruction boundaries.
 
-Malformed serialized bytecode returns a structured verifier error. It never
-reaches unchecked indexing in the VM.
+Malformed serialized bytecode will return a structured verifier error. It will
+never reach unchecked indexing in the VM; serialized verification is not
+implemented yet.
 
-The current staged implementation exposes `VerifiedControlFlow` for complete
+The staged implementation exposes `VerifiedControlFlow` for complete
 body predecode, instruction boundaries, validated execution-header bits and
 counts, function-local operand bounds, secondary operand domains, static
 successors, suspension and return function-kind compatibility, and reachable
@@ -288,12 +337,22 @@ constant-kind layouts for the narrow `close_loc`, `push_const*`, and
 cross-checks exact function-local String atoms, the compiler's actual
 heterogeneous Number/String/function pool, flat function targets, normalized
 capture edges, topology, and aggregate budgets with explicit work lists.
-Ordinary values never become topology edges. Both certificates remain
-non-executable. Serialized constant opcodes and opcodes requiring non-string
-atom namespaces, other value families, raw function slots, complete runtime
-metadata, handlers, finally return addresses, iterator markers, or packed
-stack offsets fail closed. The VM boundary continues to require the future
-whole-function `VerifiedBytecode`.
+Ordinary values never become topology edges. Both staged certificates remain
+non-executable.
+
+The final compiler-profile pass adds exact vardef, declaration-policy,
+scope-link, initializer, closure, child-name, and retained-source metadata. It
+proves declaration-closure initialization against the emitted
+`fclosure*; put_*` pairs, runs iterative binding-value/cell-state analysis over
+the CFG, freezes conservative `ExecutionRequirement` families, and returns
+`VerifiedBytecode`. This is the complete code-and-metadata authority for the
+currently admitted ordinary compiler profile, but the repository has no VM
+materialization path yet. A future VM must combine it with a same-runtime realm
+and an exact closure environment. Serialized input and opcodes requiring
+non-string atom namespaces, other value families, raw function slots,
+handlers, finally return addresses, iterator markers, or packed stack offsets
+remain fail-closed pending the full exceptional typed-stack verifier.
+
 The symbolic assembler chooses the componentwise shortest valid final branch
 layout. This can differ from a conservative QuickJS peephole boundary while
 preserving the same signed displacement rules and JavaScript behavior.
@@ -431,6 +490,14 @@ not fabricate an instruction span.
 The source registry owns display names, text, line indices, and incoming
 standard source maps. Oxc byte spans become source-aware spans before its arena
 is dropped.
+
+For the current ordinary compiler profile, `VerifiedBytecode` owns the exact
+source text and display name supplied by the compilation context, function and
+optional name byte spans, and one exact span for every final instruction PC.
+The verifier checks UTF-8 boundaries, containment, mapping cardinality, and PC
+identity. It deliberately does not authenticate that supplied source against
+the bytecode; source provenance remains a compiler-trusted invariant.
+Generated-to-original source-map chaining is also deferred.
 
 Line lookup supports separate column encodings:
 

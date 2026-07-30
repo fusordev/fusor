@@ -292,7 +292,7 @@ fn owned_argument_and_local_cells_keep_distinct_parent_reference_indices() {
             .bindings(),
         [
             CompilerCapturedBinding::Argument(0),
-            CompilerCapturedBinding::FunctionLocal(0),
+            CompilerCapturedBinding::ScopedLocal(0),
         ]
     );
     let child = tree

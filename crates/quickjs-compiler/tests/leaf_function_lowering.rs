@@ -86,12 +86,12 @@ fn lexical_identifier_leaf_matches_the_quickjs_final_opcode_oracle() {
             (BytecodePc::new(8), FinalOpcode::Return, Operands::None),
         ]
     );
-    assert_eq!(flow.domains(), FunctionIndexDomains::new(0, 0, 1, 1, 0));
+    assert_eq!(flow.domains(), FunctionIndexDomains::new(3, 0, 1, 1, 0));
     assert_eq!(flow.computed_stack_size(), 1);
 
     let header = flow.function_header();
     assert_eq!(header.kind(), FunctionKind::Normal);
-    assert_eq!(header.flags().bits(), 0x0243);
+    assert_eq!(header.flags().bits(), 0x0643);
     assert_eq!(header.defined_argument_count(), 1);
     assert_eq!(header.variable_reference_count(), 0);
     assert!(!header.mode().is_strict());
@@ -147,7 +147,7 @@ fn deepest_leaf_reads_forwarded_parent_cells_through_capture_slots() {
             (FinalOpcode::Return, Operands::None),
         ]
     );
-    assert_eq!(flow.domains(), FunctionIndexDomains::new(0, 0, 0, 0, 2));
+    assert_eq!(flow.domains(), FunctionIndexDomains::new(3, 0, 0, 0, 2));
     assert_eq!(flow.function_header().variable_reference_count(), 0);
     assert_eq!(
         flow.compiler_capture_layout()
@@ -192,7 +192,7 @@ fn deepest_leaf_checked_capture_writes_keep_assignment_and_postfix_stack_order()
             (FinalOpcode::Return, Operands::None),
         ]
     );
-    assert_eq!(flow.domains(), FunctionIndexDomains::new(0, 0, 0, 0, 1));
+    assert_eq!(flow.domains(), FunctionIndexDomains::new(2, 0, 0, 0, 1));
     assert_eq!(flow.computed_stack_size(), 2);
 }
 
@@ -226,7 +226,7 @@ fn deepest_leaf_non_tdz_capture_uses_value_preserving_set_and_postfix_put() {
     );
     assert_eq!(
         compiled.control_flow().domains(),
-        FunctionIndexDomains::new(0, 0, 0, 0, 1)
+        FunctionIndexDomains::new(2, 0, 0, 0, 1)
     );
 }
 
@@ -259,7 +259,7 @@ fn strictness_is_retained_without_debug_or_eval_header_bits() {
     let header = compiled.control_flow().function_header();
 
     assert!(header.mode().is_strict());
-    assert!(!header.flags().has_debug());
+    assert!(header.flags().has_debug());
     assert!(!header.flags().is_eval());
 }
 
@@ -330,7 +330,7 @@ fn anonymous_ordinary_function_expression_uses_the_same_owned_boundary() {
     assert_eq!(compiled.source_text(), source);
     assert_eq!(
         compiled.control_flow().function_header().flags().bits(),
-        0x0243
+        0x0643
     );
 }
 
@@ -354,7 +354,7 @@ fn object_function_value_is_ordinary_but_method_form_fails_closed() {
     .expect("front-end acceptance");
     assert_eq!(
         compiled.control_flow().function_header().flags().bits(),
-        0x0243
+        0x0643
     );
 
     let method_source = "const object = { f(arg) { let local = arg; return local; } };";

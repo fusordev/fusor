@@ -117,6 +117,24 @@ fn compiler_strings_are_canonical_exact_utf16_and_arc_backed() {
         [0x0100, 0xd800, 0xdc00, 0xd83d, 0xde00]
     );
     assert_eq!(wide.clone(), wide);
+
+    assert!(string(&['0' as u16]).is_tagged_integer_atom());
+    assert!(
+        string(&[
+            '2' as u16, '1' as u16, '4' as u16, '7' as u16, '4' as u16, '8' as u16, '3' as u16,
+            '6' as u16, '4' as u16, '7' as u16,
+        ])
+        .is_tagged_integer_atom()
+    );
+    assert!(!string(&[]).is_tagged_integer_atom());
+    assert!(!string(&['0' as u16, '0' as u16]).is_tagged_integer_atom());
+    assert!(
+        !string(&[
+            '2' as u16, '1' as u16, '4' as u16, '7' as u16, '4' as u16, '8' as u16, '3' as u16,
+            '6' as u16, '4' as u16, '8' as u16,
+        ])
+        .is_tagged_integer_atom()
+    );
 }
 
 #[test]
@@ -175,6 +193,35 @@ fn graph_rejects_atom_count_mismatch_and_duplicate_payloads() {
             first: 0,
             duplicate: 1,
         }
+    );
+}
+
+#[test]
+fn graph_rejects_empty_and_tagged_integer_atom_payloads() {
+    let empty = graph_function(
+        1,
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        Arc::from([atom(&[])]),
+        Arc::from([]),
+    );
+    let error = graph(empty, FunctionGraphVerificationLimits::default())
+        .expect_err("empty strings are not runtime atom identities");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::EmptyAtom { index: 0 }
+    );
+
+    let tagged_integer = graph_function(
+        1,
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        Arc::from([atom(&['0' as u16])]),
+        Arc::from([]),
+    );
+    let error = graph(tagged_integer, FunctionGraphVerificationLimits::default())
+        .expect_err("canonical integer spellings use tagged atom identities");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::TaggedIntegerAtom { index: 0 }
     );
 }
 
