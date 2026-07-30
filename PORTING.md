@@ -335,9 +335,16 @@ A milestone is complete only when all of its checked items pass in CI.
           current object/function tags and identity, retained verified
           bytecode source, and the pinned native-source form. Primitive boxing
           and observable object-valued native names remain fail closed.
+    - [x] Complete source-argument `ToPrimitive` for the current data-property
+          model: check `Symbol.toPrimitive` with the string hint, fall back to
+          callable `toString` then `valueOf`, resume native and verified
+          bytecode methods on the iterative VM, preserve left-to-right side
+          effects and abrupt provenance, and charge suspended continuations
+          against frame/value ceilings. Parsing and compilation begin only
+          after every argument becomes a string.
     - [ ] Add configurable-accessor replacement and persistent global lexical
-          collision checks when those object/environment forms exist. Complete
-          observable object/function `ToPrimitive` argument conversion and
+          collision checks when those object/environment forms exist. Extend
+          `ToPrimitive` lookup through those accessors and add
           `Function.prototype.call`/`apply`/`bind`/`Symbol.hasInstance`.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
       stack traces, iterators, and generators.

@@ -1,6 +1,8 @@
 use std::{error::Error, fmt, sync::Arc};
 
-use quickjs_bytecode::{VerificationLimits, VerifiedBytecode};
+use quickjs_bytecode::{
+    CompilerExecutableKind, FunctionTemplateId, VerificationLimits, VerifiedBytecode,
+};
 use quickjs_compiler::CompilationContext;
 use quickjs_frontend::{
     DynamicFunctionKind, DynamicFunctionSource, FrontendLimits, SourceFragment,
@@ -88,16 +90,7 @@ fn engine_failure(error: impl Error + Send + Sync + 'static) -> DynamicFunctionC
 }
 
 fn dynamic_function(context: &mut Context<'_>, parameters: &[&str], body: &str) -> Function {
-    let parameters = parameters
-        .iter()
-        .map(|parameter| JsString::from_utf8(parameter).expect("parameter"))
-        .collect::<Vec<_>>();
-    let authority = TestCompiler
-        .compile(OrdinaryDynamicFunctionSource::new(
-            Arc::from(parameters),
-            JsString::from_utf8(body).expect("body"),
-        ))
-        .expect("dynamic Function authority");
+    let authority = dynamic_function_authority(parameters, body);
     context
         .execute_dynamic_function_script(authority, ExecutionLimits::default())
         .expect("dynamic Function Script")
@@ -105,8 +98,44 @@ fn dynamic_function(context: &mut Context<'_>, parameters: &[&str], body: &str) 
         .expect("dynamic Function")
 }
 
+fn dynamic_function_authority(parameters: &[&str], body: &str) -> Arc<VerifiedBytecode> {
+    let parameters = parameters
+        .iter()
+        .map(|parameter| JsString::from_utf8(parameter).expect("parameter"))
+        .collect::<Vec<_>>();
+    TestCompiler
+        .compile(OrdinaryDynamicFunctionSource::new(
+            Arc::from(parameters),
+            JsString::from_utf8(body).expect("body"),
+        ))
+        .expect("dynamic Function authority")
+}
+
 fn compiler() -> Arc<dyn OrdinaryDynamicFunctionCompiler> {
     Arc::new(TestCompiler)
+}
+
+fn ordinary_dynamic_function_template(authority: &VerifiedBytecode) -> FunctionTemplateId {
+    let index = authority
+        .functions()
+        .position(|function| {
+            function.metadata().executable_kind() == CompilerExecutableKind::OrdinaryFunction
+        })
+        .expect("ordinary dynamic function");
+    FunctionTemplateId::new(u32::try_from(index).expect("small template index"))
+}
+
+fn reserved_frame_values(authority: &VerifiedBytecode, function: FunctionTemplateId) -> u64 {
+    let control_flow = authority
+        .function(function)
+        .expect("function")
+        .function()
+        .control_flow();
+    let domains = control_flow.domains();
+    u64::from(domains.argument_count())
+        + u64::from(domains.local_count())
+        + u64::from(control_flow.computed_stack_size())
+        + 1
 }
 
 fn assert_number(value: &quickjs_runtime::JsValue, expected: i32) {
@@ -728,4 +757,387 @@ fn function_prototype_to_string_rejects_an_unbound_receiver() {
             .expect("UTF-8"),
         "not a function"
     );
+}
+
+#[test]
+fn function_source_objects_coerce_left_to_right_through_bytecode_methods() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let parameter={toString:function parameterString(){phase=1;return 'value';}};\
+         let body={toString:function bodyString(){phase=2;return 'return phase;';}};\
+         let generated=Function(parameter,body);\
+         return generated(3);",
+    );
+
+    let value = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("object source conversion");
+
+    assert_number(&value, 2);
+}
+
+#[test]
+fn function_source_falls_back_from_object_to_string_result_to_value_of() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let source={\
+             toString:function sourceToString(){return {};},\
+             valueOf:function sourceValueOf(){return 'return 7;';}\
+         };\
+         return Function(source)();",
+    );
+
+    let value = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("valueOf fallback");
+
+    assert_number(&value, 7);
+}
+
+#[test]
+fn function_source_rejects_an_object_after_both_ordinary_methods() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let source={\
+             toString:0,\
+             valueOf:function sourceValueOf(){return {};}\
+         };\
+         return Function(source);",
+    );
+
+    let error = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect_err("object source has no primitive conversion");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("ordinary conversion failure must be a JavaScript exception");
+    };
+
+    assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
+    assert_eq!(
+        exception
+            .message()
+            .expect("message")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "toPrimitive"
+    );
+}
+
+#[test]
+fn function_source_bytecode_throw_stops_conversion_and_escapes() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let source={\
+             toString:function sourceToString(){throw 41;},\
+             valueOf:function sourceValueOf(){throw 42;}\
+         };\
+         return Function(source);",
+    );
+
+    let error = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect_err("source coercion throw");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("bytecode throw must remain a JavaScript exception");
+    };
+    let thrown = exception
+        .thrown_value()
+        .expect("explicit throw")
+        .as_number()
+        .expect("live value")
+        .expect("number");
+
+    assert!(thrown.strict_equals(JsNumber::from_i32(41)));
+    assert_eq!(exception.caller_frames().len(), 1);
+    assert!(
+        exception.caller_frames()[0]
+            .source_text()
+            .contains("Function(source)")
+    );
+}
+
+#[test]
+fn function_values_use_the_native_function_to_string_during_source_conversion() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let source=function namedSource(){return 1;};\
+         return Function(source)();",
+    );
+
+    let value = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("function source conversion");
+
+    assert_eq!(value.kind().expect("live value"), ValueKind::Undefined);
+}
+
+#[test]
+fn native_function_used_as_to_string_resumes_the_outer_conversion() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let source={\
+             toString:Function,\
+             valueOf:function sourceValueOf(){return 'return 8;';}\
+         };\
+         return Function(source)();",
+    );
+
+    let value = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("nested native conversion method");
+
+    assert_number(&value, 8);
+}
+
+#[test]
+fn host_direct_function_call_resumes_bytecode_source_conversion() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let expose_constructor = dynamic_function(&mut context, &[], "return Function;");
+    let make_source = dynamic_function(
+        &mut context,
+        &[],
+        "return {toString:function sourceToString(){return 'return 13;';}};",
+    );
+    let constructor = context
+        .call(&expose_constructor, &[], ExecutionLimits::default())
+        .expect("global Function")
+        .into_function()
+        .expect("Function value");
+    let source = context
+        .call(&make_source, &[], ExecutionLimits::default())
+        .expect("source object");
+
+    let generated = context
+        .call_with_dynamic_function_compiler(
+            &constructor,
+            &[source],
+            ExecutionLimits::default(),
+            &compiler(),
+        )
+        .expect("host Function call")
+        .into_function()
+        .expect("generated function");
+    let value = context
+        .call(&generated, &[], ExecutionLimits::default())
+        .expect("generated function call");
+
+    assert_number(&value, 13);
+}
+
+#[test]
+fn suspended_source_conversion_counts_toward_the_frame_limit_and_cleans_up() {
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_active_frames(1)).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let expose_constructor = dynamic_function(&mut context, &[], "return Function;");
+    let make_source = dynamic_function(
+        &mut context,
+        &[],
+        "return {toString:function sourceToString(){return 'return 13;';}};",
+    );
+    let constructor = context
+        .call(&expose_constructor, &[], ExecutionLimits::default())
+        .expect("global Function")
+        .into_function()
+        .expect("Function value");
+    let source = context
+        .call(&make_source, &[], ExecutionLimits::default())
+        .expect("source object");
+    let baseline = context.runtime_usage();
+
+    for _ in 0..2 {
+        let error = context
+            .call_with_dynamic_function_compiler(
+                &constructor,
+                std::slice::from_ref(&source),
+                ExecutionLimits::default(),
+                &compiler(),
+            )
+            .expect_err("coercion continuation plus method frame exceeds the limit");
+        assert!(matches!(
+            error,
+            ExecutionError::LimitExceeded {
+                resource: RuntimeResource::Frames,
+                limit: 1,
+                observed: 2,
+            }
+        ));
+        assert_eq!(context.runtime_usage(), baseline);
+    }
+}
+
+#[test]
+fn native_immediate_source_conversion_obeys_the_suspended_frame_limit() {
+    let authority = dynamic_function_authority(&[], "return Function({});");
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_active_frames(1)).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context
+        .execute_dynamic_function_script(authority, ExecutionLimits::default())
+        .expect("dynamic Function Script")
+        .into_function()
+        .expect("run");
+    let cleanup = dynamic_function(&mut context, &[], "return 0;");
+    let baseline = context.runtime_usage();
+
+    let error = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect_err("native toString must not bypass the suspended-frame ceiling");
+
+    assert!(matches!(
+        error,
+        ExecutionError::LimitExceeded {
+            resource: RuntimeResource::Frames,
+            limit: 1,
+            observed: 2,
+        }
+    ));
+    context
+        .call(&cleanup, &[], ExecutionLimits::default())
+        .expect("collection safe point");
+    assert_eq!(context.runtime_usage(), baseline);
+}
+
+#[test]
+fn native_throwing_source_conversion_obeys_the_suspended_frame_limit() {
+    let authority = dynamic_function_authority(
+        &[],
+        "let source={toString:Function.prototype.toString};\
+         return Function(source);",
+    );
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_active_frames(1)).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context
+        .execute_dynamic_function_script(authority, ExecutionLimits::default())
+        .expect("dynamic Function Script")
+        .into_function()
+        .expect("run");
+    let cleanup = dynamic_function(&mut context, &[], "return 0;");
+    let baseline = context.runtime_usage();
+
+    let error = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect_err("native throw must not bypass the suspended-frame ceiling");
+
+    assert!(matches!(
+        error,
+        ExecutionError::LimitExceeded {
+            resource: RuntimeResource::Frames,
+            limit: 1,
+            observed: 2,
+        }
+    ));
+    context
+        .call(&cleanup, &[], ExecutionLimits::default())
+        .expect("collection safe point");
+    assert_eq!(context.runtime_usage(), baseline);
+}
+
+#[test]
+fn constructor_source_conversion_charges_new_target_against_the_value_limit() {
+    let authority = dynamic_function_authority(
+        &[],
+        "let first,second,third,fourth;\
+         return new Function({});",
+    );
+    let function_template = ordinary_dynamic_function_template(&authority);
+    let run_values = reserved_frame_values(&authority, function_template);
+    let script_values = reserved_frame_values(&authority, authority.root_id());
+    let limit = run_values.saturating_add(1);
+    assert!(script_values <= limit);
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_active_frame_values(limit))
+            .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context
+        .execute_dynamic_function_script(authority, ExecutionLimits::default())
+        .expect("dynamic Function Script")
+        .into_function()
+        .expect("run");
+    let cleanup = dynamic_function(&mut context, &[], "return 0;");
+    let baseline = context.runtime_usage();
+
+    let error = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect_err("newTarget must count as a suspended heap edge");
+
+    assert!(matches!(
+        error,
+        ExecutionError::LimitExceeded {
+            resource: RuntimeResource::FrameValues,
+            limit: actual_limit,
+            observed,
+        } if actual_limit == limit && observed == run_values + 2
+    ));
+    context
+        .call(&cleanup, &[], ExecutionLimits::default())
+        .expect("collection safe point");
+    assert_eq!(context.runtime_usage(), baseline);
+}
+
+#[test]
+fn primitive_constructor_source_keeps_new_target_charged_in_the_wrapper_frame() {
+    let authority = dynamic_function_authority(&[], "return new Function('return 1;');");
+    let function_template = ordinary_dynamic_function_template(&authority);
+    let run_values = reserved_frame_values(&authority, function_template);
+    let wrapper = dynamic_function_authority(&[], "return 1;");
+    let wrapper_values = reserved_frame_values(&wrapper, wrapper.root_id());
+    let limit = run_values.saturating_add(wrapper_values);
+    assert!(reserved_frame_values(&authority, authority.root_id()) <= limit);
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_active_frame_values(limit))
+            .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context
+        .execute_dynamic_function_script(authority, ExecutionLimits::default())
+        .expect("dynamic Function Script")
+        .into_function()
+        .expect("run");
+    let baseline = context.runtime_usage();
+
+    let error = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect_err("wrapper frame must retain and charge newTarget");
+
+    assert!(matches!(
+        error,
+        ExecutionError::LimitExceeded {
+            resource: RuntimeResource::FrameValues,
+            limit: actual_limit,
+            observed,
+        } if actual_limit == limit && observed == limit + 1
+    ));
+    assert_eq!(context.runtime_usage(), baseline);
 }

@@ -86,6 +86,44 @@ fn facade_call_supplies_the_real_oxc_compiler_to_global_function() {
 }
 
 #[test]
+fn facade_global_function_resumes_object_source_conversion_with_real_oxc() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "let body={\
+                 toString:function bodySource(){return 'return 12;';}\
+             };\
+             return Function(body)();",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("outer dynamic Function")
+    .into_value()
+    .into_function()
+    .expect("outer function");
+
+    let value = call_with_dynamic_function_support(
+        &mut context,
+        &run,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("object source conversion");
+
+    assert!(
+        value
+            .as_number()
+            .expect("live value")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(12))
+    );
+}
+
+#[test]
 fn facade_wrapper_escape_can_invoke_global_function_during_script_execution() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

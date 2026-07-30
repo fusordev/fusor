@@ -360,13 +360,17 @@ the pinned post-completion `newTarget.prototype` adjustment are implemented.
 The realm also owns nonconstructable `Object.prototype.toString`,
 `Object.prototype.valueOf`, and `Function.prototype.toString` natives with
 exact data-property flags; bytecode function stringification returns retained
-verified source. Resumable object/function `ToPrimitive`, primitive boxing,
-configurable accessor replacement, persistent global lexical collision
-checks, and `Function.prototype.call`/`apply`/`bind`/`Symbol.hasInstance` stay
-fail closed. The path never emits `eval`/`apply_eval` and rejects direct eval
-anywhere in generated code. Direct and indirect eval remain wholly
-unimplemented. GeneratorFunction, AsyncFunction, and AsyncGeneratorFunction
-also remain fail closed.
+verified source. Object/function source arguments use an executor-owned
+continuation with one retained slot per input. It performs
+`Symbol.toPrimitive("string")`, then ordinary `toString`/`valueOf`, suspends
+across native or verified-bytecode calls, counts suspended state against
+frame/value ceilings, and resumes without Rust recursion. Primitive boxing,
+accessor-backed lookup, persistent global lexical collision checks, and
+`Function.prototype.call`/`apply`/`bind`/`Symbol.hasInstance` stay fail closed.
+The path never emits `eval`/`apply_eval` and rejects direct eval anywhere in
+generated code. Direct and indirect eval remain wholly unimplemented.
+GeneratorFunction, AsyncFunction, and AsyncGeneratorFunction also remain fail
+closed.
 
 ## Bytecode
 
