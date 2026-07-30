@@ -1,10 +1,10 @@
 use quickjs_bytecode::{
-    CompilerBindingKind, CompilerExecutableKind, CompilerInitializationPolicy, FinalOpcode,
-    FunctionTemplateId, Operands, VerificationLimits,
+    CompilerBindingKind, CompilerClosureBinding, CompilerClosureSource, CompilerExecutableKind,
+    CompilerInitializationPolicy, FinalOpcode, FunctionTemplateId, Operands, VerificationLimits,
 };
 use quickjs_compiler::{
-    CompilationContext, CompiledFunction, CompiledFunctionTree, LeafCompilationError,
-    UnsupportedLeafFeature,
+    CompilationContext, CompiledFunction, CompiledFunctionTree, CompiledRealmGlobalSource,
+    LeafCompilationError, UnsupportedLeafFeature,
 };
 use quickjs_frontend::{
     DynamicFunctionKind, DynamicFunctionSource, FrontendLimits, SourceFragment,
@@ -226,6 +226,166 @@ fn strict_named_wrapper_retains_its_immutable_self_binding() {
 }
 
 #[test]
+fn unresolved_names_lower_through_constructor_realm_global_slots() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new("realmWrite = 1; return realmRead;"),
+    )
+    .expect("constructor-realm global references");
+    let root = tree.root();
+    let wrapper = &tree.functions()[1];
+    let wrapper_opcodes = opcodes(wrapper);
+
+    assert!(root.closure_variables().is_empty());
+    assert!(wrapper.closure_variables().is_empty());
+    assert_eq!(root.realm_globals().len(), 2);
+    assert_eq!(wrapper.realm_globals().len(), 2);
+    assert!(
+        root.realm_globals()
+            .iter()
+            .all(|global| { global.source() == CompiledRealmGlobalSource::ConstructorRealm })
+    );
+    assert_eq!(
+        wrapper
+            .realm_globals()
+            .iter()
+            .map(quickjs_compiler::CompiledRealmGlobal::source)
+            .collect::<Vec<_>>(),
+        [
+            CompiledRealmGlobalSource::ParentClosure(0),
+            CompiledRealmGlobalSource::ParentClosure(1),
+        ]
+    );
+    assert!(
+        tree.verified_bytecode()
+            .root()
+            .metadata()
+            .closures()
+            .iter()
+            .all(|closure| matches!(closure.binding(), CompilerClosureBinding::RealmGlobal(_)))
+    );
+    assert!(
+        tree.verified_bytecode()
+            .root()
+            .metadata()
+            .closures()
+            .iter()
+            .all(|closure| matches!(
+                closure.source(),
+                CompilerClosureSource::ConstructorRealmGlobal(_)
+            ))
+    );
+    assert!(
+        wrapper_opcodes
+            .iter()
+            .any(|(opcode, _)| *opcode == FinalOpcode::PutVar)
+    );
+    assert!(
+        wrapper_opcodes
+            .iter()
+            .any(|(opcode, _)| *opcode == FinalOpcode::GetVar)
+    );
+    assert!(tree.functions().iter().all(|function| {
+        opcodes(function)
+            .iter()
+            .all(|(opcode, _)| !matches!(opcode, FinalOpcode::Eval | FinalOpcode::ApplyEval))
+    }));
+}
+
+#[test]
+fn typeof_an_absent_constructor_realm_name_uses_get_var_undef() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new("return typeof (((absentRealmName)));"),
+    )
+    .expect("typeof unresolved realm global");
+    let wrapper = &tree.functions()[1];
+
+    assert!(
+        opcodes(wrapper).windows(2).any(|pair| {
+            pair[0].0 == FinalOpcode::GetVarUndef && pair[1].0 == FinalOpcode::Typeof
+        })
+    );
+}
+
+#[test]
+fn unresolved_global_mutation_forms_remain_whole_function_verified() {
+    for body in [
+        "realmValue = 1; return realmValue;",
+        "realmValue += 1; return realmValue;",
+        "realmValue ||= 1; return realmValue;",
+        "return realmValue++;",
+        "return ++realmValue;",
+    ] {
+        let tree = compile_dynamic_function(&[], SourceFragment::new(body))
+            .expect("verified constructor-realm global mutation");
+        let wrapper = &tree.functions()[1];
+
+        assert!(
+            opcodes(wrapper)
+                .iter()
+                .any(|(opcode, _)| *opcode == FinalOpcode::PutVar)
+        );
+    }
+}
+
+#[test]
+fn nested_functions_forward_constructor_realm_globals_without_frame_capture() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new("return function nested(){ return realmValue; };"),
+    )
+    .expect("forwarded constructor-realm global");
+
+    assert_eq!(tree.functions().len(), 3);
+    assert_eq!(tree.root().realm_globals().len(), 1);
+    assert_eq!(tree.functions()[1].realm_globals().len(), 1);
+    assert_eq!(tree.functions()[2].realm_globals().len(), 1);
+    assert!(
+        opcodes(&tree.functions()[2])
+            .iter()
+            .any(|(opcode, _)| *opcode == FinalOpcode::GetVar)
+    );
+}
+
+#[test]
+fn realm_globals_follow_frame_captures_in_the_shared_closure_slot_domain() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new(
+            "let captured = 1; return function nested(){ return captured + realmValue; };",
+        ),
+    )
+    .expect("mixed frame capture and constructor-realm global");
+    let wrapper = &tree.functions()[1];
+    let nested = &tree.functions()[2];
+
+    assert!(wrapper.closure_variables().is_empty());
+    assert_eq!(wrapper.realm_globals()[0].slot(), 0);
+    assert_eq!(nested.closure_variables().len(), 1);
+    assert_eq!(nested.realm_globals()[0].slot(), 1);
+    assert_eq!(
+        nested.realm_globals()[0].source(),
+        CompiledRealmGlobalSource::ParentClosure(0)
+    );
+    assert!(opcodes(nested).iter().any(|(opcode, operands)| {
+        *opcode == FinalOpcode::GetVar && *operands == Operands::VarRef(1)
+    }));
+}
+
+#[test]
+fn sloppy_dynamic_function_this_is_compiled_as_a_receiver_read() {
+    let tree = compile_dynamic_function(&[], SourceFragment::new("return this;"))
+        .expect("sloppy dynamic Function this");
+
+    assert!(
+        opcodes(&tree.functions()[1])
+            .iter()
+            .any(|(opcode, _)| *opcode == FinalOpcode::PushThis)
+    );
+}
+
+#[test]
 fn ordinary_tree_entry_cannot_extract_the_wrapper_child() {
     let source = DynamicFunctionSource::new(
         DynamicFunctionKind::Function,
@@ -262,33 +422,13 @@ fn ordinary_tree_entry_cannot_extract_the_wrapper_child() {
 }
 
 #[test]
-fn program_globals_and_unresolved_references_remain_fail_closed() {
+fn escaped_program_global_declarations_remain_fail_closed() {
     let global = compile_dynamic_function(&[], SourceFragment::new("}); var escaped; ({"))
         .expect_err("Program global declaration needs a realm environment");
     assert!(matches!(
         global,
         LeafCompilationError::Unsupported {
             feature: UnsupportedLeafFeature::GlobalEnvironment,
-            ..
-        }
-    ));
-
-    let root_reference = compile_dynamic_function(&[], SourceFragment::new("}), missing, ({"))
-        .expect_err("Program global lookup needs a realm environment");
-    assert!(matches!(
-        root_reference,
-        LeafCompilationError::Unsupported {
-            feature: UnsupportedLeafFeature::UnresolvedReference,
-            ..
-        }
-    ));
-
-    let child_reference = compile_dynamic_function(&[], SourceFragment::new("return missing;"))
-        .expect_err("wrapper global lookup needs a realm environment");
-    assert!(matches!(
-        child_reference,
-        LeafCompilationError::Unsupported {
-            feature: UnsupportedLeafFeature::UnresolvedReference,
             ..
         }
     ));

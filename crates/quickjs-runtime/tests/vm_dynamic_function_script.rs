@@ -15,8 +15,8 @@ use quickjs_frontend::{
     GlobalScriptGoal, SourceFragment, with_dynamic_function_source, with_parsed_program,
 };
 use quickjs_runtime::{
-    DynamicFunctionScriptError, ExecutionLimits, InstallError, JsNumber, Runtime, RuntimeLimits,
-    RuntimeResource, ValueKind,
+    DynamicFunctionScriptError, ExceptionKind, ExecutionError, ExecutionLimits, InstallError,
+    JsNumber, Runtime, RuntimeLimits, RuntimeResource, ValueKind,
 };
 
 fn compile_dynamic(body: &str) -> Arc<VerifiedBytecode> {
@@ -335,6 +335,204 @@ fn script_receiver_is_the_constructor_realm_global_object() {
 }
 
 #[test]
+fn sloppy_dynamic_function_direct_call_uses_the_constructor_realm_global_object() {
+    let authority = compile_dynamic("return this;");
+    let mut runtime = runtime(RuntimeLimits::default());
+    let constructor_realm = runtime.create_realm().expect("constructor realm");
+    let caller_realm = runtime.create_realm().expect("caller realm");
+    let (function, constructor_global) = {
+        let mut context = runtime
+            .context(&constructor_realm)
+            .expect("constructor context");
+        let function = context
+            .execute_dynamic_function_script(authority, ExecutionLimits::default())
+            .expect("dynamic Function Script")
+            .into_function()
+            .expect("ordinary dynamic function");
+        let global = context
+            .execute_dynamic_function_script(
+                dynamic_push_this_authority(),
+                ExecutionLimits::default(),
+            )
+            .expect("constructor-realm global")
+            .into_object()
+            .expect("global object");
+        (function, global)
+    };
+    let mut context = runtime.context(&caller_realm).expect("caller context");
+    let receiver = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("cross-realm direct sloppy call")
+        .into_object()
+        .expect("constructor-realm global receiver");
+    let caller_global = context
+        .execute_dynamic_function_script(dynamic_push_this_authority(), ExecutionLimits::default())
+        .expect("caller-realm global")
+        .into_object()
+        .expect("caller global object");
+
+    assert!(
+        receiver
+            .same_identity(&constructor_global)
+            .expect("same constructor realm")
+    );
+    assert!(
+        !receiver
+            .same_identity(&caller_global)
+            .expect("distinct realms")
+    );
+}
+
+#[test]
+fn unresolved_dynamic_function_globals_are_property_backed_and_realm_local() {
+    let setter_authority = compile_dynamic("realmMarker = 41; return this.realmMarker;");
+    let getter_authority = compile_dynamic("return realmMarker;");
+    let mut runtime = runtime(RuntimeLimits::default());
+    let first_realm = runtime.create_realm().expect("first realm");
+    let second_realm = runtime.create_realm().expect("second realm");
+
+    let first_getter = {
+        let mut context = runtime.context(&first_realm).expect("first context");
+        let setter = context
+            .execute_dynamic_function_script(setter_authority, ExecutionLimits::default())
+            .expect("setter Script")
+            .into_function()
+            .expect("setter function");
+        let value = context
+            .call(&setter, &[], ExecutionLimits::default())
+            .expect("sloppy global write");
+        assert_eq!(
+            value
+                .as_number()
+                .expect("live result")
+                .map(JsNumber::as_f64),
+            Some(41.0)
+        );
+
+        let getter = context
+            .execute_dynamic_function_script(
+                Arc::clone(&getter_authority),
+                ExecutionLimits::default(),
+            )
+            .expect("getter Script")
+            .into_function()
+            .expect("getter function");
+        let value = context
+            .call(&getter, &[], ExecutionLimits::default())
+            .expect("same-realm global read");
+        assert_eq!(
+            value
+                .as_number()
+                .expect("live result")
+                .map(JsNumber::as_f64),
+            Some(41.0)
+        );
+        getter
+    };
+
+    let mut context = runtime.context(&second_realm).expect("second context");
+    let value = context
+        .call(&first_getter, &[], ExecutionLimits::default())
+        .expect("constructor-realm global read from another context");
+    assert_eq!(
+        value
+            .as_number()
+            .expect("live result")
+            .map(JsNumber::as_f64),
+        Some(41.0)
+    );
+    let getter = context
+        .execute_dynamic_function_script(getter_authority, ExecutionLimits::default())
+        .expect("second-realm getter Script")
+        .into_function()
+        .expect("second-realm getter");
+    let error = context
+        .call(&getter, &[], ExecutionLimits::default())
+        .expect_err("another realm has no marker");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("expected JavaScript exception");
+    };
+    assert_eq!(exception.kind(), Some(ExceptionKind::ReferenceError));
+    assert_eq!(
+        exception.to_string(),
+        "ReferenceError: 'realmMarker' is not defined"
+    );
+}
+
+#[test]
+fn typeof_an_absent_dynamic_function_global_returns_undefined() {
+    let authority = compile_dynamic("return typeof realmMissing;");
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context
+        .execute_dynamic_function_script(authority, ExecutionLimits::default())
+        .expect("dynamic Function Script")
+        .into_function()
+        .expect("ordinary dynamic function");
+
+    let value = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("typeof absent global");
+    assert_eq!(
+        value
+            .as_string()
+            .expect("live result")
+            .expect("String result")
+            .to_utf8_lossy()
+            .expect("UTF-8 result"),
+        "undefined"
+    );
+}
+
+#[test]
+fn reading_an_absent_dynamic_function_global_throws_exact_reference_error() {
+    let authority = compile_dynamic("return realmMissing;");
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context
+        .execute_dynamic_function_script(authority, ExecutionLimits::default())
+        .expect("dynamic Function Script")
+        .into_function()
+        .expect("ordinary dynamic function");
+
+    let error = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect_err("absent global");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("expected JavaScript exception");
+    };
+    assert_eq!(exception.kind(), Some(ExceptionKind::ReferenceError));
+    assert_eq!(
+        exception.to_string(),
+        "ReferenceError: 'realmMissing' is not defined"
+    );
+}
+
+#[test]
+fn realm_global_binding_limit_rejects_dynamic_installation_atomically() {
+    let authority = compile_dynamic("return realmMarker;");
+    let mut runtime = runtime(RuntimeLimits::default().with_max_realm_global_bindings(0));
+    let realm = runtime.create_realm().expect("realm");
+    let baseline = runtime.usage();
+    let mut context = runtime.context(&realm).expect("context");
+
+    let error = context
+        .execute_dynamic_function_script(authority, ExecutionLimits::default())
+        .expect_err("realm global binding limit");
+    assert!(matches!(
+        error,
+        DynamicFunctionScriptError::Install(InstallError::LimitExceeded {
+            resource: RuntimeResource::RealmGlobalBindings,
+            limit: 0,
+            observed: 1,
+        })
+    ));
+    assert_eq!(context.runtime_usage(), baseline);
+}
+
+#[test]
 fn public_root_failure_does_not_retain_the_internal_script_root() {
     let authority = compile_dynamic("return 1;");
     let mut runtime = runtime(RuntimeLimits::default().with_max_public_roots(0));
@@ -348,7 +546,7 @@ fn public_root_failure_does_not_retain_the_internal_script_root() {
 
         assert!(matches!(
             error,
-            DynamicFunctionScriptError::Execution(quickjs_runtime::ExecutionError::LimitExceeded {
+            DynamicFunctionScriptError::Execution(ExecutionError::LimitExceeded {
                 resource: RuntimeResource::PublicRoots,
                 limit: 0,
                 observed: 1,

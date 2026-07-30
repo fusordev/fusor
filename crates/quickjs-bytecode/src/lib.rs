@@ -71,11 +71,12 @@ pub use function::{
 pub use verified_bytecode::{
     BindingPolicyViolationReason, BindingSlot, BytecodeGraphResource, BytecodeGraphUsage,
     BytecodeGraphVerificationLimits, BytecodeVerificationError, BytecodeVerificationErrorKind,
-    ClosureVariableDefinition, CompilerBindingKind, CompilerBindingPolicy, CompilerExecutableKind,
-    CompilerInitializationPolicy, CompilerSource, CompilerWritePolicy, ExecutionRequirement,
-    MetadataAtomField, PcSourceSpan, ScopeLink, SourceByteSpan, UnverifiedCompilerBytecodeGraph,
-    UnverifiedFunctionMetadata, VariableDefinition, VerifiedBytecode, VerifiedBytecodeFunction,
-    VerifiedCompilerSource, VerifiedFunctionMetadata, verify_compiler_bytecode_graph,
+    ClosureVariableDefinition, CompilerBindingKind, CompilerBindingPolicy, CompilerClosureBinding,
+    CompilerExecutableKind, CompilerInitializationPolicy, CompilerSource, CompilerWritePolicy,
+    ExecutionRequirement, MetadataAtomField, PcSourceSpan, ScopeLink, SourceByteSpan,
+    UnverifiedCompilerBytecodeGraph, UnverifiedFunctionMetadata, VariableDefinition,
+    VerifiedBytecode, VerifiedBytecodeFunction, VerifiedCompilerSource, VerifiedFunctionMetadata,
+    verify_compiler_bytecode_graph,
 };
 pub use verifier::{
     CompilerCaptureLayout, CompilerCapturedBinding, CompilerConstantKind, CompilerConstantLayout,

@@ -282,9 +282,10 @@ local layout, exact atom and heterogeneous constant pools, normalized capture
 descriptors, source table, and staged/final certificates in immutable `Arc`
 storage after the Oxc arena is dropped. Lowering accepts only an opaque
 executable selection issued by that context. A same-index selection from
-another context is rejected. Unsupported bodies, unresolved names,
-global/module references requiring atom-backed operations, and
-async/generator functions fail before byte emission.
+another context is rejected. The dedicated dynamic-Function authority lowers
+unresolved names through verified constructor-realm slots; ordinary
+non-dynamic bodies, global/module references outside that typed path, and
+async/generator functions still fail before byte emission.
 
 Every successful unit also owns a `ModuleSyntaxRecord` for the module data that
 must survive the Oxc allocator. Static requests remain in source occurrence
@@ -321,16 +322,28 @@ function expression, so wrapper escape remains observable. Named `anonymous`
 self bindings are metadata-initialized to the returned function, including
 when captured by a nested closure.
 
-This first slice deliberately rejects Program global declarations, unresolved
-constructor-realm names, and sloppy ordinary-function `this`; the realm global
-object is currently only the Script receiver. Global declaration
-instantiation and global name lookup must land before the host entry becomes
-the global `Function` call/constructor builtin. `new Function` additionally
-needs the pinned post-completion `new_target.prototype` adjustment. The path is
-not eval, never emits `eval`/`apply_eval`, and continues to reject direct eval
-anywhere in generated code. Direct and indirect eval remain wholly
-unimplemented. GeneratorFunction, AsyncFunction, and AsyncGeneratorFunction
-also remain fail closed.
+Unresolved names are compiled as explicit closure-domain slots whose root
+source is the constructor realm rather than a caller capture. Descendants
+forward those slots through verified parent-closure edges. Runtime lookup and
+write observe the installed code's realm even when another realm initiates
+the call; absent strict reads and writes throw exact `ReferenceError`s,
+`typeof` uses the non-throwing form, and sloppy assignment creates a global
+object property. Sloppy dynamic-function `this` is normalized lazily at
+`PushThis`: objects are preserved and nullish receivers use the installed
+constructor realm's global object. Primitive boxing remains fail closed until
+the primitive wrapper object model lands.
+
+Program declarations still fail closed. This boundary matters for wrapper
+escape: indirect-eval `var` is a configurable global-object declaration,
+whereas escaped `let` and `const` are evaluation-local cells that may be
+captured by an escaping child but are not persistent realm globals. Those
+declaration paths, JavaScript argument `ToString`, the global `Function`
+call/constructor builtin, and the pinned post-completion
+`new_target.prototype` adjustment remain pending. The path is not eval, never
+emits `eval`/`apply_eval`, and continues to reject direct eval anywhere in
+generated code. Direct and indirect eval remain wholly unimplemented.
+GeneratorFunction, AsyncFunction, and AsyncGeneratorFunction also remain fail
+closed.
 
 ## Bytecode
 
@@ -399,15 +412,17 @@ across ordinary objects and function objects. Missing reads produce
 `TypeError`s; sloppy primitive writes are ignored. A method call preserves a
 static member reference through parentheses, evaluates lookup before
 arguments, and passes its base as the raw receiver; a sequence expression
-deliberately yields an unbound value. `PushThis` is admitted only in strict
-functions, while direct calls pass `undefined`. Calls fill missing formals
-with `undefined` and share aggregate frame limits and instruction fuel. An
+deliberately yields an unbound value. Outside a verified dynamic-Function
+authority, `PushThis` is admitted only in strict functions. Dynamic sloppy
+functions normalize it lazily against their installed realm; direct calls
+still pass raw `undefined`. Calls fill missing formals with `undefined` and
+share aggregate frame limits and instruction fuel. An
 escaping throw carries its exact JavaScript value through the same frame
 vector, allocates caller provenance before publishing any heap root, and
 preserves caller order from immediate to outermost. Computed properties,
 accessors, object-method syntax, prototype mutation, proxies and exotics,
-constructors, optional/spread/apply/tail calls, sloppy-`this` normalization,
-BigInt, coercive numeric operations, dynamic operators, serialized input,
+constructors, optional/spread/apply/tail calls, general sloppy-`this` primitive
+boxing, BigInt, coercive numeric operations, dynamic operators, serialized input,
 non-string atom namespaces, raw function slots, catch handlers, finally
 return addresses, iterator markers, and packed exceptional stack values
 remain fail closed.

@@ -30,8 +30,10 @@ deferred and fail closed. The `quickjs` facade now exposes a first internal
 ordinary dynamic-Function pipeline for already-coerced source fragments: it
 retains the exact wrapper/map, compiles the complete generated Script, executes
 only whole-graph `VerifiedBytecode` with a constructor-realm global receiver,
-and returns the exact Script completion. Program globals, unresolved
-constructor-realm lookups, sloppy-function `this`, the global `Function`
+and returns the exact Script completion. Unresolved names use typed
+constructor-realm lookup/write slots, and sloppy dynamic functions normalize
+`this` lazily against their installed constructor realm. Escaped Program
+declarations, JavaScript argument-to-source coercion, the global `Function`
 object, and `new.target` prototype adjustment remain pending and fail closed.
 No dynamic-Function path uses eval or captures a caller lexical frame.
 

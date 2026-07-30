@@ -16,7 +16,9 @@ use std::{
     sync::Arc,
 };
 
-use crate::{CompilerAtom, CompilerConstantKind, CompilerString, VerifiedControlFlow};
+use crate::{
+    AtomPoolIndex, CompilerAtom, CompilerConstantKind, CompilerString, VerifiedControlFlow,
+};
 
 /// Provisional maximum number of compiler function templates in one graph.
 pub const MAX_FUNCTION_GRAPH_TEMPLATES: u32 = 65_535;
@@ -137,16 +139,20 @@ impl CompilerConstant {
     }
 }
 
-/// One normalized source for a child function's imported closure cell.
+/// One normalized source for a function's closure-domain slot.
 ///
-/// These are the two non-global domains needed by the current compiler.
 /// Parent-owned cells and the parent's imported environment remain distinct.
+/// A constructor-realm global source is permitted only on the graph root; a
+/// descendant forwards that realm-owned slot through [`Self::ParentClosure`].
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CompilerClosureSource {
     /// Dense variable-reference cell owned by the parent activation.
     ParentVariableReference(u32),
     /// Dense imported-closure slot on the parent function object.
     ParentClosure(u32),
+    /// Function-local atom naming either an unresolved lookup or a
+    /// configurable indirect-eval `var` in the constructor realm.
+    ConstructorRealmGlobal(AtomPoolIndex),
 }
 
 impl fmt::Display for CompilerClosureSource {
@@ -156,6 +162,9 @@ impl fmt::Display for CompilerClosureSource {
                 write!(formatter, "parent variable-reference {index}")
             }
             Self::ParentClosure(index) => write!(formatter, "parent closure {index}"),
+            Self::ConstructorRealmGlobal(atom) => {
+                write!(formatter, "constructor-realm global atom {}", atom.get())
+            }
         }
     }
 }
@@ -791,6 +800,22 @@ pub enum FunctionGraphVerificationErrorKind {
         /// Supplied graph entries.
         entries: u64,
     },
+    /// A constructor-realm global closure source names an atom outside the
+    /// function-local pool.
+    ClosureSourceAtomOutOfBounds {
+        /// Closure-domain slot containing the source.
+        closure: u32,
+        /// Rejected function-local atom.
+        atom: AtomPoolIndex,
+        /// Function-local atom count.
+        atoms: u32,
+    },
+    /// A non-root function tries to originate a constructor-realm global
+    /// source instead of forwarding the root-owned slot.
+    ConstructorRealmGlobalSourceNotRoot {
+        /// Closure-domain slot containing the source.
+        closure: u32,
+    },
     /// A compiler function imports the same immediate-parent cell twice.
     DuplicateClosureSource {
         /// First child closure slot using the source.
@@ -911,6 +936,19 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
                 formatter,
                 "actual closure-source count {entries} does not equal body domain {declared}"
             ),
+            Self::ClosureSourceAtomOutOfBounds {
+                closure,
+                atom,
+                atoms,
+            } => write!(
+                formatter,
+                "closure slot {closure} names constructor-realm global atom {} outside atom count {atoms}",
+                atom.get()
+            ),
+            Self::ConstructorRealmGlobalSourceNotRoot { closure } => write!(
+                formatter,
+                "non-root closure slot {closure} originates a constructor-realm global source"
+            ),
             Self::DuplicateClosureSource {
                 first,
                 duplicate,
@@ -1000,18 +1038,7 @@ pub fn verify_compiler_function_graph(
     )?;
 
     validate_function_records(&functions)?;
-    let root_closure_variables = functions[root_index]
-        .control_flow
-        .domains()
-        .closure_var_count();
-    if root_closure_variables != 0 {
-        return Err(FunctionGraphVerificationError::at_function(
-            root,
-            FunctionGraphVerificationErrorKind::RootRequiresEnvironment {
-                closure_variables: root_closure_variables,
-            },
-        ));
-    }
+    validate_root_closure_sources(root, root_index, &functions)?;
     let topological_order = build_topological_order(&functions, root)?;
     debug_assert_eq!(topological_order.len(), functions.len());
     let max_nesting_depth =
@@ -1111,6 +1138,7 @@ fn validate_function_records(
         if let Some(atoms) = &function.atoms {
             validate_atoms(id, atoms)?;
         }
+        validate_realm_global_source_atoms(id, &function.closure_sources, domains.atom_pool_len())?;
         validate_unique_closure_sources(id, &function.closure_sources)?;
         for (constant_index, (constant, declared)) in function
             .constants
@@ -1135,6 +1163,68 @@ fn validate_function_records(
         }
     }
     Ok(())
+}
+
+fn validate_realm_global_source_atoms(
+    function: FunctionTemplateId,
+    sources: &[CompilerClosureSource],
+    atom_count: u32,
+) -> Result<(), FunctionGraphVerificationError> {
+    for (closure, &source) in sources.iter().enumerate() {
+        let CompilerClosureSource::ConstructorRealmGlobal(atom) = source else {
+            continue;
+        };
+        if atom.get() >= atom_count {
+            return Err(FunctionGraphVerificationError::at_function(
+                function,
+                FunctionGraphVerificationErrorKind::ClosureSourceAtomOutOfBounds {
+                    closure: usize_to_u32(closure),
+                    atom,
+                    atoms: atom_count,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_root_closure_sources(
+    root: FunctionTemplateId,
+    root_index: usize,
+    functions: &[UnverifiedCompilerFunction],
+) -> Result<(), FunctionGraphVerificationError> {
+    for (index, function) in functions.iter().enumerate() {
+        if index == root_index {
+            continue;
+        }
+        if let Some(closure) = function
+            .closure_sources
+            .iter()
+            .position(|source| matches!(source, CompilerClosureSource::ConstructorRealmGlobal(_)))
+        {
+            return Err(FunctionGraphVerificationError::at_function(
+                function_id(index)?,
+                FunctionGraphVerificationErrorKind::ConstructorRealmGlobalSourceNotRoot {
+                    closure: usize_to_u32(closure),
+                },
+            ));
+        }
+    }
+
+    let root_function = &functions[root_index];
+    if root_function
+        .closure_sources
+        .iter()
+        .all(|source| matches!(source, CompilerClosureSource::ConstructorRealmGlobal(_)))
+    {
+        return Ok(());
+    }
+    Err(FunctionGraphVerificationError::at_function(
+        root,
+        FunctionGraphVerificationErrorKind::RootRequiresEnvironment {
+            closure_variables: root_function.control_flow.domains().closure_var_count(),
+        },
+    ))
 }
 
 fn preflight_graph_usage(
@@ -1340,18 +1430,20 @@ fn validate_closure_edges(
                 parent_id,
             )?;
             for (closure_index, &source) in child.closure_sources.iter().enumerate() {
-                let len = match source {
-                    CompilerClosureSource::ParentVariableReference(_) => parent
-                        .control_flow
-                        .function_header()
-                        .variable_reference_count(),
-                    CompilerClosureSource::ParentClosure(_) => {
-                        parent.control_flow.domains().closure_var_count()
+                let (source_index, len) = match source {
+                    CompilerClosureSource::ParentVariableReference(index) => (
+                        index,
+                        parent
+                            .control_flow
+                            .function_header()
+                            .variable_reference_count(),
+                    ),
+                    CompilerClosureSource::ParentClosure(index) => {
+                        (index, parent.control_flow.domains().closure_var_count())
                     }
-                };
-                let source_index = match source {
-                    CompilerClosureSource::ParentVariableReference(index)
-                    | CompilerClosureSource::ParentClosure(index) => index,
+                    CompilerClosureSource::ConstructorRealmGlobal(_) => {
+                        continue;
+                    }
                 };
                 if source_index >= len {
                     return Err(FunctionGraphVerificationError::at_function(

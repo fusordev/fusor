@@ -80,7 +80,8 @@ impl ResolvedReferenceId {
 /// Source-unit kind accepted by this storage-planning slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompilationUnitKind {
-    /// A host-loaded Script, including an asynchronous global Script.
+    /// A Script root, including host-loaded global Script and the internal
+    /// ordinary dynamic-Function wrapper Script.
     Script,
     /// An ECMAScript Module.
     Module,
@@ -190,11 +191,12 @@ pub enum StoragePlacement {
         /// Zero-based source parameter position.
         parameter_index: u32,
     },
-    /// Executable-local storage, including nested lexical blocks.
+    /// Executable-local storage, including nested lexical blocks and
+    /// evaluation-local dynamic-Function Script lexicals.
     Local,
     /// A property-backed global Script declaration.
     GlobalObject,
-    /// A global Script declarative-environment binding.
+    /// A host global Script declarative-environment binding.
     GlobalLexical,
     /// A module-owned declaration cell.
     ModuleLocal,
@@ -1377,6 +1379,12 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         }
         match self.kind {
             CompilationUnitKind::Script => match kind {
+                DeclarationKind::Let | DeclarationKind::Const
+                    if self.unit.goal()
+                        == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) =>
+                {
+                    Ok(StoragePlacement::Local)
+                }
                 DeclarationKind::Let | DeclarationKind::Const => {
                     Ok(StoragePlacement::GlobalLexical)
                 }

@@ -309,10 +309,17 @@ A milestone is complete only when all of its checked items pass in CI.
           constructor-realm global receiver, exact completion publication,
           and failure-safe internal-root retirement. Preserve wrapper escape
           and reject direct eval and all nonordinary constructor families.
-    - [ ] Add realm-global declaration instantiation and unresolved-name
-          lookup, sloppy-function `this` normalization, ordered JavaScript
-          `ToString` argument conversion, the global `Function` call/construct
-          object, and `new_target.prototype` post-processing.
+    - [x] Add typed unresolved-name lookup and write slots rooted in the
+          constructor realm, iterative propagation through nested functions,
+          exact missing-name and `typeof` behavior, cross-realm ownership,
+          and lazy sloppy dynamic-function `this` normalization without caller
+          capture. Keep primitive receiver boxing fail closed.
+    - [ ] Add escaped Program declaration instantiation: indirect-eval `var`
+          and function declarations are configurable global-object bindings,
+          while `let` and `const` are evaluation-local cells capturable by an
+          escaping child. Then add ordered JavaScript `ToString` argument
+          conversion, the global `Function` call/construct object, and
+          `new_target.prototype` post-processing.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
       stack traces, iterators, and generators.
   - [x] First escaping exception path: local/captured TDZ access returns a

@@ -137,6 +137,8 @@ pub enum RuntimeResource {
     ObjectProperties,
     /// Captured binding cells.
     BindingCells,
+    /// Constructor-realm global binding records.
+    RealmGlobalBindings,
     /// Independently rooted public function and ordinary-object values.
     PublicRoots,
     /// Values retained by one active frame.
@@ -163,6 +165,7 @@ impl fmt::Display for RuntimeResource {
             Self::HeapObjects => "heap objects",
             Self::ObjectProperties => "object properties",
             Self::BindingCells => "binding cells",
+            Self::RealmGlobalBindings => "realm global bindings",
             Self::PublicRoots => "public roots",
             Self::FrameValues => "active frame values",
             Self::Frames => "active frames",

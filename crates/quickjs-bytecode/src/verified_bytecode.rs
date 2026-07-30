@@ -15,7 +15,7 @@ use std::{
 use crate::{
     AtomPoolIndex, BytecodePc, CompilerClosureSource, FinalOpcode, FunctionKind,
     FunctionTemplateId, Operands, VerifiedCompilerFunction, VerifiedCompilerFunctionGraph,
-    VerifiedControlFlow,
+    VerifiedControlFlow, VerifiedInstruction,
     verifier::{CompilerCapturedBinding, InstructionIndex},
 };
 
@@ -43,6 +43,9 @@ pub enum CompilerBindingKind {
     FunctionName,
     /// A catch-clause parameter.
     Catch,
+    /// An unresolved name looked up in the constructor realm's global
+    /// environment each time a global opcode executes.
+    GlobalReference,
 }
 
 /// When a compiler binding receives its first language-visible value.
@@ -62,6 +65,9 @@ pub enum CompilerInitializationPolicy {
     FunctionName,
     /// Initialized when a catch clause is entered.
     Catch,
+    /// Resolved against the constructor realm rather than initialized in a
+    /// function frame.
+    ConstructorRealmLookup,
 }
 
 /// Assignment behavior after a compiler binding is initialized.
@@ -181,11 +187,18 @@ impl CompilerBindingPolicy {
                 ) && !self.temporal_dead_zone
             }
             CompilerBindingKind::Catch => false,
+            CompilerBindingKind::GlobalReference => {
+                matches!(
+                    self.initialization,
+                    CompilerInitializationPolicy::ConstructorRealmLookup
+                ) && matches!(self.writes, CompilerWritePolicy::Mutable)
+                    && !self.temporal_dead_zone
+            }
         }
     }
 
     const fn is_valid_for_function(self, strict: bool) -> bool {
-        if !self.is_valid() {
+        if !self.is_valid() || matches!(self.kind, CompilerBindingKind::GlobalReference) {
             return false;
         }
         match self.kind {
@@ -288,6 +301,38 @@ impl VariableDefinition {
     }
 }
 
+/// Storage origin retained for one closure-domain slot.
+///
+/// Realm-global bindings use the same final closure-slot operand domain as
+/// captured cells, matching the pinned `QuickJS` opcode contract, but remain
+/// explicitly typed so installation and execution never infer their origin
+/// from a declaration policy.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CompilerClosureBinding {
+    /// A cell imported from an enclosing function activation.
+    Captured(CompilerBindingPolicy),
+    /// An unresolved lookup or configurable indirect-eval `var` owned by the
+    /// constructor realm. Evaluation-local lexical declarations never use
+    /// this origin.
+    RealmGlobal(CompilerBindingPolicy),
+}
+
+impl CompilerClosureBinding {
+    /// Returns the declaration or lookup policy carried by the slot.
+    #[must_use]
+    pub const fn policy(self) -> CompilerBindingPolicy {
+        match self {
+            Self::Captured(policy) | Self::RealmGlobal(policy) => policy,
+        }
+    }
+
+    /// Returns whether this slot belongs to the constructor realm.
+    #[must_use]
+    pub const fn is_realm_global(self) -> bool {
+        matches!(self, Self::RealmGlobal(_))
+    }
+}
+
 /// One ordered imported closure compiler-metadata record.
 ///
 /// Public construction is unverified; the same record is exposed through
@@ -295,7 +340,7 @@ impl VariableDefinition {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ClosureVariableDefinition {
     name: Option<AtomPoolIndex>,
-    policy: CompilerBindingPolicy,
+    binding: CompilerClosureBinding,
     source: CompilerClosureSource,
 }
 
@@ -309,7 +354,22 @@ impl ClosureVariableDefinition {
     ) -> Self {
         Self {
             name,
-            policy,
+            binding: CompilerClosureBinding::Captured(policy),
+            source,
+        }
+    }
+
+    /// Creates an unverified constructor-realm unresolved-name or
+    /// indirect-eval `var` descriptor.
+    #[must_use]
+    pub const fn realm_global(
+        name: Option<AtomPoolIndex>,
+        policy: CompilerBindingPolicy,
+        source: CompilerClosureSource,
+    ) -> Self {
+        Self {
+            name,
+            binding: CompilerClosureBinding::RealmGlobal(policy),
             source,
         }
     }
@@ -323,7 +383,13 @@ impl ClosureVariableDefinition {
     /// Returns the declaration policy inherited from the original binding.
     #[must_use]
     pub const fn policy(&self) -> CompilerBindingPolicy {
-        self.policy
+        self.binding.policy()
+    }
+
+    /// Returns the verified storage origin and its declaration policy.
+    #[must_use]
+    pub const fn binding(&self) -> CompilerClosureBinding {
+        self.binding
     }
 
     /// Returns the immediate-parent closure source.
@@ -616,6 +682,8 @@ pub enum ExecutionRequirement {
     AbruptCompletions,
     /// Lexical initialization, TDZ, or captured scoped locals.
     LexicalBindings,
+    /// Constructor-realm unresolved lookup or indirect-eval `var` bindings.
+    RealmGlobalBindings,
     /// `in` or `instanceof` object semantics.
     ObjectOperators,
     /// Full dynamic coercion and mixed-type operator semantics.
@@ -1057,6 +1125,30 @@ pub enum BytecodeVerificationErrorKind {
     /// A dynamic-Function Script record carries function-name metadata or a
     /// named-function self binding.
     DynamicFunctionScriptHasFunctionName,
+    /// A constructor-realm global source appears outside a dynamic-Function
+    /// Script authority root.
+    ConstructorRealmGlobalSourceRequiresDynamicFunctionScript {
+        /// Closure-domain slot containing the source.
+        closure: u32,
+    },
+    /// A global opcode targets a captured slot, or a captured-cell opcode
+    /// targets a realm-global slot.
+    ClosureBindingOpcodeMismatch {
+        /// Affected closure-domain slot.
+        closure: u32,
+        /// Final bytecode position.
+        pc: BytecodePc,
+        /// Rejected opcode.
+        opcode: FinalOpcode,
+    },
+    /// `delete_var` names no unresolved realm-global reference declared by
+    /// this function's verified closure metadata.
+    RealmGlobalDeleteBindingMissing {
+        /// Final bytecode position.
+        pc: BytecodePc,
+        /// Function-local atom named by `delete_var`.
+        atom: AtomPoolIndex,
+    },
     /// Function flags or mode are outside the selected compiler profile.
     UnsupportedFunctionHeader,
     /// Source-defined arguments do not equal simple parameter positions.
@@ -1278,6 +1370,23 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::DynamicFunctionScriptHasFunctionName => formatter.write_str(
                 "dynamic-Function Script carries function-name metadata or a self binding",
             ),
+            Self::ConstructorRealmGlobalSourceRequiresDynamicFunctionScript { closure } => write!(
+                formatter,
+                "closure slot {closure} originates a constructor-realm global outside a dynamic-Function Script root"
+            ),
+            Self::ClosureBindingOpcodeMismatch {
+                closure,
+                pc,
+                opcode,
+            } => write!(
+                formatter,
+                "opcode {opcode} at PC {pc} is incompatible with closure slot {closure}'s storage origin"
+            ),
+            Self::RealmGlobalDeleteBindingMissing { pc, atom } => write!(
+                formatter,
+                "delete_var at PC {pc} names atom {} without a verified unresolved realm-global binding",
+                atom.get()
+            ),
             Self::UnsupportedFunctionHeader => {
                 formatter.write_str("function header is outside its compiler executable profile")
             }
@@ -1456,17 +1565,43 @@ pub fn verify_compiler_bytecode_graph(
         })
     })?;
     let mut requirements = Vec::new();
-    requirements.try_reserve_exact(11).map_err(|_| {
+    requirements.try_reserve_exact(12).map_err(|_| {
         BytecodeVerificationError::graph(BytecodeVerificationErrorKind::AllocationFailed {
             resource: BytecodeGraphResource::VerifiedMetadata,
-            requested: 11,
+            requested: 12,
         })
     })?;
     requirements.push(ExecutionRequirement::CoreValues);
+    let root_index = usize::try_from(graph.root_id().get()).map_err(|_| {
+        BytecodeVerificationError::graph(BytecodeVerificationErrorKind::LimitExceeded {
+            resource: BytecodeGraphResource::VerifiedMetadata,
+            limit: u64::from(u32::MAX),
+            observed: u64::from(graph.root_id().get()),
+        })
+    })?;
+    let authority_kind = metadata
+        .get(root_index)
+        .ok_or_else(|| {
+            BytecodeVerificationError::graph(
+                BytecodeVerificationErrorKind::FunctionMetadataCountMismatch {
+                    functions: usize_to_u64(function_count),
+                    metadata: usize_to_u64(metadata.len()),
+                },
+            )
+        })?
+        .executable_kind;
 
     for (index, (function, metadata)) in graph.functions().iter().zip(metadata.iter()).enumerate() {
         let id = function_id(index)?;
-        let record = verify_function_metadata(id, &graph, function, metadata, limits, &mut usage)?;
+        let record = verify_function_metadata(
+            id,
+            &graph,
+            function,
+            metadata,
+            authority_kind,
+            limits,
+            &mut usage,
+        )?;
         collect_requirements(function, &record, &mut requirements);
         verified.push(record);
     }
@@ -1526,13 +1661,13 @@ fn preflight_usage(
             limits.max_source_mappings,
             BytecodeGraphResource::SourceMappings,
         )?;
-        let tracked = metadata
+        let frame_tracked = metadata
             .variables
             .iter()
             .filter(|definition| requires_binding_state(definition))
             .count();
         let state_entries = usize_to_u64(function.control_flow().instructions().len())
-            .checked_mul(usize_to_u64(tracked))
+            .checked_mul(usize_to_u64(frame_tracked))
             .ok_or_else(|| {
                 BytecodeVerificationError::graph(BytecodeVerificationErrorKind::LimitExceeded {
                     resource: BytecodeGraphResource::FrameStateEntries,
@@ -1681,6 +1816,7 @@ fn verify_function_metadata(
     graph: &VerifiedCompilerFunctionGraph,
     function: &VerifiedCompilerFunction,
     metadata: &UnverifiedFunctionMetadata,
+    authority_kind: CompilerExecutableKind,
     limits: BytecodeGraphVerificationLimits,
     usage: &mut BytecodeGraphUsage,
 ) -> Result<VerifiedFunctionMetadata, BytecodeVerificationError> {
@@ -1725,28 +1861,31 @@ fn verify_function_metadata(
     )?;
     verify_variables(id, function, &metadata.variables)?;
     let initializer_sites = verify_function_initializers(id, function, &metadata.variables)?;
-    verify_closures(id, function, &metadata.closures)?;
+    verify_closures(
+        id,
+        graph.root_id(),
+        authority_kind,
+        function,
+        &metadata.closures,
+    )?;
     verify_source(id, flow, metadata)?;
-    verify_supported_opcodes(id, flow, metadata.executable_kind)?;
+    verify_supported_opcodes(id, flow, metadata.executable_kind, authority_kind)?;
     verify_binding_opcodes(id, flow, &metadata.variables, &metadata.closures)?;
-    usage.policy_transfers = usage
-        .policy_transfers
-        .checked_add(verify_binding_states(
-            id,
-            graph,
-            function,
-            &metadata.variables,
-            &initializer_sites,
-            usage.policy_transfers,
-            limits.max_policy_transfers,
-        )?)
-        .ok_or_else(|| {
-            BytecodeVerificationError::graph(BytecodeVerificationErrorKind::LimitExceeded {
-                resource: BytecodeGraphResource::PolicyTransfers,
-                limit: limits.max_policy_transfers,
-                observed: u64::MAX,
-            })
-        })?;
+    let binding_transfers = verify_binding_states(
+        id,
+        graph,
+        function,
+        &metadata.variables,
+        &initializer_sites,
+        usage.policy_transfers,
+        limits.max_policy_transfers,
+    )?;
+    charge(
+        &mut usage.policy_transfers,
+        binding_transfers,
+        limits.max_policy_transfers,
+        BytecodeGraphResource::PolicyTransfers,
+    )?;
     Ok(VerifiedFunctionMetadata {
         executable_kind: metadata.executable_kind,
         function_name: metadata.function_name,
@@ -1780,7 +1919,7 @@ fn verify_executable_kind(
                 metadata.variables.iter().any(|definition| {
                     definition.policy.kind() == CompilerBindingKind::FunctionName
                 }) || metadata.closures.iter().any(|definition| {
-                    definition.policy.kind() == CompilerBindingKind::FunctionName
+                    definition.policy().kind() == CompilerBindingKind::FunctionName
                 });
             if metadata.function_name.is_some() || has_function_name_binding {
                 return Err(BytecodeVerificationError::function(
@@ -2261,7 +2400,7 @@ fn verify_function_initializers(
 fn verify_scope_function_initializer_groups(
     id: FunctionTemplateId,
     variables: &[VariableDefinition],
-    instructions: &[crate::VerifiedInstruction],
+    instructions: &[VerifiedInstruction],
     predecessor_counts: &[u32],
     closure_definitions: &[Option<usize>],
     put_definitions: &[Option<usize>],
@@ -2554,6 +2693,8 @@ fn verify_capture_layout(
 
 fn verify_closures(
     id: FunctionTemplateId,
+    root: FunctionTemplateId,
+    authority_kind: CompilerExecutableKind,
     function: &VerifiedCompilerFunction,
     closures: &[ClosureVariableDefinition],
 ) -> Result<(), BytecodeVerificationError> {
@@ -2567,7 +2708,39 @@ fn verify_closures(
             MetadataAtomField::ClosureName(usize_to_u32(index)),
             function,
         )?;
-        if !closure.policy.is_valid() {
+        let policy = closure.policy();
+        let binding_valid = match closure.binding {
+            CompilerClosureBinding::Captured(_) => {
+                policy.is_valid()
+                    && policy.kind() != CompilerBindingKind::GlobalReference
+                    && matches!(
+                        staged_source,
+                        CompilerClosureSource::ParentVariableReference(_)
+                            | CompilerClosureSource::ParentClosure(_)
+                    )
+            }
+            CompilerClosureBinding::RealmGlobal(_) => {
+                realm_global_policy_supported(policy)
+                    && match *staged_source {
+                        CompilerClosureSource::ConstructorRealmGlobal(atom) => {
+                            if id != root
+                                || authority_kind != CompilerExecutableKind::DynamicFunctionScript
+                            {
+                                return Err(BytecodeVerificationError::function(
+                                    id,
+                                    BytecodeVerificationErrorKind::ConstructorRealmGlobalSourceRequiresDynamicFunctionScript {
+                                        closure: usize_to_u32(index),
+                                    },
+                                ));
+                            }
+                            closure.name == Some(atom)
+                        }
+                        CompilerClosureSource::ParentClosure(_) => id != root,
+                        CompilerClosureSource::ParentVariableReference(_) => false,
+                    }
+            }
+        };
+        if !binding_valid {
             return Err(policy_error(
                 id,
                 slot,
@@ -2586,6 +2759,14 @@ fn verify_closures(
         }
     }
     Ok(())
+}
+
+const fn realm_global_policy_supported(policy: CompilerBindingPolicy) -> bool {
+    policy.is_valid()
+        && matches!(
+            policy.kind(),
+            CompilerBindingKind::GlobalReference | CompilerBindingKind::Var
+        )
 }
 
 fn verify_optional_atom(
@@ -2800,11 +2981,12 @@ fn verify_closure_metadata(
                     CompilerClosureSource::ParentClosure(index) => usize::try_from(index)
                         .ok()
                         .and_then(|index| parent_metadata.closures.get(index))
-                        .map(|definition| (definition.name, definition.policy, parent.atoms())),
+                        .map(|definition| (definition.name, definition.binding, parent.atoms())),
+                    CompilerClosureSource::ConstructorRealmGlobal(_) => None,
                 };
                 let matches =
-                    expected.is_some_and(|(expected_name, expected_policy, expected_atoms)| {
-                        expected_policy == closure.policy
+                    expected.is_some_and(|(expected_name, expected_binding, expected_atoms)| {
+                        expected_binding == closure.binding
                             && atom_contents(expected_name, expected_atoms)
                                 == atom_contents(closure.name, child.atoms())
                     });
@@ -2829,7 +3011,7 @@ fn parent_definition_for_reference<'metadata>(
     reference: u32,
 ) -> Option<(
     Option<AtomPoolIndex>,
-    CompilerBindingPolicy,
+    CompilerClosureBinding,
     &'metadata [crate::CompilerAtom],
 )> {
     let binding = parent
@@ -2847,7 +3029,7 @@ fn parent_definition_for_reference<'metadata>(
     let definition = metadata.variables.get(index)?;
     (definition.variable_reference == Some(reference)).then_some((
         definition.name,
-        definition.policy,
+        CompilerClosureBinding::Captured(definition.policy),
         parent.atoms(),
     ))
 }
@@ -2863,7 +3045,8 @@ fn atom_contents(
 fn verify_supported_opcodes(
     id: FunctionTemplateId,
     flow: &VerifiedControlFlow,
-    executable_kind: CompilerExecutableKind,
+    _executable_kind: CompilerExecutableKind,
+    authority_kind: CompilerExecutableKind,
 ) -> Result<(), BytecodeVerificationError> {
     for instruction in flow.instructions() {
         let decoded = instruction.decoded();
@@ -2871,7 +3054,7 @@ fn verify_supported_opcodes(
         if !supported_compiler_opcode(opcode)
             || (opcode == FinalOpcode::PushThis
                 && !flow.function_header().mode().is_strict()
-                && executable_kind != CompilerExecutableKind::DynamicFunctionScript)
+                && authority_kind != CompilerExecutableKind::DynamicFunctionScript)
         {
             return Err(BytecodeVerificationError::function(
                 id,
@@ -2907,6 +3090,9 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
             | FinalOpcode::Throw
+            | FinalOpcode::GetVarUndef
+            | FinalOpcode::GetVar
+            | FinalOpcode::PutVar
             | FinalOpcode::GetLoc
             | FinalOpcode::PutLoc
             | FinalOpcode::SetLoc
@@ -2939,6 +3125,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Not
             | FinalOpcode::Lnot
             | FinalOpcode::Typeof
+            | FinalOpcode::DeleteVar
             | FinalOpcode::Mul
             | FinalOpcode::Div
             | FinalOpcode::Mod
@@ -3045,7 +3232,28 @@ fn verify_binding_opcodes(
         let decoded = verified.decoded();
         let instruction = decoded.instruction();
         let opcode = instruction.opcode();
-        if let Some(local) = local_operand(opcode, instruction.operands()) {
+        if opcode == FinalOpcode::DeleteVar {
+            let Operands::Atom(atom) = instruction.operands() else {
+                continue;
+            };
+            let has_binding = closures.iter().any(|definition| {
+                definition.name == Some(atom)
+                    && matches!(
+                        definition.binding,
+                        CompilerClosureBinding::RealmGlobal(policy)
+                            if policy.kind() == CompilerBindingKind::GlobalReference
+                    )
+            });
+            if !has_binding {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::RealmGlobalDeleteBindingMissing {
+                        pc: decoded.pc(),
+                        atom,
+                    },
+                ));
+            }
+        } else if let Some(local) = local_operand(opcode, instruction.operands()) {
             let definition = &variables[argument_count + local as usize];
             verify_local_opcode(id, decoded.pc(), local, opcode, definition)?;
             if matches!(opcode, FinalOpcode::SetLocUninitialized) {
@@ -3149,12 +3357,45 @@ fn verify_closure_opcode(
     opcode: FinalOpcode,
     definition: &ClosureVariableDefinition,
 ) -> Result<(), BytecodeVerificationError> {
+    match definition.binding {
+        CompilerClosureBinding::Captured(_) if is_realm_global_opcode(opcode) => {
+            return Err(closure_opcode_mismatch(id, pc, closure, opcode));
+        }
+        CompilerClosureBinding::RealmGlobal(policy) => {
+            if !is_realm_global_opcode(opcode) {
+                return Err(closure_opcode_mismatch(id, pc, closure, opcode));
+            }
+            let allowed = match policy.kind() {
+                CompilerBindingKind::GlobalReference | CompilerBindingKind::Var => matches!(
+                    opcode,
+                    FinalOpcode::GetVarUndef | FinalOpcode::GetVar | FinalOpcode::PutVar
+                ),
+                _ => false,
+            };
+            if !allowed {
+                if opcode == FinalOpcode::PutVar && policy.writes() != CompilerWritePolicy::Mutable
+                {
+                    return Err(policy_error(
+                        id,
+                        BindingSlot::Closure(closure),
+                        Some(pc),
+                        BindingPolicyViolationReason::ImmutableWrite,
+                    ));
+                }
+                return Err(closure_opcode_mismatch(id, pc, closure, opcode));
+            }
+            return Ok(());
+        }
+        CompilerClosureBinding::Captured(_) => {}
+    }
+
     let slot = BindingSlot::Closure(closure);
+    let policy = definition.policy();
     let checked = matches!(
         opcode,
         FinalOpcode::GetVarRefCheck | FinalOpcode::PutVarRefCheck
     );
-    if checked != definition.policy.temporal_dead_zone {
+    if checked != policy.temporal_dead_zone {
         return Err(policy_error(
             id,
             slot,
@@ -3166,7 +3407,7 @@ fn verify_closure_opcode(
             },
         ));
     }
-    if is_closure_write(opcode) && definition.policy.writes != CompilerWritePolicy::Mutable {
+    if is_closure_write(opcode) && policy.writes != CompilerWritePolicy::Mutable {
         return Err(policy_error(
             id,
             slot,
@@ -3175,6 +3416,29 @@ fn verify_closure_opcode(
         ));
     }
     Ok(())
+}
+
+const fn is_realm_global_opcode(opcode: FinalOpcode) -> bool {
+    matches!(
+        opcode,
+        FinalOpcode::GetVarUndef | FinalOpcode::GetVar | FinalOpcode::PutVar
+    )
+}
+
+fn closure_opcode_mismatch(
+    id: FunctionTemplateId,
+    pc: BytecodePc,
+    closure: u32,
+    opcode: FinalOpcode,
+) -> BytecodeVerificationError {
+    BytecodeVerificationError::function(
+        id,
+        BytecodeVerificationErrorKind::ClosureBindingOpcodeMismatch {
+            closure,
+            pc,
+            opcode,
+        },
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3765,9 +4029,16 @@ fn collect_requirements(
         || metadata
             .closures
             .iter()
-            .any(|definition| definition.policy.temporal_dead_zone)
+            .any(|definition| definition.policy().temporal_dead_zone)
     {
         push_requirement(requirements, ExecutionRequirement::LexicalBindings);
+    }
+    if metadata
+        .closures
+        .iter()
+        .any(|definition| definition.binding().is_realm_global())
+    {
+        push_requirement(requirements, ExecutionRequirement::RealmGlobalBindings);
     }
     for instruction in function.control_flow().instructions() {
         match instruction.decoded().instruction().opcode() {

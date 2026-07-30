@@ -103,6 +103,86 @@ fn wrapper_escape_observes_the_constructor_realm_global_receiver() {
 }
 
 #[test]
+fn sloppy_dynamic_function_this_uses_its_constructor_realm_global() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = construct_dynamic_function(
+        &mut context,
+        source(&[], "return this;"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function")
+    .into_value()
+    .into_function()
+    .expect("ordinary dynamic function");
+    let expected = construct_dynamic_function(
+        &mut context,
+        source(&[], "}), (function(){}) ? this : (function(){"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("escaped Script receiver")
+    .into_value()
+    .into_object()
+    .expect("constructor-realm global object");
+
+    let actual = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("sloppy call")
+        .into_object()
+        .expect("constructor-realm global object");
+    assert!(
+        actual
+            .same_identity(&expected)
+            .expect("same-runtime object identities")
+    );
+}
+
+#[test]
+fn separately_constructed_functions_share_constructor_realm_globals() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let setter = construct_dynamic_function(
+        &mut context,
+        source(&[], "facadeMarker = 7; return facadeMarker;"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("global setter")
+    .into_value()
+    .into_function()
+    .expect("setter function");
+    let getter = construct_dynamic_function(
+        &mut context,
+        source(&[], "return facadeMarker;"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("global getter")
+    .into_value()
+    .into_function()
+    .expect("getter function");
+
+    let set = context
+        .call(&setter, &[], ExecutionLimits::default())
+        .expect("global write");
+    assert!(
+        set.as_number()
+            .expect("live setter result")
+            .expect("numeric setter result")
+            .strict_equals(JsNumber::from_i32(7))
+    );
+    let get = context
+        .call(&getter, &[], ExecutionLimits::default())
+        .expect("global read");
+    assert!(
+        get.as_number()
+            .expect("live getter result")
+            .expect("numeric getter result")
+            .strict_equals(JsNumber::from_i32(7))
+    );
+}
+
+#[test]
 fn named_anonymous_binding_is_initialized_to_the_constructed_function() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

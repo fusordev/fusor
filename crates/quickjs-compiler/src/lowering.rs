@@ -5,11 +5,11 @@ use oxc_ast::{
     ast::{
         AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement, CallExpression,
         ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForStatement,
-        ForStatementInit, Function, FunctionBody, FunctionType, IfStatement, LogicalExpression,
-        ObjectExpression, ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind,
-        ReturnStatement, SequenceExpression, SimpleAssignmentTarget, Statement,
-        StaticMemberExpression, ThrowStatement, UnaryExpression, UpdateExpression,
-        VariableDeclaration, VariableDeclarationKind, WhileStatement,
+        ForStatementInit, Function, FunctionBody, FunctionType, IdentifierReference, IfStatement,
+        LogicalExpression, ObjectExpression, ObjectPropertyKind, Program,
+        PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement, SequenceExpression,
+        SimpleAssignmentTarget, Statement, StaticMemberExpression, ThrowStatement, UnaryExpression,
+        UpdateExpression, VariableDeclaration, VariableDeclarationKind, WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
@@ -43,8 +43,8 @@ use quickjs_frontend::{
 use crate::storage::{
     BindingId, CaptureSlot, CaptureSource, CompilationUnitKind, CompilerError, DeclarationKind,
     DeclarationPolicy, Executable, ExecutableId, ExecutableKind, InitializationPolicy,
-    NativeReferenceId, PlannedStorage, ResolvedReference, StoragePlacement, StoragePlan,
-    WritePolicy, build_planned_storage,
+    NativeReferenceId, PlannedStorage, ReferenceAccess, StoragePlacement, StoragePlan,
+    UnresolvedGlobalId, WritePolicy, build_planned_storage,
 };
 
 /// A validated function-local slot number.
@@ -168,6 +168,70 @@ pub enum CompiledClosureSource {
     ParentClosure(u16),
 }
 
+/// Dense compiler identity of one constructor-realm global name.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(transparent)]
+pub struct RealmGlobalId(u32);
+
+impl RealmGlobalId {
+    /// Returns the dense zero-based global-name index.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Source of one constructor-realm global slot.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CompiledRealmGlobalSource {
+    /// The dynamic Script root resolves this name in its constructor realm.
+    ConstructorRealm,
+    /// A child forwards the same realm-owned handle from its parent.
+    ParentClosure(u16),
+}
+
+/// One dense constructor-realm global descriptor for a compiled function.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompiledRealmGlobal {
+    id: RealmGlobalId,
+    name: Arc<str>,
+    atom: AtomPoolIndex,
+    slot: u16,
+    source: CompiledRealmGlobalSource,
+}
+
+impl CompiledRealmGlobal {
+    /// Returns the compilation-unit global-name identity.
+    #[must_use]
+    pub const fn id(&self) -> RealmGlobalId {
+        self.id
+    }
+
+    /// Returns the exact unresolved identifier text.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the function-local atom naming this realm binding.
+    #[must_use]
+    pub const fn atom(&self) -> AtomPoolIndex {
+        self.atom
+    }
+
+    /// Returns the dense function-local closure-domain slot.
+    #[must_use]
+    pub const fn slot(&self) -> u16 {
+        self.slot
+    }
+
+    /// Returns whether this function originates or forwards the realm handle.
+    #[must_use]
+    pub const fn source(&self) -> CompiledRealmGlobalSource {
+        self.source
+    }
+}
+
 /// One dense imported-closure descriptor for a compiled function.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompiledClosureVariable {
@@ -219,6 +283,7 @@ pub struct CompiledFunction {
     atoms: Arc<[CompilerAtom]>,
     constants: Arc<[CompiledConstant]>,
     closure_variables: Arc<[CompiledClosureVariable]>,
+    realm_globals: Arc<[CompiledRealmGlobal]>,
     source_instructions: Arc<[SourceInstruction]>,
     control_flow: Arc<VerifiedControlFlow>,
     metadata: UnverifiedFunctionMetadata,
@@ -269,6 +334,12 @@ impl CompiledFunction {
     #[must_use]
     pub fn closure_variables(&self) -> &[CompiledClosureVariable] {
         &self.closure_variables
+    }
+
+    /// Returns constructor-realm globals in their dense closure-slot order.
+    #[must_use]
+    pub fn realm_globals(&self) -> &[CompiledRealmGlobal] {
+        &self.realm_globals
     }
 
     /// Returns source spans for final instructions in bytecode order.
@@ -587,8 +658,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     /// # Errors
     ///
     /// Rejects every non-dynamic source unit, nonordinary dynamic-function
-    /// family, Program-level global binding or reference, unsupported syntax,
-    /// resource limit, and staged or final verification failure.
+    /// family, Program-level global declaration, unsupported syntax, resource
+    /// limit, and staged or final verification failure. Unresolved identifier
+    /// references are instead typed as constructor-realm global lookups and
+    /// never become caller-frame captures.
     pub fn compile_dynamic_function_script(
         &self,
         limits: VerificationLimits,
@@ -715,6 +788,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             constants,
             atoms,
             closure_variables,
+            realm_globals,
             function_name,
             variable_definitions,
             closure_definitions,
@@ -790,6 +864,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             atoms,
             constants,
             closure_variables: closure_variables.into(),
+            realm_globals: realm_globals.into(),
             source_instructions: source_instructions.into(),
             control_flow: Arc::new(control_flow),
             metadata,
@@ -838,7 +913,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     }
 
     fn function_tree_layout(&self) -> Result<FunctionTreeLayout, LeafCompilationError> {
-        let mut layout = FunctionTreeLayout::new(&self.planned.plan)?;
+        let mut layout = FunctionTreeLayout::new(
+            &self.planned.plan,
+            self.unit.goal() == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function),
+        )?;
         for executable in self.planned.plan.executables() {
             let node_id = self
                 .planned
@@ -912,6 +990,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         let capture_layout =
             self.compiler_capture_layout(executable_id, function_scope, &layout, tree_layout)?;
         let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
+        let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
         let function_name = executable
             .name()
             .map(|_| constants.metadata_atom_index(CompiledMetadataAtomKey::FunctionName))
@@ -924,14 +1003,23 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             constants,
         )?;
         let closure_definitions =
-            self.compiled_closure_definitions(&closure_variables, constants)?;
+            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
+        let capture_count = checked_function_entry_count(
+            closure_variables
+                .len()
+                .checked_add(realm_globals.len())
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "function closure variables",
+                })?,
+            "function closure variables",
+        )?;
 
         Ok(ValidatedFunction {
             executable_kind: CompilerExecutableKind::OrdinaryFunction,
             strict: executable.is_strict(),
             argument_count: executable.parameter_count(),
             local_count: layout.local_count,
-            capture_count: layout.capture_count,
+            capture_count,
             capture_layout,
             locals: layout
                 .locals
@@ -944,6 +1032,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             constants: Arc::clone(&constants.entries),
             atoms: Arc::clone(&constants.atoms),
             closure_variables,
+            realm_globals,
             function_name,
             variable_definitions,
             closure_definitions,
@@ -975,18 +1064,6 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     .unwrap_or(program.span),
             );
         }
-        if let Some(reference) = self
-            .planned
-            .plan
-            .unresolved_globals_for(executable_id)
-            .and_then(|references| references.first())
-        {
-            return unsupported(
-                UnsupportedLeafFeature::UnresolvedReference,
-                reference.span(),
-            );
-        }
-
         let mut layout = FrameLayout::new(&self.planned.plan, executable_id)?;
         let completion = layout.push_internal_local()?;
         let mut flow = PlannedControlFlow::new(limits);
@@ -1009,6 +1086,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 span: Some(program.span),
             });
         }
+        let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
         let mut variable_definitions = self.compiled_variable_definitions(
             executable_id,
             program_scope,
@@ -1017,13 +1095,17 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             constants,
         )?;
         variable_definitions.push(script_completion_variable_definition(constants)?);
+        let closure_definitions =
+            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
+        let capture_count =
+            checked_function_entry_count(realm_globals.len(), "function closure variables")?;
 
         Ok(ValidatedFunction {
             executable_kind: CompilerExecutableKind::DynamicFunctionScript,
             strict: executable.is_strict(),
             argument_count: 0,
             local_count: layout.local_count,
-            capture_count: layout.capture_count,
+            capture_count,
             capture_layout,
             locals: layout
                 .locals
@@ -1036,9 +1118,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             constants: Arc::clone(&constants.entries),
             atoms: Arc::clone(&constants.atoms),
             closure_variables,
+            realm_globals,
             function_name: None,
             variable_definitions,
-            closure_definitions: Vec::new(),
+            closure_definitions,
             function_span: source_byte_span(program.span),
             function_name_span: None,
             flow,
@@ -1072,7 +1155,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             });
         }
         self.record_literal_candidates(&mut candidates, &mut atom_candidates)?;
-        self.record_metadata_atom_candidates(&mut metadata_atom_candidates)?;
+        self.record_metadata_atom_candidates(tree_layout, &mut metadata_atom_candidates)?;
 
         let mut pools = Vec::with_capacity(executables.len());
         for (index, ((mut candidates, mut atoms), mut metadata_atoms)) in candidates
@@ -1103,6 +1186,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     fn record_metadata_atom_candidates(
         &self,
+        tree_layout: &FunctionTreeLayout,
         candidates: &mut [Vec<CompiledMetadataAtomCandidate>],
     ) -> Result<(), LeafCompilationError> {
         for executable in self.planned.plan.executables() {
@@ -1187,6 +1271,19 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     key: CompiledMetadataAtomKey::Binding(binding.id()),
                     value: compiler_identifier_string(binding.name(), span)?,
                     span,
+                });
+            }
+            for &global in tree_layout.realm_globals.imports_for(executable.id())? {
+                let binding = tree_layout.realm_globals.binding(global).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "constructor-realm global import has a binding descriptor",
+                        span: Some(executable.span()),
+                    },
+                )?;
+                owner.push(CompiledMetadataAtomCandidate {
+                    key: CompiledMetadataAtomKey::RealmGlobal(global),
+                    value: compiler_identifier_string(&binding.name, binding.first_span)?,
+                    span: binding.first_span,
                 });
             }
         }
@@ -2455,23 +2552,16 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     }
                     match expression {
                         Expression::Identifier(identifier) => {
-                            let binding = self
-                                .resolved_binding(identifier.reference_id.get(), identifier.span)?;
-                            let frame_slot =
-                                layout
-                                    .slot(binding)
-                                    .ok_or(LeafCompilationError::Unsupported {
-                                        feature: UnsupportedLeafFeature::UnsupportedBinding,
-                                        span: identifier.span,
-                                    })?;
-                            flow.emit(self.plan_read_slot(
-                                binding,
-                                frame_slot,
-                                identifier.span,
-                            )?)?;
+                            self.plan_identifier_read(identifier, layout, tree_layout, flow)?;
                         }
                         Expression::UnaryExpression(unary) => {
-                            Self::plan_unary_expression(unary, &mut work, flow)?;
+                            self.plan_unary_expression(
+                                unary,
+                                layout,
+                                tree_layout,
+                                &mut work,
+                                flow,
+                            )?;
                         }
                         Expression::BinaryExpression(binary) => {
                             work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -2502,11 +2592,16 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         }
                         Expression::AssignmentExpression(assignment) => {
                             self.plan_assignment_expression(
-                                assignment, layout, constants, flow, &mut work,
+                                assignment,
+                                layout,
+                                tree_layout,
+                                constants,
+                                flow,
+                                &mut work,
                             )?;
                         }
                         Expression::UpdateExpression(update) => {
-                            self.plan_update_expression(update, layout, &mut work)?;
+                            self.plan_update_expression(update, layout, tree_layout, &mut work)?;
                         }
                         Expression::CallExpression(call) => {
                             Self::plan_call_expression(call, constants, &mut work)?;
@@ -2535,6 +2630,38 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    fn plan_identifier_read(
+        &self,
+        identifier: &IdentifierReference<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let reference = self.lowered_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            layout,
+            tree_layout,
+        )?;
+        if !reference.access().reads() || reference.access().writes() {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedReference,
+                identifier.span,
+            );
+        }
+        let instruction = match reference {
+            LoweredReference::Frame { binding, slot, .. } => {
+                self.plan_read_slot(binding, slot, identifier.span)?
+            }
+            LoweredReference::RealmGlobal { slot, .. } => PlannedInstruction::new(
+                FinalOpcode::GetVar,
+                Operands::VarRef(slot),
+                identifier.span,
+            ),
+        };
+        flow.emit(instruction)
+    }
+
     fn plan_this_expression(
         &self,
         span: Span,
@@ -2545,15 +2672,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 executable: layout.executable,
             },
         )?;
-        let is_dynamic_function_script = self.unit.goal()
-            == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
-            && matches!(
-                executable.kind(),
-                ExecutableKind::Script {
-                    asynchronous: false
-                }
-            );
-        if !executable.is_strict() && !is_dynamic_function_script {
+        let is_dynamic_function_authority =
+            self.unit.goal() == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function);
+        if !executable.is_strict() && !is_dynamic_function_authority {
             return unsupported(UnsupportedLeafFeature::UnsupportedExpression, span);
         }
         Ok(PlannedInstruction::new(
@@ -2767,6 +2888,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         &self,
         assignment: &'expression AssignmentExpression<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
@@ -2783,16 +2905,20 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 assignment.left.span(),
             );
         };
-        let reference = self.resolved_reference(identifier.reference_id.get(), identifier.span)?;
         let needs_read = assignment.operator != AssignmentOperator::Assign;
-        self.validate_mutation_reference(reference, needs_read, identifier.span)?;
-        let binding = reference.binding();
-        let frame_slot = layout
-            .slot(binding)
-            .ok_or(LeafCompilationError::Unsupported {
-                feature: UnsupportedLeafFeature::UnsupportedBinding,
-                span: identifier.span,
-            })?;
+        let reference = self.lowered_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            layout,
+            tree_layout,
+        )?;
+        self.validate_lowered_mutation_reference(reference, needs_read, identifier.span)?;
+        let (binding, frame_slot) = match reference {
+            LoweredReference::Frame { binding, slot, .. } => (binding, slot),
+            LoweredReference::RealmGlobal { slot, .. } => {
+                return Self::plan_realm_global_assignment(assignment, slot, flow, work);
+            }
+        };
 
         match assignment.operator {
             AssignmentOperator::Assign => {
@@ -2870,6 +2996,105 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    fn plan_realm_global_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        slot: u16,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let read = PlannedInstruction::new(
+            FinalOpcode::GetVar,
+            Operands::VarRef(slot),
+            assignment.left.span(),
+        );
+        let write = PlannedInstruction::new(
+            FinalOpcode::PutVar,
+            Operands::VarRef(slot),
+            assignment.left.span(),
+        );
+        match assignment.operator {
+            AssignmentOperator::Assign => {
+                work.push(ExpressionWork::Emit(write));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    assignment.span,
+                )));
+                work.push(ExpressionWork::Visit(&assignment.right));
+            }
+            AssignmentOperator::LogicalOr
+            | AssignmentOperator::LogicalAnd
+            | AssignmentOperator::LogicalNullish => {
+                let done = flow.new_label(assignment.span)?;
+                let branch_kind = match assignment.operator {
+                    AssignmentOperator::LogicalOr => BranchKind::IfTrue,
+                    AssignmentOperator::LogicalAnd | AssignmentOperator::LogicalNullish => {
+                        BranchKind::IfFalse
+                    }
+                    _ => {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "logical assignment has a short-circuit branch",
+                            span: Some(assignment.span),
+                        });
+                    }
+                };
+                work.push(ExpressionWork::Bind(done.clone()));
+                work.push(ExpressionWork::Emit(write));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    assignment.span,
+                )));
+                work.push(ExpressionWork::Visit(&assignment.right));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    assignment.left.span(),
+                )));
+                work.push(ExpressionWork::Branch {
+                    kind: branch_kind,
+                    target: done,
+                    span: assignment.span,
+                });
+                if assignment.operator == AssignmentOperator::LogicalNullish {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::IsUndefinedOrNull,
+                        Operands::None,
+                        assignment.left.span(),
+                    )));
+                }
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    assignment.left.span(),
+                )));
+                work.push(ExpressionWork::Emit(read));
+            }
+            operator => {
+                let binary = operator.to_binary_operator().ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "nonlogical compound assignment has a binary operator",
+                        span: Some(assignment.span),
+                    },
+                )?;
+                work.push(ExpressionWork::Emit(write));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    assignment.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    binary_opcode(binary),
+                    Operands::None,
+                    assignment.span,
+                )));
+                work.push(ExpressionWork::Visit(&assignment.right));
+                work.push(ExpressionWork::Emit(read));
+            }
+        }
+        Ok(())
+    }
+
     fn plan_static_member_assignment<'expression>(
         assignment: &'expression AssignmentExpression<'arena>,
         member: &'expression StaticMemberExpression<'arena>,
@@ -2901,6 +3126,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         &self,
         update: &'expression UpdateExpression<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         let SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) = &update.argument
@@ -2910,15 +3136,46 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 update.argument.span(),
             );
         };
-        let reference = self.resolved_reference(identifier.reference_id.get(), identifier.span)?;
-        self.validate_mutation_reference(reference, true, identifier.span)?;
-        let binding = reference.binding();
-        let frame_slot = layout
-            .slot(binding)
-            .ok_or(LeafCompilationError::Unsupported {
-                feature: UnsupportedLeafFeature::UnsupportedBinding,
-                span: identifier.span,
-            })?;
+        let reference = self.lowered_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            layout,
+            tree_layout,
+        )?;
+        self.validate_lowered_mutation_reference(reference, true, identifier.span)?;
+        let (binding, frame_slot) = match reference {
+            LoweredReference::Frame { binding, slot, .. } => (binding, slot),
+            LoweredReference::RealmGlobal { slot, .. } => {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PutVar,
+                    Operands::VarRef(slot),
+                    identifier.span,
+                )));
+                if update.prefix {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Dup,
+                        Operands::None,
+                        update.span,
+                    )));
+                }
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    match (update.operator, update.prefix) {
+                        (UpdateOperator::Increment, true) => FinalOpcode::Inc,
+                        (UpdateOperator::Decrement, true) => FinalOpcode::Dec,
+                        (UpdateOperator::Increment, false) => FinalOpcode::PostInc,
+                        (UpdateOperator::Decrement, false) => FinalOpcode::PostDec,
+                    },
+                    Operands::None,
+                    update.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::GetVar,
+                    Operands::VarRef(slot),
+                    identifier.span,
+                )));
+                return Ok(());
+            }
+        };
 
         self.push_slot_write(binding, frame_slot, update.prefix, identifier.span, work)?;
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -2940,7 +3197,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     }
 
     fn plan_unary_expression<'expression>(
+        &self,
         unary: &'expression UnaryExpression<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
@@ -2951,6 +3211,39 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         {
             flow.emit(plan_push_integer(integer, unary.span))?;
             return Ok(());
+        }
+        if unary.operator == UnaryOperator::Typeof {
+            let mut argument = &unary.argument;
+            while let Expression::ParenthesizedExpression(parenthesized) = argument {
+                argument = &parenthesized.expression;
+            }
+            if let Expression::Identifier(identifier) = argument {
+                let reference = self.lowered_reference(
+                    identifier.reference_id.get(),
+                    identifier.span,
+                    layout,
+                    tree_layout,
+                )?;
+                if let LoweredReference::RealmGlobal { slot, access } = reference {
+                    if !access.reads() || access.writes() {
+                        return unsupported(
+                            UnsupportedLeafFeature::UnsupportedReference,
+                            identifier.span,
+                        );
+                    }
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Typeof,
+                        Operands::None,
+                        unary.span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetVarUndef,
+                        Operands::VarRef(slot),
+                        identifier.span,
+                    )));
+                    return Ok(());
+                }
+            }
         }
         match unary.operator {
             UnaryOperator::UnaryPlus
@@ -3478,36 +3771,61 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     fn compiled_closure_definitions(
         &self,
         closures: &[CompiledClosureVariable],
+        realm_globals: &[CompiledRealmGlobal],
         constants: &CompiledConstantPool,
     ) -> Result<Vec<VerifiedClosureVariableDefinition>, LeafCompilationError> {
-        closures
-            .iter()
-            .map(|closure| {
-                let binding = self.planned.plan.binding(closure.binding).ok_or(
-                    LeafCompilationError::SemanticInvariant {
-                        invariant: "closure metadata binding exists",
-                        span: None,
-                    },
-                )?;
-                let source = match closure.source {
-                    CompiledClosureSource::ParentVariableReference(index) => {
-                        CompilerGraphClosureSource::ParentVariableReference(u32::from(index))
-                    }
-                    CompiledClosureSource::ParentClosure(index) => {
-                        CompilerGraphClosureSource::ParentClosure(u32::from(index))
-                    }
-                };
-                Ok(VerifiedClosureVariableDefinition::new(
-                    Some(
-                        constants.metadata_atom_index(CompiledMetadataAtomKey::Binding(
-                            closure.binding,
-                        ))?,
-                    ),
-                    verified_storage_policy(binding)?,
-                    source,
-                ))
-            })
-            .collect()
+        let capacity = closures.len().checked_add(realm_globals.len()).ok_or(
+            LeafCompilationError::CapacityExceeded {
+                domain: "closure metadata definitions",
+            },
+        )?;
+        let mut definitions = Vec::with_capacity(capacity);
+        for closure in closures {
+            let binding = self.planned.plan.binding(closure.binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "closure metadata binding exists",
+                    span: None,
+                },
+            )?;
+            let source = match closure.source {
+                CompiledClosureSource::ParentVariableReference(index) => {
+                    CompilerGraphClosureSource::ParentVariableReference(u32::from(index))
+                }
+                CompiledClosureSource::ParentClosure(index) => {
+                    CompilerGraphClosureSource::ParentClosure(u32::from(index))
+                }
+            };
+            definitions.push(VerifiedClosureVariableDefinition::new(
+                Some(
+                    constants
+                        .metadata_atom_index(CompiledMetadataAtomKey::Binding(closure.binding))?,
+                ),
+                verified_storage_policy(binding)?,
+                source,
+            ));
+        }
+        for global in realm_globals {
+            let name = global.atom;
+            let source = match global.source {
+                CompiledRealmGlobalSource::ConstructorRealm => {
+                    CompilerGraphClosureSource::ConstructorRealmGlobal(name)
+                }
+                CompiledRealmGlobalSource::ParentClosure(index) => {
+                    CompilerGraphClosureSource::ParentClosure(u32::from(index))
+                }
+            };
+            definitions.push(VerifiedClosureVariableDefinition::realm_global(
+                Some(name),
+                CompilerBindingPolicy::new(
+                    VerifiedBindingKind::GlobalReference,
+                    VerifiedInitializationPolicy::ConstructorRealmLookup,
+                    VerifiedWritePolicy::Mutable,
+                    false,
+                ),
+                source,
+            ));
+        }
+        Ok(definitions)
     }
 
     fn compiled_closure_variables(
@@ -3614,6 +3932,59 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(variables)
     }
 
+    fn compiled_realm_globals(
+        &self,
+        executable: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+    ) -> Result<Vec<CompiledRealmGlobal>, LeafCompilationError> {
+        let metadata = self
+            .planned
+            .plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let imports = tree_layout.realm_globals.imports_for(executable)?;
+        let mut globals = Vec::with_capacity(imports.len());
+        for &id in imports {
+            let binding = tree_layout.realm_globals.binding(id).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "constructor-realm global import has a binding descriptor",
+                    span: Some(metadata.span()),
+                },
+            )?;
+            let slot =
+                tree_layout
+                    .realm_globals
+                    .closure_slot(&self.planned.plan, executable, id)?;
+            let source = if let Some(parent) = metadata.parent() {
+                CompiledRealmGlobalSource::ParentClosure(tree_layout.realm_globals.closure_slot(
+                    &self.planned.plan,
+                    parent,
+                    id,
+                )?)
+            } else {
+                if self.unit.goal()
+                    != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
+                    || executable.index() != 0
+                {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "only a dynamic Function Script root originates realm-global slots",
+                        span: Some(metadata.span()),
+                    });
+                }
+                CompiledRealmGlobalSource::ConstructorRealm
+            };
+            globals.push(CompiledRealmGlobal {
+                id,
+                name: Arc::clone(&binding.name),
+                atom: constants.metadata_atom_index(CompiledMetadataAtomKey::RealmGlobal(id))?,
+                slot,
+                source,
+            });
+        }
+        Ok(globals)
+    }
+
     fn scope_for_binding(&self, binding: BindingId) -> Result<ScopeId, LeafCompilationError> {
         self.planned
             .identities
@@ -3706,11 +4077,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 function.span,
             );
         }
-        if let Some(reference) = self
-            .planned
-            .plan
-            .unresolved_globals_for(executable_id)
-            .and_then(|references| references.first())
+        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
+            && let Some(reference) = self
+                .planned
+                .plan
+                .unresolved_globals_for(executable_id)
+                .and_then(|references| references.first())
         {
             return unsupported(
                 UnsupportedLeafFeature::UnresolvedReference,
@@ -3806,23 +4178,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             })
     }
 
-    fn resolved_binding(
+    fn lowered_reference(
         &self,
         reference_id: Option<ReferenceId>,
         span: Span,
-    ) -> Result<BindingId, LeafCompilationError> {
-        let reference = self.resolved_reference(reference_id, span)?;
-        if !reference.access().reads() || reference.access().writes() {
-            return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
-        }
-        Ok(reference.binding())
-    }
-
-    fn resolved_reference(
-        &self,
-        reference_id: Option<ReferenceId>,
-        span: Span,
-    ) -> Result<&ResolvedReference, LeafCompilationError> {
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<LoweredReference, LeafCompilationError> {
         let reference_id = reference_id.ok_or(LeafCompilationError::SemanticInvariant {
             invariant: "identifier reference has Oxc reference identity",
             span: Some(span),
@@ -3838,8 +4200,49 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 invariant: "Oxc reference has compiler identity",
                 span: Some(span),
             })?;
-        let resolved_id = match native {
-            NativeReferenceId::Resolved(resolved_id) => resolved_id,
+        match native {
+            NativeReferenceId::Resolved(resolved_id) => {
+                let reference = self.planned.plan.resolved_reference(resolved_id).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "resolved compiler reference exists",
+                        span: Some(span),
+                    },
+                )?;
+                if reference.span() != span {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "resolved compiler reference retains its Oxc span",
+                        span: Some(span),
+                    });
+                }
+                let binding = self.planned.plan.binding(reference.binding()).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "resolved compiler binding exists",
+                        span: Some(span),
+                    },
+                )?;
+                match binding.placement() {
+                    StoragePlacement::Argument { .. } | StoragePlacement::Local => {
+                        let slot =
+                            layout
+                                .slot(binding.id())
+                                .ok_or(LeafCompilationError::Unsupported {
+                                    feature: UnsupportedLeafFeature::UnsupportedBinding,
+                                    span,
+                                })?;
+                        Ok(LoweredReference::Frame {
+                            binding: binding.id(),
+                            slot,
+                            access: reference.access(),
+                        })
+                    }
+                    StoragePlacement::GlobalObject | StoragePlacement::GlobalLexical => {
+                        unsupported(UnsupportedLeafFeature::GlobalEnvironment, span)
+                    }
+                    StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport => {
+                        unsupported(UnsupportedLeafFeature::UnsupportedBinding, span)
+                    }
+                }
+            }
             NativeReferenceId::Unresolved(unresolved_id) => {
                 let reference = self
                     .planned
@@ -3856,41 +4259,51 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         span: Some(span),
                     });
                 }
-                return unsupported(UnsupportedLeafFeature::UnresolvedReference, span);
+                if self.unit.goal()
+                    != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
+                {
+                    return unsupported(UnsupportedLeafFeature::UnresolvedReference, span);
+                }
+                let global = tree_layout
+                    .realm_globals
+                    .for_unresolved(unresolved_id)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant:
+                            "dynamic unresolved reference has a constructor-realm global identity",
+                        span: Some(span),
+                    })?;
+                let slot = tree_layout.realm_globals.closure_slot(
+                    &self.planned.plan,
+                    layout.executable,
+                    global,
+                )?;
+                Ok(LoweredReference::RealmGlobal {
+                    slot,
+                    access: reference.access(),
+                })
             }
-        };
-        let reference = self.planned.plan.resolved_reference(resolved_id).ok_or(
-            LeafCompilationError::SemanticInvariant {
-                invariant: "resolved compiler reference exists",
-                span: Some(span),
-            },
-        )?;
-        if reference.span() != span {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "resolved compiler reference retains its Oxc span",
-                span: Some(span),
-            });
         }
-        Ok(reference)
     }
 
-    fn validate_mutation_reference(
+    fn validate_lowered_mutation_reference(
         &self,
-        reference: &ResolvedReference,
+        reference: LoweredReference,
         needs_read: bool,
         span: Span,
     ) -> Result<(), LeafCompilationError> {
         if !reference.access().writes() || reference.access().reads() != needs_read {
             return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
         }
-        let storage = self.planned.plan.binding(reference.binding()).ok_or(
-            LeafCompilationError::SemanticInvariant {
-                invariant: "written compiler binding exists",
-                span: Some(span),
-            },
-        )?;
-        if storage.policy().writes() != WritePolicy::Mutable {
-            return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
+        if let LoweredReference::Frame { binding, .. } = reference {
+            let storage = self.planned.plan.binding(binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "written compiler binding exists",
+                    span: Some(span),
+                },
+            )?;
+            if storage.policy().writes() != WritePolicy::Mutable {
+                return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
+            }
         }
         Ok(())
     }
@@ -3995,7 +4408,14 @@ fn build_unverified_graph_records(
                 }
             }
         }
-        let mut closure_sources = Vec::with_capacity(function.closure_variables.len());
+        let closure_capacity = function
+            .closure_variables
+            .len()
+            .checked_add(function.realm_globals.len())
+            .ok_or(LeafCompilationError::CapacityExceeded {
+                domain: "compiler graph closure sources",
+            })?;
+        let mut closure_sources = Vec::with_capacity(closure_capacity);
         for (index, closure) in function.closure_variables.iter().copied().enumerate() {
             if closure.slot().index() != index {
                 return Err(LeafCompilationError::SemanticInvariant {
@@ -4008,6 +4428,27 @@ fn build_unverified_graph_records(
                     CompilerGraphClosureSource::ParentVariableReference(u32::from(index))
                 }
                 CompiledClosureSource::ParentClosure(index) => {
+                    CompilerGraphClosureSource::ParentClosure(u32::from(index))
+                }
+            });
+        }
+        for (offset, global) in function.realm_globals.iter().enumerate() {
+            let expected = function.closure_variables.len().checked_add(offset).ok_or(
+                LeafCompilationError::CapacityExceeded {
+                    domain: "compiler graph closure sources",
+                },
+            )?;
+            if usize::from(global.slot()) != expected {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "compiled realm-global slots follow captured closure slots",
+                    span: None,
+                });
+            }
+            closure_sources.push(match global.source() {
+                CompiledRealmGlobalSource::ConstructorRealm => {
+                    CompilerGraphClosureSource::ConstructorRealmGlobal(global.atom())
+                }
+                CompiledRealmGlobalSource::ParentClosure(index) => {
                     CompilerGraphClosureSource::ParentClosure(u32::from(index))
                 }
             });
@@ -4241,6 +4682,27 @@ enum FrameSlot {
     Capture(u16),
 }
 
+#[derive(Clone, Copy)]
+enum LoweredReference {
+    Frame {
+        binding: BindingId,
+        slot: FrameSlot,
+        access: ReferenceAccess,
+    },
+    RealmGlobal {
+        slot: u16,
+        access: ReferenceAccess,
+    },
+}
+
+impl LoweredReference {
+    const fn access(self) -> ReferenceAccess {
+        match self {
+            Self::Frame { access, .. } | Self::RealmGlobal { access, .. } => access,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum LogicalCompilerScope {
     Function,
@@ -4281,12 +4743,163 @@ impl ScopeEntryInitialization {
     }
 }
 
+struct RealmGlobalBinding {
+    name: Arc<str>,
+    first_span: Span,
+}
+
+struct RealmGlobalLayout {
+    bindings: Box<[RealmGlobalBinding]>,
+    by_unresolved: Box<[Option<RealmGlobalId>]>,
+    import_ranges: Box<[Range<usize>]>,
+    imports: Box<[RealmGlobalId]>,
+}
+
+impl RealmGlobalLayout {
+    fn new(plan: &StoragePlan, enabled: bool) -> Result<Self, LeafCompilationError> {
+        let executable_count = plan.executables().len();
+        if !enabled {
+            return Ok(Self {
+                bindings: Box::default(),
+                by_unresolved: vec![None; plan.unresolved_globals().len()].into_boxed_slice(),
+                import_ranges: vec![0..0; executable_count].into_boxed_slice(),
+                imports: Box::default(),
+            });
+        }
+
+        let mut bindings = Vec::<RealmGlobalBinding>::new();
+        let mut by_name = HashMap::<Arc<str>, RealmGlobalId>::new();
+        let mut by_unresolved = vec![None; plan.unresolved_globals().len()];
+        let mut needs = (0..executable_count)
+            .map(|_| Vec::<RealmGlobalId>::new())
+            .collect::<Vec<_>>();
+        for reference in plan.unresolved_globals() {
+            let name: Arc<str> = Arc::from(reference.name());
+            let id = if let Some(&id) = by_name.get(&name) {
+                id
+            } else {
+                let raw = u32::try_from(bindings.len()).map_err(|_| {
+                    LeafCompilationError::CapacityExceeded {
+                        domain: "constructor-realm global names",
+                    }
+                })?;
+                let id = RealmGlobalId(raw);
+                by_name.insert(Arc::clone(&name), id);
+                bindings.push(RealmGlobalBinding {
+                    name,
+                    first_span: reference.span(),
+                });
+                id
+            };
+            let mapping = by_unresolved.get_mut(reference.id().index()).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "unresolved global identity indexes its realm-global mapping",
+                    span: Some(reference.span()),
+                },
+            )?;
+            if mapping.replace(id).is_some() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "one realm-global mapping per unresolved reference",
+                    span: Some(reference.span()),
+                });
+            }
+            needs
+                .get_mut(reference.executable().index())
+                .ok_or(LeafCompilationError::InvalidExecutable {
+                    executable: reference.executable(),
+                })?
+                .push(id);
+        }
+
+        for index in (0..executable_count).rev() {
+            needs[index].sort_unstable();
+            needs[index].dedup();
+            let Some(parent) = plan.executables()[index].parent() else {
+                continue;
+            };
+            let inherited = needs[index].clone();
+            needs
+                .get_mut(parent.index())
+                .ok_or(LeafCompilationError::InvalidExecutable { executable: parent })?
+                .extend(inherited);
+        }
+
+        let mut import_ranges = Vec::with_capacity(executable_count);
+        let mut imports = Vec::new();
+        for mut executable_needs in needs {
+            executable_needs.sort_unstable();
+            executable_needs.dedup();
+            checked_function_entry_count(executable_needs.len(), "constructor-realm global slots")?;
+            let start = imports.len();
+            imports.extend(executable_needs);
+            import_ranges.push(start..imports.len());
+        }
+        Ok(Self {
+            bindings: bindings.into_boxed_slice(),
+            by_unresolved: by_unresolved.into_boxed_slice(),
+            import_ranges: import_ranges.into_boxed_slice(),
+            imports: imports.into_boxed_slice(),
+        })
+    }
+
+    fn binding(&self, id: RealmGlobalId) -> Option<&RealmGlobalBinding> {
+        self.bindings.get(id.index())
+    }
+
+    fn for_unresolved(&self, id: UnresolvedGlobalId) -> Option<RealmGlobalId> {
+        self.by_unresolved.get(id.index()).copied().flatten()
+    }
+
+    fn imports_for(
+        &self,
+        executable: ExecutableId,
+    ) -> Result<&[RealmGlobalId], LeafCompilationError> {
+        let range = self
+            .import_ranges
+            .get(executable.index())
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        self.imports
+            .get(range.clone())
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "constructor-realm global range indexes flat imports",
+                span: None,
+            })
+    }
+
+    fn closure_slot(
+        &self,
+        plan: &StoragePlan,
+        executable: ExecutableId,
+        global: RealmGlobalId,
+    ) -> Result<u16, LeafCompilationError> {
+        let captures = plan
+            .frame_captures_for(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let imports = self.imports_for(executable)?;
+        let offset = imports.binary_search(&global).map_err(|_| {
+            LeafCompilationError::SemanticInvariant {
+                invariant: "referenced constructor-realm global is imported by its executable",
+                span: self.binding(global).map(|binding| binding.first_span),
+            }
+        })?;
+        let index =
+            captures
+                .len()
+                .checked_add(offset)
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "function closure variables",
+                })?;
+        checked_function_index(index, "function closure variables")
+    }
+}
+
 struct FunctionTreeLayout {
     child_ranges: Box<[Range<usize>]>,
     children: Box<[ExecutableId]>,
     constant_pools: Box<[CompiledConstantPool]>,
     variable_references: Box<[Option<u16>]>,
     function_declarations: Box<[Option<ExecutableId>]>,
+    realm_globals: RealmGlobalLayout,
 }
 
 struct FunctionChildLayout {
@@ -4295,7 +4908,7 @@ struct FunctionChildLayout {
 }
 
 impl FunctionTreeLayout {
-    fn new(plan: &StoragePlan) -> Result<Self, LeafCompilationError> {
+    fn new(plan: &StoragePlan, allow_realm_globals: bool) -> Result<Self, LeafCompilationError> {
         let executables = plan.executables();
         let FunctionChildLayout {
             child_ranges,
@@ -4308,6 +4921,7 @@ impl FunctionTreeLayout {
             constant_pools: Box::default(),
             variable_references,
             function_declarations: vec![None; plan.bindings().len()].into_boxed_slice(),
+            realm_globals: RealmGlobalLayout::new(plan, allow_realm_globals)?,
         })
     }
 
@@ -4590,7 +5204,6 @@ struct FrameLayout {
     slots: Vec<FrameBindingSlot>,
     locals: Vec<FrameLocal>,
     local_count: u32,
-    capture_count: u32,
 }
 
 impl FrameLayout {
@@ -4650,7 +5263,7 @@ impl FrameLayout {
                 slot,
             });
         }
-        let capture_count = checked_function_entry_count(captures.len(), "function capture slots")?;
+        checked_function_entry_count(captures.len(), "function capture slots")?;
         for (expected_capture_index, capture) in captures.iter().enumerate() {
             let capture_index =
                 checked_function_index(capture.slot().index(), "function capture slots")?;
@@ -4683,7 +5296,6 @@ impl FrameLayout {
             slots,
             locals,
             local_count,
-            capture_count,
         })
     }
 
@@ -4722,6 +5334,7 @@ struct ValidatedFunction {
     atoms: Arc<[CompilerAtom]>,
     constants: Arc<[CompiledConstant]>,
     closure_variables: Vec<CompiledClosureVariable>,
+    realm_globals: Vec<CompiledRealmGlobal>,
     function_name: Option<AtomPoolIndex>,
     variable_definitions: Vec<VariableDefinition>,
     closure_definitions: Vec<VerifiedClosureVariableDefinition>,
@@ -4796,6 +5409,7 @@ enum CompiledMetadataAtomKey {
     FunctionName,
     ScriptCompletion,
     Binding(BindingId),
+    RealmGlobal(RealmGlobalId),
 }
 
 struct CompiledMetadataAtomCandidate {

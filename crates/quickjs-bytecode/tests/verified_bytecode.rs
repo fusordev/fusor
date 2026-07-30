@@ -4,15 +4,15 @@ use quickjs_bytecode::{
     AtomPoolIndex, BindingPolicyViolationReason, BytecodeBuilder, BytecodeGraphResource,
     BytecodeGraphVerificationLimits, BytecodePc, BytecodeVerificationErrorKind,
     ClosureVariableDefinition, CompilerAtom, CompilerBindingKind, CompilerBindingPolicy,
-    CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureSource, CompilerConstantKind,
-    CompilerConstantLayout, CompilerExecutableKind, CompilerInitializationPolicy, CompilerSource,
-    CompilerString, CompilerWritePolicy, ExecutionRequirement, FinalOpcode,
-    FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId, Operands,
-    PcSourceSpan, ScopeLink, SourceByteSpan, UnverifiedCompilerBytecodeGraph,
-    UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph,
-    UnverifiedFunctionHeader, UnverifiedFunctionMetadata, VariableDefinition, VerificationLimits,
-    VerifiedBytecode, VerifiedControlFlow, verify_compiler_bytecode_graph,
-    verify_compiler_control_flow, verify_compiler_function_graph,
+    CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureBinding, CompilerClosureSource,
+    CompilerConstantKind, CompilerConstantLayout, CompilerExecutableKind,
+    CompilerInitializationPolicy, CompilerSource, CompilerString, CompilerWritePolicy,
+    ExecutionRequirement, FinalOpcode, FunctionGraphVerificationLimits, FunctionIndexDomains,
+    FunctionTemplateId, Operands, PcSourceSpan, ScopeLink, SourceByteSpan,
+    UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody,
+    UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader, UnverifiedFunctionMetadata,
+    VariableDefinition, VerificationLimits, VerifiedBytecode, VerifiedControlFlow,
+    verify_compiler_bytecode_graph, verify_compiler_control_flow, verify_compiler_function_graph,
 };
 
 fn atom(text: &str) -> CompilerAtom {
@@ -168,6 +168,15 @@ fn function_policy(initialization: CompilerInitializationPolicy) -> CompilerBind
     CompilerBindingPolicy::new(
         CompilerBindingKind::Function,
         initialization,
+        CompilerWritePolicy::Mutable,
+        false,
+    )
+}
+
+fn global_reference_policy() -> CompilerBindingPolicy {
+    CompilerBindingPolicy::new(
+        CompilerBindingKind::GlobalReference,
+        CompilerInitializationPolicy::ConstructorRealmLookup,
         CompilerWritePolicy::Mutable,
         false,
     )
@@ -808,6 +817,121 @@ fn profiled_single_input(
     )
 }
 
+fn realm_global_definition(
+    realm_global: bool,
+    name: AtomPoolIndex,
+    policy: CompilerBindingPolicy,
+    source: CompilerClosureSource,
+) -> ClosureVariableDefinition {
+    if realm_global {
+        ClosureVariableDefinition::realm_global(Some(name), policy, source)
+    } else {
+        ClosureVariableDefinition::new(Some(name), policy, source)
+    }
+}
+
+fn dynamic_realm_global_input(
+    child_instructions: &[(FinalOpcode, Operands)],
+    child_atoms: &[CompilerAtom],
+    root_realm_global: bool,
+    child_realm_global: bool,
+    policy: CompilerBindingPolicy,
+) -> UnverifiedCompilerBytecodeGraph {
+    let root_flow = flow_with_header(
+        &[
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        1,
+        0,
+        0,
+        &[],
+        1,
+        &[CompilerConstantKind::Function],
+        UnverifiedFunctionHeader::dynamic_function_script(0),
+    );
+    let child_flow = flow(
+        child_instructions,
+        u32::try_from(child_atoms.len()).expect("child atom count"),
+        0,
+        0,
+        &[],
+        1,
+        &[],
+    );
+    let graph = Arc::new(
+        verify_compiler_function_graph(
+            UnverifiedCompilerFunctionGraph::new(
+                FunctionTemplateId::new(0),
+                Arc::from([
+                    UnverifiedCompilerFunction::new(
+                        Arc::clone(&root_flow),
+                        Arc::from([quickjs_bytecode::CompilerConstant::Function(
+                            FunctionTemplateId::new(1),
+                        )]),
+                        Arc::from([CompilerClosureSource::ConstructorRealmGlobal(
+                            AtomPoolIndex::new(0),
+                        )]),
+                    )
+                    .with_atom_pool(Arc::from([atom("realmValue")])),
+                    UnverifiedCompilerFunction::new(
+                        Arc::clone(&child_flow),
+                        Arc::from([]),
+                        Arc::from([CompilerClosureSource::ParentClosure(0)]),
+                    )
+                    .with_atom_pool(Arc::from(child_atoms)),
+                ]),
+            ),
+            FunctionGraphVerificationLimits::default(),
+        )
+        .expect("dynamic realm-global staged graph"),
+    );
+    let text: Arc<str> = Arc::from("function anonymous(){return realmValue}");
+    let full_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let mapped_source = |flow: &VerifiedControlFlow, name_span| {
+        CompilerSource::new(
+            Arc::from("fixture.js"),
+            Arc::clone(&text),
+            full_span,
+            name_span,
+            Arc::from(
+                flow.instructions()
+                    .iter()
+                    .map(|instruction| PcSourceSpan::new(instruction.decoded().pc(), full_span))
+                    .collect::<Vec<_>>(),
+            ),
+        )
+    };
+    UnverifiedCompilerBytecodeGraph::new(
+        graph,
+        Arc::from([
+            UnverifiedFunctionMetadata::new(
+                None,
+                Arc::from([]),
+                Arc::from([realm_global_definition(
+                    root_realm_global,
+                    AtomPoolIndex::new(0),
+                    policy,
+                    CompilerClosureSource::ConstructorRealmGlobal(AtomPoolIndex::new(0)),
+                )]),
+                mapped_source(&root_flow, None),
+            )
+            .with_executable_kind(CompilerExecutableKind::DynamicFunctionScript),
+            UnverifiedFunctionMetadata::new(
+                Some(AtomPoolIndex::new(0)),
+                Arc::from([]),
+                Arc::from([realm_global_definition(
+                    child_realm_global,
+                    AtomPoolIndex::new(1),
+                    policy,
+                    CompilerClosureSource::ParentClosure(0),
+                )]),
+                mapped_source(&child_flow, Some(SourceByteSpan::new(9, 18))),
+            ),
+        ]),
+    )
+}
+
 fn function_initializer_input(
     instructions: &[(FinalOpcode, Operands)],
     definition_name: &str,
@@ -1275,6 +1399,475 @@ fn dynamic_function_script_profile_is_forbidden_on_child_templates() {
         &BytecodeVerificationErrorKind::DynamicFunctionScriptNotRoot
     );
     assert_eq!(error.function_id(), Some(FunctionTemplateId::new(1)));
+}
+
+#[test]
+fn dynamic_function_authority_carries_verified_constructor_realm_global_references() {
+    let input = dynamic_realm_global_input(
+        &[
+            (FinalOpcode::GetVarUndef, Operands::VarRef(0)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::GetVar, Operands::VarRef(0)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::PutVar, Operands::VarRef(0)),
+            (
+                FinalOpcode::DeleteVar,
+                Operands::Atom(AtomPoolIndex::new(1)),
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("anonymous"), atom("realmValue")],
+        true,
+        true,
+        global_reference_policy(),
+    );
+    let verified =
+        verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+            .expect("global lookup, assignment, and delete gain typed dynamic-Function authority");
+
+    assert!(
+        verified
+            .requirements()
+            .contains(&ExecutionRequirement::RealmGlobalBindings)
+    );
+    assert_eq!(
+        verified
+            .function(FunctionTemplateId::new(1))
+            .expect("dynamic function")
+            .metadata()
+            .closures()[0]
+            .binding(),
+        CompilerClosureBinding::RealmGlobal(global_reference_policy())
+    );
+}
+
+#[test]
+fn constructor_realm_global_opcodes_cannot_cross_captured_slot_boundaries() {
+    let realm_slot_with_capture_opcode = dynamic_realm_global_input(
+        &[
+            (FinalOpcode::GetVarRef, Operands::VarRef(0)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("anonymous"), atom("realmValue")],
+        true,
+        true,
+        global_reference_policy(),
+    );
+    let error = verify_compiler_bytecode_graph(
+        realm_slot_with_capture_opcode,
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a realm-global slot cannot execute captured-cell opcodes");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::ClosureBindingOpcodeMismatch {
+            closure: 0,
+            pc: BytecodePc::new(0),
+            opcode: FinalOpcode::GetVarRef,
+        }
+    );
+
+    let captured_slot_with_global_opcode = dynamic_realm_global_input(
+        &[
+            (FinalOpcode::GetVar, Operands::VarRef(0)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("anonymous"), atom("realmValue")],
+        true,
+        false,
+        global_reference_policy(),
+    );
+    let error = verify_compiler_bytecode_graph(
+        captured_slot_with_global_opcode,
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a captured slot cannot execute constructor-realm global opcodes");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: quickjs_bytecode::BindingSlot::Closure(0),
+            pc: None,
+            reason: BindingPolicyViolationReason::InvalidDeclarationPolicy,
+        }
+    );
+
+    let captured_root_source = dynamic_realm_global_input(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        &[atom("anonymous"), atom("realmValue")],
+        false,
+        true,
+        global_reference_policy(),
+    );
+    let error = verify_compiler_bytecode_graph(
+        captured_root_source,
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("root realm-global provenance cannot be relabeled as a captured binding");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: quickjs_bytecode::BindingSlot::Closure(0),
+            pc: None,
+            reason: BindingPolicyViolationReason::InvalidDeclarationPolicy,
+        }
+    );
+}
+
+#[test]
+fn ordinary_root_authority_cannot_originate_constructor_realm_globals() {
+    let flow = flow_with_header(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        1,
+        0,
+        0,
+        &[],
+        1,
+        &[],
+        UnverifiedFunctionHeader::ordinary_source_function(false, 0),
+    );
+    let graph = Arc::new(
+        verify_compiler_function_graph(
+            UnverifiedCompilerFunctionGraph::new(
+                FunctionTemplateId::new(0),
+                Arc::from([UnverifiedCompilerFunction::new(
+                    Arc::clone(&flow),
+                    Arc::from([]),
+                    Arc::from([CompilerClosureSource::ConstructorRealmGlobal(
+                        AtomPoolIndex::new(0),
+                    )]),
+                )
+                .with_atom_pool(Arc::from([atom("realmValue")]))]),
+            ),
+            FunctionGraphVerificationLimits::default(),
+        )
+        .expect("staged graphs defer the executable-role check to final verification"),
+    );
+    let text = "function(){return undefined}";
+    let full_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let input = UnverifiedCompilerBytecodeGraph::new(
+        graph,
+        Arc::from([UnverifiedFunctionMetadata::new(
+            None,
+            Arc::from([]),
+            Arc::from([ClosureVariableDefinition::realm_global(
+                Some(AtomPoolIndex::new(0)),
+                global_reference_policy(),
+                CompilerClosureSource::ConstructorRealmGlobal(AtomPoolIndex::new(0)),
+            )]),
+            source(text, full_span, None, &[(0, full_span)]),
+        )]),
+    );
+    let error = verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect_err("only a dynamic-Function Script authority owns constructor-realm globals");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::ConstructorRealmGlobalSourceRequiresDynamicFunctionScript {
+            closure: 0,
+        }
+    );
+}
+
+#[test]
+fn unresolved_realm_globals_forbid_initialization_and_undeclared_delete_atoms() {
+    let put_init = dynamic_realm_global_input(
+        &[
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::PutVarInit, Operands::VarRef(0)),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        &[atom("anonymous"), atom("realmValue")],
+        true,
+        true,
+        global_reference_policy(),
+    );
+    let error =
+        verify_compiler_bytecode_graph(put_init, BytecodeGraphVerificationLimits::default())
+            .expect_err("an unresolved global reference is never declaration-initialized");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc: BytecodePc::new(1),
+            opcode: FinalOpcode::PutVarInit,
+        }
+    );
+
+    let undeclared_delete = dynamic_realm_global_input(
+        &[
+            (
+                FinalOpcode::DeleteVar,
+                Operands::Atom(AtomPoolIndex::new(2)),
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("anonymous"), atom("realmValue"), atom("other")],
+        true,
+        true,
+        global_reference_policy(),
+    );
+    let error = verify_compiler_bytecode_graph(
+        undeclared_delete,
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("delete_var needs a same-name unresolved realm-global descriptor");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::RealmGlobalDeleteBindingMissing {
+            pc: BytecodePc::new(0),
+            atom: AtomPoolIndex::new(2),
+        }
+    );
+}
+
+#[test]
+fn realm_global_authority_supports_indirect_eval_var_but_rejects_lexical_declarations() {
+    let verified = verify_compiler_bytecode_graph(
+        dynamic_realm_global_input(
+            &[
+                (FinalOpcode::GetVar, Operands::VarRef(0)),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (FinalOpcode::PutVar, Operands::VarRef(0)),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            &[atom("anonymous"), atom("realmValue")],
+            true,
+            true,
+            var_policy(),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("indirect-eval var remains a mutable constructor-realm binding");
+    assert!(
+        verified
+            .requirements()
+            .contains(&ExecutionRequirement::RealmGlobalBindings)
+    );
+
+    let delete_declared_var = verify_compiler_bytecode_graph(
+        dynamic_realm_global_input(
+            &[
+                (
+                    FinalOpcode::DeleteVar,
+                    Operands::Atom(AtomPoolIndex::new(1)),
+                ),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            &[atom("anonymous"), atom("realmValue")],
+            true,
+            true,
+            var_policy(),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("delete_var is reserved for unresolved lookup, not a declared eval var");
+    assert_eq!(
+        delete_declared_var.kind(),
+        &BytecodeVerificationErrorKind::RealmGlobalDeleteBindingMissing {
+            pc: BytecodePc::new(0),
+            atom: AtomPoolIndex::new(1),
+        }
+    );
+
+    for policy in [let_policy(), const_policy()] {
+        let error = verify_compiler_bytecode_graph(
+            dynamic_realm_global_input(
+                &[(FinalOpcode::ReturnUndef, Operands::None)],
+                &[atom("anonymous"), atom("realmValue")],
+                true,
+                true,
+                policy,
+            ),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("indirect-eval lexical declarations are evaluation-local, not realm globals");
+        assert_eq!(
+            error.kind(),
+            &BytecodeVerificationErrorKind::BindingPolicyViolation {
+                slot: quickjs_bytecode::BindingSlot::Closure(0),
+                pc: None,
+                reason: BindingPolicyViolationReason::InvalidDeclarationPolicy,
+            }
+        );
+    }
+
+    let unsupported_function = verify_compiler_bytecode_graph(
+        dynamic_realm_global_input(
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            &[atom("anonymous"), atom("realmValue")],
+            true,
+            true,
+            function_policy(CompilerInitializationPolicy::FunctionAtInstantiation),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("realm-global Function declarations remain fail closed");
+    assert!(matches!(
+        unsupported_function.kind(),
+        BytecodeVerificationErrorKind::BindingPolicyViolation {
+            reason: BindingPolicyViolationReason::InvalidDeclarationPolicy,
+            ..
+        }
+    ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn dynamic_script_lexical_is_evaluation_local_and_capturable_by_its_child() {
+    let root_flow = flow_with_header(
+        &[
+            (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::PutLoc0, Operands::NoneLoc),
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        2,
+        0,
+        1,
+        &[CompilerCapturedBinding::ScopedLocal(0)],
+        0,
+        &[CompilerConstantKind::Function],
+        UnverifiedFunctionHeader::dynamic_function_script(1),
+    );
+    let child_flow = flow(
+        &[
+            (FinalOpcode::GetVarRefCheck, Operands::VarRef(0)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        2,
+        0,
+        0,
+        &[],
+        1,
+        &[],
+    );
+    let graph = Arc::new(
+        verify_compiler_function_graph(
+            UnverifiedCompilerFunctionGraph::new(
+                FunctionTemplateId::new(0),
+                Arc::from([
+                    UnverifiedCompilerFunction::new(
+                        Arc::clone(&root_flow),
+                        Arc::from([quickjs_bytecode::CompilerConstant::Function(
+                            FunctionTemplateId::new(1),
+                        )]),
+                        Arc::from([]),
+                    )
+                    .with_atom_pool(Arc::from([atom("lexical"), atom("inner")])),
+                    UnverifiedCompilerFunction::new(
+                        Arc::clone(&child_flow),
+                        Arc::from([]),
+                        Arc::from([CompilerClosureSource::ParentVariableReference(0)]),
+                    )
+                    .with_atom_pool(Arc::from([atom("inner"), atom("lexical")])),
+                ]),
+            ),
+            FunctionGraphVerificationLimits::default(),
+        )
+        .expect("dynamic Script evaluation-local lexical graph"),
+    );
+    let text: Arc<str> = Arc::from("let lexical=1; function inner(){return lexical} inner");
+    let full_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let input = UnverifiedCompilerBytecodeGraph::new(
+        graph,
+        Arc::from([
+            UnverifiedFunctionMetadata::new(
+                None,
+                Arc::from([VariableDefinition::new(
+                    Some(AtomPoolIndex::new(0)),
+                    ScopeLink::End,
+                    let_policy(),
+                    true,
+                    Some(0),
+                )]),
+                Arc::from([]),
+                CompilerSource::new(
+                    Arc::from("fixture.js"),
+                    Arc::clone(&text),
+                    full_span,
+                    None,
+                    Arc::from(
+                        root_flow
+                            .instructions()
+                            .iter()
+                            .map(|instruction| {
+                                PcSourceSpan::new(instruction.decoded().pc(), full_span)
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                ),
+            )
+            .with_executable_kind(CompilerExecutableKind::DynamicFunctionScript),
+            UnverifiedFunctionMetadata::new(
+                Some(AtomPoolIndex::new(0)),
+                Arc::from([]),
+                Arc::from([ClosureVariableDefinition::new(
+                    Some(AtomPoolIndex::new(1)),
+                    let_policy(),
+                    CompilerClosureSource::ParentVariableReference(0),
+                )]),
+                source_for_flow(
+                    &text,
+                    &child_flow,
+                    SourceByteSpan::new(15, 47),
+                    SourceByteSpan::new(24, 29),
+                ),
+            ),
+        ]),
+    );
+
+    let verified =
+        verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+            .expect("an escaped child can capture an evaluation-local Script lexical");
+    assert_eq!(
+        verified
+            .function(FunctionTemplateId::new(1))
+            .expect("escaped child")
+            .metadata()
+            .closures()[0]
+            .binding(),
+        CompilerClosureBinding::Captured(let_policy())
+    );
+    assert!(
+        verified
+            .requirements()
+            .contains(&ExecutionRequirement::LexicalBindings)
+    );
+    assert!(
+        !verified
+            .requirements()
+            .contains(&ExecutionRequirement::RealmGlobalBindings)
+    );
+}
+
+#[test]
+fn sloppy_this_is_authorized_only_inside_a_dynamic_function_authority() {
+    let verified = verify_compiler_bytecode_graph(
+        dynamic_realm_global_input(
+            &[
+                (FinalOpcode::PushThis, Operands::None),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            &[atom("anonymous"), atom("realmValue")],
+            true,
+            true,
+            global_reference_policy(),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("ordinary dynamic Function receives constructor-realm sloppy-this authority");
+    assert_eq!(
+        verified
+            .function(FunctionTemplateId::new(1))
+            .expect("dynamic function")
+            .function()
+            .control_flow()
+            .function_header()
+            .mode()
+            .bits(),
+        0
+    );
 }
 
 #[test]

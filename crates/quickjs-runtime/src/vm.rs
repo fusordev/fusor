@@ -26,19 +26,20 @@
 //! Iterative execution of runtime-installed verified bytecode.
 
 use quickjs_bytecode::{
-    BytecodePc, CompilerBindingKind, CompilerClosureSource, CompilerExecutableKind, FinalOpcode,
-    FunctionTemplateId, InstructionIndex, Operands, VerifiedBytecodeFunction,
-    VerifiedSuccessorKind,
+    BytecodePc, CompilerBindingKind, CompilerClosureBinding, CompilerClosureSource,
+    CompilerExecutableKind, FinalOpcode, FunctionTemplateId, InstructionIndex, Operands,
+    VerifiedBytecodeFunction, VerifiedSuccessorKind,
 };
 
 use crate::{
     Context, EngineFault, ExceptionKind, ExecutionError, Function, HandleError, HandleKind,
     JsException, JsNumber, JsStackFrame, JsString, JsValue, PredefinedAtom, PropertyKey,
     PropertyLayout, Runtime, RuntimeResource,
-    ids::{BindingCellId, FunctionId, InstalledCodeId},
+    ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId},
     runtime::{
-        BindingCell, FrameBindingAddress, HeapFunction, InstalledCode, InstalledConstant,
-        InstalledTemplate, check_execution_limit, usize_to_u64,
+        BindingCell, EnvironmentBinding, FrameBindingAddress, HeapFunction, InstalledCode,
+        InstalledConstant, InstalledTemplate, RealmGlobalBindingState, check_execution_limit,
+        usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -85,7 +86,7 @@ struct Frame {
     locals: Vec<FrameBinding>,
     own_cells: Vec<Option<BindingCellId>>,
     own_cell_bindings: Vec<FrameBindingAddress>,
-    environment: Vec<BindingCellId>,
+    environment: Vec<EnvironmentBinding>,
     stack: Vec<StoredValue>,
 }
 
@@ -137,6 +138,28 @@ fn receiver_profile(function: &VerifiedBytecodeFunction<'_>) -> (bool, ReceiverA
     )
 }
 
+fn normalize_receiver(
+    runtime: &Runtime,
+    realm: crate::ids::RealmId,
+    access: ReceiverAccess,
+    receiver: StoredValue,
+) -> Result<StoredValue, EngineFault> {
+    if matches!(access, ReceiverAccess::Direct) {
+        return Ok(receiver);
+    }
+    match receiver {
+        StoredValue::Undefined | StoredValue::Null => {
+            runtime.realm_global_object(realm).map(StoredValue::Object)
+        }
+        StoredValue::Function(_) | StoredValue::Object(_) => Ok(receiver),
+        StoredValue::Boolean(_) | StoredValue::Number(_) | StoredValue::String(_) => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "primitive sloppy receiver reached the pre-wrapper object profile",
+            })
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum CallKind {
     Direct,
@@ -180,7 +203,7 @@ enum BindingName {
 }
 
 enum ClosureCapturePlan {
-    Existing(BindingCellId),
+    Existing(EnvironmentBinding),
     New(usize),
 }
 
@@ -379,6 +402,10 @@ fn execute_frames(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "verified environment validation and cumulative frame-budget planning remain one read-only transaction"
+)]
 fn plan_frame(
     runtime: &Runtime,
     function_id: FunctionId,
@@ -431,14 +458,46 @@ fn plan_frame(
         }
         .into());
     }
-    for cell in function.environment.iter().copied() {
-        if !runtime.cells.contains(cell) {
-            return Err(EngineFault::StaleHeapEdge {
-                edge: "closure cell",
-                index: cell.index(),
-                generation: cell.generation(),
+    for (binding, definition) in function
+        .environment
+        .iter()
+        .copied()
+        .zip(verified.metadata().closures())
+    {
+        match (binding, definition.binding()) {
+            (EnvironmentBinding::Captured(cell), CompilerClosureBinding::Captured(_)) => {
+                if !runtime.cells.contains(cell) {
+                    return Err(EngineFault::StaleHeapEdge {
+                        edge: "closure cell",
+                        index: cell.index(),
+                        generation: cell.generation(),
+                    }
+                    .into());
+                }
             }
-            .into());
+            (EnvironmentBinding::RealmGlobal(global), CompilerClosureBinding::RealmGlobal(_)) => {
+                let valid = runtime
+                    .global_bindings
+                    .get(global)
+                    .is_some_and(|binding| binding.realm == code.realm);
+                if !valid {
+                    return Err(EngineFault::StaleHeapEdge {
+                        edge: "realm global binding",
+                        index: global.index(),
+                        generation: global.generation(),
+                    }
+                    .into());
+                }
+            }
+            (
+                EnvironmentBinding::Captured(_) | EnvironmentBinding::RealmGlobal(_),
+                CompilerClosureBinding::Captured(_) | CompilerClosureBinding::RealmGlobal(_),
+            ) => {
+                return Err(EngineFault::InvalidClosureEnvironment {
+                    function: template_id,
+                }
+                .into());
+            }
         }
     }
 
@@ -509,7 +568,7 @@ fn create_frame(
             index: plan.function.index(),
             generation: plan.function.generation(),
         })?;
-    let environment = copy_ids(&function.environment, RuntimeResource::FrameValues)?;
+    let environment = copy_environment(&function.environment, RuntimeResource::FrameValues)?;
     let code = runtime
         .code
         .get(plan.code)
@@ -758,13 +817,13 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
         FinalOpcode::Undefined => frame.stack.push(StoredValue::Undefined),
         FinalOpcode::Null => frame.stack.push(StoredValue::Null),
         FinalOpcode::PushThis => {
-            if matches!(frame.receiver_access, ReceiverAccess::DeferredSloppy) {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "sloppy ordinary push_this entered the deferred receiver profile",
-                }
-                .into());
-            }
-            frame.stack.push(frame.receiver.duplicate());
+            let realm = code(runtime, frame.code)?.realm;
+            frame.stack.push(normalize_receiver(
+                runtime,
+                realm,
+                frame.receiver_access,
+                frame.receiver.duplicate(),
+            )?);
         }
         FinalOpcode::PushFalse => frame.stack.push(StoredValue::Boolean(false)),
         FinalOpcode::PushTrue => frame.stack.push(StoredValue::Boolean(true)),
@@ -953,6 +1012,43 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             let index = argument_index(opcode, operands)?;
             let value = peek(frame)?.duplicate();
             write_argument(runtime, frame, index, SlotValue::Value(value))?;
+        }
+        FinalOpcode::GetVarUndef | FinalOpcode::GetVar => {
+            let index = closure_index(opcode, operands)?;
+            let global = global_reference_operand(runtime, frame, index)?;
+            match read_realm_global(runtime, &global)? {
+                RealmGlobalReadOutcome::Value(value) => frame.stack.push(value),
+                RealmGlobalReadOutcome::Missing if opcode == FinalOpcode::GetVarUndef => {
+                    frame.stack.push(StoredValue::Undefined);
+                }
+                RealmGlobalReadOutcome::Missing => {
+                    return Ok(Step::Abrupt(global_not_defined_exception(
+                        runtime,
+                        frame,
+                        &global.name,
+                        source_pc,
+                    )?));
+                }
+            }
+        }
+        FinalOpcode::PutVar => {
+            let index = closure_index(opcode, operands)?;
+            let global = global_reference_operand(runtime, frame, index)?;
+            let name = global.name.clone();
+            let value = pop(frame)?;
+            match write_realm_global(runtime, global, value, frame.strict)? {
+                RealmGlobalWriteOutcome::Complete => {}
+                RealmGlobalWriteOutcome::Missing => {
+                    return Ok(Step::Abrupt(global_not_defined_exception(
+                        runtime, frame, &name, source_pc,
+                    )?));
+                }
+                RealmGlobalWriteOutcome::Property(failure) => {
+                    return Ok(Step::Abrupt(property_exception(
+                        runtime, frame, source_pc, &name, failure,
+                    )?));
+                }
+            }
         }
         FinalOpcode::GetLoc
         | FinalOpcode::GetLoc8
@@ -1189,6 +1285,13 @@ struct StaticPropertyOperand {
     name: JsString,
 }
 
+struct GlobalReferenceOperand {
+    binding: RealmGlobalBindingId,
+    object: ObjectId,
+    key: PropertyKey,
+    name: JsString,
+}
+
 enum PropertyReadOutcome {
     Value(StoredValue),
     Failed(PropertyFailure),
@@ -1197,6 +1300,17 @@ enum PropertyReadOutcome {
 enum PropertyWriteOutcome {
     Complete,
     Failed(PropertyFailure),
+}
+
+enum RealmGlobalReadOutcome {
+    Value(StoredValue),
+    Missing,
+}
+
+enum RealmGlobalWriteOutcome {
+    Complete,
+    Missing,
+    Property(PropertyFailure),
 }
 
 #[derive(Clone, Copy)]
@@ -1242,6 +1356,133 @@ fn static_property_operand(
     })
 }
 
+fn global_reference_operand(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: u32,
+) -> Result<GlobalReferenceOperand, EngineFault> {
+    let binding = *frame
+        .environment
+        .get(index as usize)
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "realm global environment",
+            index,
+        })?;
+    let EnvironmentBinding::RealmGlobal(global) = binding else {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        });
+    };
+    let record = runtime
+        .global_bindings
+        .get(global)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "realm global binding",
+            index: global.index(),
+            generation: global.generation(),
+        })?;
+    let realm = code(runtime, frame.code)?.realm;
+    if record.realm != realm {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        });
+    }
+    let name = record
+        .name
+        .description()
+        .cloned()
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "realm global atom description",
+            index,
+        })?;
+    Ok(GlobalReferenceOperand {
+        binding: global,
+        object: runtime.realm_global_object(realm)?,
+        key: PropertyKey::from_validated_atom(record.name.clone()),
+        name,
+    })
+}
+
+fn read_realm_global(
+    runtime: &Runtime,
+    global: &GlobalReferenceOperand,
+) -> Result<RealmGlobalReadOutcome, ExecutionError> {
+    let binding =
+        runtime
+            .global_bindings
+            .get(global.binding)
+            .ok_or(EngineFault::StaleHeapEdge {
+                edge: "realm global binding",
+                index: global.binding.index(),
+                generation: global.binding.generation(),
+            })?;
+    match binding.state {
+        RealmGlobalBindingState::Unresolved | RealmGlobalBindingState::Object => {
+            read_heap_property_if_present(
+                runtime,
+                HeapReference::Object(global.object),
+                &global.key,
+            )
+            .map(|value| {
+                value.map_or(
+                    RealmGlobalReadOutcome::Missing,
+                    RealmGlobalReadOutcome::Value,
+                )
+            })
+        }
+    }
+}
+
+fn write_realm_global(
+    runtime: &mut Runtime,
+    global: GlobalReferenceOperand,
+    value: StoredValue,
+    strict: bool,
+) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    let state = runtime
+        .global_bindings
+        .get(global.binding)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "realm global binding",
+            index: global.binding.index(),
+            generation: global.binding.generation(),
+        })?
+        .state;
+    match state {
+        RealmGlobalBindingState::Unresolved => {
+            let present = read_heap_property_if_present(
+                runtime,
+                HeapReference::Object(global.object),
+                &global.key,
+            )?
+            .is_some();
+            if !present && strict {
+                return Ok(RealmGlobalWriteOutcome::Missing);
+            }
+            let base = StoredValue::Object(global.object);
+            Ok(
+                match write_static_property(runtime, &base, global.key, value, strict)? {
+                    PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
+                    PropertyWriteOutcome::Failed(failure) => {
+                        RealmGlobalWriteOutcome::Property(failure)
+                    }
+                },
+            )
+        }
+        RealmGlobalBindingState::Object => {
+            let base = StoredValue::Object(global.object);
+            Ok(
+                match write_static_property(runtime, &base, global.key, value, strict)? {
+                    PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
+                    PropertyWriteOutcome::Failed(failure) => {
+                        RealmGlobalWriteOutcome::Property(failure)
+                    }
+                },
+            )
+        }
+    }
+}
+
 fn read_static_property(
     runtime: &Runtime,
     base: &StoredValue,
@@ -1281,6 +1522,14 @@ fn read_heap_property(
     reference: HeapReference,
     key: &PropertyKey,
 ) -> Result<StoredValue, ExecutionError> {
+    Ok(read_heap_property_if_present(runtime, reference, key)?.unwrap_or(StoredValue::Undefined))
+}
+
+fn read_heap_property_if_present(
+    runtime: &Runtime,
+    reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<Option<StoredValue>, ExecutionError> {
     let mut current = Some(reference);
     let mut remaining = runtime
         .functions
@@ -1297,11 +1546,11 @@ fn read_heap_property(
         remaining -= 1;
         let record = runtime.object_record(reference)?;
         if let Some((_, value)) = record.own_data_property(key) {
-            return Ok(value);
+            return Ok(Some(value));
         }
         current = record.prototype();
     }
-    Ok(StoredValue::Undefined)
+    Ok(None)
 }
 
 fn inherited_data_layout(
@@ -1623,7 +1872,9 @@ fn create_closure(
                         }
                         .into());
                     }
-                    capture_plans.push(ClosureCapturePlan::Existing(cell));
+                    capture_plans.push(ClosureCapturePlan::Existing(EnvironmentBinding::Captured(
+                        cell,
+                    )));
                     continue;
                 }
 
@@ -1652,21 +1903,38 @@ fn create_closure(
                 capture_plans.push(ClosureCapturePlan::New(pending));
             }
             CompilerClosureSource::ParentClosure(index) => {
-                let cell = *frame.environment.get(index as usize).ok_or(
+                let binding = *frame.environment.get(index as usize).ok_or(
                     EngineFault::MissingPoolEntry {
                         pool: "parent closure",
                         index,
                     },
                 )?;
-                if !runtime.cells.contains(cell) {
-                    return Err(EngineFault::StaleHeapEdge {
-                        edge: "closure cell",
-                        index: cell.index(),
-                        generation: cell.generation(),
+                match binding {
+                    EnvironmentBinding::Captured(cell) => {
+                        if !runtime.cells.contains(cell) {
+                            return Err(EngineFault::StaleHeapEdge {
+                                edge: "closure cell",
+                                index: cell.index(),
+                                generation: cell.generation(),
+                            }
+                            .into());
+                        }
                     }
-                    .into());
+                    EnvironmentBinding::RealmGlobal(global) => {
+                        if !runtime.global_bindings.contains(global) {
+                            return Err(EngineFault::StaleHeapEdge {
+                                edge: "realm global binding",
+                                index: global.index(),
+                                generation: global.generation(),
+                            }
+                            .into());
+                        }
+                    }
                 }
-                capture_plans.push(ClosureCapturePlan::Existing(cell));
+                capture_plans.push(ClosureCapturePlan::Existing(binding));
+            }
+            CompilerClosureSource::ConstructorRealmGlobal(_) => {
+                return Err(EngineFault::InvalidClosureEnvironment { function: child }.into());
             }
         }
     }
@@ -1728,17 +1996,17 @@ fn create_closure(
     }
 
     for capture in capture_plans {
-        let cell = match capture {
-            ClosureCapturePlan::Existing(cell) => cell,
+        let binding = match capture {
+            ClosureCapturePlan::Existing(binding) => binding,
             ClosureCapturePlan::New(index) => {
                 let Some(cell) = new_cells.get(index).copied() else {
                     rollback_new_cells(runtime, frame, &pending_cells, &new_cells);
                     return Err(EngineFault::InvalidClosureEnvironment { function: child }.into());
                 };
-                cell
+                EnvironmentBinding::Captured(cell)
             }
         };
-        environment.push(cell);
+        environment.push(binding);
     }
 
     for (pending, cell) in pending_cells.iter().zip(new_cells.iter().copied()) {
@@ -1954,12 +2222,19 @@ fn duplicate_environment(
     index: u32,
     checked: bool,
 ) -> Result<StoredValue, BindingAccessError> {
-    let cell = *frame.environment.get(index as usize).ok_or({
+    let binding = *frame.environment.get(index as usize).ok_or({
         BindingAccessError::Fault(EngineFault::MissingPoolEntry {
             pool: "closure environment",
             index,
         })
     })?;
+    let EnvironmentBinding::Captured(cell) = binding else {
+        return Err(BindingAccessError::Fault(
+            EngineFault::InvalidClosureEnvironment {
+                function: frame.template,
+            },
+        ));
+    };
     let value = &runtime
         .cells
         .get(cell)
@@ -1987,13 +2262,18 @@ fn environment_is_uninitialized(
     frame: &Frame,
     index: u32,
 ) -> Result<bool, EngineFault> {
-    let cell = *frame
+    let binding = *frame
         .environment
         .get(index as usize)
         .ok_or(EngineFault::MissingPoolEntry {
             pool: "closure environment",
             index,
         })?;
+    let EnvironmentBinding::Captured(cell) = binding else {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        });
+    };
     Ok(matches!(
         runtime
             .cells
@@ -2014,13 +2294,19 @@ fn write_environment(
     index: u32,
     value: SlotValue,
 ) -> Result<(), ExecutionError> {
-    let cell = *frame
+    let binding = *frame
         .environment
         .get(index as usize)
         .ok_or(EngineFault::MissingPoolEntry {
             pool: "closure environment",
             index,
         })?;
+    let EnvironmentBinding::Captured(cell) = binding else {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        }
+        .into());
+    };
     runtime
         .cells
         .get_mut(cell)
@@ -2075,6 +2361,21 @@ fn tdz_exception(
         payload: PendingExceptionPayload::EngineError {
             kind: ExceptionKind::ReferenceError,
             message,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
+fn global_not_defined_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    name: &JsString,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    Ok(PendingException {
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::ReferenceError,
+            message: named_property_message("'", name, "' is not defined")?,
         },
         origin: instruction_location(runtime, frame, pc)?,
     })
@@ -2482,10 +2783,10 @@ const fn implied_integer(opcode: FinalOpcode) -> Option<i32> {
     }
 }
 
-fn copy_ids(
-    values: &[BindingCellId],
+fn copy_environment(
+    values: &[EnvironmentBinding],
     resource: RuntimeResource,
-) -> Result<Vec<BindingCellId>, ExecutionError> {
+) -> Result<Vec<EnvironmentBinding>, ExecutionError> {
     let mut copied = Vec::new();
     copied
         .try_reserve_exact(values.len())

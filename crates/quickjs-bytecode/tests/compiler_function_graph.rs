@@ -1,14 +1,21 @@
 use std::sync::Arc;
 
 use quickjs_bytecode::{
-    BytecodeBuilder, CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureSource,
-    CompilerConstant, CompilerConstantKind, CompilerConstantLayout, FinalOpcode,
-    FunctionGraphResource, FunctionGraphVerificationErrorKind, FunctionGraphVerificationLimits,
-    FunctionIndexDomains, FunctionTemplateId, Operands, UnverifiedCompilerFunction,
-    UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader,
-    VerificationLimits, VerifiedCompilerFunctionGraph, VerifiedControlFlow,
-    verify_compiler_control_flow, verify_compiler_function_graph,
+    AtomPoolIndex, BytecodeBuilder, CompilerAtom, CompilerCaptureLayout, CompilerCapturedBinding,
+    CompilerClosureSource, CompilerConstant, CompilerConstantKind, CompilerConstantLayout,
+    CompilerString, FinalOpcode, FunctionGraphResource, FunctionGraphVerificationErrorKind,
+    FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId, Operands,
+    UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph,
+    UnverifiedFunctionHeader, VerificationLimits, VerifiedCompilerFunctionGraph,
+    VerifiedControlFlow, verify_compiler_control_flow, verify_compiler_function_graph,
 };
+
+fn atom(text: &str) -> CompilerAtom {
+    CompilerAtom::new(
+        CompilerString::try_from_code_units(text.encode_utf16().collect::<Vec<_>>().into())
+            .expect("fixture atom"),
+    )
+}
 
 fn encode(instructions: &[(FinalOpcode, Operands)]) -> Vec<u8> {
     let mut builder = BytecodeBuilder::new();
@@ -28,8 +35,29 @@ fn compiler_flow(
     imported_closure_count: u32,
     constant_kinds: &[CompilerConstantKind],
 ) -> Arc<VerifiedControlFlow> {
-    let domains = FunctionIndexDomains::new(
+    compiler_flow_with_atoms(
+        instructions,
         0,
+        argument_count,
+        local_count,
+        owned_captures,
+        imported_closure_count,
+        constant_kinds,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compiler_flow_with_atoms(
+    instructions: &[(FinalOpcode, Operands)],
+    atom_count: u32,
+    argument_count: u32,
+    local_count: u32,
+    owned_captures: &[CompilerCapturedBinding],
+    imported_closure_count: u32,
+    constant_kinds: &[CompilerConstantKind],
+) -> Arc<VerifiedControlFlow> {
+    let domains = FunctionIndexDomains::new(
+        atom_count,
         u32::try_from(constant_kinds.len()).expect("fixture constant count fits u32"),
         argument_count,
         local_count,
@@ -654,6 +682,102 @@ fn rejects_roots_requiring_an_unverified_external_environment() {
             closure_variables: 1,
         }
     );
+}
+
+#[test]
+fn constructor_realm_global_sources_are_atom_bound_and_root_owned() {
+    let root_flow = compiler_flow_with_atoms(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        1,
+        0,
+        0,
+        &[],
+        1,
+        &[],
+    );
+    let root = function(
+        Arc::clone(&root_flow),
+        &[],
+        &[CompilerClosureSource::ConstructorRealmGlobal(
+            AtomPoolIndex::new(0),
+        )],
+    )
+    .with_atom_pool(Arc::from([atom("realmValue")]));
+    let verified = verify_compiler_function_graph(
+        graph(vec![root]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("a root can carry an atom-bound constructor-realm global source");
+    assert_eq!(
+        verified.root().closure_sources(),
+        [CompilerClosureSource::ConstructorRealmGlobal(
+            AtomPoolIndex::new(0)
+        )]
+    );
+
+    let out_of_bounds = function(
+        root_flow,
+        &[],
+        &[CompilerClosureSource::ConstructorRealmGlobal(
+            AtomPoolIndex::new(1),
+        )],
+    )
+    .with_atom_pool(Arc::from([atom("realmValue")]));
+    let error = verify_compiler_function_graph(
+        graph(vec![out_of_bounds]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("the realm-global source atom must belong to the root atom pool");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::ClosureSourceAtomOutOfBounds {
+            closure: 0,
+            atom: AtomPoolIndex::new(1),
+            atoms: 1,
+        }
+    );
+
+    let parent = function(
+        compiler_flow(
+            &[
+                (FinalOpcode::FClosure8, Operands::Const8(0)),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            0,
+            0,
+            &[],
+            0,
+            &[CompilerConstantKind::Function],
+        ),
+        &[1],
+        &[],
+    );
+    let child = function(
+        compiler_flow_with_atoms(
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            1,
+            0,
+            0,
+            &[],
+            1,
+            &[],
+        ),
+        &[],
+        &[CompilerClosureSource::ConstructorRealmGlobal(
+            AtomPoolIndex::new(0),
+        )],
+    )
+    .with_atom_pool(Arc::from([atom("realmValue")]));
+    let error = verify_compiler_function_graph(
+        graph(vec![parent, child]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("only the graph root can originate a constructor-realm global source");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::ConstructorRealmGlobalSourceNotRoot { closure: 0 }
+    );
+    assert_eq!(error.function(), Some(FunctionTemplateId::new(1)));
 }
 
 #[test]

@@ -113,6 +113,28 @@ impl ObjectRecord {
         self.slots.push(value);
         Ok(())
     }
+
+    pub(crate) fn try_reserve_data(&mut self, additional: usize) -> Result<(), TryReserveError> {
+        self.slots.try_reserve(additional)?;
+        Arc::get_mut(&mut self.shape)
+            .expect("object shape Arc is private and uniquely owned before shape interning")
+            .try_reserve(additional)
+    }
+
+    pub(crate) fn pop_last_data(&mut self, key: &PropertyKey) -> Option<StoredValue> {
+        if self
+            .shape
+            .last()
+            .is_none_or(|property| property.key != *key)
+        {
+            return None;
+        }
+        let shape = Arc::get_mut(&mut self.shape)
+            .expect("object shape Arc is private and uniquely owned before shape interning");
+        let property = shape.pop()?;
+        debug_assert_eq!(property.layout.kind(), PropertyLayoutKind::Data);
+        self.slots.pop()
+    }
 }
 
 pub(crate) struct HeapObject {
