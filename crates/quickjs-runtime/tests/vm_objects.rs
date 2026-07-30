@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use quickjs_bytecode::FunctionTemplateId;
 use quickjs_compiler::CompilationContext;
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 use quickjs_runtime::{
@@ -64,6 +65,22 @@ fn with_context<T>(
 fn assert_number(value: &JsValue, expected: i32) {
     let actual = value.as_number().expect("live value").expect("number");
     assert!(actual.strict_equals(JsNumber::from_i32(expected)));
+}
+
+fn reserved_frame_values(
+    authority: &quickjs_bytecode::VerifiedBytecode,
+    function: FunctionTemplateId,
+) -> u64 {
+    let control_flow = authority
+        .function(function)
+        .expect("function")
+        .function()
+        .control_flow();
+    let domains = control_flow.domains();
+    u64::from(domains.argument_count())
+        + u64::from(domains.local_count())
+        + u64::from(control_flow.computed_stack_size())
+        + 1
 }
 
 fn escaping_exception(result: Result<JsValue, ExecutionError>) -> JsException {
@@ -150,6 +167,405 @@ fn duplicate_literal_key_replaces_one_slot_without_double_charging() {
     let report = runtime.collect_cycles().expect("collection");
     assert_eq!(report.objects(), 1);
     assert_eq!(runtime.usage(), baseline);
+}
+
+#[test]
+fn static_getter_and_setter_halves_merge_in_both_source_orders() {
+    let getter_first = compile(
+        "function run(){\
+            let stored=0;\
+            let object={\
+                get value(){return stored;},\
+                set value(next){stored=next;}\
+            };\
+            let assigned=object.value=17;\
+            if(assigned!==17){return 1;}\
+            return object.value;\
+        }",
+        "run",
+    );
+    let setter_first = compile(
+        "function run(){\
+            let stored=0;\
+            let object={\
+                set value(next){stored=next;},\
+                get value(){return stored;}\
+            };\
+            let assigned=object.value=23;\
+            if(assigned!==23){return 1;}\
+            return object.value;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let getter_first = context.instantiate(getter_first).expect("getter first");
+    let setter_first = context.instantiate(setter_first).expect("setter first");
+
+    let result = context
+        .call(&getter_first, &[], ExecutionLimits::default())
+        .expect("getter then setter");
+    assert_number(&result, 17);
+    let result = context
+        .call(&setter_first, &[], ExecutionLimits::default())
+        .expect("setter then getter");
+    assert_number(&result, 23);
+}
+
+#[test]
+fn repeated_accessor_halves_replace_only_the_matching_half() {
+    let authority = compile(
+        "function run(){\
+            let stored=0;\
+            let object={\
+                get value(){return 1;},\
+                get value(){return stored;},\
+                set value(next){stored=2;},\
+                set value(next){stored=3;}\
+            };\
+            object.value=9;\
+            return object.value;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("repeated accessor halves");
+    assert_number(&result, 3);
+}
+
+#[test]
+fn data_and_accessor_sandwiches_follow_source_order() {
+    let authority = compile(
+        "function run(){\
+            let dataLast={value:1,get value(){return 2;},value:3};\
+            let getterLast={get value(){return 4;},value:5,get value(){return 6;}};\
+            if(dataLast.value!==3){return 1;}\
+            return getterLast.value;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("data/accessor replacement");
+    assert_number(&result, 6);
+}
+
+#[test]
+fn methods_and_getters_replace_each_other_in_source_order() {
+    let authority = compile(
+        "function run(){\
+            let methodLast={get value(){return 1;},value(){return 2;}};\
+            let getterLast={value(){return 3;},get value(){return 4;}};\
+            if(methodLast.value()!==2){return 1;}\
+            return getterLast.value;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("method/accessor replacement");
+    assert_number(&result, 4);
+}
+
+#[test]
+fn extracted_concise_methods_preserve_sloppy_and_strict_this_modes() {
+    let authority = compile(
+        "function run(){\
+            let object={\
+                sloppy(){return this;},\
+                strict(){\"use strict\";return this;}\
+            };\
+            let sloppy=object.sloppy;\
+            let strict=object.strict;\
+            let sloppyThis=sloppy();\
+            let strictThis=strict();\
+            if(sloppyThis===void 0){return false;}\
+            if(sloppyThis===object){return false;}\
+            return strictThis===void 0;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("extracted method calls");
+    assert_eq!(result.as_boolean().expect("live value"), Some(true));
+}
+
+#[test]
+fn proto_spelled_concise_method_is_an_ordinary_method_property() {
+    let authority = compile(
+        "function run(){\
+            let object={__proto__(){return 31;}};\
+            if(object.__proto__.name!==\"__proto__\"){return 1;}\
+            return object.__proto__();\
+        }",
+        "run",
+    );
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("__proto__ method");
+    assert_number(&result, 31);
+}
+
+#[test]
+fn escaped_identifier_method_uses_its_cooked_property_name() {
+    let authority = compile(
+        "function run(){\
+            let object={\\u006dethod(){return 43;}};\
+            if(object.method.name!==\"method\"){return 1;}\
+            return object.method();\
+        }",
+        "run",
+    );
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("escaped identifier method");
+    assert_number(&result, 43);
+}
+
+#[test]
+fn setter_receives_original_receiver_and_rhs_and_its_return_is_discarded() {
+    let authority = compile(
+        "function run(){\
+            let observed=0;\
+            let receiver;\
+            let object={\
+                marker:31,\
+                get value(){return observed;},\
+                set value(next){\"use strict\";receiver=this;observed=next;return 99;}\
+            };\
+            let assigned=object.value=47;\
+            if(assigned!==47){return 1;}\
+            if(receiver!==object){return 2;}\
+            return object.value;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("setter call");
+    assert_number(&result, 47);
+}
+
+#[test]
+fn getter_only_assignment_is_a_sloppy_noop_and_a_strict_exact_error() {
+    let sloppy_source = "function write(){\
+        let object={get value(){return 3;}};\
+        let assigned=object.value=9;\
+        if(assigned!==9){return 1;}\
+        return object.value;\
+    }";
+    let strict_source = "function write(){\"use strict\";\
+        let object={get value(){return 3;}};\
+        return object.value=9;\
+    }";
+    let sloppy = compile(sloppy_source, "write");
+    let strict = compile(strict_source, "write");
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let sloppy = context.instantiate(sloppy).expect("sloppy writer");
+    let strict = context.instantiate(strict).expect("strict writer");
+
+    let result = context
+        .call(&sloppy, &[], ExecutionLimits::default())
+        .expect("sloppy missing setter");
+    assert_number(&result, 3);
+
+    let exception = escaping_exception(context.call(&strict, &[], ExecutionLimits::default()));
+    assert_engine_exception(
+        &exception,
+        strict_source,
+        "no setter for property",
+        "object.value",
+    );
+    assert!(exception.caller_frames().is_empty());
+}
+
+#[test]
+fn object_literal_methods_are_named_nonconstructors_without_a_prototype_value() {
+    let inspect = compile(
+        "function inspect(){\
+            let object={method(first,second){return second;}};\
+            if(object.method.name!==\"method\"){return 1;}\
+            if(object.method.length!==2){return 2;}\
+            return object.method.prototype===void 0;\
+        }",
+        "inspect",
+    );
+    let construct_source =
+        "function construct(){let object={method(){return 1;}};return new object.method();}";
+    let construct = compile(construct_source, "construct");
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let inspect = context.instantiate(inspect).expect("inspect");
+    let construct = context.instantiate(construct).expect("construct");
+
+    let result = context
+        .call(&inspect, &[], ExecutionLimits::default())
+        .expect("method observables");
+    assert_eq!(result.as_boolean().expect("live value"), Some(true));
+
+    let exception = escaping_exception(context.call(&construct, &[], ExecutionLimits::default()));
+    assert_engine_exception(
+        &exception,
+        construct_source,
+        "method is not a constructor",
+        "new object.method()",
+    );
+    assert!(exception.caller_frames().is_empty());
+}
+
+#[test]
+fn throwing_setter_keeps_throw_origin_and_assignment_caller_then_runtime_reuses() {
+    let source = "function run(shouldThrow){\
+        let object={\
+            set value(next){if(shouldThrow){throw next;}return 99;}\
+        };\
+        object.value=37;\
+        return 7;\
+    }";
+    let authority = compile(source, "run");
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let should_throw = context.boolean(true);
+    let exception =
+        escaping_exception(context.call(&run, &[should_throw], ExecutionLimits::default()));
+    assert_eq!(exception.kind(), None);
+    assert_number(exception.thrown_value().expect("thrown RHS"), 37);
+    assert_eq!(exception.source_text(), source);
+    let origin = exception.source_span();
+    assert_eq!(
+        &source[origin.start() as usize..origin.end() as usize],
+        "throw next;"
+    );
+    let callers = exception.caller_frames();
+    assert_eq!(callers.len(), 1);
+    let caller = callers[0].source_span();
+    assert_eq!(
+        &source[caller.start() as usize..caller.end() as usize],
+        "object.value"
+    );
+
+    let should_return = context.boolean(false);
+    let result = context
+        .call(&run, &[should_return], ExecutionLimits::default())
+        .expect("runtime remains reusable");
+    assert_number(&result, 7);
+}
+
+#[test]
+fn setter_calls_charge_the_exact_cumulative_frame_value_limit() {
+    let authority = compile(
+        "function run(input){\
+            let object={set value(next){return next;}};\
+            object.value=input;\
+            return input;\
+        }",
+        "run",
+    );
+    let outer_values = reserved_frame_values(&authority, FunctionTemplateId::new(0));
+    let setter_values = reserved_frame_values(&authority, FunctionTemplateId::new(1));
+    let limit = outer_values
+        .checked_add(setter_values)
+        .expect("small frame usage")
+        - 1;
+    let mut runtime = runtime(
+        RuntimeLimits::default()
+            .with_max_active_frames(2)
+            .with_max_active_frame_values(limit),
+    );
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+    let input = context.number(JsNumber::from_i32(5));
+
+    assert!(matches!(
+        context
+            .call(&run, &[input], ExecutionLimits::default())
+            .expect_err("setter frame values exceed limit"),
+        ExecutionError::LimitExceeded {
+            resource: RuntimeResource::FrameValues,
+            limit: actual_limit,
+            observed,
+        } if actual_limit == limit && observed == outer_values + setter_values
+    ));
+}
+
+#[test]
+fn setter_recursion_uses_shared_instruction_fuel_not_the_rust_stack() {
+    let authority = compile(
+        "function run(){\
+            let object={set value(next){object.value=next;}};\
+            object.value=1;\
+        }",
+        "run",
+    );
+    let constant = compile("function constant(){return 3;}", "constant");
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+    let constant = context.instantiate(constant).expect("constant");
+
+    assert!(matches!(
+        context
+            .call(
+                &run,
+                &[],
+                ExecutionLimits::default().with_instruction_fuel(64),
+            )
+            .expect_err("shared fuel interrupts setter recursion"),
+        ExecutionError::InstructionLimitExceeded {
+            limit: 64,
+            executed: 64,
+        }
+    ));
+    let result = context
+        .call(&constant, &[], ExecutionLimits::default())
+        .expect("runtime remains reusable after fuel exhaustion");
+    assert_number(&result, 3);
 }
 
 #[test]

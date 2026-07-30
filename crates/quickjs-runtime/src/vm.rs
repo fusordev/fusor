@@ -147,7 +147,7 @@ struct Frame {
     receiver_access: ReceiverAccess,
     receiver: StoredValue,
     instruction: InstructionIndex,
-    return_to: Option<InstructionIndex>,
+    return_to: Option<CallReturn>,
     dynamic_return: Option<DynamicFunctionReturn>,
     native_returns: Vec<NativeContinuation>,
     ordinary_constructor: bool,
@@ -227,7 +227,7 @@ struct NativeCall {
     function: FunctionId,
     receiver: StoredValue,
     arguments: CallArguments,
-    return_to: Option<InstructionIndex>,
+    return_to: Option<CallReturn>,
     origin: JsStackFrame,
     continuations: Vec<NativeContinuation>,
 }
@@ -368,12 +368,40 @@ impl CallInputSource {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ReturnDisposition {
+    Push,
+    Discard,
+}
+
+#[derive(Clone, Copy)]
+struct CallReturn {
+    instruction: InstructionIndex,
+    disposition: ReturnDisposition,
+}
+
+impl CallReturn {
+    const fn push(instruction: InstructionIndex) -> Self {
+        Self {
+            instruction,
+            disposition: ReturnDisposition::Push,
+        }
+    }
+
+    const fn discard(instruction: InstructionIndex) -> Self {
+        Self {
+            instruction,
+            disposition: ReturnDisposition::Discard,
+        }
+    }
+}
+
 enum Step {
     Continue,
     Call {
         function: FunctionId,
         inputs: CallInputSource,
-        return_to: InstructionIndex,
+        return_to: CallReturn,
         source_pc: BytecodePc,
     },
     Abrupt(PendingException),
@@ -784,7 +812,7 @@ fn execute_frame_loop(
                     let pending = PendingException {
                         payload: PendingExceptionPayload::EngineError {
                             kind: ExceptionKind::TypeError,
-                            message: JsString::from_utf8("not a constructor")?,
+                            message: function_not_constructor_message(runtime, function)?,
                         },
                         origin,
                     };
@@ -1032,7 +1060,7 @@ fn resume_native_continuations(
     runtime: &mut Runtime,
     mut continuations: Vec<NativeContinuation>,
     mut value: StoredValue,
-    return_to: Option<InstructionIndex>,
+    return_to: Option<CallReturn>,
     active_frames: usize,
     active_frame_values: u64,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
@@ -1256,7 +1284,7 @@ fn dispatch_native_call(
     runtime: &mut Runtime,
     native: NativeFunction,
     inputs: CallInputs,
-    return_to: Option<InstructionIndex>,
+    return_to: Option<CallReturn>,
     origin: Option<JsStackFrame>,
     active_frames: usize,
     active_frame_values: u64,
@@ -1411,7 +1439,7 @@ fn begin_function_source_conversion(
     native: NativeFunction,
     arguments: Vec<StoredValue>,
     construction: Option<FunctionId>,
-    return_to: Option<InstructionIndex>,
+    return_to: Option<CallReturn>,
     origin: JsStackFrame,
     active_frames: usize,
     active_frame_values: u64,
@@ -1446,7 +1474,7 @@ fn advance_function_source_conversion(
     runtime: &mut Runtime,
     mut state: FunctionSourceContinuation,
     completion: Option<StoredValue>,
-    return_to: Option<InstructionIndex>,
+    return_to: Option<CallReturn>,
     active_frames: usize,
     active_frame_values: u64,
     compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
@@ -1699,7 +1727,7 @@ fn function_source_method_call(
     state: FunctionSourceContinuation,
     function: FunctionId,
     arguments: Vec<StoredValue>,
-    return_to: Option<InstructionIndex>,
+    return_to: Option<CallReturn>,
 ) -> Result<NativeDispatch, NativeFailure> {
     let receiver = state
         .arguments
@@ -1784,7 +1812,7 @@ fn finish_ordinary_function_constructor(
     native: NativeFunction,
     construction: Option<FunctionId>,
     source: OrdinaryDynamicFunctionSource,
-    return_to: Option<InstructionIndex>,
+    return_to: Option<CallReturn>,
     origin: JsStackFrame,
     active_frames: usize,
     active_frame_values: u64,
@@ -2186,16 +2214,18 @@ fn retire_active_dynamic_roots(
 fn push_call_result(
     parent: &mut Frame,
     value: StoredValue,
-    return_to: InstructionIndex,
+    return_to: CallReturn,
 ) -> Result<(), ExecutionError> {
-    if parent.stack.len() == parent.stack.capacity() {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "verified call result exceeds frame stack capacity",
+    if matches!(return_to.disposition, ReturnDisposition::Push) {
+        if parent.stack.len() == parent.stack.capacity() {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "verified call result exceeds frame stack capacity",
+            }
+            .into());
         }
-        .into());
+        parent.stack.push(value);
     }
-    parent.stack.push(value);
-    parent.instruction = return_to;
+    parent.instruction = return_to.instruction;
     Ok(())
 }
 
@@ -2356,7 +2386,7 @@ fn create_frame(
     plan: FramePlan,
     receiver: StoredValue,
     supplied: FrameArguments<'_>,
-    return_to: Option<InstructionIndex>,
+    return_to: Option<CallReturn>,
     dynamic_return: Option<DynamicFunctionReturn>,
 ) -> Result<Frame, ExecutionError> {
     let function = runtime
@@ -2683,12 +2713,13 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
                     runtime, frame, source_pc,
                 )?));
             };
-            let return_to = verified_instruction.successors().fallthrough().ok_or(
-                EngineFault::InvalidSuccessor {
-                    function: frame.template,
-                    pc: source_pc,
-                },
-            )?;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
             return Ok(Step::Call {
                 function: *function,
                 inputs: CallInputSource::Frame {
@@ -2720,12 +2751,13 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
                     runtime, frame, source_pc,
                 )?));
             };
-            let return_to = verified_instruction.successors().fallthrough().ok_or(
-                EngineFault::InvalidSuccessor {
-                    function: frame.template,
-                    pc: source_pc,
-                },
-            )?;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
             return Ok(Step::Call {
                 function: *function,
                 inputs: CallInputSource::Frame {
@@ -2760,12 +2792,13 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
                     runtime, frame, source_pc,
                 )?));
             };
-            let return_to = verified_instruction.successors().fallthrough().ok_or(
-                EngineFault::InvalidSuccessor {
-                    function: frame.template,
-                    pc: source_pc,
-                },
-            )?;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
             return Ok(Step::Call {
                 function: *function,
                 inputs: CallInputSource::Frame {
@@ -2795,12 +2828,13 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             match read_static_property(runtime, &base, &property.key)? {
                 PropertyReadOutcome::Value(value) => frame.stack.push(value),
                 PropertyReadOutcome::Getter { function, receiver } => {
-                    let return_to = verified_instruction.successors().fallthrough().ok_or(
-                        EngineFault::InvalidSuccessor {
-                            function: frame.template,
-                            pc: source_pc,
-                        },
-                    )?;
+                    let return_to =
+                        CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                            EngineFault::InvalidSuccessor {
+                                function: frame.template,
+                                pc: source_pc,
+                            },
+                        )?);
                     return Ok(Step::Call {
                         function,
                         inputs: CallInputSource::Prepared(CallInputs {
@@ -2827,16 +2861,49 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             let property = static_property_operand(runtime, frame, operands)?;
             let value = pop(frame)?;
             let base = pop(frame)?;
-            if let PropertyWriteOutcome::Failed(failure) =
-                write_static_property(runtime, &base, property.key, value, frame.strict)?
-            {
-                return Ok(Step::Abrupt(property_exception(
-                    runtime,
-                    frame,
-                    source_pc,
-                    &property.name,
-                    failure,
-                )?));
+            match write_static_property(runtime, &base, property.key, value, frame.strict)? {
+                PropertyWriteOutcome::Complete => {}
+                PropertyWriteOutcome::Setter {
+                    function,
+                    receiver,
+                    value,
+                } => {
+                    let mut arguments = Vec::new();
+                    arguments.try_reserve_exact(1).map_err(|_| {
+                        ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::FrameValues,
+                            additional: 1,
+                        }
+                    })?;
+                    arguments.push(value);
+                    let return_to = CallReturn::discard(
+                        verified_instruction.successors().fallthrough().ok_or(
+                            EngineFault::InvalidSuccessor {
+                                function: frame.template,
+                                pc: source_pc,
+                            },
+                        )?,
+                    );
+                    return Ok(Step::Call {
+                        function,
+                        inputs: CallInputSource::Prepared(CallInputs {
+                            receiver,
+                            arguments: CallArguments::from_values(arguments),
+                            new_target: None,
+                        }),
+                        return_to,
+                        source_pc,
+                    });
+                }
+                PropertyWriteOutcome::Failed(failure) => {
+                    return Ok(Step::Abrupt(property_exception(
+                        runtime,
+                        frame,
+                        source_pc,
+                        &property.name,
+                        failure,
+                    )?));
+                }
             }
         }
         FinalOpcode::DefineField => {
@@ -2853,6 +2920,36 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
                     &property.name,
                     failure,
                 )?));
+            }
+        }
+        FinalOpcode::DefineMethod => {
+            let method = define_method_operand(runtime, frame, operands)?;
+            let value = pop(frame)?;
+            let StoredValue::Function(function) = value else {
+                return Ok(Step::Abrupt(not_callable_exception(
+                    runtime, frame, source_pc,
+                )?));
+            };
+            let base = peek(frame)?.duplicate();
+            match define_static_method(
+                runtime,
+                &base,
+                method.property.key,
+                &method.property.name,
+                function,
+                method.kind,
+                method.enumerable,
+            )? {
+                PropertyDefinitionOutcome::Complete => {}
+                PropertyDefinitionOutcome::Failed(failure) => {
+                    return Ok(Step::Abrupt(property_exception(
+                        runtime,
+                        frame,
+                        source_pc,
+                        &method.property.name,
+                        failure,
+                    )?));
+                }
             }
         }
         FinalOpcode::GetArg
@@ -3154,6 +3251,19 @@ struct StaticPropertyOperand {
     name: JsString,
 }
 
+#[derive(Clone, Copy)]
+enum DefineMethodKind {
+    Method,
+    Getter,
+    Setter,
+}
+
+struct DefineMethodOperand {
+    property: StaticPropertyOperand,
+    kind: DefineMethodKind,
+    enumerable: bool,
+}
+
 struct GlobalReferenceOperand {
     binding: RealmGlobalBindingId,
     object: ObjectId,
@@ -3171,6 +3281,16 @@ enum PropertyReadOutcome {
 }
 
 enum PropertyWriteOutcome {
+    Complete,
+    Setter {
+        function: FunctionId,
+        receiver: StoredValue,
+        value: StoredValue,
+    },
+    Failed(PropertyFailure),
+}
+
+enum PropertyDefinitionOutcome {
     Complete,
     Failed(PropertyFailure),
 }
@@ -3194,6 +3314,8 @@ enum PropertyFailure {
     WriteUndefined,
     NotObject,
     ReadOnly,
+    NoSetter,
+    NotConfigurable,
     NonExtensible,
 }
 
@@ -3208,6 +3330,14 @@ fn static_property_operand(
             index: u32::MAX,
         });
     };
+    static_property_at(runtime, frame, index)
+}
+
+fn static_property_at(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: quickjs_bytecode::AtomPoolIndex,
+) -> Result<StaticPropertyOperand, EngineFault> {
     let atom = installed_template(runtime, frame.code, frame.template)?
         .atoms
         .get(index.get() as usize)
@@ -3226,6 +3356,39 @@ fn static_property_operand(
     Ok(StaticPropertyOperand {
         key: PropertyKey::from_validated_atom(atom),
         name,
+    })
+}
+
+fn define_method_operand(
+    runtime: &Runtime,
+    frame: &Frame,
+    operands: Operands,
+) -> Result<DefineMethodOperand, EngineFault> {
+    let Operands::AtomU8 { atom, value } = operands else {
+        return Err(EngineFault::MissingPoolEntry {
+            pool: "method property atom",
+            index: u32::MAX,
+        });
+    };
+    if value & !0b111 != 0 || value & 0b11 == 0b11 {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified define_method flags are invalid",
+        });
+    }
+    let kind = match value & 0b11 {
+        0 => DefineMethodKind::Method,
+        1 => DefineMethodKind::Getter,
+        2 => DefineMethodKind::Setter,
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "verified define_method kind is invalid",
+            });
+        }
+    };
+    Ok(DefineMethodOperand {
+        property: static_property_at(runtime, frame, atom)?,
+        kind,
+        enumerable: value & 0b100 != 0,
     })
 }
 
@@ -3336,6 +3499,12 @@ fn write_realm_global(
             Ok(
                 match write_static_property(runtime, &base, global.key, value, strict)? {
                     PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
+                    PropertyWriteOutcome::Setter { .. } => {
+                        return Err(EngineFault::UnsupportedAccessorWrite {
+                            operation: "realm-global property write",
+                        }
+                        .into());
+                    }
                     PropertyWriteOutcome::Failed(failure) => {
                         RealmGlobalWriteOutcome::Property(failure)
                     }
@@ -3347,6 +3516,12 @@ fn write_realm_global(
             Ok(
                 match write_static_property(runtime, &base, global.key, value, strict)? {
                     PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
+                    PropertyWriteOutcome::Setter { .. } => {
+                        return Err(EngineFault::UnsupportedAccessorWrite {
+                            operation: "realm-global property write",
+                        }
+                        .into());
+                    }
                     PropertyWriteOutcome::Failed(failure) => {
                         RealmGlobalWriteOutcome::Property(failure)
                     }
@@ -3526,11 +3701,16 @@ fn write_static_property(
                     PropertyWriteOutcome::Complete
                 });
             }
-            OwnProperty::Accessor { .. } => {
-                return Err(EngineFault::UnsupportedAccessorWrite {
-                    operation: "static property write",
-                }
-                .into());
+            OwnProperty::Accessor { setter, .. } => {
+                return Ok(match setter {
+                    Some(function) => PropertyWriteOutcome::Setter {
+                        function,
+                        receiver: base.duplicate(),
+                        value,
+                    },
+                    None if strict => PropertyWriteOutcome::Failed(PropertyFailure::NoSetter),
+                    None => PropertyWriteOutcome::Complete,
+                });
             }
         }
     }
@@ -3544,11 +3724,16 @@ fn write_static_property(
                 });
             }
             OwnProperty::Data { .. } => {}
-            OwnProperty::Accessor { .. } => {
-                return Err(EngineFault::UnsupportedAccessorWrite {
-                    operation: "inherited static property write",
-                }
-                .into());
+            OwnProperty::Accessor { setter, .. } => {
+                return Ok(match setter {
+                    Some(function) => PropertyWriteOutcome::Setter {
+                        function,
+                        receiver: base.duplicate(),
+                        value,
+                    },
+                    None if strict => PropertyWriteOutcome::Failed(PropertyFailure::NoSetter),
+                    None => PropertyWriteOutcome::Complete,
+                });
             }
         }
     }
@@ -3589,28 +3774,18 @@ fn define_static_property(
         let record = runtime.object_record(reference)?;
         (record.own_property(&key), record.is_extensible())
     };
-    if let Some(existing) = exists {
-        match existing {
-            OwnProperty::Data { .. } => {
-                let replaced = runtime
-                    .object_record_mut(reference)?
-                    .replace_existing_data(&key, value);
-                if !replaced {
-                    return Err(EngineFault::RuntimeInvariant {
-                        message: "located own data property disappeared before its definition",
-                    }
-                    .into());
-                }
-                runtime.collection_pending = true;
-                return Ok(PropertyWriteOutcome::Complete);
+    if exists.is_some() {
+        let replaced = runtime
+            .object_record_mut(reference)?
+            .replace_existing_with_data(&key, PropertyLayout::data(true, true, true), value);
+        if replaced.is_none() {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "located own property disappeared before its data definition",
             }
-            OwnProperty::Accessor { .. } => {
-                return Err(EngineFault::UnsupportedAccessorWrite {
-                    operation: "static property definition",
-                }
-                .into());
-            }
+            .into());
         }
+        runtime.collection_pending = true;
+        return Ok(PropertyWriteOutcome::Complete);
     }
     if !extensible {
         return Ok(PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible));
@@ -3622,6 +3797,239 @@ fn define_static_property(
         value,
     )?;
     Ok(PropertyWriteOutcome::Complete)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "method naming, descriptor merging, publication, and rollback form one failure-atomic transaction"
+)]
+fn define_static_method(
+    runtime: &mut Runtime,
+    base: &StoredValue,
+    key: PropertyKey,
+    name: &JsString,
+    function: FunctionId,
+    kind: DefineMethodKind,
+    enumerable: bool,
+) -> Result<PropertyDefinitionOutcome, ExecutionError> {
+    let reference = match base {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_) => {
+            return Ok(PropertyDefinitionOutcome::Failed(
+                PropertyFailure::NotObject,
+            ));
+        }
+    };
+    if reference == HeapReference::Function(function) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "define_method cannot publish a function onto itself",
+        }
+        .into());
+    }
+    if bytecode_function_is_constructor(runtime, function)? {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "define_method received a constructable function",
+        }
+        .into());
+    }
+
+    let function_name = method_function_name(name, kind)?;
+    let previous_name = preflight_method_function_name(runtime, function)?;
+    let (existing, extensible) = {
+        let record = runtime.object_record(reference)?;
+        (record.own_property(&key), record.is_extensible())
+    };
+    if existing
+        .as_ref()
+        .is_some_and(|property| !property.layout().is_configurable())
+    {
+        return Ok(PropertyDefinitionOutcome::Failed(
+            PropertyFailure::NotConfigurable,
+        ));
+    }
+    if existing.is_none() && !extensible {
+        return Ok(PropertyDefinitionOutcome::Failed(
+            PropertyFailure::NonExtensible,
+        ));
+    }
+    if existing.is_none() {
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            runtime.limits.max_object_properties,
+            runtime.object_properties.saturating_add(1),
+        )?;
+        runtime
+            .object_record_mut(reference)?
+            .try_reserve_data(1)
+            .map_err(|_| ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+    }
+
+    let layout = match kind {
+        DefineMethodKind::Method => PropertyLayout::data(true, enumerable, true),
+        DefineMethodKind::Getter | DefineMethodKind::Setter => {
+            PropertyLayout::accessor(enumerable, true)
+        }
+    };
+    set_preflighted_method_function_name(runtime, function, function_name)?;
+    let definition = (|| -> Result<(), ExecutionError> {
+        if let Some(existing) = existing {
+            let replacement = match kind {
+                DefineMethodKind::Method => runtime
+                    .object_record_mut(reference)?
+                    .replace_existing_with_data(&key, layout, StoredValue::Function(function)),
+                DefineMethodKind::Getter => {
+                    let setter = match existing {
+                        OwnProperty::Accessor { setter, .. } => setter,
+                        OwnProperty::Data { .. } => None,
+                    };
+                    runtime
+                        .object_record_mut(reference)?
+                        .replace_existing_with_accessor(&key, layout, Some(function), setter)
+                }
+                DefineMethodKind::Setter => {
+                    let getter = match existing {
+                        OwnProperty::Accessor { getter, .. } => getter,
+                        OwnProperty::Data { .. } => None,
+                    };
+                    runtime
+                        .object_record_mut(reference)?
+                        .replace_existing_with_accessor(&key, layout, getter, Some(function))
+                }
+            };
+            if replacement.is_none() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "located own property disappeared during define_method",
+                }
+                .into());
+            }
+        } else {
+            match kind {
+                DefineMethodKind::Method => runtime.append_data_property(
+                    reference,
+                    key,
+                    layout,
+                    StoredValue::Function(function),
+                )?,
+                DefineMethodKind::Getter => runtime.append_accessor_property(
+                    reference,
+                    key,
+                    layout,
+                    Some(function),
+                    None,
+                )?,
+                DefineMethodKind::Setter => runtime.append_accessor_property(
+                    reference,
+                    key,
+                    layout,
+                    None,
+                    Some(function),
+                )?,
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = definition {
+        restore_preflighted_method_function_name(runtime, function, previous_name)?;
+        return Err(error);
+    }
+    // The function name is initialized before the target slot becomes
+    // observable. Every fallible target-append resource is preflighted above;
+    // the rollback remains as a defensive transaction boundary.
+    if runtime
+        .object_record(HeapReference::Function(function))?
+        .own_property(&runtime.predefined_property_key(PredefinedAtom::Name))
+        .is_none()
+    {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "defined method lost its initialized name property",
+        }
+        .into());
+    }
+    runtime.collection_pending = true;
+    Ok(PropertyDefinitionOutcome::Complete)
+}
+
+fn method_function_name(
+    name: &JsString,
+    kind: DefineMethodKind,
+) -> Result<JsString, crate::JsStringError> {
+    match kind {
+        DefineMethodKind::Method => Ok(name.clone()),
+        DefineMethodKind::Getter => JsString::from_utf8("get ")?.concat(name),
+        DefineMethodKind::Setter => JsString::from_utf8("set ")?.concat(name),
+    }
+}
+
+fn preflight_method_function_name(
+    runtime: &Runtime,
+    function: FunctionId,
+) -> Result<OwnProperty, ExecutionError> {
+    let key = runtime.predefined_property_key(PredefinedAtom::Name);
+    let property = runtime
+        .object_record(HeapReference::Function(function))?
+        .own_property(&key)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "define_method function has no own name property",
+        })?;
+    match property {
+        OwnProperty::Data { layout, .. } if layout == PropertyLayout::data(false, false, true) => {
+            Ok(property)
+        }
+        OwnProperty::Data { .. } | OwnProperty::Accessor { .. } => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "define_method function has an invalid name descriptor",
+            }
+            .into())
+        }
+    }
+}
+
+fn set_preflighted_method_function_name(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    name: JsString,
+) -> Result<(), ExecutionError> {
+    let key = runtime.predefined_property_key(PredefinedAtom::Name);
+    let replaced = runtime
+        .object_record_mut(HeapReference::Function(function))?
+        .replace_existing_with_data(
+            &key,
+            PropertyLayout::data(false, false, true),
+            StoredValue::String(name),
+        );
+    if replaced.is_none() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "preflighted define_method name property disappeared",
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn restore_preflighted_method_function_name(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    previous: OwnProperty,
+) -> Result<(), ExecutionError> {
+    let key = runtime.predefined_property_key(PredefinedAtom::Name);
+    let restored = runtime
+        .object_record_mut(HeapReference::Function(function))?
+        .restore_existing_property(&key, previous);
+    if restored.is_none() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "preflighted define_method name property disappeared during rollback",
+        }
+        .into());
+    }
+    Ok(())
 }
 
 fn code(runtime: &Runtime, id: InstalledCodeId) -> Result<&InstalledCode, EngineFault> {
@@ -4501,6 +4909,27 @@ fn not_constructor_exception(
     })
 }
 
+fn function_not_constructor_message(
+    runtime: &Runtime,
+    function: FunctionId,
+) -> Result<JsString, ExecutionError> {
+    let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
+    let name = match runtime
+        .object_record(HeapReference::Function(function))?
+        .own_property(&name_key)
+    {
+        Some(OwnProperty::Data {
+            value: StoredValue::String(name),
+            ..
+        }) => name,
+        Some(OwnProperty::Data { .. } | OwnProperty::Accessor { .. }) | None => JsString::empty(),
+    };
+    if name.is_empty() {
+        return Ok(JsString::from_utf8("not a constructor")?);
+    }
+    Ok(name.concat(&JsString::from_utf8(" is not a constructor")?)?)
+}
+
 fn property_exception(
     runtime: &Runtime,
     frame: &Frame,
@@ -4523,6 +4952,8 @@ fn property_exception(
         }
         PropertyFailure::NotObject => JsString::from_utf8("not an object")?,
         PropertyFailure::ReadOnly => named_property_message("'", name, "' is read-only")?,
+        PropertyFailure::NoSetter => JsString::from_utf8("no setter for property")?,
+        PropertyFailure::NotConfigurable => JsString::from_utf8("property is not configurable")?,
         PropertyFailure::NonExtensible => JsString::from_utf8("object is not extensible")?,
     };
     Ok(PendingException {
@@ -4610,9 +5041,10 @@ fn exception_caller_frames(
                 | FinalOpcode::CallConstructor
                 | FinalOpcode::GetField
                 | FinalOpcode::GetField2
+                | FinalOpcode::PutField
         ) {
             return Err(EngineFault::RuntimeInvariant {
-                message: "exception caller is not parked at an ordinary call or accessor read",
+                message: "exception caller is not parked at an ordinary call or accessor operation",
             }
             .into());
         }
@@ -5245,6 +5677,464 @@ mod tests {
     }
 
     #[test]
+    fn define_method_installs_exact_descriptors_names_lengths_and_function_profile() {
+        let maker_authority = compile_test_function(
+            "function make(){\
+                return {\
+                    valueOf(first,second){return second;},\
+                    get toString(){return 1;},\
+                    set toString(next){}\
+                };\
+            }",
+            "make",
+        );
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let maker = runtime
+            .context(&realm)
+            .expect("context")
+            .instantiate(maker_authority)
+            .expect("maker");
+        let object = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&maker, &[], ExecutionLimits::default())
+            .expect("method object");
+        let object_id = object.object_id().expect("object id");
+        let value_of_key = runtime.predefined_property_key(PredefinedAtom::ValueOf);
+        let to_string_key = runtime.predefined_property_key(PredefinedAtom::ToString);
+
+        let record = runtime
+            .object_record(HeapReference::Object(object_id))
+            .expect("object record");
+        assert_eq!(record.property_count(), 2);
+        let Some(OwnProperty::Data {
+            layout: method_layout,
+            value: StoredValue::Function(method),
+        }) = record.own_property(&value_of_key)
+        else {
+            panic!("valueOf must be an own method");
+        };
+        assert_eq!(method_layout, PropertyLayout::data(true, true, true));
+        let Some(OwnProperty::Accessor {
+            layout: accessor_layout,
+            getter: Some(getter),
+            setter: Some(setter),
+        }) = record.own_property(&to_string_key)
+        else {
+            panic!("toString must merge one getter and setter slot");
+        };
+        assert_eq!(accessor_layout, PropertyLayout::accessor(true, true));
+
+        assert_method_function_shape(&runtime, method, "valueOf", 2);
+        assert_method_function_shape(&runtime, getter, "get toString", 0);
+        assert_method_function_shape(&runtime, setter, "set toString", 1);
+        assert_method_function_source(&runtime, method, "valueOf(first,second){return second;}");
+        assert_method_function_source(&runtime, getter, "get toString(){return 1;}");
+        assert_method_function_source(&runtime, setter, "set toString(next){}");
+    }
+
+    #[test]
+    fn define_method_rejects_a_nonconfigurable_target_without_renaming_the_method() {
+        let target_authority = compile_test_function(
+            "function makeTarget(){function target(){}return target;}",
+            "makeTarget",
+        );
+        let maker_authority =
+            compile_test_function("function make(){return {valueOf(){}};}", "make");
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let (target_maker, maker) = {
+            let mut context = runtime.context(&realm).expect("context");
+            (
+                context.instantiate(target_authority).expect("target maker"),
+                context.instantiate(maker_authority).expect("maker"),
+            )
+        };
+        let target = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&target_maker, &[], ExecutionLimits::default())
+            .expect("constructable nested target")
+            .into_function()
+            .expect("target function");
+        let target_id = target.id().expect("target id");
+        let object = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&maker, &[], ExecutionLimits::default())
+            .expect("method object");
+        let object_id = object.object_id().expect("object id");
+        let value_of_key = runtime.predefined_property_key(PredefinedAtom::ValueOf);
+        let Some(OwnProperty::Data {
+            value: StoredValue::Function(method),
+            ..
+        }) = runtime
+            .object_record(HeapReference::Object(object_id))
+            .expect("object record")
+            .own_property(&value_of_key)
+        else {
+            panic!("valueOf must be an own method");
+        };
+
+        let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+        let prototype_name = JsString::from_utf8("prototype").expect("property name");
+        let outcome = define_static_method(
+            &mut runtime,
+            &StoredValue::Function(target_id),
+            prototype_key.clone(),
+            &prototype_name,
+            method,
+            DefineMethodKind::Method,
+            true,
+        )
+        .expect("descriptor compatibility check");
+        assert!(matches!(
+            outcome,
+            PropertyDefinitionOutcome::Failed(PropertyFailure::NotConfigurable)
+        ));
+        assert_method_function_shape(&runtime, method, "valueOf", 0);
+        assert!(matches!(
+            runtime
+                .object_record(HeapReference::Function(target_id))
+                .expect("target record")
+                .own_property(&prototype_key),
+            Some(OwnProperty::Data { layout, .. }) if !layout.is_configurable()
+        ));
+    }
+
+    #[test]
+    fn inherited_setter_receives_the_original_receiver_and_does_not_create_the_key() {
+        let writer_authority = compile_test_function(
+            "function write(object,value){return object.toString=value;}",
+            "write",
+        );
+        let setter_authority = compile_test_function(
+            "function setter(value){\"use strict\";this.valueOf=value;return 99;}",
+            "setter",
+        );
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let (writer, setter) = {
+            let mut context = runtime.context(&realm).expect("context");
+            (
+                context.instantiate(writer_authority).expect("writer"),
+                context.instantiate(setter_authority).expect("setter"),
+            )
+        };
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let prototype = source_object(&mut runtime, realm_id);
+        let object = runtime
+            .allocate_ordinary_object(prototype)
+            .expect("child object");
+        let to_string_key = runtime.predefined_property_key(PredefinedAtom::ToString);
+        let value_of_key = runtime.predefined_property_key(PredefinedAtom::ValueOf);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(prototype),
+                to_string_key.clone(),
+                PropertyLayout::accessor(false, true),
+                None,
+                Some(setter.id().expect("setter id")),
+            )
+            .expect("inherited setter");
+        let object_value = runtime
+            .public_value(StoredValue::Object(object))
+            .expect("object root");
+        let assigned = runtime
+            .public_value(StoredValue::Number(JsNumber::from_i32(42)))
+            .expect("number");
+
+        let result = runtime
+            .context(&realm)
+            .expect("context")
+            .call(
+                &writer,
+                &[object_value, assigned],
+                ExecutionLimits::default(),
+            )
+            .expect("inherited setter");
+        let number = result
+            .as_number()
+            .expect("live assignment")
+            .expect("number assignment");
+        assert!(number.strict_equals(JsNumber::from_i32(42)));
+
+        let object_record = runtime
+            .object_record(HeapReference::Object(object))
+            .expect("object record");
+        assert!(
+            object_record.own_property(&to_string_key).is_none(),
+            "an inherited setter must not create an own property for its key"
+        );
+        assert!(matches!(
+            object_record.own_property(&value_of_key),
+            Some(OwnProperty::Data {
+                layout,
+                value: StoredValue::Number(number),
+            }) if layout == PropertyLayout::data(true, true, true)
+                && number.strict_equals(JsNumber::from_i32(42))
+        ));
+        assert!(
+            runtime
+                .object_record(HeapReference::Object(prototype))
+                .expect("prototype record")
+                .own_property(&value_of_key)
+                .is_none(),
+            "the setter receiver must be the original child, not the holder"
+        );
+    }
+
+    #[test]
+    fn own_getter_without_a_setter_shadows_an_inherited_setter() {
+        let writer_authority =
+            compile_test_function("function write(object){return object.toString=7;}", "write");
+        let getter_authority = compile_test_function("function getter(){return 1;}", "getter");
+        let setter_authority = compile_test_function(
+            "function setter(value){\"use strict\";this.valueOf=value;}",
+            "setter",
+        );
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let (writer, getter, setter) = {
+            let mut context = runtime.context(&realm).expect("context");
+            (
+                context.instantiate(writer_authority).expect("writer"),
+                context.instantiate(getter_authority).expect("getter"),
+                context.instantiate(setter_authority).expect("setter"),
+            )
+        };
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let prototype = source_object(&mut runtime, realm_id);
+        let object = runtime
+            .allocate_ordinary_object(prototype)
+            .expect("child object");
+        let to_string_key = runtime.predefined_property_key(PredefinedAtom::ToString);
+        let value_of_key = runtime.predefined_property_key(PredefinedAtom::ValueOf);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(prototype),
+                to_string_key.clone(),
+                PropertyLayout::accessor(false, true),
+                None,
+                Some(setter.id().expect("setter id")),
+            )
+            .expect("prototype setter");
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(object),
+                to_string_key,
+                PropertyLayout::accessor(false, true),
+                Some(getter.id().expect("getter id")),
+                None,
+            )
+            .expect("own getter");
+        let object_value = runtime
+            .public_value(StoredValue::Object(object))
+            .expect("object root");
+
+        let result = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&writer, &[object_value], ExecutionLimits::default())
+            .expect("sloppy own getter write");
+        let number = result
+            .as_number()
+            .expect("live assignment")
+            .expect("number assignment");
+        assert!(number.strict_equals(JsNumber::from_i32(7)));
+        assert!(
+            runtime
+                .object_record(HeapReference::Object(object))
+                .expect("object record")
+                .own_property(&value_of_key)
+                .is_none(),
+            "the shadowed inherited setter must not run"
+        );
+    }
+
+    #[test]
+    fn native_setter_completion_is_discarded_while_assignment_keeps_the_rhs() {
+        let writer_authority = compile_test_function(
+            "function write(object){return object.toString=29;}",
+            "write",
+        );
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let writer = runtime
+            .context(&realm)
+            .expect("context")
+            .instantiate(writer_authority)
+            .expect("writer");
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let object_prototype = runtime
+            .realm_object_prototype(realm_id)
+            .expect("Object.prototype");
+        let StoredValue::Function(native_setter) = read_heap_property(
+            &runtime,
+            HeapReference::Object(object_prototype),
+            &runtime.predefined_property_key(PredefinedAtom::ValueOf),
+        )
+        .expect("Object.prototype.valueOf") else {
+            panic!("Object.prototype.valueOf must be callable");
+        };
+        let object = source_object(&mut runtime, realm_id);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(object),
+                runtime.predefined_property_key(PredefinedAtom::ToString),
+                PropertyLayout::accessor(false, true),
+                None,
+                Some(native_setter),
+            )
+            .expect("native setter");
+        let object = runtime
+            .public_value(StoredValue::Object(object))
+            .expect("object root");
+
+        let result = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&writer, &[object], ExecutionLimits::default())
+            .expect("native setter");
+        let number = result
+            .as_number()
+            .expect("live assignment")
+            .expect("number assignment");
+        assert!(number.strict_equals(JsNumber::from_i32(29)));
+    }
+
+    #[test]
+    fn dynamic_function_setter_completion_is_discarded_while_assignment_keeps_the_rhs() {
+        let writer_authority = compile_test_function(
+            "function write(object){return object.toString='return 47;';}",
+            "write",
+        );
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let writer = runtime
+            .context(&realm)
+            .expect("context")
+            .instantiate(writer_authority)
+            .expect("writer");
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let global = runtime
+            .realm_global_object(realm_id)
+            .expect("global object");
+        let StoredValue::Function(constructor) = read_heap_property(
+            &runtime,
+            HeapReference::Object(global),
+            &runtime.predefined_property_key(PredefinedAtom::Function),
+        )
+        .expect("global Function") else {
+            panic!("global Function must be callable");
+        };
+        let object = source_object(&mut runtime, realm_id);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(object),
+                runtime.predefined_property_key(PredefinedAtom::ToString),
+                PropertyLayout::accessor(false, true),
+                None,
+                Some(constructor),
+            )
+            .expect("Function setter");
+        let object = runtime
+            .public_value(StoredValue::Object(object))
+            .expect("object root");
+        let compiler: Arc<dyn OrdinaryDynamicFunctionCompiler> = Arc::new(OxcDynamicCompiler);
+
+        let result = runtime
+            .context(&realm)
+            .expect("context")
+            .call_with_dynamic_function_compiler(
+                &writer,
+                &[object],
+                ExecutionLimits::default(),
+                &compiler,
+            )
+            .expect("dynamic Function setter");
+        assert_eq!(
+            result
+                .as_string()
+                .expect("live assignment")
+                .expect("assignment string")
+                .to_utf8_lossy()
+                .expect("UTF-8 assignment"),
+            "return 47;"
+        );
+    }
+
+    #[test]
+    fn function_prototype_call_setter_forwards_then_discards_the_target_completion() {
+        let writer_authority = compile_test_function(
+            "function write(target,value){return target.toString=value;}",
+            "write",
+        );
+        let target_authority = compile_test_function(
+            "function target(){\"use strict\";this.valueOf=41;return 99;}",
+            "target",
+        );
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let (writer, target) = {
+            let mut context = runtime.context(&realm).expect("context");
+            (
+                context.instantiate(writer_authority).expect("writer"),
+                context.instantiate(target_authority).expect("target"),
+            )
+        };
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let call = runtime
+            .functions
+            .iter()
+            .find_map(|(id, function)| {
+                (function.native().copied()
+                    == Some(NativeFunction {
+                        realm: realm_id,
+                        kind: NativeFunctionKind::FunctionPrototypeCall,
+                    }))
+                .then_some(id)
+            })
+            .expect("Function.prototype.call");
+        runtime
+            .append_accessor_property(
+                HeapReference::Function(target.id().expect("target id")),
+                runtime.predefined_property_key(PredefinedAtom::ToString),
+                PropertyLayout::accessor(false, true),
+                None,
+                Some(call),
+            )
+            .expect("forwarding native setter");
+        let receiver = source_object(&mut runtime, realm_id);
+        let receiver_value = runtime
+            .public_value(StoredValue::Object(receiver))
+            .expect("receiver root");
+
+        let result = runtime
+            .context(&realm)
+            .expect("context")
+            .call(
+                &writer,
+                &[target.as_value(), receiver_value],
+                ExecutionLimits::default(),
+            )
+            .expect("forwarded setter");
+        assert_eq!(result.object_id().expect("assignment object"), receiver);
+        assert!(matches!(
+            runtime
+                .object_record(HeapReference::Object(receiver))
+                .expect("receiver record")
+                .own_property(&runtime.predefined_property_key(PredefinedAtom::ValueOf)),
+            Some(OwnProperty::Data {
+                layout,
+                value: StoredValue::Number(number),
+            }) if layout == PropertyLayout::data(true, true, true)
+                && number.strict_equals(JsNumber::from_i32(41))
+        ));
+    }
+
+    #[test]
     fn inherited_getter_receives_the_original_object() {
         let reader_authority =
             compile_test_function("function read(object){return object.toString;}", "read");
@@ -5523,6 +6413,212 @@ mod tests {
     }
 
     #[test]
+    fn bytecode_setter_obeys_the_active_frame_limit_without_mutating_usage() {
+        let writer_authority =
+            compile_test_function("function write(object){return object.toString=1;}", "write");
+        let setter_authority =
+            compile_test_function("function setter(value){return value;}", "setter");
+        let mut runtime =
+            Runtime::try_new(RuntimeLimits::default().with_max_active_frames(1)).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let (writer, setter) = {
+            let mut context = runtime.context(&realm).expect("context");
+            (
+                context.instantiate(writer_authority).expect("writer"),
+                context.instantiate(setter_authority).expect("setter"),
+            )
+        };
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let object = source_object(&mut runtime, realm_id);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(object),
+                runtime.predefined_property_key(PredefinedAtom::ToString),
+                PropertyLayout::accessor(false, true),
+                None,
+                Some(setter.id().expect("setter id")),
+            )
+            .expect("accessor");
+        let object = runtime
+            .public_value(StoredValue::Object(object))
+            .expect("object root");
+        let baseline = runtime.usage();
+
+        for _ in 0..2 {
+            let error = runtime
+                .context(&realm)
+                .expect("context")
+                .call(
+                    &writer,
+                    std::slice::from_ref(&object),
+                    ExecutionLimits::default(),
+                )
+                .expect_err("setter frame exceeds limit");
+            assert!(matches!(
+                error,
+                ExecutionError::LimitExceeded {
+                    resource: RuntimeResource::Frames,
+                    limit: 1,
+                    observed: 2,
+                }
+            ));
+            assert_eq!(runtime.usage(), baseline);
+        }
+    }
+
+    #[test]
+    fn replaced_accessor_halves_are_collected_while_the_final_pair_stays_traced() {
+        let maker_authority = compile_test_function(
+            "function make(){\
+                let stored=0;\
+                return {\
+                    toString:1,\
+                    get toString(){return stored;},\
+                    get toString(){return stored;},\
+                    set toString(next){stored=next;},\
+                    set toString(next){stored=next;},\
+                    toString:2,\
+                    get toString(){return stored;},\
+                    set toString(next){stored=next;}\
+                };\
+            }",
+            "make",
+        );
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let maker = runtime
+            .context(&realm)
+            .expect("context")
+            .instantiate(maker_authority)
+            .expect("maker");
+        let baseline = runtime.usage();
+        let object = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&maker, &[], ExecutionLimits::default())
+            .expect("object")
+            .into_object()
+            .expect("ordinary object");
+        let object_id = object.as_value().object_id().expect("object id");
+        let live = runtime.usage();
+
+        assert_eq!(live.heap_functions(), baseline.heap_functions() + 6);
+        assert_eq!(live.heap_objects(), baseline.heap_objects() + 1);
+        assert_eq!(live.binding_cells(), baseline.binding_cells() + 1);
+        assert_eq!(
+            live.object_properties(),
+            baseline.object_properties() + 13,
+            "six nonconstructable method functions add name/length while every definition reuses one target slot"
+        );
+        let record = runtime
+            .object_record(HeapReference::Object(object_id))
+            .expect("object record");
+        assert_eq!(record.property_count(), 1);
+        assert!(matches!(
+            record.own_property(
+                &runtime.predefined_property_key(PredefinedAtom::ToString)
+            ),
+            Some(OwnProperty::Accessor {
+                layout,
+                getter: Some(_),
+                setter: Some(_),
+            }) if layout == PropertyLayout::accessor(true, true)
+        ));
+
+        let report = runtime
+            .collect_cycles()
+            .expect("collect replaced accessor functions");
+        assert_eq!(report.functions(), 4);
+        assert_eq!(report.objects(), 0);
+        assert_eq!(report.binding_cells(), 0);
+        let retained = runtime.usage();
+        assert_eq!(
+            retained.heap_functions(),
+            baseline.heap_functions() + 2,
+            "the final getter and setter stay live through the accessor slot"
+        );
+        assert_eq!(retained.heap_objects(), baseline.heap_objects() + 1);
+        assert_eq!(retained.binding_cells(), baseline.binding_cells() + 1);
+        assert_eq!(
+            retained.object_properties(),
+            baseline.object_properties() + 5
+        );
+
+        drop(object);
+        let report = runtime
+            .collect_cycles()
+            .expect("collect final accessor graph");
+        assert_eq!(report.functions(), 2);
+        assert_eq!(report.objects(), 1);
+        assert_eq!(report.binding_cells(), 1);
+        assert_eq!(runtime.usage(), baseline);
+    }
+
+    #[test]
+    fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_slot() {
+        let maker_authority = compile_test_function(
+            "function make(define){\
+                if(define){return {valueOf(){return 1;}};}\
+                return 7;\
+            }",
+            "make",
+        );
+        let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(21))
+            .expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let maker = runtime
+            .context(&realm)
+            .expect("context")
+            .instantiate(maker_authority)
+            .expect("maker");
+        let baseline = runtime.usage();
+        let define = runtime
+            .public_value(StoredValue::Boolean(true))
+            .expect("boolean");
+
+        let error = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&maker, &[define], ExecutionLimits::default())
+            .expect_err("target property exceeds limit");
+        assert!(matches!(
+            error,
+            ExecutionError::LimitExceeded {
+                resource: RuntimeResource::ObjectProperties,
+                limit: 21,
+                observed: 22,
+            }
+        ));
+        let failed = runtime.usage();
+        assert_eq!(failed.heap_functions(), baseline.heap_functions() + 1);
+        assert_eq!(failed.heap_objects(), baseline.heap_objects() + 1);
+        assert_eq!(
+            failed.object_properties(),
+            baseline.object_properties() + 2,
+            "only the unpublished method function's name and length were charged"
+        );
+
+        let report = runtime.collect_cycles().expect("collect failed literal");
+        assert_eq!(report.functions(), 1);
+        assert_eq!(report.objects(), 1);
+        assert_eq!(runtime.usage(), baseline);
+
+        let skip = runtime
+            .public_value(StoredValue::Boolean(false))
+            .expect("boolean");
+        let result = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&maker, &[skip], ExecutionLimits::default())
+            .expect("runtime remains reusable");
+        let number = result
+            .as_number()
+            .expect("live result")
+            .expect("number result");
+        assert!(number.strict_equals(JsNumber::from_i32(7)));
+    }
+
+    #[test]
     fn dynamic_function_calls_an_accessor_before_using_its_to_string_value() {
         let (mut runtime, realm, constructor, native) = runtime_with_function_constructor();
         let object = source_object(&mut runtime, realm);
@@ -5708,6 +6804,73 @@ mod tests {
             .expect("number throw");
 
         assert!(thrown.strict_equals(JsNumber::from_i32(53)));
+    }
+
+    fn assert_method_function_shape(
+        runtime: &Runtime,
+        function: FunctionId,
+        expected_name: &str,
+        expected_length: i32,
+    ) {
+        let record = runtime
+            .object_record(HeapReference::Function(function))
+            .expect("method function record");
+        let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
+        let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
+        let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+
+        let Some(OwnProperty::Data {
+            layout: name_layout,
+            value: StoredValue::String(name),
+        }) = record.own_property(&name_key)
+        else {
+            panic!("method function must have an own string name");
+        };
+        assert_eq!(
+            name_layout,
+            PropertyLayout::data(false, false, true),
+            "name must be nonwritable, nonenumerable, and configurable"
+        );
+        assert_eq!(
+            name.to_utf8_lossy().expect("UTF-8 function name"),
+            expected_name
+        );
+
+        let Some(OwnProperty::Data {
+            layout: length_layout,
+            value: StoredValue::Number(length),
+        }) = record.own_property(&length_key)
+        else {
+            panic!("method function must have an own numeric length");
+        };
+        assert_eq!(
+            length_layout,
+            PropertyLayout::data(false, false, true),
+            "length must be nonwritable, nonenumerable, and configurable"
+        );
+        assert!(length.strict_equals(JsNumber::from_i32(expected_length)));
+        assert!(
+            record.own_property(&prototype_key).is_none(),
+            "ordinary methods and accessors must not have an own prototype"
+        );
+        assert!(
+            !bytecode_function_is_constructor(runtime, function).expect("constructor profile"),
+            "ordinary methods and accessors must not be constructable"
+        );
+    }
+
+    fn assert_method_function_source(
+        runtime: &Runtime,
+        function: FunctionId,
+        expected_source: &str,
+    ) {
+        let Ok(source) = function_to_string(runtime, function) else {
+            panic!("method source must remain readable");
+        };
+        assert_eq!(
+            source.to_utf8_lossy().expect("UTF-8 method source"),
+            expected_source
+        );
     }
 
     fn compile_test_function(source: &str, name: &str) -> Arc<quickjs_bytecode::VerifiedBytecode> {

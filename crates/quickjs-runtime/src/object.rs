@@ -234,6 +234,24 @@ impl ObjectRecord {
         self.replace_existing_property(key, OwnProperty::Data { layout, value })
     }
 
+    pub(crate) fn replace_existing_with_accessor(
+        &mut self,
+        key: &PropertyKey,
+        layout: PropertyLayout,
+        getter: Option<FunctionId>,
+        setter: Option<FunctionId>,
+    ) -> Option<OwnProperty> {
+        debug_assert_eq!(layout.kind(), PropertyLayoutKind::Accessor);
+        self.replace_existing_property(
+            key,
+            OwnProperty::Accessor {
+                layout,
+                getter,
+                setter,
+            },
+        )
+    }
+
     pub(crate) fn restore_existing_property(
         &mut self,
         key: &PropertyKey,
@@ -296,10 +314,6 @@ impl ObjectRecord {
         Ok(())
     }
 
-    #[allow(
-        dead_code,
-        reason = "the crate-private accessor foundation is consumed through the pending VM path"
-    )]
     pub(crate) fn append_accessor(
         &mut self,
         key: PropertyKey,
@@ -473,6 +487,44 @@ mod tests {
                 getter: Some(actual_getter),
                 setter: None,
             }) if layout == accessor_layout && actual_getter == getter
+        ));
+    }
+
+    #[test]
+    fn accessor_halves_merge_by_replacing_one_typed_slot() {
+        let mut functions = Arena::<FunctionMarker, ()>::new(RuntimeIdentity::from_address(10));
+        let getter = functions.try_insert(()).expect("getter");
+        let setter = functions.try_insert(()).expect("setter");
+        let key = PropertyKey::from_index(ArrayIndex::new(10).expect("array index"));
+        let original_layout = PropertyLayout::accessor(false, true);
+        let replacement_layout = PropertyLayout::accessor(true, true);
+        let mut record = ObjectRecord::empty(None);
+        record
+            .append_accessor(key.clone(), original_layout, Some(getter), None)
+            .expect("getter");
+
+        let previous = record
+            .replace_existing_with_accessor(&key, replacement_layout, Some(getter), Some(setter))
+            .expect("existing getter");
+
+        assert!(matches!(
+            previous,
+            OwnProperty::Accessor {
+                layout,
+                getter: Some(actual_getter),
+                setter: None,
+            } if layout == original_layout && actual_getter == getter
+        ));
+        assert_eq!(record.property_count(), 1);
+        assert!(matches!(
+            record.own_property(&key),
+            Some(OwnProperty::Accessor {
+                layout,
+                getter: Some(read_function),
+                setter: Some(write_function),
+            }) if layout == replacement_layout
+                && read_function == getter
+                && write_function == setter
         ));
     }
 }

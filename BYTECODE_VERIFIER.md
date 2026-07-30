@@ -103,6 +103,21 @@ entry prefix, and validates each scope-entry activation-and-initializer group.
 This prevents a branch from entering the store or a different child template
 from initializing the declared name.
 
+Static-identifier object-literal methods/getters/setters are typed
+`OrdinaryMethod` children with exact header flags `0x0742`, only the strict
+mode bit admitted, matching declared argument counts, and no source function
+name or self binding. Every such child must be owned exactly once by one
+immediately adjacent `fclosure8|fclosure; define_method` pair whose definition
+has only the closure predecessor. Definition flags are exactly `4`, `5`, or
+`6`; getters have arity zero and setters arity one. Raw, reused, or unconsumed
+ordinary-method closures are rejected. Observable property-derived naming is
+performed only by the verified runtime `define_method` dispatch. A separate
+iterative operand-provenance lattice proves that the target beneath each
+closure descends from one `Object` instruction on every incoming path.
+Same-origin branches may rejoin; argument, primitive, or mixed-origin targets
+are rejected. Retained operand states and transfer visits share the explicit
+frame-state and policy-transfer budgets.
+
 A dynamic-Function Script root may instead attach a function initializer to a
 constructor-realm `FunctionAtInstantiation` closure slot. Verification ties the
 slot, exact name, child constant, and one `fclosure*; put_var` pair together;

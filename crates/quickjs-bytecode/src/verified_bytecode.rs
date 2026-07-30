@@ -507,6 +507,8 @@ pub enum CompilerExecutableKind {
     /// An ordinary callable JavaScript function.
     #[default]
     OrdinaryFunction,
+    /// A nonconstructable ordinary object-literal method, getter, or setter.
+    OrdinaryMethod,
     /// The constructor-realm global Script produced for dynamic `Function`.
     DynamicFunctionScript,
 }
@@ -877,14 +879,16 @@ impl BytecodeGraphVerificationLimits {
         self
     }
 
-    /// Returns a copy with another frame-state entry maximum.
+    /// Returns a copy with another binding and method-target abstract
+    /// frame-state entry maximum.
     #[must_use]
     pub const fn with_max_frame_state_entries(mut self, maximum: u64) -> Self {
         self.max_frame_state_entries = maximum;
         self
     }
 
-    /// Returns a copy with another binding-policy transfer maximum.
+    /// Returns a copy with another binding-policy and method-target transfer
+    /// maximum.
     #[must_use]
     pub const fn with_max_policy_transfers(mut self, maximum: u64) -> Self {
         self.max_policy_transfers = maximum;
@@ -915,13 +919,15 @@ impl BytecodeGraphVerificationLimits {
         self.max_source_mappings
     }
 
-    /// Returns the conservative abstract frame-state cell maximum.
+    /// Returns the conservative binding and method-target abstract frame-state
+    /// cell maximum.
     #[must_use]
     pub const fn max_frame_state_entries(self) -> u64 {
         self.max_frame_state_entries
     }
 
-    /// Returns the aggregate binding-policy state-cell visit maximum.
+    /// Returns the aggregate binding-policy and method-target state-cell visit
+    /// maximum.
     #[must_use]
     pub const fn max_policy_transfers(self) -> u64 {
         self.max_policy_transfers
@@ -970,13 +976,14 @@ impl BytecodeGraphUsage {
         self.source_mappings
     }
 
-    /// Returns allocated abstract frame-state entries.
+    /// Returns allocated binding and method-target abstract frame-state
+    /// entries.
     #[must_use]
     pub const fn frame_state_entries(self) -> u64 {
         self.frame_state_entries
     }
 
-    /// Returns evaluated binding-policy transfers.
+    /// Returns evaluated binding-policy and method-target transfers.
     #[must_use]
     pub const fn policy_transfers(self) -> u64 {
         self.policy_transfers
@@ -994,9 +1001,9 @@ pub enum BytecodeGraphResource {
     SourceBytes,
     /// Final PC-to-source mappings.
     SourceMappings,
-    /// Abstract frame-state entries.
+    /// Binding and method-target abstract frame-state entries.
     FrameStateEntries,
-    /// Binding-policy transfer evaluations.
+    /// Binding-policy and method-target transfer evaluations.
     PolicyTransfers,
     /// Frozen verified metadata records.
     VerifiedMetadata,
@@ -1010,7 +1017,7 @@ impl fmt::Display for BytecodeGraphResource {
             Self::SourceBytes => "source bytes",
             Self::SourceMappings => "source mappings",
             Self::FrameStateEntries => "frame-state entries",
-            Self::PolicyTransfers => "binding-policy transfers",
+            Self::PolicyTransfers => "policy and method-target transfers",
             Self::VerifiedMetadata => "verified metadata records",
         })
     }
@@ -1143,6 +1150,9 @@ pub enum BytecodeVerificationErrorKind {
     /// A dynamic-Function Script record carries function-name metadata or a
     /// named-function self binding.
     DynamicFunctionScriptHasFunctionName,
+    /// An object method or accessor carries a source name before
+    /// `define_method` assigns its property-derived observable name.
+    OrdinaryMethodHasFunctionName,
     /// A constructor-realm global source appears outside a dynamic-Function
     /// Script authority root.
     ConstructorRealmGlobalSourceRequiresDynamicFunctionScript {
@@ -1376,6 +1386,33 @@ pub enum BytecodeVerificationErrorKind {
         /// Rejected opcode.
         opcode: FinalOpcode,
     },
+    /// `define_method` is not paired with one immediately preceding typed
+    /// ordinary-method closure.
+    DefineMethodTemplateMismatch {
+        /// Final bytecode position of `define_method`.
+        pc: BytecodePc,
+    },
+    /// `define_method` does not target one fresh object-literal value on every
+    /// incoming control-flow path.
+    DefineMethodTargetMismatch {
+        /// Final bytecode position of `define_method`.
+        pc: BytecodePc,
+    },
+    /// An ordinary-method template closure is not consumed by its one
+    /// compiler-shaped `define_method` site.
+    OrdinaryMethodTemplatePlacementMismatch {
+        /// Final bytecode position of the method closure.
+        pc: BytecodePc,
+        /// Child template selected by the closure.
+        child: FunctionTemplateId,
+    },
+    /// An ordinary-method template is not defined by exactly one parent site.
+    OrdinaryMethodTemplateOwnershipMismatch {
+        /// Method or accessor template.
+        child: FunctionTemplateId,
+        /// Validated `define_method` sites targeting the template.
+        definitions: u32,
+    },
 }
 
 impl fmt::Display for BytecodeVerificationErrorKind {
@@ -1413,6 +1450,9 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             ),
             Self::DynamicFunctionScriptHasFunctionName => formatter.write_str(
                 "dynamic-Function Script carries function-name metadata or a self binding",
+            ),
+            Self::OrdinaryMethodHasFunctionName => formatter.write_str(
+                "ordinary method carries a source name before define_method initialization",
             ),
             Self::ConstructorRealmGlobalSourceRequiresDynamicFunctionScript { closure } => write!(
                 formatter,
@@ -1590,6 +1630,22 @@ impl fmt::Display for BytecodeVerificationErrorKind {
                     "opcode {opcode:?} at PC {pc} is outside compiler profile"
                 )
             }
+            Self::DefineMethodTemplateMismatch { pc } => write!(
+                formatter,
+                "define_method at PC {pc} is not paired with one typed method closure"
+            ),
+            Self::DefineMethodTargetMismatch { pc } => write!(
+                formatter,
+                "define_method at PC {pc} does not target one fresh object literal"
+            ),
+            Self::OrdinaryMethodTemplatePlacementMismatch { pc, child } => write!(
+                formatter,
+                "ordinary-method template {child} closure at PC {pc} is not consumed by define_method"
+            ),
+            Self::OrdinaryMethodTemplateOwnershipMismatch { child, definitions } => write!(
+                formatter,
+                "ordinary-method template {child} has {definitions} define_method sites"
+            ),
         }
     }
 }
@@ -1666,6 +1722,7 @@ pub fn verify_compiler_bytecode_graph(
         verified.push(record);
     }
     verify_closure_metadata(&graph, &verified)?;
+    verify_method_definitions(&graph, &verified, limits, &mut usage)?;
 
     requirements.sort_unstable();
     Ok(VerifiedBytecode {
@@ -1980,6 +2037,21 @@ fn verify_executable_kind(
 ) -> Result<(), BytecodeVerificationError> {
     match metadata.executable_kind {
         CompilerExecutableKind::OrdinaryFunction => Ok(()),
+        CompilerExecutableKind::OrdinaryMethod => {
+            let has_function_name_binding =
+                metadata.variables.iter().any(|definition| {
+                    definition.policy.kind() == CompilerBindingKind::FunctionName
+                }) || metadata.closures.iter().any(|definition| {
+                    definition.policy().kind() == CompilerBindingKind::FunctionName
+                });
+            if metadata.function_name.is_some() || has_function_name_binding {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::OrdinaryMethodHasFunctionName,
+                ));
+            }
+            Ok(())
+        }
         CompilerExecutableKind::DynamicFunctionScript => {
             if id != root {
                 return Err(BytecodeVerificationError::function(
@@ -2015,6 +2087,26 @@ fn verify_header(
         CompilerExecutableKind::OrdinaryFunction => {
             if header.kind() != FunctionKind::Normal
                 || header.flags().bits() != 0x0643
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() != arguments {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DefinedArgumentCountMismatch {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::OrdinaryMethod => {
+            if header.kind() != FunctionKind::Normal
+                || header.flags().bits() != 0x0742
                 || header.mode().bits() & !1 != 0
             {
                 return Err(BytecodeVerificationError::function(
@@ -3341,6 +3433,480 @@ fn verify_closure_metadata(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "typed closure pairing, unique CFG entry, arity, and ownership form one method-definition certificate"
+)]
+fn verify_method_definitions(
+    graph: &VerifiedCompilerFunctionGraph,
+    metadata: &[VerifiedFunctionMetadata],
+    limits: BytecodeGraphVerificationLimits,
+    usage: &mut BytecodeGraphUsage,
+) -> Result<(), BytecodeVerificationError> {
+    let mut definition_counts = try_filled_vec(
+        graph.root_id(),
+        graph.functions().len(),
+        0_u32,
+        BytecodeGraphResource::VerifiedMetadata,
+    )?;
+    for (parent_index, parent) in graph.functions().iter().enumerate() {
+        let parent_id = function_id(parent_index)?;
+        let instructions = parent.control_flow().instructions();
+        let mut predecessor_counts = try_filled_vec(
+            parent_id,
+            instructions.len(),
+            0_u32,
+            BytecodeGraphResource::SourceMappings,
+        )?;
+        for instruction in instructions {
+            let successors = instruction.successors();
+            for successor in [
+                successors.fallthrough(),
+                successors.branch_target(),
+                successors.jump_target(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                predecessor_counts[successor.get() as usize] =
+                    predecessor_counts[successor.get() as usize].saturating_add(1);
+            }
+        }
+
+        for (index, verified) in instructions.iter().enumerate() {
+            let decoded = verified.decoded();
+            let instruction = decoded.instruction();
+            if instruction.opcode() == FinalOpcode::DefineMethod
+                && method_definition_pair(
+                    graph,
+                    parent,
+                    metadata,
+                    instructions,
+                    &predecessor_counts,
+                    index,
+                )
+                .is_none()
+            {
+                return Err(BytecodeVerificationError::function(
+                    parent_id,
+                    BytecodeVerificationErrorKind::DefineMethodTemplateMismatch {
+                        pc: decoded.pc(),
+                    },
+                ));
+            }
+
+            let Some(constant) = closure_constant(instruction.opcode(), instruction.operands())
+            else {
+                continue;
+            };
+            let Some(crate::CompilerConstant::Function(child)) =
+                parent.constants().get(constant as usize)
+            else {
+                continue;
+            };
+            let Some(child_metadata) = usize::try_from(child.get())
+                .ok()
+                .and_then(|index| metadata.get(index))
+            else {
+                continue;
+            };
+            if child_metadata.executable_kind != CompilerExecutableKind::OrdinaryMethod {
+                continue;
+            }
+            let pair = index.checked_add(1).and_then(|definition_index| {
+                method_definition_pair(
+                    graph,
+                    parent,
+                    metadata,
+                    instructions,
+                    &predecessor_counts,
+                    definition_index,
+                )
+            });
+            if pair.map(|(defined, _)| defined) != Some(*child) {
+                return Err(BytecodeVerificationError::function(
+                    parent_id,
+                    BytecodeVerificationErrorKind::OrdinaryMethodTemplatePlacementMismatch {
+                        pc: decoded.pc(),
+                        child: *child,
+                    },
+                ));
+            }
+            let child_index = usize::try_from(child.get()).map_err(|_| {
+                BytecodeVerificationError::function(
+                    *child,
+                    BytecodeVerificationErrorKind::OrdinaryMethodTemplatePlacementMismatch {
+                        pc: decoded.pc(),
+                        child: *child,
+                    },
+                )
+            })?;
+            let count = &mut definition_counts[child_index];
+            *count = count.saturating_add(1);
+        }
+        if instructions.iter().any(|instruction| {
+            instruction.decoded().instruction().opcode() == FinalOpcode::DefineMethod
+        }) {
+            verify_method_target_provenance(parent_id, parent, limits, usage)?;
+        }
+    }
+
+    for (index, (metadata, &definitions)) in metadata.iter().zip(&definition_counts).enumerate() {
+        if metadata.executable_kind != CompilerExecutableKind::OrdinaryMethod {
+            continue;
+        }
+        let child = function_id(index)?;
+        if definitions != 1 {
+            return Err(BytecodeVerificationError::function(
+                child,
+                BytecodeVerificationErrorKind::OrdinaryMethodTemplateOwnershipMismatch {
+                    child,
+                    definitions,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn method_definition_pair(
+    graph: &VerifiedCompilerFunctionGraph,
+    parent: &VerifiedCompilerFunction,
+    metadata: &[VerifiedFunctionMetadata],
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    definition_index: usize,
+) -> Option<(FunctionTemplateId, u8)> {
+    let definition = instructions.get(definition_index)?;
+    let definition_instruction = definition.decoded().instruction();
+    let (FinalOpcode::DefineMethod, Operands::AtomU8 { value: flags, .. }) = (
+        definition_instruction.opcode(),
+        definition_instruction.operands(),
+    ) else {
+        return None;
+    };
+    if !(4..=6).contains(&flags) || predecessor_counts.get(definition_index) != Some(&1) {
+        return None;
+    }
+    let closure_index = definition_index.checked_sub(1)?;
+    let closure = instructions.get(closure_index)?;
+    if closure
+        .successors()
+        .fallthrough()
+        .map(InstructionIndex::get)
+        != Some(usize_to_u32(definition_index))
+    {
+        return None;
+    }
+    let closure_instruction = closure.decoded().instruction();
+    let constant = closure_constant(closure_instruction.opcode(), closure_instruction.operands())?;
+    let crate::CompilerConstant::Function(child) = parent.constants().get(constant as usize)?
+    else {
+        return None;
+    };
+    let child_index = usize::try_from(child.get()).ok()?;
+    let child_metadata = metadata.get(child_index)?;
+    if child_metadata.executable_kind != CompilerExecutableKind::OrdinaryMethod {
+        return None;
+    }
+    let arguments = graph
+        .function(*child)?
+        .control_flow()
+        .function_header()
+        .defined_argument_count();
+    if (flags == 5 && arguments != 0) || (flags == 6 && arguments != 1) {
+        return None;
+    }
+    Some((*child, flags))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MethodObjectProvenance {
+    Unknown,
+    FreshObject(u32),
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the bounded CFG worklist and exact operand-stack transfer form one fresh-object certificate"
+)]
+fn verify_method_target_provenance(
+    id: FunctionTemplateId,
+    function: &VerifiedCompilerFunction,
+    limits: BytecodeGraphVerificationLimits,
+    usage: &mut BytecodeGraphUsage,
+) -> Result<(), BytecodeVerificationError> {
+    let instructions = function.control_flow().instructions();
+    let mut entries = try_filled_vec(
+        id,
+        instructions.len(),
+        None::<Vec<MethodObjectProvenance>>,
+        BytecodeGraphResource::FrameStateEntries,
+    )?;
+    let mut queued = try_filled_vec(
+        id,
+        instructions.len(),
+        false,
+        BytecodeGraphResource::PolicyTransfers,
+    )?;
+    let mut work = VecDeque::new();
+    work.try_reserve_exact(instructions.len()).map_err(|_| {
+        BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::AllocationFailed {
+                resource: BytecodeGraphResource::PolicyTransfers,
+                requested: usize_to_u64(instructions.len()),
+            },
+        )
+    })?;
+
+    let mut next_seed = 0_usize;
+    let mut evaluations = 0_u64;
+    loop {
+        if work.is_empty() {
+            while entries.get(next_seed).is_some_and(Option::is_some) {
+                next_seed = next_seed.saturating_add(1);
+            }
+            if next_seed == entries.len() {
+                break;
+            }
+            entries[next_seed] = Some(Vec::new());
+            queued[next_seed] = true;
+            work.push_back(next_seed);
+        }
+
+        let Some(index) = work.pop_front() else {
+            continue;
+        };
+        queued[index] = false;
+        let entry = entries[index]
+            .as_deref()
+            .ok_or_else(|| method_target_error(id, instructions[index].decoded().pc()))?;
+        charge_policy_transfers(
+            id,
+            &mut evaluations,
+            usize_to_u64(entry.len()).saturating_add(1),
+            usage.policy_transfers,
+            limits.max_policy_transfers,
+        )?;
+        let mut state = try_copy_slice(id, entry, BytecodeGraphResource::FrameStateEntries)?;
+        let decoded = instructions[index].decoded();
+        if decoded.instruction().opcode() == FinalOpcode::DefineMethod
+            && !matches!(
+                state.get(state.len().saturating_sub(2)),
+                Some(MethodObjectProvenance::FreshObject(_))
+            )
+        {
+            return Err(method_target_error(id, decoded.pc()));
+        }
+        if !transfer_method_object_provenance(id, index, decoded, &mut state)? {
+            continue;
+        }
+
+        let successors = instructions[index].successors();
+        for successor in [
+            successors.fallthrough(),
+            successors.branch_target(),
+            successors.jump_target(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            charge_policy_transfers(
+                id,
+                &mut evaluations,
+                usize_to_u64(state.len()).saturating_add(1),
+                usage.policy_transfers,
+                limits.max_policy_transfers,
+            )?;
+            propagate_method_object_provenance(
+                id,
+                decoded.pc(),
+                successor,
+                &state,
+                &mut entries,
+                &mut queued,
+                &mut work,
+                limits.max_frame_state_entries,
+                usage,
+            )?;
+        }
+    }
+    charge(
+        &mut usage.policy_transfers,
+        evaluations,
+        limits.max_policy_transfers,
+        BytecodeGraphResource::PolicyTransfers,
+    )
+}
+
+fn transfer_method_object_provenance(
+    id: FunctionTemplateId,
+    instruction_index: usize,
+    decoded: crate::DecodedInstruction,
+    state: &mut Vec<MethodObjectProvenance>,
+) -> Result<bool, BytecodeVerificationError> {
+    let instruction = decoded.instruction();
+    let effect = instruction
+        .stack_effect()
+        .map_err(|_| method_target_error(id, decoded.pc()))?;
+    let pops = effect.pops() as usize;
+    let pushes = effect.pushes() as usize;
+    if state.len() < pops {
+        return Ok(false);
+    }
+    let output_len = state
+        .len()
+        .checked_sub(pops)
+        .and_then(|length| length.checked_add(pushes))
+        .ok_or_else(|| method_target_error(id, decoded.pc()))?;
+    if output_len > state.len() {
+        let additional = output_len - state.len();
+        state.try_reserve(additional).map_err(|_| {
+            BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::AllocationFailed {
+                    resource: BytecodeGraphResource::FrameStateEntries,
+                    requested: usize_to_u64(additional),
+                },
+            )
+        })?;
+    }
+
+    match instruction.opcode() {
+        FinalOpcode::Object => state.push(MethodObjectProvenance::FreshObject(usize_to_u32(
+            instruction_index,
+        ))),
+        FinalOpcode::Dup => {
+            let value = *state
+                .last()
+                .ok_or_else(|| method_target_error(id, decoded.pc()))?;
+            state.push(value);
+        }
+        FinalOpcode::Insert2 => {
+            let left_index = state.len() - 2;
+            let left = state[left_index];
+            let right = state[left_index + 1];
+            state[left_index] = right;
+            state[left_index + 1] = left;
+            state.push(right);
+        }
+        FinalOpcode::GetField2 => {
+            state.push(MethodObjectProvenance::Unknown);
+        }
+        FinalOpcode::DefineField | FinalOpcode::DefineMethod => {
+            let base = state[state.len() - 2];
+            state.truncate(state.len() - 2);
+            state.push(base);
+        }
+        _ => {
+            state.truncate(state.len() - pops);
+            state.resize(output_len, MethodObjectProvenance::Unknown);
+        }
+    }
+    if state.len() != output_len {
+        return Err(method_target_error(id, decoded.pc()));
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propagate_method_object_provenance(
+    id: FunctionTemplateId,
+    source_pc: BytecodePc,
+    successor: InstructionIndex,
+    output: &[MethodObjectProvenance],
+    entries: &mut [Option<Vec<MethodObjectProvenance>>],
+    queued: &mut [bool],
+    work: &mut VecDeque<usize>,
+    state_limit: u64,
+    usage: &mut BytecodeGraphUsage,
+) -> Result<(), BytecodeVerificationError> {
+    let index = successor.get() as usize;
+    let entry = entries
+        .get_mut(index)
+        .ok_or_else(|| method_target_error(id, source_pc))?;
+    let changed = match entry {
+        None => {
+            charge_method_state_entries(id, usage, output.len(), state_limit)?;
+            *entry = Some(try_copy_slice(
+                id,
+                output,
+                BytecodeGraphResource::FrameStateEntries,
+            )?);
+            true
+        }
+        Some(existing) if existing.len() == output.len() => {
+            let mut changed = false;
+            for (target, incoming) in existing.iter_mut().zip(output) {
+                let merged = match (*target, *incoming) {
+                    (
+                        MethodObjectProvenance::FreshObject(left),
+                        MethodObjectProvenance::FreshObject(right),
+                    ) if left == right => *target,
+                    _ => MethodObjectProvenance::Unknown,
+                };
+                changed |= merged != *target;
+                *target = merged;
+            }
+            changed
+        }
+        Some(existing) => {
+            let changed = existing
+                .iter()
+                .any(|value| *value != MethodObjectProvenance::Unknown);
+            existing.fill(MethodObjectProvenance::Unknown);
+            changed
+        }
+    };
+    if changed && !queued[index] {
+        queued[index] = true;
+        work.push_back(index);
+    }
+    Ok(())
+}
+
+fn charge_method_state_entries(
+    id: FunctionTemplateId,
+    usage: &mut BytecodeGraphUsage,
+    amount: usize,
+    limit: u64,
+) -> Result<(), BytecodeVerificationError> {
+    let amount = usize_to_u64(amount);
+    let observed = usage
+        .frame_state_entries
+        .checked_add(amount)
+        .ok_or_else(|| {
+            BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::LimitExceeded {
+                    resource: BytecodeGraphResource::FrameStateEntries,
+                    limit,
+                    observed: u64::MAX,
+                },
+            )
+        })?;
+    if observed > limit {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::LimitExceeded {
+                resource: BytecodeGraphResource::FrameStateEntries,
+                limit,
+                observed,
+            },
+        ));
+    }
+    usage.frame_state_entries = observed;
+    Ok(())
+}
+
+fn method_target_error(id: FunctionTemplateId, pc: BytecodePc) -> BytecodeVerificationError {
+    BytecodeVerificationError::function(
+        id,
+        BytecodeVerificationErrorKind::DefineMethodTargetMismatch { pc },
+    )
+}
+
 fn parent_definition_for_reference<'metadata>(
     parent: &'metadata VerifiedCompilerFunction,
     metadata: &'metadata VerifiedFunctionMetadata,
@@ -3381,16 +3947,25 @@ fn atom_contents(
 fn verify_supported_opcodes(
     id: FunctionTemplateId,
     flow: &VerifiedControlFlow,
-    _executable_kind: CompilerExecutableKind,
+    executable_kind: CompilerExecutableKind,
     authority_kind: CompilerExecutableKind,
 ) -> Result<(), BytecodeVerificationError> {
     for instruction in flow.instructions() {
         let decoded = instruction.decoded();
-        let opcode = decoded.instruction().opcode();
+        let instruction = decoded.instruction();
+        let opcode = instruction.opcode();
         if !supported_compiler_opcode(opcode)
             || (opcode == FinalOpcode::PushThis
                 && !flow.function_header().mode().is_strict()
+                && executable_kind != CompilerExecutableKind::OrdinaryMethod
                 && authority_kind != CompilerExecutableKind::DynamicFunctionScript)
+            || matches!(
+                (opcode, instruction.operands()),
+                (
+                    FinalOpcode::DefineMethod,
+                    Operands::AtomU8 { value, .. }
+                ) if !(4..=6).contains(&value)
+            )
         {
             return Err(BytecodeVerificationError::function(
                 id,
@@ -3450,6 +4025,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetField2
             | FinalOpcode::PutField
             | FinalOpcode::DefineField
+            | FinalOpcode::DefineMethod
             | FinalOpcode::IfFalse
             | FinalOpcode::IfTrue
             | FinalOpcode::Goto
@@ -4425,7 +5001,8 @@ fn collect_requirements(
             | FinalOpcode::GetField
             | FinalOpcode::GetField2
             | FinalOpcode::PutField
-            | FinalOpcode::DefineField => {
+            | FinalOpcode::DefineField
+            | FinalOpcode::DefineMethod => {
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
             }
             FinalOpcode::Throw => {

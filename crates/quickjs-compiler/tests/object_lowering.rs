@@ -1,6 +1,7 @@
 use quickjs_bytecode::{AtomPoolIndex, BytecodePc, FinalOpcode, Operands, VerificationLimits};
 use quickjs_compiler::{
-    CompilationContext, CompiledLeafFunction, LeafCompilationError, UnsupportedLeafFeature,
+    CompilationContext, CompiledFunction, CompiledFunctionTree, CompiledLeafFunction,
+    CompilerError, LeafCompilationError, UnsupportedFeature, UnsupportedLeafFeature,
 };
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
@@ -40,7 +41,37 @@ fn compile_error(source: &str, name: &str) -> LeafCompilationError {
     .expect("front-end acceptance")
 }
 
+fn compile_tree(source: &str, name: &str) -> CompiledFunctionTree {
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage planning must succeed");
+            let executable = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some(name))
+                .expect("named function executable");
+            context
+                .compile_tree(&executable, VerificationLimits::default())
+                .expect("ordinary object method tree must compile")
+        },
+    )
+    .expect("front-end acceptance")
+}
+
 fn instructions(compiled: &CompiledLeafFunction) -> Vec<(FinalOpcode, Operands)> {
+    compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect()
+}
+
+fn tree_instructions(compiled: &CompiledFunction) -> Vec<(FinalOpcode, Operands)> {
     compiled
         .control_flow()
         .instructions()
@@ -117,6 +148,129 @@ fn static_data_properties_are_defined_in_source_order() {
         "beta".encode_utf16().collect::<Vec<_>>()
     );
     assert_eq!(compiled.control_flow().computed_stack_size(), 2);
+}
+
+#[test]
+fn static_methods_and_accessors_use_typed_closures_and_exact_enumerable_flags() {
+    let tree = compile_tree(
+        "function make(){return {method(){return 1;},get value(){return 2;},set value(next){next;}};}",
+        "make",
+    );
+    let root = tree.root();
+
+    assert_eq!(
+        tree_instructions(root),
+        [
+            (FinalOpcode::Object, Operands::None),
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (
+                FinalOpcode::DefineMethod,
+                Operands::AtomU8 {
+                    atom: AtomPoolIndex::new(0),
+                    value: 4,
+                },
+            ),
+            (FinalOpcode::FClosure8, Operands::Const8(1)),
+            (
+                FinalOpcode::DefineMethod,
+                Operands::AtomU8 {
+                    atom: AtomPoolIndex::new(1),
+                    value: 5,
+                },
+            ),
+            (FinalOpcode::FClosure8, Operands::Const8(2)),
+            (
+                FinalOpcode::DefineMethod,
+                Operands::AtomU8 {
+                    atom: AtomPoolIndex::new(1),
+                    value: 6,
+                },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(tree.functions().len(), 4);
+    assert_eq!(
+        atom_code_units(root, 0),
+        "method".encode_utf16().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        atom_code_units(root, 1),
+        "value".encode_utf16().collect::<Vec<_>>()
+    );
+    for ((child, verified), expected_source) in tree.functions()[1..]
+        .iter()
+        .zip(tree.verified_bytecode().functions().skip(1))
+        .zip([
+            "method(){return 1;}",
+            "get value(){return 2;}",
+            "set value(next){next;}",
+        ])
+    {
+        let header = child.control_flow().function_header();
+        assert!(!header.flags().has_prototype());
+        assert!(!header.flags().needs_home_object());
+        assert_eq!(
+            verified.metadata().function_name(),
+            None,
+            "DefineMethod assigns the observable property-derived name"
+        );
+        assert_eq!(
+            verified.metadata().source().function_source(),
+            expected_source,
+            "the retained method source includes its property key and accessor prefix"
+        );
+    }
+}
+
+#[test]
+fn object_methods_capture_outer_cells_and_lower_their_frontend_bodies() {
+    let tree = compile_tree(
+        "function make(value){return {read(){return value;},get current(){return this;},set current(next){value=next;}};}",
+        "make",
+    );
+    let children = &tree.functions()[1..];
+
+    assert_eq!(children.len(), 3);
+    assert!(tree_instructions(&children[0]).iter().any(|instruction| {
+        matches!(
+            instruction,
+            (FinalOpcode::GetVarRef0, Operands::NoneVarRef)
+                | (FinalOpcode::GetVarRef, Operands::VarRef(0))
+        )
+    }));
+    assert!(tree_instructions(&children[1]).contains(&(FinalOpcode::PushThis, Operands::None)));
+    let setter_instructions = tree_instructions(&children[2]);
+    assert!(
+        setter_instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                (FinalOpcode::SetVarRef0, Operands::NoneVarRef)
+                    | (FinalOpcode::SetVarRef, Operands::VarRef(0))
+            )
+        }),
+        "{setter_instructions:?}"
+    );
+}
+
+#[test]
+fn object_method_super_remains_fail_closed_before_home_object_lowering() {
+    let source = "function make(){return {method(){return super.value;}};}";
+    let error = with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| match CompilationContext::new(unit) {
+            Ok(_) => panic!("super must not acquire compiler storage"),
+            Err(error) => error,
+        },
+    )
+    .expect("front-end acceptance");
+
+    let CompilerError::Unsupported { feature, span } = error else {
+        panic!("expected a structured unsupported super binding");
+    };
+    assert_eq!(feature, UnsupportedFeature::FunctionSyntheticBinding);
+    assert_eq!(&source[span.start as usize..span.end as usize], "super");
 }
 
 #[test]
@@ -318,19 +472,29 @@ fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
             "...value",
         ),
         (
-            "function make(){return {get value(){return 1;}};}",
+            "function make(){return {[\"method\"](){return 1;}};}",
+            UnsupportedLeafFeature::UnsupportedExpression,
+            "\"method\"",
+        ),
+        (
+            "function make(){return {\"method\"(){return 1;}};}",
             UnsupportedLeafFeature::ObjectMethodOrAccessor,
+            "\"method\"",
+        ),
+        (
+            "function make(){return {1(){return 1;}};}",
+            UnsupportedLeafFeature::ObjectMethodOrAccessor,
+            "1",
+        ),
+        (
+            "function make(){return {async method(){return 1;}};}",
+            UnsupportedLeafFeature::NonOrdinaryFunction,
             "return 1",
         ),
         (
-            "function make(){return {set value(next){next;}};}",
-            UnsupportedLeafFeature::ObjectMethodOrAccessor,
-            "next",
-        ),
-        (
-            "function make(){return {method(){return 1;}};}",
-            UnsupportedLeafFeature::ObjectMethodOrAccessor,
-            "return 1",
+            "function make(){return {*method(){yield 1;}};}",
+            UnsupportedLeafFeature::NonOrdinaryFunction,
+            "yield 1",
         ),
         (
             "function make(value){return {__proto__:value};}",

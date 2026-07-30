@@ -1685,10 +1685,6 @@ impl Runtime {
         Ok(())
     }
 
-    #[allow(
-        dead_code,
-        reason = "the crate-private accessor foundation is consumed by the pending VM path"
-    )]
     pub(crate) fn append_accessor_property(
         &mut self,
         reference: HeapReference,
@@ -3002,12 +2998,31 @@ fn require_root_kind(
     if actual == expected {
         return Ok(());
     }
-    let message = match expected {
-        CompilerExecutableKind::OrdinaryFunction => {
-            "dynamic-function Script cannot be instantiated as an ordinary function"
+    let message = match (expected, actual) {
+        (
+            CompilerExecutableKind::OrdinaryFunction,
+            CompilerExecutableKind::DynamicFunctionScript,
+        ) => "dynamic-function Script cannot be instantiated as an ordinary function",
+        (CompilerExecutableKind::OrdinaryFunction, CompilerExecutableKind::OrdinaryMethod) => {
+            "ordinary method cannot be instantiated as an ordinary function"
         }
-        CompilerExecutableKind::DynamicFunctionScript => {
-            "ordinary function cannot execute as a dynamic-function Script"
+        (CompilerExecutableKind::OrdinaryMethod, CompilerExecutableKind::OrdinaryFunction) => {
+            "ordinary function cannot be instantiated as an ordinary method"
+        }
+        (CompilerExecutableKind::OrdinaryMethod, CompilerExecutableKind::DynamicFunctionScript) => {
+            "dynamic-function Script cannot be instantiated as an ordinary method"
+        }
+        (
+            CompilerExecutableKind::DynamicFunctionScript,
+            CompilerExecutableKind::OrdinaryFunction,
+        ) => "ordinary function cannot execute as a dynamic-function Script",
+        (CompilerExecutableKind::DynamicFunctionScript, CompilerExecutableKind::OrdinaryMethod) => {
+            "ordinary method cannot execute as a dynamic-function Script"
+        }
+        _ => {
+            return Err(InstallError::AuthorityInvariant {
+                message: "matching executable kinds reached rejection",
+            });
         }
     };
     Err(InstallError::AuthorityInvariant { message })
@@ -3092,6 +3107,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetField2
             | FinalOpcode::PutField
             | FinalOpcode::DefineField
+            | FinalOpcode::DefineMethod
             | FinalOpcode::IfFalse
             | FinalOpcode::IfTrue
             | FinalOpcode::Goto

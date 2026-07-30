@@ -16,18 +16,23 @@ transactionally install that authority into a same-runtime realm and host-call
 the resulting function. The admitted profile executes primitive constants,
 arguments, locals, captured cells, nested closures, TDZ checks, cell rotation,
 branches, returns, direct ordinary JavaScript-to-JavaScript calls, truthiness,
-`typeof`, strict equality, nullish tests, ordinary object literals, static data
-property reads/writes, own and inherited static accessor getter reads, strict
-receiver-aware static method calls, and arbitrary explicit `throw` values.
+`typeof`, strict equality, nullish tests, ordinary object literals with
+source-ordered static identifier-named data properties and synchronous
+methods/getters/setters, static data property reads/writes, own and inherited
+static accessor getter/setter dispatch, strict receiver-aware static method
+calls, and arbitrary explicit `throw` values.
 Functions and ordinary objects use typed `Arc`-backed public roots, and the
 iterative collector traces their data properties, accessor functions,
-prototypes, closures, and binding cells. Nested calls, recursion, getter
-dispatch, and abrupt unwinding use an explicit frame vector with cumulative
-frame/value ceilings and shared fuel. Installation scans every instruction in
-every template before mutation. Computed/exotic object operations, accessor
-syntax and setter execution, optional/spread/apply calls, BigInt, general
-coercive operations, dynamic operators, serialized bytecode, every form of
-eval, and catch/finally typed-stack semantics remain deferred and fail closed.
+prototypes, closures, and binding cells. Nested calls, recursion,
+getter/setter dispatch, and abrupt unwinding use an explicit frame vector with
+cumulative frame/value ceilings and shared fuel. Installation scans every
+instruction in every template before mutation. Computed/exotic object
+operations, string/numeric/computed literal keys, shorthand/spread and
+`__proto__` data-initializer semantics, async/generator methods,
+`super`/home-object semantics, realm-global accessor writes,
+optional/spread/apply calls, BigInt, general coercive operations, dynamic
+operators, serialized bytecode, every form of eval, and catch/finally
+typed-stack semantics remain deferred and fail closed.
 Ordinary `new` calls now execute constructor-capable bytecode functions and
 materialize their `name`, `length`, and
 `prototype.constructor` graph. The `quickjs` facade supplies one immutable

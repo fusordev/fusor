@@ -507,6 +507,365 @@ fn final_authority_admits_ordinary_object_properties_and_method_calls() {
 }
 
 #[test]
+fn final_authority_admits_only_enumerable_static_define_method_kinds() {
+    for (flags, arguments) in [(4, 0), (5, 0), (6, 1)] {
+        let instructions = [
+            (FinalOpcode::Object, Operands::None),
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (
+                FinalOpcode::DefineMethod,
+                Operands::AtomU8 {
+                    atom: AtomPoolIndex::new(1),
+                    value: flags,
+                },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ];
+        let verified = verify_compiler_bytecode_graph(
+            define_method_input(
+                &instructions,
+                CompilerExecutableKind::OrdinaryMethod,
+                arguments,
+            ),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect("the compiler's method, getter, and setter flags gain authority");
+
+        assert_eq!(
+            verified.requirements(),
+            [
+                ExecutionRequirement::CoreValues,
+                ExecutionRequirement::Strings,
+                ExecutionRequirement::Closures,
+                ExecutionRequirement::OrdinaryObjects,
+            ]
+        );
+        let child = verified
+            .function(FunctionTemplateId::new(1))
+            .expect("method child");
+        assert_eq!(
+            child.metadata().executable_kind(),
+            CompilerExecutableKind::OrdinaryMethod
+        );
+        assert!(
+            !child
+                .function()
+                .control_flow()
+                .function_header()
+                .flags()
+                .has_prototype()
+        );
+    }
+}
+
+#[test]
+fn final_authority_rejects_non_enumerable_or_computed_method_definitions() {
+    for flags in 0..=2 {
+        let instructions = [
+            (FinalOpcode::Object, Operands::None),
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (
+                FinalOpcode::DefineMethod,
+                Operands::AtomU8 {
+                    atom: AtomPoolIndex::new(1),
+                    value: flags,
+                },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ];
+        let error = verify_compiler_bytecode_graph(
+            define_method_input(
+                &instructions,
+                CompilerExecutableKind::OrdinaryMethod,
+                u32::from(flags == 2),
+            ),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("non-enumerable class-style flags remain outside object-literal authority");
+        assert!(matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                opcode: FinalOpcode::DefineMethod,
+                ..
+            }
+        ));
+    }
+
+    let computed = [
+        (FinalOpcode::Object, Operands::None),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(1)),
+        ),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::DefineMethodComputed, Operands::U8(4)),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(&computed, CompilerExecutableKind::OrdinaryMethod, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("computed method definition remains fail-closed");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            opcode: FinalOpcode::DefineMethodComputed,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn final_authority_requires_a_typed_method_closure_and_accessor_arity() {
+    let method = [
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::DefineMethod,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 4,
+            },
+        ),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(&method, CompilerExecutableKind::OrdinaryFunction, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("an ordinary constructable function cannot back define_method");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::DefineMethodTemplateMismatch { .. }
+        ),
+        "{error:?}"
+    );
+
+    let getter_with_argument = [
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::DefineMethod,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 5,
+            },
+        ),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(
+            &getter_with_argument,
+            CompilerExecutableKind::OrdinaryMethod,
+            1,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a getter must have zero formal parameters");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::OrdinaryMethodTemplatePlacementMismatch { .. }
+        ),
+        "{error:?}"
+    );
+
+    let unconsumed = [
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(&unconsumed, CompilerExecutableKind::OrdinaryMethod, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a method closure cannot escape its definition site");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::OrdinaryMethodTemplatePlacementMismatch { .. }
+    ));
+}
+
+#[test]
+fn final_authority_requires_define_method_to_target_one_fresh_literal_object() {
+    let source_ordered = [
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (
+            FinalOpcode::DefineField,
+            Operands::Atom(AtomPoolIndex::new(0)),
+        ),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::DefineMethod,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 4,
+            },
+        ),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let source_ordered_input =
+        define_method_input(&source_ordered, CompilerExecutableKind::OrdinaryMethod, 0);
+    let verified = verify_compiler_bytecode_graph(
+        source_ordered_input.clone(),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("source-ordered data and method definitions preserve one fresh literal target");
+    let usage = verified.usage();
+    assert_eq!(
+        usage.frame_state_entries(),
+        7,
+        "fresh-object entry states are charged to the aggregate frame-state budget"
+    );
+    assert_eq!(
+        usage.policy_transfers(),
+        25,
+        "fresh-object state visits are charged to the aggregate transfer-work budget"
+    );
+    assert_limit(
+        &source_ordered_input,
+        BytecodeGraphVerificationLimits::default()
+            .with_max_frame_state_entries(usage.frame_state_entries()),
+        BytecodeGraphVerificationLimits::default()
+            .with_max_frame_state_entries(usage.frame_state_entries() - 1),
+        BytecodeGraphResource::FrameStateEntries,
+        usage.frame_state_entries() - 1,
+        usage.frame_state_entries(),
+    );
+    assert_limit(
+        &source_ordered_input,
+        BytecodeGraphVerificationLimits::default()
+            .with_max_policy_transfers(usage.policy_transfers()),
+        BytecodeGraphVerificationLimits::default()
+            .with_max_policy_transfers(usage.policy_transfers() - 1),
+        BytecodeGraphResource::PolicyTransfers,
+        usage.policy_transfers() - 1,
+        usage.policy_transfers(),
+    );
+}
+
+#[test]
+fn final_authority_preserves_one_fresh_method_target_across_a_field_value_join() {
+    let same_literal_across_join = [
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Goto8, Operands::Label8(2)),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (
+            FinalOpcode::DefineField,
+            Operands::Atom(AtomPoolIndex::new(0)),
+        ),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::DefineMethod,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 4,
+            },
+        ),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        define_method_input(
+            &same_literal_across_join,
+            CompilerExecutableKind::OrdinaryMethod,
+            0,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a join preserves the same fresh literal while selecting one field value");
+}
+
+#[test]
+fn final_authority_rejects_argument_and_primitive_define_method_targets() {
+    for hostile in [
+        vec![
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (
+                FinalOpcode::DefineMethod,
+                Operands::AtomU8 {
+                    atom: AtomPoolIndex::new(1),
+                    value: 4,
+                },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (
+                FinalOpcode::DefineMethod,
+                Operands::AtomU8 {
+                    atom: AtomPoolIndex::new(1),
+                    value: 4,
+                },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+    ] {
+        let error = verify_compiler_bytecode_graph(
+            define_method_input_with_root_arguments(
+                &hostile,
+                CompilerExecutableKind::OrdinaryMethod,
+                0,
+                1,
+            ),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("a method cannot target an argument or primitive value");
+        assert!(
+            matches!(
+                error.kind(),
+                BytecodeVerificationErrorKind::DefineMethodTargetMismatch { .. }
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn final_authority_rejects_mixed_define_method_target_provenance_at_a_join() {
+    let mixed = [
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(2)),
+        (FinalOpcode::GetArg0, Operands::NoneArg),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::DefineMethod,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 4,
+            },
+        ),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input_with_root_arguments(
+            &mixed,
+            CompilerExecutableKind::OrdinaryMethod,
+            0,
+            1,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a join cannot mix a fresh literal with an arbitrary argument target");
+
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::DefineMethodTargetMismatch { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn push_this_authority_is_limited_to_strict_functions_and_dynamic_scripts() {
     let instructions = [
         (FinalOpcode::PushThis, Operands::None),
@@ -1075,6 +1434,153 @@ fn function_initializer_input(
                     SourceByteSpan::new(26, 31),
                 ),
             ),
+        ]),
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the two-function authority fixture keeps graph, metadata, source, and header variants together"
+)]
+fn define_method_input(
+    root_instructions: &[(FinalOpcode, Operands)],
+    child_kind: CompilerExecutableKind,
+    child_arguments: u32,
+) -> UnverifiedCompilerBytecodeGraph {
+    define_method_input_with_root_arguments(root_instructions, child_kind, child_arguments, 0)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the two-function authority fixture keeps graph, metadata, source, and header variants together"
+)]
+fn define_method_input_with_root_arguments(
+    root_instructions: &[(FinalOpcode, Operands)],
+    child_kind: CompilerExecutableKind,
+    child_arguments: u32,
+    root_arguments: u32,
+) -> UnverifiedCompilerBytecodeGraph {
+    let root_flow = flow_with_header(
+        root_instructions,
+        3,
+        root_arguments,
+        0,
+        &[],
+        0,
+        &[CompilerConstantKind::Function],
+        UnverifiedFunctionHeader::ordinary_source_function(false, root_arguments),
+    );
+    let child_flow = flow_with_header(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        child_arguments,
+        child_arguments,
+        0,
+        &[],
+        0,
+        &[],
+        match child_kind {
+            CompilerExecutableKind::OrdinaryFunction => {
+                UnverifiedFunctionHeader::ordinary_source_function(false, child_arguments)
+            }
+            CompilerExecutableKind::OrdinaryMethod => {
+                UnverifiedFunctionHeader::ordinary_method_with_variable_references(
+                    false,
+                    child_arguments,
+                    0,
+                )
+            }
+            CompilerExecutableKind::DynamicFunctionScript => {
+                panic!("a define_method child cannot be a Script")
+            }
+        },
+    );
+    let child_atoms = (0..child_arguments)
+        .map(|index| atom(&format!("argument{index}")))
+        .collect::<Vec<_>>();
+    let child_variables = (0..child_arguments)
+        .map(|index| {
+            VariableDefinition::new(
+                Some(AtomPoolIndex::new(index)),
+                ScopeLink::End,
+                parameter_policy(),
+                false,
+                None,
+            )
+        })
+        .collect::<Vec<_>>();
+    let root_variables = (0..root_arguments)
+        .map(|_| {
+            VariableDefinition::new(
+                Some(AtomPoolIndex::new(2)),
+                ScopeLink::End,
+                parameter_policy(),
+                false,
+                None,
+            )
+        })
+        .collect::<Vec<_>>();
+    let graph = Arc::new(
+        verify_compiler_function_graph(
+            UnverifiedCompilerFunctionGraph::new(
+                FunctionTemplateId::new(0),
+                Arc::from([
+                    UnverifiedCompilerFunction::new(
+                        Arc::clone(&root_flow),
+                        Arc::from([quickjs_bytecode::CompilerConstant::Function(
+                            FunctionTemplateId::new(1),
+                        )]),
+                        Arc::from([]),
+                    )
+                    .with_atom_pool(Arc::from([
+                        atom("outer"),
+                        atom("value"),
+                        atom("target"),
+                    ])),
+                    UnverifiedCompilerFunction::new(
+                        Arc::clone(&child_flow),
+                        Arc::from([]),
+                        Arc::from([]),
+                    )
+                    .with_atom_pool(child_atoms.into()),
+                ]),
+            ),
+            FunctionGraphVerificationLimits::default(),
+        )
+        .expect("define_method fixture graph"),
+    );
+    let text: Arc<str> = Arc::from("function outer(){return {value(){}}}");
+    let full_span =
+        SourceByteSpan::new(0, u32::try_from(text.len()).expect("fixture source length"));
+    let mapped_source = |flow: &VerifiedControlFlow, name_span| {
+        CompilerSource::new(
+            Arc::from("fixture.js"),
+            Arc::clone(&text),
+            full_span,
+            name_span,
+            Arc::from(
+                flow.instructions()
+                    .iter()
+                    .map(|instruction| PcSourceSpan::new(instruction.decoded().pc(), full_span))
+                    .collect::<Vec<_>>(),
+            ),
+        )
+    };
+    UnverifiedCompilerBytecodeGraph::new(
+        graph,
+        Arc::from([
+            UnverifiedFunctionMetadata::new(
+                Some(AtomPoolIndex::new(0)),
+                root_variables.into(),
+                Arc::from([]),
+                mapped_source(&root_flow, Some(SourceByteSpan::new(9, 14))),
+            ),
+            UnverifiedFunctionMetadata::new(
+                None,
+                child_variables.into(),
+                Arc::from([]),
+                mapped_source(&child_flow, None),
+            )
+            .with_executable_kind(child_kind),
         ]),
     )
 }

@@ -273,19 +273,23 @@ opcodes, serialized `close_loc`, and all reference-construction opcodes remain
 fail-closed pending a serialized graph format and verifier that own complete
 constant, vardef, child, and closure metadata.
 
-Module functions, object-literal method/accessor definitions, and named
-function expressions fail closed until their distinct surrounding-storage,
-header, and self-binding behavior is implemented. Ordinary function values may
-already be stored in data properties and called through a static member
-reference. The compiled artifact keeps the exact source text, storage plan,
-local layout, exact atom and heterogeneous constant pools, normalized capture
-descriptors, source table, and staged/final certificates in immutable `Arc`
-storage after the Oxc arena is dropped. Lowering accepts only an opaque
-executable selection issued by that context. A same-index selection from
-another context is rejected. The dedicated dynamic-Function authority lowers
-unresolved names through verified constructor-realm slots; ordinary
-non-dynamic bodies, global/module references outside that typed path, and
-async/generator functions still fail before byte emission.
+Module functions and named function expressions fail closed until their
+distinct surrounding-storage and self-binding behavior is implemented.
+Static-identifier object-literal concise methods/getters/setters lower as
+nonconstructable `OrdinaryMethod` templates paired with one adjacent
+`fclosure*; define_method` site. Computed or non-identifier keys,
+async/generator methods, and `super`/home-object use remain fail closed.
+Ordinary function values may also be stored in data properties and called
+through a static member reference. The compiled artifact keeps the exact
+source text, storage plan, local layout, exact atom and heterogeneous constant
+pools, normalized capture descriptors, source table, and staged/final
+certificates in immutable `Arc` storage after the Oxc arena is dropped.
+Lowering accepts only an opaque executable selection issued by that context. A
+same-index selection from another context is rejected. The dedicated
+dynamic-Function authority lowers unresolved names through verified
+constructor-realm slots; ordinary non-dynamic bodies, global/module references
+outside that typed path, and async/generator functions still fail before byte
+emission.
 
 Every successful unit also owns a `ModuleSyntaxRecord` for the module data that
 must survive the Oxc allocator. Static requests remain in source occurrence
@@ -443,28 +447,38 @@ returns, truthiness, `typeof`, strict equality, the nullish predicate, direct
 native forwarding boundary attaches one zero-value identity continuation, so
 self-targeting call chains remain on the same iterative dispatcher while
 counting exactly against the active-frame ceiling. Object literals create
-realm-owned ordinary objects, define static
-data properties in source order, and support static reads and simple writes
-across ordinary objects and function objects. Missing reads produce
-`undefined`; nullish access and strict primitive writes produce exact
-`TypeError`s; sloppy primitive writes are ignored. A method call preserves a
-static member reference through parentheses, evaluates lookup before
-arguments, and passes its base as the raw receiver; a sequence expression
-deliberately yields an unbound value. Outside a verified dynamic-Function
-authority, `PushThis` is admitted only in strict functions. Dynamic sloppy
-functions normalize it lazily against their installed realm; direct calls
-still pass raw `undefined`. Calls fill missing formals with `undefined` and
-share aggregate frame limits and instruction fuel. An
-escaping throw carries its exact JavaScript value through the same frame
+realm-owned ordinary objects and define static identifier-named data
+properties plus synchronous methods/getters/setters in source order. Typed
+ordinary-method closures use the exact nonconstructable header and are
+consumed by one verifier-certified `DefineMethod` site whose target retains one
+object-literal origin across every incoming path. Definition derives the
+observable method or accessor name, preserves exact arity, and merges or
+replaces data/accessor halves without charging a duplicate slot. Static reads
+and writes operate across ordinary objects and function objects. Setter calls
+preserve the original receiver and sole assignment RHS, discard their
+completion, and resume the assigning frame at the certified successor; the
+assignment expression retains its RHS. Missing reads produce `undefined`;
+nullish access, strict primitive writes, and strict writes to a getter-only
+property produce exact `TypeError`s, including
+`TypeError: no setter for property`; sloppy rejected writes are ignored. A
+method call preserves a static member reference through parentheses, evaluates
+lookup before arguments, and passes its base as the raw receiver; a sequence
+expression deliberately yields an unbound value. Outside a verified
+dynamic-Function authority, sloppy `PushThis` is admitted only for typed
+ordinary methods. Dynamic sloppy functions normalize it lazily against their
+installed realm; direct calls still pass raw `undefined`. Calls fill missing
+formals with `undefined` and share aggregate frame limits and instruction fuel.
+An escaping throw carries its exact JavaScript value through the same frame
 vector, allocates caller provenance before publishing any heap root, and
-preserves caller order from immediate to outermost. Computed properties,
-accessor syntax and setter execution, object-method syntax, prototype mutation,
-proxies and exotics, derived/class and nonordinary constructor forms,
-optional/spread/apply/tail calls, general sloppy-`this` primitive boxing,
-BigInt, coercive numeric operations, dynamic operators, serialized input,
-non-string atom namespaces, raw function slots, catch handlers, finally return
-addresses, iterator markers, and packed exceptional stack values remain fail
-closed. Internally installed ordinary accessors are typed slots: `GetField`
+preserves caller order from immediate to outermost. Computed or non-identifier
+object-member keys, async/generator methods, `super`/home-object semantics,
+realm-global setter dispatch, prototype mutation, proxies and exotics,
+derived/class and nonordinary constructor forms, optional/spread/apply/tail
+calls, general sloppy-`this` primitive boxing, BigInt, coercive numeric
+operations, dynamic operators, serialized input, non-string atom namespaces,
+raw function slots, catch handlers, finally return addresses, iterator
+markers, and packed exceptional stack values remain fail closed. Ordinary
+accessors are typed slots: `GetField`
 and `GetField2` stop at the first own or inherited accessor, execute native or
 verified-bytecode getters through the same frame vector, preserve the original
 receiver and `GetField2` base, and retain exact abrupt provenance. Getterless
@@ -573,10 +587,12 @@ until zombie-state and resurrection rules are complete.
 - Incomplete property descriptors retain independent presence for `value`,
   `writable`, `get`, `set`, `enumerable`, and `configurable`. Classification
   produces an opaque generic/data/accessor descriptor, so callers cannot forge
-  a kind contradicted by its present fields. Completion in this foundation is
-  explicitly limited to creation of a new ordinary property; accessor
+  a kind contradicted by its present fields. The general descriptor API still
+  limits completion to creation of a new ordinary property; general accessor
   callability and existing-property compatibility remain later object-model
-  checks.
+  checks. The narrower compiler-shaped `DefineMethod` path separately requires
+  a typed callable template, verifies its getter/setter merge invariants, and
+  certifies one object-literal-derived target through a bounded CFG lattice.
 - Bytecode never stores an `Atom` pointer or runtime identity. Atom operands
   are validated function-local pool indices; serialized units carry bounded
   atom contents and namespace metadata, and loading reinterns or creates each
@@ -584,18 +600,23 @@ until zombie-state and resurrection rules are complete.
 - The current ordinary-object slice keeps each shape in a private
   `Arc<Vec<_>>` and each aligned slot typed as data or accessor. Property
   growth reserves the unique vectors fallibly before mutating either logical
-  sequence; transition interning is not implemented yet. Deletion, flag
-  changes, accessor syntax, setter execution, and prototype mutation remain
-  fail closed.
+  sequence; transition interning is not implemented yet. Static object-literal
+  accessor definition and static setter dispatch are admitted. Deletion,
+  general flag changes, computed/non-identifier definitions, realm-global
+  setter dispatch, and prototype mutation remain fail closed.
 - Object literals inherit their realm's internal `Object.prototype`, which
   currently owns exact `toString` and `valueOf` native data properties.
   `Function.prototype` likewise owns exact `toString` and `call`; all four
   method functions belong to the realm, inherit `Function.prototype`, and
-  participate in the iterative heap trace. Ordinary objects and function objects share
-  typed data/accessor property storage, and both getter and setter function
-  edges are traced. `DefineField` creates configurable, writable, enumerable
-  data properties; duplicate literal keys replace one slot without double
-  charging.
+  participate in the iterative heap trace. Ordinary objects and function
+  objects share typed data/accessor property storage, and both getter and
+  setter function edges are traced. `DefineField` creates configurable,
+  writable, enumerable
+  data properties; `DefineMethod` creates configurable/enumerable methods or
+  accessors, with writable method data properties and exact getter/setter-half
+  merging. It initializes the function's exact property-derived name before
+  publication, while the compiled arity supplies `length`; duplicate literal
+  keys replace one slot without double charging.
 - Ordinary data/accessor layouts have an opaque value-independent
   representation; accessor layouts cannot carry a writable flag. Current
   ordinary property slots are typed as data or accessor; binding-cell and lazy
@@ -729,10 +750,12 @@ function outer(value) {
 It proves runtime-local realm installation, host and JavaScript calls,
 forwarded closure cells, TDZ diagnostics, `close_loc` rotation, compact/full
 operand forms, allocation-free public-root release, ordinary object allocation
-and static data properties, strict receiver-aware method calls, and safe-point
-collection of transient/cyclic function, cell, and object graphs. Full
-descriptors/accessors, computed properties, coercive `+`, catch/finally, and
-JavaScript Error objects remain later slices.
+and static data properties, identifier-named synchronous object
+methods/getters/setters, strict receiver-aware calls, iterative accessor
+dispatch, and safe-point collection of transient/cyclic function, cell, and
+object graphs. General descriptor mutation, computed properties,
+`super`/home-object semantics, coercive `+`, catch/finally, and JavaScript
+Error objects remain later slices.
 
 The planned asynchronous slice creates a host timer Promise. A Tokio wakeup
 must be observed on the runtime owner, the FIFO job queue must drain

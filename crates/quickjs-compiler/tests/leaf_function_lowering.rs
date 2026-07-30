@@ -330,7 +330,7 @@ fn anonymous_ordinary_function_expression_uses_the_same_owned_boundary() {
 }
 
 #[test]
-fn object_function_value_is_ordinary_but_method_form_fails_closed() {
+fn object_function_value_and_method_use_distinct_exact_headers() {
     let value_source = "const object = { f: function (arg) { let local = arg; return local; } };";
     let compiled = with_parsed_program(
         value_source,
@@ -353,7 +353,7 @@ fn object_function_value_is_ordinary_but_method_form_fails_closed() {
     );
 
     let method_source = "const object = { f(arg) { let local = arg; return local; } };";
-    let error = with_parsed_program(
+    let compiled = with_parsed_program(
         method_source,
         FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
         |unit| {
@@ -364,14 +364,14 @@ fn object_function_value_is_ordinary_but_method_form_fails_closed() {
                 .expect("object method executable");
             context
                 .compile_leaf(&executable, VerificationLimits::default())
-                .expect_err("method header policy is not implemented")
+                .expect("ordinary object method")
         },
     )
     .expect("front-end acceptance");
-    let LeafCompilationError::Unsupported { feature, .. } = error else {
-        panic!("object method must fail as unsupported");
-    };
-    assert_eq!(feature, UnsupportedLeafFeature::ObjectMethodOrAccessor);
+    let header = compiled.control_flow().function_header();
+    assert_eq!(header.flags().bits(), 0x0742);
+    assert!(!header.flags().has_prototype());
+    assert!(!header.flags().needs_home_object());
 }
 
 #[test]

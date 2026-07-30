@@ -568,6 +568,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     /// returns. A leaf may own ordinary value constants and may read or write
     /// frame cells captured from an ancestor. The entire function is converted
     /// to typed symbolic instructions before branch relaxation emits any bytes.
+    /// A selected static ordinary method/accessor may be staged here for
+    /// inspection, but this leaf artifact is never execution authority; only
+    /// [`Self::compile_tree`] on its owning parent can certify and publish the
+    /// required object-literal `DefineMethod` site.
     ///
     /// # Errors
     ///
@@ -982,7 +986,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         tree_layout: &FunctionTreeLayout,
         limits: VerificationLimits,
     ) -> Result<ValidatedFunction, LeafCompilationError> {
-        let (executable, function) = self.selected_ordinary_function(executable_id)?;
+        let (executable, function, form) = self.selected_ordinary_function(executable_id)?;
         let layout = FrameLayout::new(&self.planned.plan, executable_id)?;
         let body = function
             .body
@@ -1009,10 +1013,25 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             self.compiler_capture_layout(executable_id, function_scope, &layout, tree_layout)?;
         let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
         let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
-        let function_name = executable
-            .name()
-            .map(|_| constants.metadata_atom_index(CompiledMetadataAtomKey::FunctionName))
-            .transpose()?;
+        let (executable_kind, function_span, function_name, function_name_span) = match form {
+            OrdinaryFunctionForm::Function => (
+                CompilerExecutableKind::OrdinaryFunction,
+                function.span,
+                executable
+                    .name()
+                    .map(|_| constants.metadata_atom_index(CompiledMetadataAtomKey::FunctionName))
+                    .transpose()?,
+                executable.name_span().map(source_byte_span),
+            ),
+            OrdinaryFunctionForm::ObjectMethod {
+                property_span: source_span,
+            } => (
+                CompilerExecutableKind::OrdinaryMethod,
+                source_span,
+                None,
+                None,
+            ),
+        };
         let variable_definitions = self.compiled_variable_definitions(
             executable_id,
             function_scope,
@@ -1033,7 +1052,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         )?;
 
         Ok(ValidatedFunction {
-            executable_kind: CompilerExecutableKind::OrdinaryFunction,
+            executable_kind,
             strict: executable.is_strict(),
             argument_count: executable.parameter_count(),
             local_count: layout.local_count,
@@ -1054,8 +1073,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             function_name,
             variable_definitions,
             closure_definitions,
-            function_span: source_byte_span(function.span),
-            function_name_span: executable.name_span().map(source_byte_span),
+            function_span: source_byte_span(function_span),
+            function_name_span,
             flow,
         })
     }
@@ -2767,7 +2786,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                             Self::plan_logical_expression(logical, flow, &mut work)?;
                         }
                         Expression::ObjectExpression(object) => {
-                            Self::plan_object_expression(object, constants, &mut work)?;
+                            self.plan_object_expression(
+                                object,
+                                layout,
+                                tree_layout,
+                                constants,
+                                &mut work,
+                            )?;
                         }
                         Expression::StaticMemberExpression(member) => {
                             Self::plan_static_member_read(member, constants, &mut work)?;
@@ -2859,7 +2884,15 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         )?;
         let is_dynamic_function_authority =
             self.unit.goal() == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function);
-        if !executable.is_strict() && !is_dynamic_function_authority {
+        let is_object_method = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(layout.executable.index())
+            .copied()
+            .and_then(|node_id| object_method_or_accessor_span(self.unit, node_id))
+            .is_some();
+        if !executable.is_strict() && !is_dynamic_function_authority && !is_object_method {
             return unsupported(UnsupportedLeafFeature::UnsupportedExpression, span);
         }
         Ok(PlannedInstruction::new(
@@ -2987,7 +3020,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     }
 
     fn plan_object_expression<'expression>(
+        &self,
         object: &'expression ObjectExpression<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -2998,26 +3034,54 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     property.span(),
                 );
             };
-            if property.computed
-                || property.shorthand
-                || property.method
-                || property.kind != PropertyKind::Init
-            {
+            if property.computed || property.shorthand {
+                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, property.span);
+            }
+            let OxcPropertyKey::StaticIdentifier(identifier) = &property.key else {
                 return unsupported(
                     if property.method || property.kind != PropertyKind::Init {
                         UnsupportedLeafFeature::ObjectMethodOrAccessor
                     } else {
                         UnsupportedLeafFeature::UnsupportedExpression
                     },
-                    property.span,
-                );
-            }
-            let OxcPropertyKey::StaticIdentifier(identifier) = &property.key else {
-                return unsupported(
-                    UnsupportedLeafFeature::UnsupportedExpression,
                     property.key.span(),
                 );
             };
+            let method_kind = match (property.method, property.kind) {
+                (true, PropertyKind::Init) => Some(ObjectMethodKind::Method),
+                (false, PropertyKind::Get) => Some(ObjectMethodKind::Getter),
+                (false, PropertyKind::Set) => Some(ObjectMethodKind::Setter),
+                (false, PropertyKind::Init) => None,
+                _ => {
+                    return unsupported(
+                        UnsupportedLeafFeature::ObjectMethodOrAccessor,
+                        property.span,
+                    );
+                }
+            };
+            if let Some(kind) = method_kind {
+                let Expression::FunctionExpression(function) = &property.value else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "object method or accessor value is a function expression",
+                        span: Some(property.value.span()),
+                    });
+                };
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::DefineMethod,
+                    Operands::AtomU8 {
+                        atom: constants.property_atom_index(identifier.span)?,
+                        value: kind.define_method_flags(),
+                    },
+                    property.span,
+                )));
+                work.push(ExpressionWork::Emit(self.plan_function_closure(
+                    function,
+                    layout.executable,
+                    tree_layout,
+                    constants,
+                )?));
+                continue;
+            }
             if identifier.name == "__proto__" {
                 return unsupported(
                     UnsupportedLeafFeature::UnsupportedExpression,
@@ -4256,7 +4320,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     fn selected_ordinary_function(
         &self,
         executable_id: ExecutableId,
-    ) -> Result<(&Executable, &Function<'arena>), LeafCompilationError> {
+    ) -> Result<(&Executable, &Function<'arena>, OrdinaryFunctionForm), LeafCompilationError> {
         let executable = self.planned.plan.executable(executable_id).ok_or(
             LeafCompilationError::InvalidExecutable {
                 executable: executable_id,
@@ -4304,12 +4368,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 function.span,
             );
         }
-        if is_object_method_or_accessor(self.unit, node_id) {
-            return unsupported(
-                UnsupportedLeafFeature::ObjectMethodOrAccessor,
-                function.span,
-            );
-        }
+        let form = object_method_or_accessor_span(self.unit, node_id)
+            .map_or(OrdinaryFunctionForm::Function, |property_span| {
+                OrdinaryFunctionForm::ObjectMethod { property_span }
+            });
         if !matches!(
             executable.kind(),
             ExecutableKind::Function {
@@ -4340,7 +4402,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 reference.span(),
             );
         }
-        Ok((executable, function))
+        Ok((executable, function, form))
     }
 
     fn selected_dynamic_function_script(
@@ -4777,15 +4839,42 @@ fn resolve_function_template_id(
         })
 }
 
-fn is_object_method_or_accessor(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> bool {
+fn object_method_or_accessor_span(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> Option<Span> {
     let AstKind::ObjectProperty(property) = unit.semantic().nodes().parent_kind(node_id) else {
-        return false;
+        return None;
     };
     let Expression::FunctionExpression(value) = &property.value else {
-        return false;
+        return None;
     };
-    value.node_id.get() == node_id
-        && (property.method || !matches!(property.kind, PropertyKind::Init))
+    (value.node_id.get() == node_id
+        && (property.method || !matches!(property.kind, PropertyKind::Init)))
+    .then_some(property.span)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OrdinaryFunctionForm {
+    Function,
+    ObjectMethod { property_span: Span },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObjectMethodKind {
+    Method,
+    Getter,
+    Setter,
+}
+
+impl ObjectMethodKind {
+    const ENUMERABLE: u8 = 1 << 2;
+
+    const fn define_method_flags(self) -> u8 {
+        Self::ENUMERABLE
+            | match self {
+                Self::Method => 0,
+                Self::Getter => 1,
+                Self::Setter => 2,
+            }
+    }
 }
 
 fn same_operator_left_chain<'expression, 'arena>(
@@ -4923,6 +5012,13 @@ const fn executable_header(
     match kind {
         CompilerExecutableKind::OrdinaryFunction => {
             UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
+                strict,
+                argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::OrdinaryMethod => {
+            UnverifiedFunctionHeader::ordinary_method_with_variable_references(
                 strict,
                 argument_count,
                 variable_reference_count,
@@ -7100,7 +7196,8 @@ pub enum UnsupportedLeafFeature {
     InferredFunctionName,
     /// The Oxc function form is neither a declaration nor function expression.
     UnsupportedFunctionForm,
-    /// Object methods and accessors need distinct prototype/home-object flags.
+    /// An object method or accessor is outside the admitted static,
+    /// synchronous, identifier-named profile.
     ObjectMethodOrAccessor,
     /// The selected function contains another executable body.
     NestedExecutable,

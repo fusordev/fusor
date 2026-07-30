@@ -123,6 +123,33 @@ fn retained_source_header_sets_the_quickjs_debug_flag() {
 }
 
 #[test]
+fn ordinary_method_header_is_nonconstructable_without_claiming_a_home_object() {
+    let raw = UnverifiedFunctionHeader::ordinary_method_with_variable_references(false, 1, 2);
+
+    assert_eq!(raw.serialized_flags(), 0x0742);
+    assert_eq!(raw.js_mode(), 0);
+    assert_eq!(raw.defined_argument_count(), 1);
+    assert_eq!(raw.variable_reference_count(), 2);
+
+    let verified = verify(
+        ordinary_body(),
+        0,
+        FunctionIndexDomains::new(0, 0, 1, 2, 0),
+        raw,
+    )
+    .expect("ordinary object method header must verify");
+    let flags = verified.function_header().flags();
+
+    assert!(!flags.has_prototype());
+    assert!(flags.has_simple_parameter_list());
+    assert!(!flags.needs_home_object());
+    assert!(flags.new_target_allowed());
+    assert!(flags.super_allowed());
+    assert!(flags.arguments_allowed());
+    assert!(flags.has_debug());
+}
+
+#[test]
 fn dynamic_function_script_header_is_debug_only_and_never_eval() {
     let raw = UnverifiedFunctionHeader::dynamic_function_script(3);
 

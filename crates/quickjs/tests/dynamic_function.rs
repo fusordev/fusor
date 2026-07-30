@@ -124,6 +124,51 @@ fn facade_global_function_resumes_object_source_conversion_with_real_oxc() {
 }
 
 #[test]
+fn facade_executes_static_object_methods_getters_and_setters() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "let object={\
+                 stored:0,\
+                 set value(next){\"use strict\";this.stored=next;return 99;},\
+                 get value(){\"use strict\";return this.stored;},\
+                 read(){\"use strict\";return this.value;}\
+             };\
+             let assigned=object.value=40;\
+             if(assigned!==40){return 0;}\
+             if(object.read()!==40){return 0;}\
+             return 82;",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("Oxc object method and accessor frontend")
+    .into_value()
+    .into_function()
+    .expect("outer function");
+
+    let value = call_with_dynamic_function_support(
+        &mut context,
+        &run,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("static object method and accessor execution");
+
+    assert!(
+        value
+            .as_number()
+            .expect("live value")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(82)),
+        "the setter return is discarded while the assignment RHS and getter receiver are preserved"
+    );
+}
+
+#[test]
 fn facade_wrapper_escape_can_invoke_global_function_during_script_execution() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -457,6 +502,34 @@ fn direct_eval_remains_fail_closed_without_installing_code() {
             DynamicFunctionLimits::default(),
         )
         .expect_err("direct eval remains unsupported");
+        assert!(matches!(
+            &error,
+            DynamicFunctionConstructionError::Compiler {
+                source: DynamicFunctionCompilerError::Planning(_),
+                ..
+            }
+        ));
+        assert!(error.prepared_source().is_some());
+    }
+    assert_eq!(runtime.usage(), before);
+}
+
+#[test]
+fn direct_eval_inside_an_object_method_rejects_the_whole_dynamic_function() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let before = runtime.usage();
+    {
+        let mut context = runtime.context(&realm).expect("context");
+        let error = construct_dynamic_function(
+            &mut context,
+            source(
+                &[],
+                "let object={method(){return eval('1');}};return object;",
+            ),
+            DynamicFunctionLimits::default(),
+        )
+        .expect_err("direct eval in a method remains unsupported");
         assert!(matches!(
             &error,
             DynamicFunctionConstructionError::Compiler {
