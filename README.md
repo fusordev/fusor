@@ -43,8 +43,12 @@ evaluation-local TDZ cells and can survive only through escaping closures.
 The intrinsic descriptors, call/new realm selection, wrapper escape,
 `newTarget.prototype` adjustment, SyntaxError boundary, and primitive
 undefined/null/Boolean/Number/String source coercions are implemented.
-Object/function `ToPrimitive`, configurable accessor replacement, persistent
-global lexical collisions, and the rest of `Function.prototype` remain
+Realm-owned `Object.prototype.toString`, `Object.prototype.valueOf`, and
+`Function.prototype.toString` cover the currently representable object and
+function values with exact intrinsic descriptors and retained function source.
+Resumable object/function `ToPrimitive`, primitive boxing, configurable
+accessor replacement, persistent global lexical collisions, and
+`Function.prototype.call`/`apply`/`bind`/`Symbol.hasInstance` remain
 fail-closed. Per-session compilation-count and generated-source limits bound
 nested construction. No dynamic-Function path uses eval or captures a caller
 lexical frame.

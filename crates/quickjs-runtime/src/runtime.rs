@@ -379,6 +379,9 @@ pub(crate) struct BytecodeFunction {
 pub(crate) enum NativeFunctionKind {
     FunctionPrototype,
     OrdinaryFunctionConstructor,
+    ObjectPrototypeToString,
+    ObjectPrototypeValueOf,
+    FunctionPrototypeToString,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -697,12 +700,12 @@ impl Runtime {
         check_limit(
             RuntimeResource::HeapFunctions,
             self.limits.max_heap_functions,
-            usize_to_u64(self.functions.len()).saturating_add(2),
+            usize_to_u64(self.functions.len()).saturating_add(5),
         )?;
         check_limit(
             RuntimeResource::ObjectProperties,
             self.limits.max_object_properties,
-            self.object_properties.saturating_add(7),
+            self.object_properties.saturating_add(16),
         )?;
         self.realms
             .try_reserve(1)
@@ -717,10 +720,10 @@ impl Runtime {
                 additional: 2,
             })?;
         self.functions
-            .try_reserve(2)
+            .try_reserve(5)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::HeapFunctions,
-                additional: 2,
+                additional: 5,
             })?;
 
         let function_key =
@@ -733,8 +736,14 @@ impl Runtime {
             PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Length));
         let name_key =
             PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Name));
+        let to_string_key =
+            PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::ToString));
+        let value_of_key =
+            PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::ValueOf));
         let function_name = predefined_string(&self.atoms, PredefinedAtom::Function);
         let empty_name = predefined_string(&self.atoms, PredefinedAtom::EmptyString);
+        let to_string_name = predefined_string(&self.atoms, PredefinedAtom::ToString);
+        let value_of_name = predefined_string(&self.atoms, PredefinedAtom::ValueOf);
 
         let mut global_record = ObjectRecord::empty(None);
         global_record
@@ -743,11 +752,18 @@ impl Runtime {
                 resource: RuntimeResource::ObjectProperties,
                 additional: 1,
             })?;
-        let mut function_prototype_record = ObjectRecord::empty(None);
-        function_prototype_record.try_reserve_data(3).map_err(|_| {
+        let mut object_prototype_record = ObjectRecord::empty(None);
+        object_prototype_record.try_reserve_data(2).map_err(|_| {
             RuntimeError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
-                additional: 3,
+                additional: 2,
+            }
+        })?;
+        let mut function_prototype_record = ObjectRecord::empty(None);
+        function_prototype_record.try_reserve_data(4).map_err(|_| {
+            RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 4,
             }
         })?;
         let mut function_constructor_record = ObjectRecord::empty(None);
@@ -757,11 +773,32 @@ impl Runtime {
                 resource: RuntimeResource::ObjectProperties,
                 additional: 3,
             })?;
+        let mut object_to_string_record = ObjectRecord::empty(None);
+        object_to_string_record.try_reserve_data(2).map_err(|_| {
+            RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 2,
+            }
+        })?;
+        let mut object_value_of_record = ObjectRecord::empty(None);
+        object_value_of_record
+            .try_reserve_data(2)
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 2,
+            })?;
+        let mut function_to_string_record = ObjectRecord::empty(None);
+        function_to_string_record.try_reserve_data(2).map_err(|_| {
+            RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 2,
+            }
+        })?;
 
         let object_prototype = self
             .objects
             .try_insert(HeapObject {
-                record: ObjectRecord::empty(None),
+                record: object_prototype_record,
                 public_roots: 0,
             })
             .map_err(|_| RuntimeError::AllocationFailed {
@@ -840,8 +877,61 @@ impl Runtime {
                 additional: 1,
             });
         };
+        object_to_string_record
+            .replace_prototype(Some(HeapReference::Function(function_prototype)));
+        let object_to_string = self
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: id,
+                    kind: NativeFunctionKind::ObjectPrototypeToString,
+                }),
+                object: object_to_string_record,
+                public_roots: 0,
+            })
+            .expect("the realm transaction reserved all intrinsic function slots");
+        object_value_of_record.replace_prototype(Some(HeapReference::Function(function_prototype)));
+        let object_value_of = self
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: id,
+                    kind: NativeFunctionKind::ObjectPrototypeValueOf,
+                }),
+                object: object_value_of_record,
+                public_roots: 0,
+            })
+            .expect("the realm transaction reserved all intrinsic function slots");
+        function_to_string_record
+            .replace_prototype(Some(HeapReference::Function(function_prototype)));
+        let function_to_string = self
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: id,
+                    kind: NativeFunctionKind::FunctionPrototypeToString,
+                }),
+                object: function_to_string_record,
+                public_roots: 0,
+            })
+            .expect("the realm transaction reserved all intrinsic function slots");
 
         let property_result = (|| {
+            let object_prototype_node = self
+                .objects
+                .get_mut(object_prototype)
+                .expect("new Object.prototype remains live");
+            object_prototype_node.record.append_data(
+                to_string_key.clone(),
+                PropertyLayout::data(true, false, true),
+                StoredValue::Function(object_to_string),
+            )?;
+            object_prototype_node.record.append_data(
+                value_of_key,
+                PropertyLayout::data(true, false, true),
+                StoredValue::Function(object_value_of),
+            )?;
+
             let function_prototype_node = self
                 .functions
                 .get_mut(function_prototype)
@@ -861,6 +951,11 @@ impl Runtime {
                 PropertyLayout::data(false, false, true),
                 StoredValue::String(empty_name),
             )?;
+            function_prototype_node.object.append_data(
+                to_string_key,
+                PropertyLayout::data(true, false, true),
+                StoredValue::Function(function_to_string),
+            )?;
 
             let function_constructor_node = self
                 .functions
@@ -872,15 +967,36 @@ impl Runtime {
                 StoredValue::Function(function_prototype),
             )?;
             function_constructor_node.object.append_data(
-                length_key,
+                length_key.clone(),
                 PropertyLayout::data(false, false, true),
                 StoredValue::Number(JsNumber::from_i32(1)),
             )?;
             function_constructor_node.object.append_data(
-                name_key,
+                name_key.clone(),
                 PropertyLayout::data(false, false, true),
                 StoredValue::String(function_name),
             )?;
+
+            for (function, name) in [
+                (object_to_string, to_string_name.clone()),
+                (object_value_of, value_of_name),
+                (function_to_string, to_string_name),
+            ] {
+                let method = self
+                    .functions
+                    .get_mut(function)
+                    .expect("new intrinsic method remains live");
+                method.object.append_data(
+                    length_key.clone(),
+                    PropertyLayout::data(false, false, true),
+                    StoredValue::Number(JsNumber::from_i32(0)),
+                )?;
+                method.object.append_data(
+                    name_key.clone(),
+                    PropertyLayout::data(false, false, true),
+                    StoredValue::String(name),
+                )?;
+            }
 
             self.objects
                 .get_mut(global_object)
@@ -893,6 +1009,12 @@ impl Runtime {
                 )
         })();
         if property_result.is_err() {
+            let removed = self.functions.remove(function_to_string);
+            debug_assert!(removed.is_some());
+            let removed = self.functions.remove(object_value_of);
+            debug_assert!(removed.is_some());
+            let removed = self.functions.remove(object_to_string);
+            debug_assert!(removed.is_some());
             let removed = self.functions.remove(function_constructor);
             debug_assert!(removed.is_some());
             let removed = self.functions.remove(function_prototype);
@@ -916,7 +1038,7 @@ impl Runtime {
             function_prototype,
             function_constructor,
         };
-        self.object_properties += 7;
+        self.object_properties += 16;
         Ok(Realm(Arc::new(RealmHandle {
             owner: Arc::downgrade(&self.mailbox),
             id,
@@ -1299,6 +1421,10 @@ impl Runtime {
 
     pub(crate) fn predefined_property_key(&self, atom: PredefinedAtom) -> PropertyKey {
         PropertyKey::from_validated_atom(self.atoms.predefined(atom))
+    }
+
+    pub(crate) fn predefined_symbol_property_key(&self, atom: PredefinedAtom) -> PropertyKey {
+        PropertyKey::from_validated_symbol(self.atoms.predefined(atom))
     }
 
     pub(crate) fn realm_function_prototype(
@@ -3005,8 +3131,8 @@ mod tests {
 
         assert_eq!(runtime.usage().realms(), 1);
         assert_eq!(runtime.usage().heap_objects(), 2);
-        assert_eq!(runtime.usage().heap_functions(), 2);
-        assert_eq!(runtime.usage().object_properties(), 7);
+        assert_eq!(runtime.usage().heap_functions(), 5);
+        assert_eq!(runtime.usage().object_properties(), 16);
         assert_eq!(runtime.usage().installed_code(), 0);
 
         let prototype = runtime
@@ -3060,6 +3186,57 @@ mod tests {
             PropertyLayout::data(false, false, true),
             |value| matches!(value, StoredValue::String(name) if name == JsString::empty()),
         );
+        let function_to_string = function_property(
+            &prototype.object,
+            &runtime,
+            PredefinedAtom::ToString,
+            PropertyLayout::data(true, false, true),
+        );
+        assert_native_method(
+            &runtime,
+            function_to_string,
+            function_prototype,
+            realm_id,
+            NativeFunctionKind::FunctionPrototypeToString,
+            PredefinedAtom::ToString,
+            0,
+        );
+
+        let object_prototype = &runtime
+            .objects
+            .get(state.object_prototype)
+            .expect("Object.prototype")
+            .record;
+        let object_to_string = function_property(
+            object_prototype,
+            &runtime,
+            PredefinedAtom::ToString,
+            PropertyLayout::data(true, false, true),
+        );
+        assert_native_method(
+            &runtime,
+            object_to_string,
+            function_prototype,
+            realm_id,
+            NativeFunctionKind::ObjectPrototypeToString,
+            PredefinedAtom::ToString,
+            0,
+        );
+        let object_value_of = function_property(
+            object_prototype,
+            &runtime,
+            PredefinedAtom::ValueOf,
+            PropertyLayout::data(true, false, true),
+        );
+        assert_native_method(
+            &runtime,
+            object_value_of,
+            function_prototype,
+            realm_id,
+            NativeFunctionKind::ObjectPrototypeValueOf,
+            PredefinedAtom::ValueOf,
+            0,
+        );
 
         assert_data_property(
             &constructor.object,
@@ -3110,16 +3287,16 @@ mod tests {
                 2,
             ),
             (
-                RuntimeLimits::default().with_max_heap_functions(1),
+                RuntimeLimits::default().with_max_heap_functions(4),
                 RuntimeResource::HeapFunctions,
-                1,
-                2,
+                4,
+                5,
             ),
             (
-                RuntimeLimits::default().with_max_object_properties(6),
+                RuntimeLimits::default().with_max_object_properties(15),
                 RuntimeResource::ObjectProperties,
-                6,
-                7,
+                15,
+                16,
             ),
         ] {
             let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -3151,7 +3328,7 @@ mod tests {
         let report = runtime.collect_cycles().expect("collection");
 
         assert_eq!(report.functions(), 0);
-        assert_eq!(runtime.usage().heap_functions(), 2);
+        assert_eq!(runtime.usage().heap_functions(), 5);
         assert_eq!(runtime.usage().installed_code(), 0);
         assert_eq!(
             runtime
@@ -3204,5 +3381,62 @@ mod tests {
         let (layout, value) = record.own_data_property(&key).expect("data property");
         assert_eq!(layout, expected_layout);
         assert!(expected_value(value));
+    }
+
+    fn function_property(
+        record: &crate::object::ObjectRecord,
+        runtime: &Runtime,
+        atom: PredefinedAtom,
+        expected_layout: PropertyLayout,
+    ) -> crate::ids::FunctionId {
+        let key = PropertyKey::from_validated_atom(runtime.atoms.predefined(atom));
+        let (layout, value) = record.own_data_property(&key).expect("function property");
+        assert_eq!(layout, expected_layout);
+        let StoredValue::Function(function) = value else {
+            panic!("property is not a function");
+        };
+        function
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_native_method(
+        runtime: &Runtime,
+        function: crate::ids::FunctionId,
+        function_prototype: crate::ids::FunctionId,
+        realm: crate::ids::RealmId,
+        kind: NativeFunctionKind,
+        name: PredefinedAtom,
+        length: i32,
+    ) {
+        let method = runtime.functions.get(function).expect("native method");
+        assert_eq!(
+            method.object.prototype(),
+            Some(HeapReference::Function(function_prototype))
+        );
+        assert!(matches!(
+            method.implementation,
+            FunctionImplementation::Native(ref native)
+                if native.realm == realm && native.kind == kind
+        ));
+        assert_data_property(
+            &method.object,
+            runtime,
+            PredefinedAtom::Length,
+            PropertyLayout::data(false, false, true),
+            |value| matches!(value, StoredValue::Number(number) if number.strict_equals(JsNumber::from_i32(length))),
+        );
+        let expected_name = runtime
+            .atoms
+            .predefined(name)
+            .description()
+            .expect("predefined method name")
+            .clone();
+        assert_data_property(
+            &method.object,
+            runtime,
+            PredefinedAtom::Name,
+            PropertyLayout::data(false, false, true),
+            |value| matches!(value, StoredValue::String(actual) if actual == expected_name),
+        );
     }
 }

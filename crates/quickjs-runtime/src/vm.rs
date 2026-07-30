@@ -835,25 +835,26 @@ fn dispatch_native_call(
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     dynamic_budget: &mut DynamicCompilationBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    if inputs.new_target.is_some() && native.kind != NativeFunctionKind::OrdinaryFunctionConstructor
+    {
+        let Some(origin) = origin else {
+            return Err(NativeFailure::Execution(
+                EngineFault::RuntimeInvariant {
+                    message: "host construction of a nonconstructor native function is not implemented",
+                }
+                .into(),
+            ));
+        };
+        return Err(NativeFailure::Abrupt(PendingException {
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("not a constructor")?,
+            },
+            origin,
+        }));
+    }
     match native.kind {
         NativeFunctionKind::FunctionPrototype => {
-            if inputs.new_target.is_some() {
-                let Some(origin) = origin else {
-                    return Err(NativeFailure::Execution(
-                        EngineFault::RuntimeInvariant {
-                            message: "host construction of Function.prototype is not implemented",
-                        }
-                        .into(),
-                    ));
-                };
-                return Err(NativeFailure::Abrupt(PendingException {
-                    payload: PendingExceptionPayload::EngineError {
-                        kind: ExceptionKind::TypeError,
-                        message: JsString::from_utf8("not a constructor")?,
-                    },
-                    origin,
-                }));
-            }
             Ok(NativeDispatch::Immediate(StoredValue::Undefined))
         }
         NativeFunctionKind::OrdinaryFunctionConstructor => {
@@ -975,6 +976,144 @@ fn dispatch_native_call(
             });
             Ok(NativeDispatch::Frame(frame))
         }
+        NativeFunctionKind::ObjectPrototypeToString => {
+            let value = object_prototype_to_string(runtime, &inputs.receiver)?;
+            Ok(NativeDispatch::Immediate(StoredValue::String(value)))
+        }
+        NativeFunctionKind::ObjectPrototypeValueOf => match inputs.receiver {
+            value @ (StoredValue::Function(_) | StoredValue::Object(_)) => {
+                Ok(NativeDispatch::Immediate(value))
+            }
+            StoredValue::Undefined | StoredValue::Null => {
+                let Some(origin) = origin else {
+                    return Err(NativeFailure::Execution(
+                        EngineFault::RuntimeInvariant {
+                            message: "host Object.prototype.valueOf error has no source origin",
+                        }
+                        .into(),
+                    ));
+                };
+                Err(NativeFailure::Abrupt(PendingException {
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("cannot convert to object")?,
+                    },
+                    origin,
+                }))
+            }
+            StoredValue::Boolean(_) | StoredValue::Number(_) | StoredValue::String(_) => {
+                Err(NativeFailure::Execution(
+                    EngineFault::RuntimeInvariant {
+                        message: "Object.prototype.valueOf primitive boxing is not implemented",
+                    }
+                    .into(),
+                ))
+            }
+        },
+        NativeFunctionKind::FunctionPrototypeToString => {
+            let StoredValue::Function(function) = inputs.receiver else {
+                let Some(origin) = origin else {
+                    return Err(NativeFailure::Execution(
+                        EngineFault::RuntimeInvariant {
+                            message: "host Function.prototype.toString error has no source origin",
+                        }
+                        .into(),
+                    ));
+                };
+                return Err(NativeFailure::Abrupt(PendingException {
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("not a function")?,
+                    },
+                    origin,
+                }));
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                function_to_string(runtime, function)?,
+            )))
+        }
+    }
+}
+
+fn object_prototype_to_string(
+    runtime: &Runtime,
+    receiver: &StoredValue,
+) -> Result<JsString, NativeFailure> {
+    let (reference, default_tag) = match receiver {
+        StoredValue::Undefined => return Ok(JsString::from_utf8("[object Undefined]")?),
+        StoredValue::Null => return Ok(JsString::from_utf8("[object Null]")?),
+        StoredValue::Function(function) => (HeapReference::Function(*function), "Function"),
+        StoredValue::Object(object) => (HeapReference::Object(*object), "Object"),
+        StoredValue::Boolean(_) | StoredValue::Number(_) | StoredValue::String(_) => {
+            return Err(NativeFailure::Execution(
+                EngineFault::RuntimeInvariant {
+                    message: "Object.prototype.toString primitive boxing is not implemented",
+                }
+                .into(),
+            ));
+        }
+    };
+    let to_string_tag = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag);
+    let tag = match read_heap_property(runtime, reference, &to_string_tag)? {
+        StoredValue::String(tag) => tag,
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::Function(_)
+        | StoredValue::Object(_) => JsString::from_utf8(default_tag)?,
+    };
+    Ok(JsString::from_utf8("[object ")?
+        .concat(&tag)?
+        .concat(&JsString::from_utf8("]")?)?)
+}
+
+fn function_to_string(runtime: &Runtime, function: FunctionId) -> Result<JsString, NativeFailure> {
+    let node = runtime
+        .functions
+        .get(function)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "function",
+            index: function.index(),
+            generation: function.generation(),
+        })?;
+    if let FunctionImplementation::Bytecode(bytecode) = &node.implementation {
+        let installed = code(runtime, bytecode.code)?;
+        let function = installed.authority.function(bytecode.template).ok_or(
+            EngineFault::InvalidClosureEnvironment {
+                function: bytecode.template,
+            },
+        )?;
+        return Ok(JsString::from_utf8(
+            function.metadata().source().function_source(),
+        )?);
+    }
+
+    let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
+    let name = native_function_name_to_string(read_heap_property(
+        runtime,
+        HeapReference::Function(function),
+        &name_key,
+    )?)?;
+    Ok(JsString::from_utf8("function ")?
+        .concat(&name)?
+        .concat(&JsString::from_utf8("() {\n    [native code]\n}")?)?)
+}
+
+fn native_function_name_to_string(value: StoredValue) -> Result<JsString, NativeFailure> {
+    match value {
+        StoredValue::Undefined => Ok(JsString::empty()),
+        StoredValue::Null => Ok(JsString::from_utf8("null")?),
+        StoredValue::Boolean(false) => Ok(JsString::from_utf8("false")?),
+        StoredValue::Boolean(true) => Ok(JsString::from_utf8("true")?),
+        StoredValue::Number(value) => Ok(JsString::from_utf8(&value.to_javascript_string())?),
+        StoredValue::String(value) => Ok(value),
+        StoredValue::Function(_) | StoredValue::Object(_) => Err(NativeFailure::Execution(
+            EngineFault::RuntimeInvariant {
+                message: "native function name ToPrimitive is not implemented",
+            }
+            .into(),
+        )),
     }
 }
 

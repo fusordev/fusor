@@ -357,10 +357,14 @@ realm selection, primitive undefined/null/Boolean/Number/String argument
 coercions, parser/profile/semantic `SyntaxError`, generated-function
 `name`/`length`/`prototype`, legacy bytecode construction, wrapper escape, and
 the pinned post-completion `newTarget.prototype` adjustment are implemented.
-Object/function `ToPrimitive`, configurable accessor replacement, persistent
-global lexical collision checks, and the remaining `Function.prototype`
-methods stay fail closed. The path never emits `eval`/`apply_eval` and rejects
-direct eval anywhere in generated code. Direct and indirect eval remain wholly
+The realm also owns nonconstructable `Object.prototype.toString`,
+`Object.prototype.valueOf`, and `Function.prototype.toString` natives with
+exact data-property flags; bytecode function stringification returns retained
+verified source. Resumable object/function `ToPrimitive`, primitive boxing,
+configurable accessor replacement, persistent global lexical collision
+checks, and `Function.prototype.call`/`apply`/`bind`/`Symbol.hasInstance` stay
+fail closed. The path never emits `eval`/`apply_eval` and rejects direct eval
+anywhere in generated code. Direct and indirect eval remain wholly
 unimplemented. GeneratorFunction, AsyncFunction, and AsyncGeneratorFunction
 also remain fail closed.
 
@@ -561,10 +565,14 @@ will not be admitted until zombie-state and resurrection rules are complete.
   fallibly before mutating either logical sequence; transition interning is not
   implemented yet. Deletion, flag changes, accessors, and prototype mutation
   remain fail closed.
-- Object literals inherit their realm's internal `Object.prototype`.
-  Ordinary objects and function objects share own data-property storage.
-  `DefineField` creates configurable, writable, enumerable properties;
-  duplicate literal keys replace one slot without double charging.
+- Object literals inherit their realm's internal `Object.prototype`, which
+  currently owns exact `toString` and `valueOf` native data properties.
+  `Function.prototype` likewise owns exact `toString`; all three method
+  functions belong to the realm, inherit `Function.prototype`, and participate
+  in the iterative heap trace. Ordinary objects and function objects share own
+  data-property storage. `DefineField` creates configurable, writable,
+  enumerable properties; duplicate literal keys replace one slot without
+  double charging.
 - Ordinary data/accessor layouts have an opaque value-independent
   representation; accessor layouts cannot carry a writable flag. Future
   property slots are typed as data, accessor, binding cell, or lazy value.

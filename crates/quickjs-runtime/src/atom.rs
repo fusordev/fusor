@@ -202,6 +202,14 @@ impl PropertyKey {
         Self::from_atom(atom)
     }
 
+    pub(crate) fn from_validated_symbol(atom: Atom) -> Self {
+        debug_assert!(matches!(
+            atom.kind(),
+            AtomKind::GlobalSymbol | AtomKind::Symbol
+        ));
+        Self::from_atom(atom)
+    }
+
     /// Returns the array index when this is an integer property key.
     #[must_use]
     pub const fn as_index(&self) -> Option<ArrayIndex> {

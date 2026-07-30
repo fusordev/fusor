@@ -573,3 +573,159 @@ fn foreign_function_constructor_uses_its_home_realm_globals() {
 
     assert_number(&value, 11);
 }
+
+#[test]
+fn object_prototype_conversion_methods_cover_current_object_values() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let display = dynamic_function(
+        &mut runtime.context(&realm).expect("context"),
+        &[],
+        "let object={};return object.toString();",
+    );
+    let identity = dynamic_function(
+        &mut runtime.context(&realm).expect("context"),
+        &[],
+        "let object={};return object.valueOf()===object;",
+    );
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = context
+        .call(&display, &[], ExecutionLimits::default())
+        .expect("Object.prototype.toString");
+    assert_eq!(
+        value
+            .as_string()
+            .expect("live value")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "[object Object]"
+    );
+    let value = context
+        .call(&identity, &[], ExecutionLimits::default())
+        .expect("Object.prototype.valueOf");
+    assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+}
+
+#[test]
+fn object_prototype_conversion_methods_handle_unbound_nullish_receivers_exactly() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let display = dynamic_function(
+        &mut runtime.context(&realm).expect("context"),
+        &[],
+        "let stringify={}.toString;return stringify();",
+    );
+    let value_of = dynamic_function(
+        &mut runtime.context(&realm).expect("context"),
+        &[],
+        "let valueOf={}.valueOf;return valueOf();",
+    );
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = context
+        .call(&display, &[], ExecutionLimits::default())
+        .expect("undefined Object.prototype.toString receiver");
+    assert_eq!(
+        value
+            .as_string()
+            .expect("live value")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "[object Undefined]"
+    );
+
+    let error = context
+        .call(&value_of, &[], ExecutionLimits::default())
+        .expect_err("undefined Object.prototype.valueOf receiver");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("undefined valueOf receiver must throw");
+    };
+    assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
+    assert_eq!(
+        exception
+            .message()
+            .expect("message")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "cannot convert to object"
+    );
+}
+
+#[test]
+fn function_prototype_to_string_returns_verified_and_native_source() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let verified = dynamic_function(
+        &mut runtime.context(&realm).expect("context"),
+        &[],
+        "return Function('value','return value;').toString();",
+    );
+    let native = dynamic_function(
+        &mut runtime.context(&realm).expect("context"),
+        &[],
+        "return Function.toString();",
+    );
+    let mut context = runtime.context(&realm).expect("context");
+
+    let verified_source = context
+        .call_with_dynamic_function_compiler(
+            &verified,
+            &[],
+            ExecutionLimits::default(),
+            &compiler(),
+        )
+        .expect("verified source");
+    assert_eq!(
+        verified_source
+            .as_string()
+            .expect("live source")
+            .expect("source string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "function anonymous(value\n) {\nreturn value;\n}"
+    );
+
+    let native_source = context
+        .call(&native, &[], ExecutionLimits::default())
+        .expect("native source");
+    assert_eq!(
+        native_source
+            .as_string()
+            .expect("live source")
+            .expect("source string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "function Function() {\n    [native code]\n}"
+    );
+}
+
+#[test]
+fn function_prototype_to_string_rejects_an_unbound_receiver() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let stringify=Function.prototype.toString;return stringify();",
+    );
+
+    let error = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect_err("undefined receiver is not callable");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("wrong receiver must throw");
+    };
+    assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
+    assert_eq!(
+        exception
+            .message()
+            .expect("message")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "not a function"
+    );
+}

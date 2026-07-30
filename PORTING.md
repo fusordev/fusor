@@ -329,10 +329,16 @@ A milestone is complete only when all of its checked items pass in CI.
           per-session compilation/source limits. Primitive
           undefined/null/Boolean/Number/String source coercions are ordered;
           syntax-profile failures are catchable `SyntaxError`s.
+    - [x] Add realm-owned, nonconstructable `Object.prototype.toString`,
+          `Object.prototype.valueOf`, and `Function.prototype.toString`
+          natives with exact method/name/length descriptors, GC reachability,
+          current object/function tags and identity, retained verified
+          bytecode source, and the pinned native-source form. Primitive boxing
+          and observable object-valued native names remain fail closed.
     - [ ] Add configurable-accessor replacement and persistent global lexical
           collision checks when those object/environment forms exist. Complete
           observable object/function `ToPrimitive` argument conversion and
-          the remaining `Function.prototype` methods.
+          `Function.prototype.call`/`apply`/`bind`/`Symbol.hasInstance`.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
       stack traces, iterators, and generators.
   - [x] First escaping exception path: local/captured TDZ access returns a
