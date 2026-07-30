@@ -35,9 +35,10 @@ use quickjs_bytecode::{
 
 use crate::{
     ArrayIndex, Context, DynamicFunctionCompileFailure, EngineFault, ExceptionKind, ExecutionError,
-    Function, HandleError, HandleKind, JsException, JsNumber, JsStackFrame, JsString, JsValue,
-    OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey,
-    PropertyLayout, Runtime, RuntimeResource,
+    Function, HandleError, HandleKind, JsException, JsNumber, JsStackFrame, JsString,
+    JsStringError, JsValue, OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
+    PredefinedAtom, PropertyKey, PropertyLayout, Runtime, RuntimeResource,
+    conversion::{number_to_int32, number_to_uint32, string_to_number},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId},
     object::OwnProperty,
     runtime::{
@@ -169,6 +170,7 @@ struct DynamicFunctionReturn {
 enum NativeContinuation {
     FunctionSource(FunctionSourceContinuation),
     PropertyKey(PropertyKeyContinuation),
+    OperatorPrimitive(OperatorPrimitiveContinuation),
     FunctionCall,
 }
 
@@ -178,6 +180,7 @@ impl NativeContinuation {
             Self::FunctionSource(state) => usize_to_u64(state.arguments.len())
                 .saturating_add(u64::from(state.construction.is_some())),
             Self::PropertyKey(state) => state.retained_values(),
+            Self::OperatorPrimitive(state) => state.retained_values(),
             Self::FunctionCall => 0,
         }
     }
@@ -263,6 +266,76 @@ impl PropertyKeyTarget {
             Self::Read { .. } => 1,
             Self::Write { .. } | Self::DefineMethod { .. } => 2,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OperatorPrimitiveHint {
+    Default,
+    Number,
+}
+
+impl OperatorPrimitiveHint {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Number => "number",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OperatorPrimitiveStage {
+    Start,
+    ValueOf,
+    ToString,
+    AwaitExoticProperty,
+    AwaitValueOfProperty,
+    AwaitToStringProperty,
+    AwaitExotic,
+    AwaitValueOf,
+    AwaitToString,
+}
+
+enum OperatorPrimitiveTarget {
+    Unary {
+        opcode: FinalOpcode,
+    },
+    BinaryRight {
+        opcode: FinalOpcode,
+        right: StoredValue,
+        hint: OperatorPrimitiveHint,
+    },
+    BinaryFinish {
+        opcode: FinalOpcode,
+        left: StoredValue,
+    },
+    EqualityFinish {
+        opcode: FinalOpcode,
+        other: StoredValue,
+    },
+}
+
+impl OperatorPrimitiveTarget {
+    const fn retained_values(&self) -> u64 {
+        match self {
+            Self::Unary { .. } => 0,
+            Self::BinaryRight { .. } | Self::BinaryFinish { .. } | Self::EqualityFinish { .. } => 1,
+        }
+    }
+}
+
+struct OperatorPrimitiveContinuation {
+    receiver: StoredValue,
+    hint: OperatorPrimitiveHint,
+    stage: OperatorPrimitiveStage,
+    target: OperatorPrimitiveTarget,
+    origin: JsStackFrame,
+}
+
+impl OperatorPrimitiveContinuation {
+    const fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(self.target.retained_values())
     }
 }
 
@@ -840,6 +913,12 @@ fn execute_frame_loop(
                                 })?;
                             push_call_result(parent, value, return_to)?;
                         }
+                        Ok(NativeDispatch::Pair(_, _)) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "native function call returned an operator value pair",
+                            }
+                            .into());
+                        }
                         Ok(NativeDispatch::Frame(child)) => {
                             *active_frame_values =
                                 active_frame_values.saturating_add(child.reserved_values);
@@ -941,6 +1020,13 @@ fn execute_frame_loop(
                         })?;
                         push_call_result(parent, value, return_to)?;
                     }
+                    Ok(NativeDispatch::Pair(original, updated)) => {
+                        let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?;
+                        push_operator_pair(parent, original, updated, return_to)?;
+                    }
                     Ok(NativeDispatch::Frame(child)) => {
                         *active_frame_values =
                             active_frame_values.saturating_add(child.reserved_values);
@@ -1024,6 +1110,17 @@ fn execute_frame_loop(
                     };
                     match dispatch {
                         Ok(NativeDispatch::Immediate(completion)) => value = completion,
+                        Ok(NativeDispatch::Pair(original, updated)) => {
+                            let parent =
+                                frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                                    message: "operator continuation has no executing frame",
+                                })?;
+                            let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
+                                message: "operator continuation has no caller continuation",
+                            })?;
+                            push_operator_pair(parent, original, updated, return_to)?;
+                            continue;
+                        }
                         Ok(NativeDispatch::Frame(child)) => {
                             *active_frame_values =
                                 active_frame_values.saturating_add(child.reserved_values);
@@ -1069,6 +1166,7 @@ fn execute_frame_loop(
 )]
 enum NativeDispatch {
     Immediate(StoredValue),
+    Pair(StoredValue, StoredValue),
     Frame(Frame),
     Call(NativeCall),
 }
@@ -1084,8 +1182,8 @@ impl From<ExecutionError> for NativeFailure {
     }
 }
 
-impl From<crate::JsStringError> for NativeFailure {
-    fn from(error: crate::JsStringError) -> Self {
+impl From<JsStringError> for NativeFailure {
+    fn from(error: JsStringError) -> Self {
         Self::Execution(error.into())
     }
 }
@@ -1199,10 +1297,22 @@ fn resume_native_continuations(
             NativeContinuation::PropertyKey(state) => {
                 advance_property_key_conversion(runtime, state, Some(value), return_to)?
             }
+            NativeContinuation::OperatorPrimitive(state) => {
+                advance_operator_primitive_conversion(runtime, state, Some(value), return_to)?
+            }
             NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
         };
         match dispatch {
             NativeDispatch::Immediate(next) => value = next,
+            pair @ NativeDispatch::Pair(_, _) => {
+                if continuations.is_empty() {
+                    return Ok(pair);
+                }
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "operator value pair escaped into an outer native continuation",
+                }
+                .into());
+            }
             NativeDispatch::Frame(mut frame) => {
                 attach_native_continuations(&mut frame, continuations)?;
                 return Ok(NativeDispatch::Frame(frame));
@@ -1282,6 +1392,12 @@ fn resolve_native_dispatch(
                     compiler,
                     dynamic_budget,
                 )?,
+                NativeDispatch::Pair(_, _) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "native function produced an operator value pair",
+                    }
+                    .into());
+                }
                 NativeDispatch::Frame(mut frame) => {
                     attach_native_continuations(&mut frame, call.continuations)?;
                     NativeDispatch::Frame(frame)
@@ -1360,6 +1476,10 @@ fn execute_native_entry(
     };
     match dispatch {
         Ok(NativeDispatch::Immediate(value)) => Ok(value),
+        Ok(NativeDispatch::Pair(_, _)) => Err(EngineFault::RuntimeInvariant {
+            message: "host native entry returned an operator value pair",
+        }
+        .into()),
         Ok(NativeDispatch::Frame(frame)) => {
             prepared_frames.push(frame);
             execute_prepared_frames_with_dynamic_budget(
@@ -2087,6 +2207,646 @@ fn property_key_method_call(
     }))
 }
 
+fn begin_operator_primitive_conversion(
+    runtime: &mut Runtime,
+    value: StoredValue,
+    hint: OperatorPrimitiveHint,
+    target: OperatorPrimitiveTarget,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+        return advance_operator_primitive_conversion(
+            runtime,
+            OperatorPrimitiveContinuation {
+                receiver: value,
+                hint,
+                stage: OperatorPrimitiveStage::Start,
+                target,
+                origin,
+            },
+            None,
+            return_to,
+        );
+    }
+    finish_operator_primitive_target(runtime, value, target, return_to, &origin)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the explicit ToPrimitive state machine preserves every observable lookup, getter, and call boundary"
+)]
+fn advance_operator_primitive_conversion(
+    runtime: &mut Runtime,
+    mut state: OperatorPrimitiveContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(value) = completion {
+        match state.stage {
+            OperatorPrimitiveStage::AwaitExoticProperty
+            | OperatorPrimitiveStage::AwaitValueOfProperty
+            | OperatorPrimitiveStage::AwaitToStringProperty => {
+                let property = match state.stage {
+                    OperatorPrimitiveStage::AwaitExoticProperty => {
+                        PrimitiveConversionProperty::Exotic
+                    }
+                    OperatorPrimitiveStage::AwaitValueOfProperty => {
+                        PrimitiveConversionProperty::ValueOf
+                    }
+                    OperatorPrimitiveStage::AwaitToStringProperty => {
+                        PrimitiveConversionProperty::ToString
+                    }
+                    OperatorPrimitiveStage::Start
+                    | OperatorPrimitiveStage::ValueOf
+                    | OperatorPrimitiveStage::ToString
+                    | OperatorPrimitiveStage::AwaitExotic
+                    | OperatorPrimitiveStage::AwaitValueOf
+                    | OperatorPrimitiveStage::AwaitToString => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "operator primitive property stage changed while resuming",
+                        }
+                        .into());
+                    }
+                };
+                if let Some((function, arguments)) =
+                    use_operator_primitive_property(&mut state, property, &value)?
+                {
+                    return operator_primitive_method_call(state, function, arguments, return_to);
+                }
+            }
+            OperatorPrimitiveStage::AwaitValueOf
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) =>
+            {
+                state.stage = OperatorPrimitiveStage::ToString;
+            }
+            OperatorPrimitiveStage::AwaitExotic | OperatorPrimitiveStage::AwaitToString
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) =>
+            {
+                return Err(primitive_conversion_type_error(
+                    &state.origin,
+                    "toPrimitive",
+                )?);
+            }
+            OperatorPrimitiveStage::AwaitExotic
+            | OperatorPrimitiveStage::AwaitValueOf
+            | OperatorPrimitiveStage::AwaitToString => {
+                return finish_operator_primitive_target(
+                    runtime,
+                    value,
+                    state.target,
+                    return_to,
+                    &state.origin,
+                );
+            }
+            OperatorPrimitiveStage::Start
+            | OperatorPrimitiveStage::ValueOf
+            | OperatorPrimitiveStage::ToString => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "operator primitive conversion resumed outside a call stage",
+                }
+                .into());
+            }
+        }
+    }
+
+    loop {
+        let reference = state
+            .receiver
+            .heap_reference()
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "object-valued operator operand has no heap reference",
+            })?;
+        let (property, key, awaiting_property) = match state.stage {
+            OperatorPrimitiveStage::Start => (
+                PrimitiveConversionProperty::Exotic,
+                runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToPrimitive),
+                OperatorPrimitiveStage::AwaitExoticProperty,
+            ),
+            OperatorPrimitiveStage::ValueOf => (
+                PrimitiveConversionProperty::ValueOf,
+                runtime.predefined_property_key(PredefinedAtom::ValueOf),
+                OperatorPrimitiveStage::AwaitValueOfProperty,
+            ),
+            OperatorPrimitiveStage::ToString => (
+                PrimitiveConversionProperty::ToString,
+                runtime.predefined_property_key(PredefinedAtom::ToString),
+                OperatorPrimitiveStage::AwaitToStringProperty,
+            ),
+            OperatorPrimitiveStage::AwaitExoticProperty
+            | OperatorPrimitiveStage::AwaitValueOfProperty
+            | OperatorPrimitiveStage::AwaitToStringProperty
+            | OperatorPrimitiveStage::AwaitExotic
+            | OperatorPrimitiveStage::AwaitValueOf
+            | OperatorPrimitiveStage::AwaitToString => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "operator primitive conversion awaited without a completion",
+                }
+                .into());
+            }
+        };
+        match lookup_primitive_conversion_property(runtime, reference, &key)? {
+            PrimitiveConversionPropertyLookup::Getter(function) => {
+                state.stage = awaiting_property;
+                return operator_primitive_method_call(state, function, Vec::new(), return_to);
+            }
+            PrimitiveConversionPropertyLookup::Value(value) => {
+                if let Some((function, arguments)) =
+                    use_operator_primitive_property(&mut state, property, &value)?
+                {
+                    return operator_primitive_method_call(state, function, arguments, return_to);
+                }
+            }
+        }
+    }
+}
+
+fn use_operator_primitive_property(
+    state: &mut OperatorPrimitiveContinuation,
+    property: PrimitiveConversionProperty,
+    value: &StoredValue,
+) -> Result<Option<(FunctionId, Vec<StoredValue>)>, NativeFailure> {
+    match property {
+        PrimitiveConversionProperty::Exotic => match value {
+            StoredValue::Undefined | StoredValue::Null => {
+                state.stage = OperatorPrimitiveStage::ValueOf;
+                Ok(None)
+            }
+            StoredValue::Function(function) => {
+                state.stage = OperatorPrimitiveStage::AwaitExotic;
+                let mut arguments = Vec::new();
+                arguments
+                    .try_reserve_exact(1)
+                    .map_err(|_| ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::FrameValues,
+                        additional: 1,
+                    })?;
+                arguments.push(StoredValue::String(JsString::from_utf8(state.hint.name())?));
+                Ok(Some((*function, arguments)))
+            }
+            StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_)
+            | StoredValue::Object(_) => Err(primitive_conversion_type_error(
+                &state.origin,
+                "not a function",
+            )?),
+        },
+        PrimitiveConversionProperty::ValueOf => match value {
+            StoredValue::Function(function) => {
+                state.stage = OperatorPrimitiveStage::AwaitValueOf;
+                Ok(Some((*function, Vec::new())))
+            }
+            StoredValue::Undefined
+            | StoredValue::Null
+            | StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_)
+            | StoredValue::Object(_) => {
+                state.stage = OperatorPrimitiveStage::ToString;
+                Ok(None)
+            }
+        },
+        PrimitiveConversionProperty::ToString => match value {
+            StoredValue::Function(function) => {
+                state.stage = OperatorPrimitiveStage::AwaitToString;
+                Ok(Some((*function, Vec::new())))
+            }
+            StoredValue::Undefined
+            | StoredValue::Null
+            | StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_)
+            | StoredValue::Object(_) => Err(primitive_conversion_type_error(
+                &state.origin,
+                "toPrimitive",
+            )?),
+        },
+    }
+}
+
+fn operator_primitive_method_call(
+    state: OperatorPrimitiveContinuation,
+    function: FunctionId,
+    arguments: Vec<StoredValue>,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let receiver = state.receiver.duplicate();
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::OperatorPrimitive(state));
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::from_values(arguments),
+        return_to,
+        origin,
+        continuations,
+    }))
+}
+
+fn finish_operator_primitive_target(
+    runtime: &mut Runtime,
+    value: StoredValue,
+    target: OperatorPrimitiveTarget,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    match target {
+        OperatorPrimitiveTarget::Unary { opcode } => apply_unary_operator(opcode, value, origin),
+        OperatorPrimitiveTarget::BinaryRight {
+            opcode,
+            right,
+            hint,
+        } => {
+            let left = if binary_operator_converts_left_to_number_first(opcode) {
+                StoredValue::Number(operator_to_number(value, origin)?)
+            } else {
+                value
+            };
+            begin_operator_primitive_conversion(
+                runtime,
+                right,
+                hint,
+                OperatorPrimitiveTarget::BinaryFinish { opcode, left },
+                return_to,
+                origin.clone(),
+            )
+        }
+        OperatorPrimitiveTarget::BinaryFinish { opcode, left } => {
+            apply_binary_operator(opcode, left, value, origin)
+        }
+        OperatorPrimitiveTarget::EqualityFinish { opcode, other } => {
+            begin_abstract_equality(runtime, value, other, opcode, return_to, origin.clone())
+        }
+    }
+}
+
+const fn binary_operator_converts_left_to_number_first(opcode: FinalOpcode) -> bool {
+    matches!(
+        opcode,
+        FinalOpcode::Mul
+            | FinalOpcode::Div
+            | FinalOpcode::Mod
+            | FinalOpcode::Sub
+            | FinalOpcode::Pow
+            | FinalOpcode::Shl
+            | FinalOpcode::Sar
+            | FinalOpcode::Shr
+            | FinalOpcode::And
+            | FinalOpcode::Xor
+            | FinalOpcode::Or
+    )
+}
+
+fn apply_unary_operator(
+    opcode: FinalOpcode,
+    value: StoredValue,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let number = operator_to_number(value, origin)?;
+    let dispatch = match opcode {
+        FinalOpcode::Plus => NativeDispatch::Immediate(StoredValue::Number(number)),
+        FinalOpcode::Neg => {
+            NativeDispatch::Immediate(StoredValue::Number(JsNumber::from_f64(-number.as_f64())))
+        }
+        FinalOpcode::Inc => NativeDispatch::Immediate(StoredValue::Number(
+            number.add_numeric(JsNumber::from_i32(1)),
+        )),
+        FinalOpcode::Dec => NativeDispatch::Immediate(StoredValue::Number(
+            number.add_numeric(JsNumber::from_i32(-1)),
+        )),
+        FinalOpcode::PostInc => NativeDispatch::Pair(
+            StoredValue::Number(number),
+            StoredValue::Number(number.add_numeric(JsNumber::from_i32(1))),
+        ),
+        FinalOpcode::PostDec => NativeDispatch::Pair(
+            StoredValue::Number(number),
+            StoredValue::Number(number.add_numeric(JsNumber::from_i32(-1))),
+        ),
+        FinalOpcode::Not => NativeDispatch::Immediate(StoredValue::Number(JsNumber::from_i32(
+            !number_to_int32(number),
+        ))),
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "non-unary opcode reached unary dynamic-operator execution",
+            }
+            .into());
+        }
+    };
+    Ok(dispatch)
+}
+
+fn apply_binary_operator(
+    opcode: FinalOpcode,
+    left: StoredValue,
+    right: StoredValue,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    match opcode {
+        FinalOpcode::Add => apply_addition(left, right, origin),
+        FinalOpcode::Mul
+        | FinalOpcode::Div
+        | FinalOpcode::Mod
+        | FinalOpcode::Sub
+        | FinalOpcode::Pow => apply_numeric_arithmetic(opcode, left, right, origin),
+        FinalOpcode::Shl
+        | FinalOpcode::Sar
+        | FinalOpcode::Shr
+        | FinalOpcode::And
+        | FinalOpcode::Xor
+        | FinalOpcode::Or => apply_numeric_bitwise(opcode, left, right, origin),
+        FinalOpcode::Lt | FinalOpcode::Lte | FinalOpcode::Gt | FinalOpcode::Gte => {
+            apply_relational(opcode, left, right, origin)
+        }
+        _ => Err(EngineFault::RuntimeInvariant {
+            message: "unsupported opcode reached binary dynamic-operator execution",
+        }
+        .into()),
+    }
+}
+
+fn apply_addition(
+    left: StoredValue,
+    right: StoredValue,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(left, StoredValue::String(_)) || matches!(right, StoredValue::String(_)) {
+        let left = operator_primitive_to_string(left, origin)?;
+        let right = operator_primitive_to_string(right, origin)?;
+        let value = match left.concat(&right) {
+            Ok(value) => value,
+            Err(JsStringError::TooLong { .. }) => {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::InternalError,
+                        message: JsString::from_utf8("string too long")?,
+                    },
+                    origin: origin.clone(),
+                }));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        return Ok(NativeDispatch::Immediate(StoredValue::String(value)));
+    }
+    let left = operator_to_number(left, origin)?;
+    let right = operator_to_number(right, origin)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Number(
+        left.add_numeric(right),
+    )))
+}
+
+fn apply_numeric_arithmetic(
+    opcode: FinalOpcode,
+    left: StoredValue,
+    right: StoredValue,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let left = operator_to_number(left, origin)?.as_f64();
+    let right = operator_to_number(right, origin)?.as_f64();
+    let result = match opcode {
+        FinalOpcode::Mul => left * right,
+        FinalOpcode::Div => left / right,
+        FinalOpcode::Mod => left % right,
+        FinalOpcode::Sub => left - right,
+        FinalOpcode::Pow if !right.is_finite() && left.abs().to_bits() == 1.0_f64.to_bits() => {
+            f64::NAN
+        }
+        FinalOpcode::Pow => left.powf(right),
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "non-arithmetic opcode reached numeric arithmetic",
+            }
+            .into());
+        }
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::Number(
+        JsNumber::from_f64(result),
+    )))
+}
+
+fn apply_numeric_bitwise(
+    opcode: FinalOpcode,
+    left: StoredValue,
+    right: StoredValue,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let left = operator_to_number(left, origin)?;
+    let right = operator_to_number(right, origin)?;
+    let shift = number_to_uint32(right) & 0x1f;
+    let result = match opcode {
+        FinalOpcode::Shl => StoredValue::Number(JsNumber::from_i32(
+            number_to_int32(left).wrapping_shl(shift),
+        )),
+        FinalOpcode::Sar => StoredValue::Number(JsNumber::from_i32(number_to_int32(left) >> shift)),
+        FinalOpcode::Shr => {
+            StoredValue::Number(JsNumber::from_u32(number_to_uint32(left) >> shift))
+        }
+        FinalOpcode::And => StoredValue::Number(JsNumber::from_i32(
+            number_to_int32(left) & number_to_int32(right),
+        )),
+        FinalOpcode::Xor => StoredValue::Number(JsNumber::from_i32(
+            number_to_int32(left) ^ number_to_int32(right),
+        )),
+        FinalOpcode::Or => StoredValue::Number(JsNumber::from_i32(
+            number_to_int32(left) | number_to_int32(right),
+        )),
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "non-bitwise opcode reached numeric bitwise execution",
+            }
+            .into());
+        }
+    };
+    Ok(NativeDispatch::Immediate(result))
+}
+
+fn apply_relational(
+    opcode: FinalOpcode,
+    left: StoredValue,
+    right: StoredValue,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let result = match (left, right) {
+        (StoredValue::String(left), StoredValue::String(right)) => match opcode {
+            FinalOpcode::Lt => left < right,
+            FinalOpcode::Lte => left <= right,
+            FinalOpcode::Gt => left > right,
+            FinalOpcode::Gte => left >= right,
+            _ => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "non-relational opcode reached string comparison",
+                }
+                .into());
+            }
+        },
+        (left, right) => {
+            let left = operator_to_number(left, origin)?.as_f64();
+            let right = operator_to_number(right, origin)?.as_f64();
+            match opcode {
+                FinalOpcode::Lt => left < right,
+                FinalOpcode::Lte => left <= right,
+                FinalOpcode::Gt => left > right,
+                FinalOpcode::Gte => left >= right,
+                _ => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "non-relational opcode reached numeric comparison",
+                    }
+                    .into());
+                }
+            }
+        }
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::Boolean(result)))
+}
+
+fn begin_abstract_equality(
+    runtime: &mut Runtime,
+    mut left: StoredValue,
+    mut right: StoredValue,
+    opcode: FinalOpcode,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let invert = match opcode {
+        FinalOpcode::Eq => false,
+        FinalOpcode::Neq => true,
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "non-equality opcode reached abstract equality",
+            }
+            .into());
+        }
+    };
+
+    loop {
+        if left.kind() == right.kind() || (is_object_value(&left) && is_object_value(&right)) {
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(
+                left.strict_equals(&right) ^ invert,
+            )));
+        }
+        if matches!(
+            (&left, &right),
+            (StoredValue::Null, StoredValue::Undefined)
+                | (StoredValue::Undefined, StoredValue::Null)
+        ) {
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(!invert)));
+        }
+
+        match (&left, &right) {
+            (StoredValue::String(_), StoredValue::Number(_)) => {
+                left = StoredValue::Number(operator_to_number(left, &origin)?);
+                continue;
+            }
+            (StoredValue::Number(_), StoredValue::String(_)) => {
+                right = StoredValue::Number(operator_to_number(right, &origin)?);
+                continue;
+            }
+            (StoredValue::Boolean(value), _) => {
+                left = StoredValue::Number(JsNumber::from_i32(i32::from(*value)));
+                continue;
+            }
+            (_, StoredValue::Boolean(value)) => {
+                right = StoredValue::Number(JsNumber::from_i32(i32::from(*value)));
+                continue;
+            }
+            _ => {}
+        }
+
+        if is_object_value(&left) && is_equality_conversion_primitive(&right) {
+            return begin_operator_primitive_conversion(
+                runtime,
+                left,
+                OperatorPrimitiveHint::Default,
+                OperatorPrimitiveTarget::EqualityFinish {
+                    opcode,
+                    other: right,
+                },
+                return_to,
+                origin,
+            );
+        }
+        if is_object_value(&right) && is_equality_conversion_primitive(&left) {
+            return begin_operator_primitive_conversion(
+                runtime,
+                right,
+                OperatorPrimitiveHint::Default,
+                OperatorPrimitiveTarget::EqualityFinish {
+                    opcode,
+                    other: left,
+                },
+                return_to,
+                origin,
+            );
+        }
+
+        return Ok(NativeDispatch::Immediate(StoredValue::Boolean(invert)));
+    }
+}
+
+const fn is_object_value(value: &StoredValue) -> bool {
+    matches!(value, StoredValue::Function(_) | StoredValue::Object(_))
+}
+
+const fn is_equality_conversion_primitive(value: &StoredValue) -> bool {
+    matches!(
+        value,
+        StoredValue::Number(_) | StoredValue::String(_) | StoredValue::Symbol(_)
+    )
+}
+
+fn operator_to_number(
+    value: StoredValue,
+    origin: &JsStackFrame,
+) -> Result<JsNumber, NativeFailure> {
+    match value {
+        StoredValue::Undefined => Ok(JsNumber::from_f64(f64::NAN)),
+        StoredValue::Null | StoredValue::Boolean(false) => Ok(JsNumber::from_i32(0)),
+        StoredValue::Boolean(true) => Ok(JsNumber::from_i32(1)),
+        StoredValue::Number(value) => Ok(value),
+        StoredValue::String(value) => Ok(string_to_number(&value)?),
+        StoredValue::Symbol(_) => Err(primitive_conversion_type_error(
+            origin,
+            "cannot convert symbol to number",
+        )?),
+        StoredValue::Function(_) | StoredValue::Object(_) => Err(EngineFault::RuntimeInvariant {
+            message: "object reached primitive operator Number conversion",
+        }
+        .into()),
+    }
+}
+
+fn operator_primitive_to_string(
+    value: StoredValue,
+    origin: &JsStackFrame,
+) -> Result<JsString, NativeFailure> {
+    match value {
+        StoredValue::Undefined => Ok(JsString::from_utf8("undefined")?),
+        StoredValue::Null => Ok(JsString::from_utf8("null")?),
+        StoredValue::Boolean(false) => Ok(JsString::from_utf8("false")?),
+        StoredValue::Boolean(true) => Ok(JsString::from_utf8("true")?),
+        StoredValue::Number(value) => Ok(value.to_javascript_string()?),
+        StoredValue::String(value) => Ok(value),
+        StoredValue::Symbol(_) => Err(primitive_conversion_type_error(
+            origin,
+            "cannot convert symbol to string",
+        )?),
+        StoredValue::Function(_) | StoredValue::Object(_) => Err(EngineFault::RuntimeInvariant {
+            message: "object reached primitive operator String conversion",
+        }
+        .into()),
+    }
+}
+
 fn finish_property_key_target(
     runtime: &mut Runtime,
     value: StoredValue,
@@ -2196,9 +2956,7 @@ fn property_key_primitive_to_value(value: StoredValue) -> Result<StoredValue, Na
         StoredValue::Null => StoredValue::String(JsString::from_utf8("null")?),
         StoredValue::Boolean(false) => StoredValue::String(JsString::from_utf8("false")?),
         StoredValue::Boolean(true) => StoredValue::String(JsString::from_utf8("true")?),
-        StoredValue::Number(value) => {
-            StoredValue::String(JsString::from_utf8(&value.to_javascript_string())?)
-        }
+        StoredValue::Number(value) => StoredValue::String(value.to_javascript_string()?),
         value @ (StoredValue::String(_) | StoredValue::Symbol(_)) => value,
         StoredValue::Function(_) | StoredValue::Object(_) => {
             return Err(EngineFault::RuntimeInvariant {
@@ -2260,7 +3018,7 @@ fn computed_method_name(value: &StoredValue) -> Result<JsString, NativeFailure> 
 fn primitive_conversion_type_error(
     origin: &JsStackFrame,
     message: &str,
-) -> Result<NativeFailure, crate::JsStringError> {
+) -> Result<NativeFailure, JsStringError> {
     Ok(NativeFailure::Abrupt(PendingException {
         payload: PendingExceptionPayload::EngineError {
             kind: ExceptionKind::TypeError,
@@ -2498,7 +3256,7 @@ fn native_function_name_to_string(
         StoredValue::Null => Ok(JsString::from_utf8("null")?),
         StoredValue::Boolean(false) => Ok(JsString::from_utf8("false")?),
         StoredValue::Boolean(true) => Ok(JsString::from_utf8("true")?),
-        StoredValue::Number(value) => Ok(JsString::from_utf8(&value.to_javascript_string())?),
+        StoredValue::Number(value) => Ok(value.to_javascript_string()?),
         StoredValue::String(value) => Ok(value),
         StoredValue::Symbol(_) => {
             let Some(origin) = origin else {
@@ -2566,7 +3324,7 @@ fn dynamic_source_primitive_to_string(
         StoredValue::Null => Ok(JsString::from_utf8("null")?),
         StoredValue::Boolean(false) => Ok(JsString::from_utf8("false")?),
         StoredValue::Boolean(true) => Ok(JsString::from_utf8("true")?),
-        StoredValue::Number(value) => Ok(JsString::from_utf8(&value.to_javascript_string())?),
+        StoredValue::Number(value) => Ok(value.to_javascript_string()?),
         StoredValue::String(value) => Ok(value),
         StoredValue::Symbol(_) => Err(NativeFailure::Abrupt(PendingException {
             payload: PendingExceptionPayload::EngineError {
@@ -2636,8 +3394,8 @@ impl From<EngineFault> for ConstructorCompletionError {
     }
 }
 
-impl From<crate::JsStringError> for ConstructorCompletionError {
-    fn from(error: crate::JsStringError) -> Self {
+impl From<JsStringError> for ConstructorCompletionError {
+    fn from(error: JsStringError) -> Self {
         Self::Execution(error.into())
     }
 }
@@ -2769,6 +3527,30 @@ fn push_call_result(
         }
         parent.stack.push(value);
     }
+    parent.instruction = return_to.instruction;
+    Ok(())
+}
+
+fn push_operator_pair(
+    parent: &mut Frame,
+    original: StoredValue,
+    updated: StoredValue,
+    return_to: CallReturn,
+) -> Result<(), ExecutionError> {
+    if !matches!(return_to.disposition, ReturnDisposition::Push) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "postfix operator pair reached a discarding continuation",
+        }
+        .into());
+    }
+    if parent.stack.capacity().saturating_sub(parent.stack.len()) < 2 {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified postfix operator result exceeds frame stack capacity",
+        }
+        .into());
+    }
+    parent.stack.push(original);
+    parent.stack.push(updated);
     parent.instruction = return_to.instruction;
     Ok(())
 }
@@ -3859,6 +4641,85 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             )?;
             return Ok(Step::Continue);
         }
+        FinalOpcode::Neg
+        | FinalOpcode::Plus
+        | FinalOpcode::Dec
+        | FinalOpcode::Inc
+        | FinalOpcode::PostDec
+        | FinalOpcode::PostInc
+        | FinalOpcode::Not => {
+            let value = pop(frame)?;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::Number,
+                    OperatorPrimitiveTarget::Unary { opcode },
+                    Some(return_to),
+                    origin,
+                ),
+                return_to,
+            );
+        }
+        FinalOpcode::Mul
+        | FinalOpcode::Div
+        | FinalOpcode::Mod
+        | FinalOpcode::Add
+        | FinalOpcode::Sub
+        | FinalOpcode::Pow
+        | FinalOpcode::Shl
+        | FinalOpcode::Sar
+        | FinalOpcode::Shr
+        | FinalOpcode::Lt
+        | FinalOpcode::Lte
+        | FinalOpcode::Gt
+        | FinalOpcode::Gte
+        | FinalOpcode::Eq
+        | FinalOpcode::Neq
+        | FinalOpcode::And
+        | FinalOpcode::Xor
+        | FinalOpcode::Or => {
+            let right = pop(frame)?;
+            let left = pop(frame)?;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            let dispatch = if matches!(opcode, FinalOpcode::Eq | FinalOpcode::Neq) {
+                begin_abstract_equality(runtime, left, right, opcode, Some(return_to), origin)
+            } else {
+                let hint = if opcode == FinalOpcode::Add {
+                    OperatorPrimitiveHint::Default
+                } else {
+                    OperatorPrimitiveHint::Number
+                };
+                begin_operator_primitive_conversion(
+                    runtime,
+                    left,
+                    hint,
+                    OperatorPrimitiveTarget::BinaryRight {
+                        opcode,
+                        right,
+                        hint,
+                    },
+                    Some(return_to),
+                    origin,
+                )
+            };
+            return native_step(dispatch, return_to);
+        }
         FinalOpcode::Lnot => {
             let value = pop(frame)?;
             frame.stack.push(StoredValue::Boolean(!value.is_truthy()));
@@ -4729,7 +5590,7 @@ fn define_static_method(
 fn method_function_name(
     name: &JsString,
     kind: DefineMethodKind,
-) -> Result<JsString, crate::JsStringError> {
+) -> Result<JsString, JsStringError> {
     match kind {
         DefineMethodKind::Method => Ok(name.clone()),
         DefineMethodKind::Getter => JsString::from_utf8("get ")?.concat(name),
@@ -5764,7 +6625,7 @@ fn named_property_message(
     prefix: &str,
     name: &JsString,
     suffix: &str,
-) -> Result<JsString, crate::JsStringError> {
+) -> Result<JsString, JsStringError> {
     JsString::from_utf8(prefix)?
         .concat(name)?
         .concat(&JsString::from_utf8(suffix)?)
@@ -5842,9 +6703,34 @@ fn exception_caller_frames(
                 | FinalOpcode::PutArrayEl
                 | FinalOpcode::ToPropKey
                 | FinalOpcode::DefineMethodComputed
+                | FinalOpcode::Neg
+                | FinalOpcode::Plus
+                | FinalOpcode::Dec
+                | FinalOpcode::Inc
+                | FinalOpcode::PostDec
+                | FinalOpcode::PostInc
+                | FinalOpcode::Not
+                | FinalOpcode::Mul
+                | FinalOpcode::Div
+                | FinalOpcode::Mod
+                | FinalOpcode::Add
+                | FinalOpcode::Sub
+                | FinalOpcode::Pow
+                | FinalOpcode::Shl
+                | FinalOpcode::Sar
+                | FinalOpcode::Shr
+                | FinalOpcode::Lt
+                | FinalOpcode::Lte
+                | FinalOpcode::Gt
+                | FinalOpcode::Gte
+                | FinalOpcode::Eq
+                | FinalOpcode::Neq
+                | FinalOpcode::And
+                | FinalOpcode::Xor
+                | FinalOpcode::Or
         ) {
             return Err(EngineFault::RuntimeInvariant {
-                message: "exception caller is not parked at a call or property abstract operation",
+                message: "exception caller is not parked at a call or abstract operation",
             }
             .into());
         }

@@ -17,6 +17,7 @@
 mod arena;
 mod array_index;
 mod atom;
+mod conversion;
 mod error;
 mod host;
 mod ids;

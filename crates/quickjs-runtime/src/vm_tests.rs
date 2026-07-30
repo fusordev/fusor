@@ -330,6 +330,55 @@ mod tests {
     }
 
     #[test]
+    fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
+        let (mut runtime, realm, _constructor, _native) = runtime_with_function_constructor();
+        let object = source_object(&mut runtime, realm);
+        let origin = native_function_host_origin();
+        let continuation = |target| {
+            NativeContinuation::OperatorPrimitive(OperatorPrimitiveContinuation {
+                receiver: StoredValue::Object(object),
+                hint: OperatorPrimitiveHint::Number,
+                stage: OperatorPrimitiveStage::Start,
+                target,
+                origin: origin.clone(),
+            })
+        };
+
+        assert_eq!(
+            continuation(OperatorPrimitiveTarget::Unary {
+                opcode: FinalOpcode::Plus,
+            })
+            .retained_values(),
+            1
+        );
+        assert_eq!(
+            continuation(OperatorPrimitiveTarget::BinaryRight {
+                opcode: FinalOpcode::Sub,
+                right: StoredValue::Undefined,
+                hint: OperatorPrimitiveHint::Number,
+            })
+            .retained_values(),
+            2
+        );
+        assert_eq!(
+            continuation(OperatorPrimitiveTarget::BinaryFinish {
+                opcode: FinalOpcode::Add,
+                left: StoredValue::Undefined,
+            })
+            .retained_values(),
+            2
+        );
+        assert_eq!(
+            continuation(OperatorPrimitiveTarget::EqualityFinish {
+                opcode: FinalOpcode::Eq,
+                other: StoredValue::Undefined,
+            })
+            .retained_values(),
+            2
+        );
+    }
+
+    #[test]
     fn synchronous_internal_read_rejects_an_accessor_instead_of_skipping_it() {
         let (mut runtime, realm, constructor, _native) = runtime_with_function_constructor();
         let object = source_object(&mut runtime, realm);

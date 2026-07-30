@@ -25,7 +25,7 @@
 
 use std::fmt;
 
-use quickjs_bytecode::Binary64Constant;
+use crate::string::{JsString, JsStringError, MAX_STRING_CODE_UNITS};
 
 /// An ECMAScript Number with the pinned `QuickJS` integer fast-path invariant.
 ///
@@ -119,10 +119,10 @@ impl JsNumber {
     /// formatter, then applies the pinned `QuickJS` decimal-vs-exponent
     /// thresholds and exponent spelling. Integer fast-path values never pass
     /// through binary64 formatting.
-    pub(crate) fn to_javascript_string(self) -> String {
+    pub(crate) fn to_javascript_string(self) -> Result<JsString, JsStringError> {
         match self.0 {
-            NumberRepr::Int(value) => value.to_string(),
-            NumberRepr::Float(value) => Binary64Constant::from_f64(value).to_javascript_string(),
+            NumberRepr::Int(value) => format_i32_for_javascript(value),
+            NumberRepr::Float(value) => format_binary64_for_javascript(value),
         }
     }
 
@@ -201,6 +201,230 @@ impl JsNumber {
     }
 }
 
+const RENDERED_BINARY64_INLINE_BYTES: usize = 384;
+const JAVASCRIPT_NUMBER_INLINE_BYTES: usize = 64;
+
+fn format_i32_for_javascript(value: i32) -> Result<JsString, JsStringError> {
+    let mut output = FallibleAsciiBuffer::<JAVASCRIPT_NUMBER_INLINE_BYTES>::new();
+    output.write_arguments(format_args!("{value}"))?;
+    output.into_js_string()
+}
+
+fn format_binary64_for_javascript(value: f64) -> Result<JsString, JsStringError> {
+    let bits = value.to_bits();
+    let absolute_bits = bits & 0x7fff_ffff_ffff_ffff;
+    if absolute_bits > 0x7ff0_0000_0000_0000 {
+        return JsString::from_latin1(b"NaN");
+    }
+    if absolute_bits == 0x7ff0_0000_0000_0000 {
+        return if bits >> 63 == 0 {
+            JsString::from_latin1(b"Infinity")
+        } else {
+            JsString::from_latin1(b"-Infinity")
+        };
+    }
+    if absolute_bits == 0 {
+        return JsString::from_latin1(b"0");
+    }
+
+    let mut rendered = FallibleAsciiBuffer::<RENDERED_BINARY64_INLINE_BYTES>::new();
+    rendered.write_arguments(format_args!("{value}"))?;
+    let rendered = rendered.as_slice();
+    let (negative, unsigned) = rendered
+        .strip_prefix(b"-")
+        .map_or((false, rendered), |unsigned| (true, unsigned));
+    let (mantissa, explicit_exponent) = unsigned
+        .iter()
+        .position(|byte| matches!(byte, b'e' | b'E'))
+        .map_or((unsigned, 0), |position| {
+            (
+                &unsigned[..position],
+                parse_decimal_exponent(&unsigned[position + 1..]),
+            )
+        });
+    let decimal_position = mantissa
+        .iter()
+        .position(|byte| *byte == b'.')
+        .unwrap_or(mantissa.len());
+
+    let mut untrimmed_digits = FallibleAsciiBuffer::<RENDERED_BINARY64_INLINE_BYTES>::new();
+    for byte in mantissa.iter().copied().filter(|byte| *byte != b'.') {
+        untrimmed_digits.push_byte(byte)?;
+    }
+    let first_significant = untrimmed_digits
+        .as_slice()
+        .iter()
+        .position(|byte| *byte != b'0')
+        .unwrap_or(0);
+    let scientific_exponent = explicit_exponent
+        .saturating_add(i32::try_from(decimal_position).unwrap_or(i32::MAX))
+        .saturating_sub(i32::try_from(first_significant).unwrap_or(i32::MAX))
+        .saturating_sub(1);
+    let mut significant_end = untrimmed_digits.len();
+    while significant_end > first_significant + 1
+        && untrimmed_digits.as_slice()[significant_end - 1] == b'0'
+    {
+        significant_end -= 1;
+    }
+    let digits = &untrimmed_digits.as_slice()[first_significant..significant_end];
+
+    let mut output = FallibleAsciiBuffer::<JAVASCRIPT_NUMBER_INLINE_BYTES>::new();
+    if negative {
+        output.push_byte(b'-')?;
+    }
+    if !(-6..21).contains(&scientific_exponent) {
+        output.push_byte(digits[0])?;
+        if digits.len() > 1 {
+            output.push_bytes(b".")?;
+            output.push_bytes(&digits[1..])?;
+        }
+        output.push_byte(b'e')?;
+        if scientific_exponent >= 0 {
+            output.push_byte(b'+')?;
+        }
+        output.write_arguments(format_args!("{scientific_exponent}"))?;
+        return output.into_js_string();
+    }
+
+    if scientific_exponent < 0 {
+        output.push_bytes(b"0.")?;
+        let zeros = usize::try_from(-scientific_exponent - 1).unwrap_or(0);
+        output.push_repeated(b'0', zeros)?;
+        output.push_bytes(digits)?;
+        return output.into_js_string();
+    }
+
+    let integer_digits = usize::try_from(scientific_exponent + 1).unwrap_or(usize::MAX);
+    if integer_digits >= digits.len() {
+        output.push_bytes(digits)?;
+        output.push_repeated(b'0', integer_digits - digits.len())?;
+    } else {
+        output.push_bytes(&digits[..integer_digits])?;
+        output.push_byte(b'.')?;
+        output.push_bytes(&digits[integer_digits..])?;
+    }
+    output.into_js_string()
+}
+
+fn parse_decimal_exponent(value: &[u8]) -> i32 {
+    let (negative, digits) = value
+        .strip_prefix(b"-")
+        .map_or((false, value), |digits| (true, digits));
+    let digits = digits.strip_prefix(b"+").unwrap_or(digits);
+    let exponent = digits.iter().fold(0_i32, |exponent, digit| {
+        exponent
+            .saturating_mul(10)
+            .saturating_add(i32::from(digit.saturating_sub(b'0')))
+    });
+    if negative { -exponent } else { exponent }
+}
+
+struct FallibleAsciiBuffer<const INLINE_BYTES: usize> {
+    inline: [u8; INLINE_BYTES],
+    inline_len: usize,
+    heap: Option<Vec<u8>>,
+    format_error: Option<JsStringError>,
+}
+
+impl<const INLINE_BYTES: usize> FallibleAsciiBuffer<INLINE_BYTES> {
+    const fn new() -> Self {
+        Self {
+            inline: [0; INLINE_BYTES],
+            inline_len: 0,
+            heap: None,
+            format_error: None,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.heap.as_ref().map_or(self.inline_len, Vec::len)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        self.heap
+            .as_deref()
+            .unwrap_or(&self.inline[..self.inline_len])
+    }
+
+    fn push_byte(&mut self, byte: u8) -> Result<(), JsStringError> {
+        self.push_bytes(&[byte])
+    }
+
+    fn push_repeated(&mut self, byte: u8, count: usize) -> Result<(), JsStringError> {
+        for _ in 0..count {
+            self.push_byte(byte)?;
+        }
+        Ok(())
+    }
+
+    fn push_bytes(&mut self, bytes: &[u8]) -> Result<(), JsStringError> {
+        debug_assert!(bytes.is_ascii(), "number formatting emits ASCII");
+        let requested = self
+            .len()
+            .checked_add(bytes.len())
+            .ok_or(JsStringError::TooLong {
+                requested: u64::MAX,
+                maximum: MAX_STRING_CODE_UNITS,
+            })?;
+        if requested > usize::try_from(MAX_STRING_CODE_UNITS).unwrap_or(usize::MAX) {
+            return Err(JsStringError::TooLong {
+                requested: u64::try_from(requested).unwrap_or(u64::MAX),
+                maximum: MAX_STRING_CODE_UNITS,
+            });
+        }
+
+        if let Some(heap) = self.heap.as_mut() {
+            if heap.capacity() - heap.len() < bytes.len() {
+                heap.try_reserve(bytes.len())
+                    .map_err(|_| JsStringError::AllocationFailed {
+                        additional: bytes.len(),
+                    })?;
+            }
+            heap.extend_from_slice(bytes);
+            return Ok(());
+        }
+
+        if requested <= INLINE_BYTES {
+            self.inline[self.inline_len..requested].copy_from_slice(bytes);
+            self.inline_len = requested;
+            return Ok(());
+        }
+
+        let mut heap = Vec::new();
+        heap.try_reserve_exact(requested)
+            .map_err(|_| JsStringError::AllocationFailed {
+                additional: requested,
+            })?;
+        heap.extend_from_slice(&self.inline[..self.inline_len]);
+        heap.extend_from_slice(bytes);
+        self.heap = Some(heap);
+        Ok(())
+    }
+
+    fn write_arguments(&mut self, arguments: fmt::Arguments<'_>) -> Result<(), JsStringError> {
+        if fmt::write(self, arguments).is_ok() {
+            return Ok(());
+        }
+        Err(self
+            .format_error
+            .take()
+            .unwrap_or(JsStringError::AllocationFailed { additional: 0 }))
+    }
+
+    fn into_js_string(self) -> Result<JsString, JsStringError> {
+        JsString::from_latin1(self.as_slice())
+    }
+}
+
+impl<const INLINE_BYTES: usize> fmt::Write for FallibleAsciiBuffer<INLINE_BYTES> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        self.push_bytes(value.as_bytes()).map_err(|error| {
+            self.format_error = Some(error);
+            fmt::Error
+        })
+    }
+}
+
 impl From<i32> for JsNumber {
     fn from(value: i32) -> Self {
         Self::from_i32(value)
@@ -228,6 +452,7 @@ impl From<JsNumber> for f64 {
 #[cfg(test)]
 mod tests {
     use super::JsNumber;
+    use quickjs_bytecode::Binary64Constant;
 
     #[test]
     fn exact_i32_values_use_the_integer_fast_path_without_losing_negative_zero() {
@@ -328,7 +553,59 @@ mod tests {
             (f64::NEG_INFINITY, "-Infinity"),
             (0.000_001_234_567_890_123, "0.000001234567890123"),
         ] {
-            assert_eq!(JsNumber::from_f64(value).to_javascript_string(), expected);
+            let actual = JsNumber::from_f64(value)
+                .to_javascript_string()
+                .expect("number string");
+            assert_eq!(
+                actual.to_utf8_lossy().expect("ASCII number string"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn source_string_format_covers_binary64_and_integer_buffer_boundaries() {
+        for (number, expected) in [
+            (JsNumber::from_i32(i32::MIN), "-2147483648"),
+            (JsNumber::from_i32(i32::MAX), "2147483647"),
+            (JsNumber::from_f64(f64::MAX), "1.7976931348623157e+308"),
+            (JsNumber::from_f64(f64::from_bits(1)), "5e-324"),
+            (JsNumber::from_f64(-f64::from_bits(1)), "-5e-324"),
+            (
+                JsNumber::from_f64(f64::MIN_POSITIVE),
+                "2.2250738585072014e-308",
+            ),
+            (
+                JsNumber::from_f64(1.234_567_890_123_456_7e200),
+                "1.2345678901234567e+200",
+            ),
+        ] {
+            assert_eq!(
+                number
+                    .to_javascript_string()
+                    .expect("number string")
+                    .to_utf8_lossy()
+                    .expect("ASCII number string"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn fallible_source_format_matches_project_spelling_across_binary64_space() {
+        let mut state = 0x6a09_e667_f3bc_c909_u64;
+        for index in 0..100_000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let value = f64::from_bits(state);
+            let expected = Binary64Constant::from_f64(value).to_javascript_string();
+            let actual = JsNumber::from_f64(value)
+                .to_javascript_string()
+                .expect("fallible number string")
+                .to_utf8_lossy()
+                .expect("ASCII number string");
+            assert_eq!(actual, expected, "case {index}, bits {state:016x}");
         }
     }
 

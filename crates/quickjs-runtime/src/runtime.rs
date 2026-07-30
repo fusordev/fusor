@@ -2675,6 +2675,17 @@ impl Context<'_> {
         ))
     }
 
+    /// Roots one predefined well-known Symbol in this runtime.
+    ///
+    /// String atoms and the private brand atom return `None`; only the pinned
+    /// well-known Symbol identities are exposed through this entry.
+    #[must_use]
+    pub fn well_known_symbol(&self, atom: PredefinedAtom) -> Option<JsValue> {
+        let symbol = self.runtime.atoms.predefined(atom);
+        (symbol.kind() == crate::AtomKind::Symbol)
+            .then(|| JsValue::primitive(&self.runtime.mailbox, PrimitiveValue::Symbol(symbol)))
+    }
+
     /// Transactionally installs complete verified bytecode and materializes
     /// its root function in this context's realm.
     ///
@@ -3146,10 +3157,35 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::IfFalse
             | FinalOpcode::IfTrue
             | FinalOpcode::Goto
+            | FinalOpcode::Neg
+            | FinalOpcode::Plus
+            | FinalOpcode::Dec
+            | FinalOpcode::Inc
+            | FinalOpcode::PostDec
+            | FinalOpcode::PostInc
+            | FinalOpcode::Not
             | FinalOpcode::Lnot
             | FinalOpcode::Typeof
+            | FinalOpcode::Mul
+            | FinalOpcode::Div
+            | FinalOpcode::Mod
+            | FinalOpcode::Add
+            | FinalOpcode::Sub
+            | FinalOpcode::Pow
+            | FinalOpcode::Shl
+            | FinalOpcode::Sar
+            | FinalOpcode::Shr
+            | FinalOpcode::Lt
+            | FinalOpcode::Lte
+            | FinalOpcode::Gt
+            | FinalOpcode::Gte
+            | FinalOpcode::Eq
+            | FinalOpcode::Neq
             | FinalOpcode::StrictEq
             | FinalOpcode::StrictNeq
+            | FinalOpcode::And
+            | FinalOpcode::Xor
+            | FinalOpcode::Or
             | FinalOpcode::IsUndefinedOrNull
             | FinalOpcode::Nop
             | FinalOpcode::PushMinus1

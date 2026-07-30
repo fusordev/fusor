@@ -450,7 +450,10 @@ values, ordinary objects, stack operations, arguments and locals, imported
 captures, closure creation, TDZ checks, `close_loc` cell rotation, branches,
 returns, truthiness, `typeof`, strict equality, the nullish predicate, direct
 `call` plus `call0`–`call3`, static-property method calls, and explicit
-`throw`. `Function.prototype.call` forwards its callable receiver, raw
+`throw`. The admitted dynamic-operator family additionally covers every
+currently lowered non-BigInt unary, update, arithmetic, shift, bitwise,
+relational, loose-equality, and strict-equality opcode.
+`Function.prototype.call` forwards its callable receiver, raw
 `thisArg`, and remaining arguments through an owned argument cursor. Each
 native forwarding boundary attaches one zero-value identity continuation, so
 self-targeting call chains remain on the same iterative dispatcher while
@@ -467,7 +470,12 @@ derives the observable method or accessor name, preserves exact arity, and
 merges or replaces data/accessor halves without charging a duplicate slot.
 Canonical decimal property descriptions become immediate array-index keys
 through `4294967294`; `4294967295` remains an ordinary string key. Static reads
-and writes operate across ordinary objects and function objects. Setter calls
+and writes operate across ordinary objects and function objects. Computed
+reads, writes, calls, data definitions, and synchronous method/accessor
+definitions first run a resumable `ToPropertyKey` state machine. It preserves
+the original receiver across inherited accessor lookup and native or bytecode
+conversion calls, accepts exact runtime-local well-known and unique Symbol
+identity, and resumes only at the verifier-certified successor. Setter calls
 preserve the original receiver and sole assignment RHS, discard their
 completion, and resume the assigning frame at the certified successor; the
 assignment expression retains its RHS. Missing reads produce `undefined`;
@@ -483,14 +491,24 @@ installed realm; direct calls still pass raw `undefined`. Calls fill missing
 formals with `undefined` and share aggregate frame limits and instruction fuel.
 An escaping throw carries its exact JavaScript value through the same frame
 vector, allocates caller provenance before publishing any heap root, and
-preserves caller order from immediate to outermost. Computed object-member
-keys, async/generator methods, `super`/home-object semantics,
-realm-global setter dispatch, prototype mutation, proxies and exotics,
-derived/class and nonordinary constructor forms, optional/spread/apply/tail
-calls, general sloppy-`this` primitive boxing, BigInt values, coercive numeric
-operations, dynamic operators, serialized input, non-string atom namespaces,
-raw function slots, catch handlers, finally return addresses, iterator
-markers, and packed exceptional stack values remain fail closed. Ordinary
+preserves caller order from immediate to outermost. Dynamic operators use a
+second resumable state machine for default/Number-hint `ToPrimitive`, including
+`Symbol.toPrimitive`, ordinary `valueOf`/`toString` fallback, exact hints,
+left-to-right getter/call ordering, and abrupt completion. Number conversion
+operates on UTF-16 without replacing lone surrogates, implements the pinned
+whitespace and decimal/radix grammar, and feeds exact `ToInt32`/`ToUint32`.
+Postfix updates return a verifier-accounted old/new pair so the lvalue write
+consumes only the new Number. Number-to-String formatting is fallible end to
+end, and concatenation that exceeds the JavaScript String limit raises the
+exact `InternalError` instead of escaping as a host allocation error. BigInt
+values and mixed numeric domains,
+async/generator methods, `super`/home-object semantics, realm-global setter
+dispatch, prototype mutation, proxies and other exotics, derived/class and
+nonordinary constructor forms, optional/spread/apply/tail calls, general
+sloppy-`this` primitive boxing, remaining primitive wrapper/prototype
+conversions, serialized input, raw function slots, catch handlers, finally
+return addresses, iterator markers, and packed exceptional stack values remain
+fail closed. Ordinary
 accessors are typed slots: `GetField`
 and `GetField2` stop at the first own or inherited accessor, execute native or
 verified-bytecode getters through the same frame vector, preserve the original

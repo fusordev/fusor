@@ -373,6 +373,8 @@ impl From<AtomError> for InstallError {
 /// itself later modeled as an Error object.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ExceptionKind {
+    /// An implementation limit was exceeded by otherwise valid JavaScript.
+    InternalError,
     /// A lexical binding was read or written before initialization.
     ReferenceError,
     /// Source supplied to a dynamic JavaScript compiler was not valid.
@@ -571,6 +573,7 @@ impl fmt::Display for JsException {
         match &self.payload {
             ExceptionPayload::EngineError { kind, message } => {
                 let name = match kind {
+                    ExceptionKind::InternalError => "InternalError",
                     ExceptionKind::ReferenceError => "ReferenceError",
                     ExceptionKind::SyntaxError => "SyntaxError",
                     ExceptionKind::TypeError => "TypeError",

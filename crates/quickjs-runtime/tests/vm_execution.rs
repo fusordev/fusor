@@ -402,8 +402,8 @@ fn captured_tdz_state_survives_frame_teardown() {
 fn whole_graph_feature_admission_rejects_unsupported_unreachable_code() {
     let authority = compile(
         "function fail(){\
-            if(false){return 1+2;}\
-            function child(){return -1;}\
+            if(false){return \"key\" in {};}\
+            function child(left,right){return left instanceof right;}\
             return 0;\
         }",
         "fail",
@@ -419,7 +419,7 @@ fn whole_graph_feature_admission_rejects_unsupported_unreachable_code() {
                 .copied()
                 .map(|instruction| instruction.decoded().instruction().opcode())
         })
-        .find(|opcode| matches!(opcode, FinalOpcode::Add | FinalOpcode::Neg))
+        .find(|opcode| matches!(opcode, FinalOpcode::In | FinalOpcode::InstanceOf))
         .expect("unsupported opcode in graph");
 
     let mut runtime = runtime();

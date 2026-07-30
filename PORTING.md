@@ -282,10 +282,13 @@ A milestone is complete only when all of its checked items pass in CI.
         own/inherited setters execute iteratively with the original receiver
         and assignment RHS. Cooked and canonical literal names share exact
         property identity, while retained method source keeps raw spelling.
-        Frames and all traversals use explicit vectors. BigInt values, coercive
-        numeric operations, computed/exotic object operations, computed member
-        keys, async/generator methods, `super`/home-object
-        semantics, realm-global setter dispatch, dynamic operators,
+        Computed reads/writes/calls and computed data/method/accessor
+        definitions run resumable `ToPropertyKey`. The complete currently
+        lowered non-BigInt dynamic-operator family runs resumable
+        `ToPrimitive`/Number/String coercion with exact postfix stack results.
+        Frames and all traversals use explicit vectors. BigInt values and
+        mixed numeric domains, exotic-object operations, async/generator
+        methods, `super`/home-object semantics, realm-global setter dispatch,
         nonordinary constructor families, and tail-call opcodes remain fail
         closed.
   - [x] Add direct ordinary JavaScript-to-JavaScript calls end to end:
@@ -418,12 +421,29 @@ A milestone is complete only when all of its checked items pass in CI.
       nonconstructable headers, derived names/lengths,
       enumerable/configurable descriptors, source-order data/accessor
       replacement, and iterative setter dispatch that discards the setter
-      completion while preserving the assignment RHS. Computed keys,
-      async/generator methods, `super`/home-object semantics, realm-global
-      setter dispatch, prototype mutation, exotics, and transition interning
-      remain pending.
+      completion while preserving the assignment RHS. Computed keys preserve
+      exact String/Symbol identity through resumable getters and conversion
+      methods for reads, writes, calls, data definitions, and synchronous
+      method/accessor definitions. Async/generator methods,
+      `super`/home-object semantics, realm-global setter dispatch, prototype
+      mutation, exotics, and transition interning remain pending.
 - [ ] ECMAScript primitive conversions, parsing/printing, and remaining numeric
       edge cases.
+  - [x] Implement the complete currently lowered non-BigInt dynamic-operator
+        family: unary plus/negation/bitwise-not, prefix/postfix updates,
+        arithmetic and exponentiation, signed/unsigned shifts, bitwise
+        operations, relational comparisons, loose equality, and strict
+        equality. Default/Number-hint `ToPrimitive` is an explicit resumable
+        state machine across inherited data/accessor lookup and native or
+        bytecode calls. UTF-16 `StringToNumber`, radix tie-to-even rounding,
+        `ToInt32`, and `ToUint32` match the pinned oracle, while Symbol errors,
+        signed zero, NaN, left-to-right coercion, exception provenance,
+        postfix two-value stack shape, fallible Number formatting, exact
+        string-limit `InternalError`, and whole-graph admission remain
+        regression-tested.
+  - [ ] Add primitive wrapper payloads/prototypes, the remaining conversion
+        hints and built-in entry points, BigInt numeric domains, and the
+        remaining conversion/formatting surface.
 - [ ] Complete property descriptors, interned shapes, mutable prototypes, and
       exotic objects.
 - [ ] Dense/sparse arrays and typed indexed access.

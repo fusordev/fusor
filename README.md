@@ -21,19 +21,25 @@ source-ordered static identifier, quoted String, Number, and BigInt
 literal-named data properties and synchronous methods/getters/setters, static
 data property reads/writes, own and inherited static accessor getter/setter
 dispatch, strict receiver-aware static method calls, and arbitrary explicit
-`throw` values.
+`throw` values. Computed property reads, writes, calls, data definitions, and
+synchronous methods/accessors perform resumable `ToPropertyKey`, including
+exact well-known Symbol identity. Non-BigInt unary, update, arithmetic, shift,
+bitwise, relational, loose-equality, and strict-equality operators execute with
+left-to-right resumable `ToPrimitive`, exact UTF-16 `StringToNumber`,
+`ToInt32`/`ToUint32`, signed-zero and NaN behavior, and verified postfix stack
+results.
 Functions and ordinary objects use typed `Arc`-backed public roots, and the
 iterative collector traces their data properties, accessor functions,
 prototypes, closures, and binding cells. Nested calls, recursion,
 getter/setter dispatch, and abrupt unwinding use an explicit frame vector with
 cumulative frame/value ceilings and shared fuel. Installation scans every
-instruction in every template before mutation. Computed/exotic object
-operations, computed keys, shorthand/spread and `__proto__` data-initializer
-semantics, anonymous data-function inferred names, async/generator methods,
-`super`/home-object semantics, realm-global accessor writes,
-optional/spread/apply calls, BigInt values, general coercive operations, dynamic
-operators, serialized bytecode, every form of eval, and catch/finally
-typed-stack semantics remain deferred and fail closed.
+instruction in every template before mutation. BigInt values and mixed numeric
+domains, arrays and other exotic objects, shorthand/spread and `__proto__`
+data-initializer semantics, anonymous data-function inferred names,
+async/generator methods, `super`/home-object semantics, realm-global accessor
+writes, optional/spread/apply calls, remaining primitive-wrapper coercions,
+serialized bytecode, every form of eval, and catch/finally typed-stack
+semantics remain deferred and fail closed.
 Ordinary `new` calls now execute constructor-capable bytecode functions and
 materialize their `name`, `length`, and
 `prototype.constructor` graph. The `quickjs` facade supplies one immutable

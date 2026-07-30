@@ -60,37 +60,85 @@ fn atom_failure_rolls_back_the_complete_installation() {
 }
 
 #[test]
-fn unsupported_child_opcode_is_rejected_even_when_the_child_is_never_created() {
+fn complete_non_bigint_dynamic_operator_family_is_admitted_across_the_complete_graph() {
     let authority = compile(
         "function outer(){\
-            function child(value){return value+1;}\
+            function child(left,right){\
+                let value=left;\
+                +left;-left;~left;\
+                ++value;--value;value++;value--;\
+                left*right;left/right;left%right;left+right;left-right;left**right;\
+                left<<right;left>>right;left>>>right;\
+                left<right;left<=right;left>right;left>=right;\
+                left==right;left!=right;left===right;left!==right;\
+                left&right;left^right;return left|right;\
+            }\
             return 0;\
         }",
         "outer",
     );
+    let child = authority
+        .function(FunctionTemplateId::new(1))
+        .expect("nested child");
+    let child_opcodes = child
+        .function()
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    for expected in [
+        FinalOpcode::Neg,
+        FinalOpcode::Plus,
+        FinalOpcode::Dec,
+        FinalOpcode::Inc,
+        FinalOpcode::PostDec,
+        FinalOpcode::PostInc,
+        FinalOpcode::Not,
+        FinalOpcode::Mul,
+        FinalOpcode::Div,
+        FinalOpcode::Mod,
+        FinalOpcode::Add,
+        FinalOpcode::Sub,
+        FinalOpcode::Pow,
+        FinalOpcode::Shl,
+        FinalOpcode::Sar,
+        FinalOpcode::Shr,
+        FinalOpcode::Lt,
+        FinalOpcode::Lte,
+        FinalOpcode::Gt,
+        FinalOpcode::Gte,
+        FinalOpcode::Eq,
+        FinalOpcode::Neq,
+        FinalOpcode::StrictEq,
+        FinalOpcode::StrictNeq,
+        FinalOpcode::And,
+        FinalOpcode::Xor,
+        FinalOpcode::Or,
+    ] {
+        assert!(
+            child_opcodes.contains(&expected),
+            "child must exercise {expected:?}"
+        );
+    }
+
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
-    let before = runtime.usage();
-    let error = {
-        let mut context = runtime.context(&realm).expect("context");
-        context
-            .instantiate(authority)
-            .expect_err("unsupported child")
-    };
-    assert!(matches!(
-        error,
-        InstallError::UnsupportedOpcode {
-            function,
-            opcode: FinalOpcode::Add,
-            ..
-        } if function == FunctionTemplateId::new(1)
-    ));
-    assert_eq!(runtime.usage(), before);
+    let mut context = runtime.context(&realm).expect("context");
+    context
+        .instantiate(authority)
+        .expect("the complete non-BigInt dynamic operator family is supported");
 }
 
 #[test]
-fn bigint_is_rejected_before_runtime_mutation() {
-    let authority = compile("function bigint(){return 1n;}", "bigint");
+fn unsupported_nested_bigint_is_rejected_before_runtime_mutation() {
+    let authority = compile(
+        "function outer(){\
+            function child(){return 1n;}\
+            return 0;\
+        }",
+        "outer",
+    );
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let before = runtime.usage();
@@ -106,32 +154,43 @@ fn bigint_is_rejected_before_runtime_mutation() {
             function,
             opcode: FinalOpcode::PushBigIntI32,
             ..
-        } if function == FunctionTemplateId::new(0)
+        } if function == FunctionTemplateId::new(1)
     ));
     assert_eq!(runtime.usage(), before);
 }
 
 #[test]
-fn negative_zero_waits_for_complete_unary_numeric_semantics() {
-    let authority = compile("function negativeZero(){return -0;}", "negativeZero");
-    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-    let realm = runtime.create_realm().expect("realm");
-    let before = runtime.usage();
-    let error = {
-        let mut context = runtime.context(&realm).expect("context");
-        context
-            .instantiate(authority)
-            .expect_err("unary numeric semantics are deferred")
-    };
-    assert!(matches!(
-        error,
-        InstallError::UnsupportedOpcode {
-            function,
-            opcode: FinalOpcode::Neg,
-            ..
-        } if function == FunctionTemplateId::new(0)
-    ));
-    assert_eq!(runtime.usage(), before);
+fn object_operators_remain_rejected_before_runtime_mutation() {
+    for (source, expected) in [
+        (
+            "function outer(){function child(left,right){return left in right;}return 0;}",
+            FinalOpcode::In,
+        ),
+        (
+            "function outer(){function child(left,right){return left instanceof right;}return 0;}",
+            FinalOpcode::InstanceOf,
+        ),
+    ] {
+        let authority = compile(source, "outer");
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let before = runtime.usage();
+        let error = {
+            let mut context = runtime.context(&realm).expect("context");
+            context
+                .instantiate(authority)
+                .expect_err("object operators remain deferred")
+        };
+        assert!(matches!(
+            error,
+            InstallError::UnsupportedOpcode {
+                function,
+                opcode,
+                ..
+            } if function == FunctionTemplateId::new(1) && opcode == expected
+        ));
+        assert_eq!(runtime.usage(), before);
+    }
 }
 
 #[test]
