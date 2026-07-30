@@ -35,9 +35,10 @@ use quickjs_bytecode::{
 
 use crate::{
     Atom, AtomLimits, AtomTable, AtomUsage, Function, HandleError, HandleKind, InstallError,
-    JsNumber, JsString, JsValue, RuntimeError, RuntimeResource,
+    JsNumber, JsString, JsValue, PropertyKey, PropertyLayout, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
-    ids::{BindingCellId, FunctionId, InstalledCodeId, RealmId},
+    ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmId},
+    object::{HeapObject, ObjectRecord},
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
 
@@ -47,6 +48,8 @@ const DEFAULT_MAX_INSTALLED_TEMPLATES: u64 = 1_048_576;
 const DEFAULT_MAX_INSTALLED_ATOMS: u64 = 1_048_576;
 const DEFAULT_MAX_INSTALLED_CONSTANTS: u64 = 1_048_576;
 const DEFAULT_MAX_HEAP_FUNCTIONS: u64 = 1_048_576;
+const DEFAULT_MAX_HEAP_OBJECTS: u64 = 1_048_576;
+const DEFAULT_MAX_OBJECT_PROPERTIES: u64 = 16_777_216;
 const DEFAULT_MAX_BINDING_CELLS: u64 = 1_048_576;
 const DEFAULT_MAX_PUBLIC_ROOTS: u64 = 1_048_576;
 const DEFAULT_MAX_ACTIVE_FRAMES: u32 = 1_024;
@@ -66,6 +69,8 @@ pub struct RuntimeLimits {
     max_installed_atoms: u64,
     max_installed_constants: u64,
     pub(crate) max_heap_functions: u64,
+    pub(crate) max_heap_objects: u64,
+    pub(crate) max_object_properties: u64,
     pub(crate) max_binding_cells: u64,
     max_public_roots: u64,
     pub(crate) max_active_frames: u32,
@@ -122,6 +127,20 @@ impl RuntimeLimits {
         self
     }
 
+    /// Replaces the maximum live ordinary-object count.
+    #[must_use]
+    pub const fn with_max_heap_objects(mut self, maximum: u64) -> Self {
+        self.max_heap_objects = maximum;
+        self
+    }
+
+    /// Replaces the maximum aggregate own-property slot count.
+    #[must_use]
+    pub const fn with_max_object_properties(mut self, maximum: u64) -> Self {
+        self.max_object_properties = maximum;
+        self
+    }
+
     /// Replaces the maximum live binding-cell count.
     #[must_use]
     pub const fn with_max_binding_cells(mut self, maximum: u64) -> Self {
@@ -129,7 +148,7 @@ impl RuntimeLimits {
         self
     }
 
-    /// Replaces the maximum public function-root count.
+    /// Replaces the maximum public function/object-root count.
     #[must_use]
     pub const fn with_max_public_roots(mut self, maximum: u64) -> Self {
         self.max_public_roots = maximum;
@@ -161,6 +180,8 @@ impl Default for RuntimeLimits {
             max_installed_atoms: DEFAULT_MAX_INSTALLED_ATOMS,
             max_installed_constants: DEFAULT_MAX_INSTALLED_CONSTANTS,
             max_heap_functions: DEFAULT_MAX_HEAP_FUNCTIONS,
+            max_heap_objects: DEFAULT_MAX_HEAP_OBJECTS,
+            max_object_properties: DEFAULT_MAX_OBJECT_PROPERTIES,
             max_binding_cells: DEFAULT_MAX_BINDING_CELLS,
             max_public_roots: DEFAULT_MAX_PUBLIC_ROOTS,
             max_active_frames: DEFAULT_MAX_ACTIVE_FRAMES,
@@ -181,6 +202,8 @@ pub struct RuntimeUsage {
     installed_atoms: u64,
     installed_constants: u64,
     heap_functions: u64,
+    heap_objects: u64,
+    object_properties: u64,
     binding_cells: u64,
     public_roots: u64,
     pending_releases: u64,
@@ -223,14 +246,26 @@ impl RuntimeUsage {
         self.heap_functions
     }
 
+    /// Returns the number of live ordinary objects, including realm roots.
+    #[must_use]
+    pub const fn heap_objects(self) -> u64 {
+        self.heap_objects
+    }
+
+    /// Returns the aggregate own-property slot count.
+    #[must_use]
+    pub const fn object_properties(self) -> u64 {
+        self.object_properties
+    }
+
     /// Returns the number of live captured-binding cells.
     #[must_use]
     pub const fn binding_cells(self) -> u64 {
         self.binding_cells
     }
 
-    /// Returns charged public function roots, including queued undrained
-    /// releases.
+    /// Returns charged public function/object roots, including queued
+    /// undrained releases.
     #[must_use]
     pub const fn public_roots(self) -> u64 {
         self.public_roots
@@ -243,7 +278,9 @@ impl RuntimeUsage {
     }
 }
 
-struct RealmState;
+struct RealmState {
+    object_prototype: ObjectId,
+}
 
 struct RealmHandle {
     owner: Weak<ReleaseMailbox>,
@@ -304,6 +341,7 @@ pub(crate) struct HeapFunction {
     pub(crate) code: InstalledCodeId,
     pub(crate) template: FunctionTemplateId,
     pub(crate) environment: Vec<BindingCellId>,
+    pub(crate) object: ObjectRecord,
     pub(crate) public_roots: u32,
 }
 
@@ -330,11 +368,13 @@ pub struct Runtime {
     realms: Arena<crate::ids::RealmMarker, RealmState>,
     pub(crate) code: Arena<crate::ids::InstalledCodeMarker, InstalledCode>,
     pub(crate) functions: Arena<crate::ids::FunctionMarker, HeapFunction>,
+    pub(crate) objects: Arena<crate::ids::ObjectMarker, HeapObject>,
     pub(crate) cells: Arena<crate::ids::BindingCellMarker, BindingCell>,
     pub(crate) limits: RuntimeLimits,
     installed_templates: u64,
     installed_atoms: u64,
     installed_constants: u64,
+    object_properties: u64,
     public_roots: u64,
     pub(crate) collection_pending: bool,
 }
@@ -360,11 +400,13 @@ impl Runtime {
             realms: Arena::new(runtime_identity),
             code: Arena::new(runtime_identity),
             functions: Arena::new(runtime_identity),
+            objects: Arena::new(runtime_identity),
             cells: Arena::new(runtime_identity),
             limits,
             installed_templates: 0,
             installed_atoms: 0,
             installed_constants: 0,
+            object_properties: 0,
             public_roots: 0,
             collection_pending: false,
         })
@@ -386,13 +428,41 @@ impl Runtime {
             self.limits.max_realms,
             usize_to_u64(self.realms.len()).saturating_add(1),
         )?;
-        let id =
-            self.realms
-                .try_insert(RealmState)
-                .map_err(|_| RuntimeError::AllocationFailed {
-                    resource: RuntimeResource::Realms,
-                    additional: 1,
-                })?;
+        check_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        self.realms
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::Realms,
+                additional: 1,
+            })?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let object_prototype = self
+            .objects
+            .try_insert(HeapObject {
+                record: ObjectRecord::empty(None),
+                public_roots: 0,
+            })
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let Ok(id) = self.realms.try_insert(RealmState { object_prototype }) else {
+            let removed = self.objects.remove(object_prototype);
+            debug_assert!(removed.is_some());
+            return Err(RuntimeError::AllocationFailed {
+                resource: RuntimeResource::Realms,
+                additional: 1,
+            });
+        };
         Ok(Realm(Arc::new(RealmHandle {
             owner: Arc::downgrade(&self.mailbox),
             id,
@@ -439,6 +509,8 @@ impl Runtime {
             installed_atoms: self.installed_atoms,
             installed_constants: self.installed_constants,
             heap_functions: usize_to_u64(self.functions.len()),
+            heap_objects: usize_to_u64(self.objects.len()),
+            object_properties: self.object_properties,
             binding_cells: usize_to_u64(self.cells.len()),
             public_roots: self.public_roots,
             pending_releases: usize_to_u64(self.mailbox.pending_len()),
@@ -454,12 +526,12 @@ impl Runtime {
         self.atoms.usage()
     }
 
-    /// Drains dropped public roots and traces the runtime-local function/cell
-    /// graph from the remaining public function roots.
+    /// Drains dropped public roots and traces the runtime-local object,
+    /// function, and binding-cell graph from public and realm-owned roots.
     ///
     /// The traversal and dead-set reclamation are iterative. Runtime function
-    /// objects and binding cells never use `Arc`, so self- and mutual-capture
-    /// cycles are reclaimable.
+    /// heap nodes and binding cells never use `Arc`, so property, prototype,
+    /// and closure cycles are reclaimable.
     ///
     /// # Errors
     ///
@@ -478,6 +550,13 @@ impl Runtime {
                 resource: RuntimeResource::Collection,
                 additional: self.functions.len(),
             })?;
+        let mut marked_objects = HashSet::new();
+        marked_objects
+            .try_reserve(self.objects.len())
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::Collection,
+                additional: self.objects.len(),
+            })?;
         let mut marked_cells = HashSet::new();
         marked_cells
             .try_reserve(self.cells.len())
@@ -486,16 +565,44 @@ impl Runtime {
                 additional: self.cells.len(),
             })?;
         let mut work = Vec::new();
-        work.try_reserve(self.functions.len().saturating_add(self.cells.len()))
+        let graph_nodes = self
+            .functions
+            .len()
+            .saturating_add(self.objects.len())
+            .saturating_add(self.cells.len());
+        work.try_reserve(graph_nodes)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::Collection,
-                additional: self.functions.len().saturating_add(self.cells.len()),
+                additional: graph_nodes,
             })?;
 
         for (id, function) in self.functions.iter() {
-            if function.public_roots > 0 && marked_functions.insert(id) {
-                work.push(GraphNode::Function(id));
+            if function.public_roots > 0 {
+                mark_heap_reference(
+                    HeapReference::Function(id),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
             }
+        }
+        for (id, object) in self.objects.iter() {
+            if object.public_roots > 0 {
+                mark_heap_reference(
+                    HeapReference::Object(id),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+            }
+        }
+        for (_, realm) in self.realms.iter() {
+            mark_heap_reference(
+                HeapReference::Object(realm.object_prototype),
+                &mut marked_functions,
+                &mut marked_objects,
+                &mut work,
+            );
         }
 
         while let Some(node) = work.pop() {
@@ -507,14 +614,35 @@ impl Runtime {
                                 work.push(GraphNode::Cell(cell));
                             }
                         }
+                        mark_object_record(
+                            &function.object,
+                            &mut marked_functions,
+                            &mut marked_objects,
+                            &mut work,
+                        );
+                    }
+                }
+                GraphNode::Object(id) => {
+                    if let Some(object) = self.objects.get(id) {
+                        mark_object_record(
+                            &object.record,
+                            &mut marked_functions,
+                            &mut marked_objects,
+                            &mut work,
+                        );
                     }
                 }
                 GraphNode::Cell(id) => {
-                    if let Some(cell) = self.cells.get(id)
-                        && let SlotValue::Value(StoredValue::Function(function)) = &cell.value
-                        && marked_functions.insert(*function)
-                    {
-                        work.push(GraphNode::Function(*function));
+                    if let Some(cell) = self.cells.get(id) {
+                        match &cell.value {
+                            SlotValue::Uninitialized => {}
+                            SlotValue::Value(value) => mark_stored_value(
+                                value,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            ),
+                        }
                     }
                 }
             }
@@ -534,6 +662,20 @@ impl Runtime {
                 .filter(|id| !marked_functions.contains(id)),
         );
 
+        let mut dead_objects = Vec::new();
+        dead_objects
+            .try_reserve(self.objects.len().saturating_sub(marked_objects.len()))
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::Collection,
+                additional: self.objects.len().saturating_sub(marked_objects.len()),
+            })?;
+        dead_objects.extend(
+            self.objects
+                .iter()
+                .map(|(id, _)| id)
+                .filter(|id| !marked_objects.contains(id)),
+        );
+
         let mut dead_cells = Vec::new();
         dead_cells
             .try_reserve(self.cells.len().saturating_sub(marked_cells.len()))
@@ -549,6 +691,7 @@ impl Runtime {
         );
 
         let functions = dead_functions.len();
+        let objects = dead_objects.len();
         let cells = dead_cells.len();
         let mut maybe_dead_code = Vec::new();
         maybe_dead_code
@@ -559,14 +702,24 @@ impl Runtime {
             })?;
         for id in dead_functions {
             let removed = self.functions.remove(id);
-            if let Some(function) = removed
-                && let Some(code) = self.code.get_mut(function.code)
-            {
-                debug_assert!(code.live_functions > 0);
-                code.live_functions = code.live_functions.saturating_sub(1);
-                if code.live_functions == 0 {
-                    maybe_dead_code.push(function.code);
+            if let Some(function) = removed {
+                self.object_properties = self
+                    .object_properties
+                    .saturating_sub(usize_to_u64(function.object.property_count()));
+                if let Some(code) = self.code.get_mut(function.code) {
+                    debug_assert!(code.live_functions > 0);
+                    code.live_functions = code.live_functions.saturating_sub(1);
+                    if code.live_functions == 0 {
+                        maybe_dead_code.push(function.code);
+                    }
                 }
+            }
+        }
+        for id in dead_objects {
+            if let Some(object) = self.objects.remove(id) {
+                self.object_properties = self
+                    .object_properties
+                    .saturating_sub(usize_to_u64(object.record.property_count()));
             }
         }
         for id in dead_cells {
@@ -602,6 +755,7 @@ impl Runtime {
 
         Ok(CollectionReport {
             functions: usize_to_u64(functions),
+            objects: usize_to_u64(objects),
             binding_cells: usize_to_u64(cells),
         })
     }
@@ -620,6 +774,118 @@ impl Runtime {
 
     pub(crate) fn contains_realm(&self, realm: RealmId) -> bool {
         self.realms.contains(realm)
+    }
+
+    pub(crate) fn heap_reference_is_live(&self, reference: HeapReference) -> bool {
+        match reference {
+            HeapReference::Function(function) => self.functions.contains(function),
+            HeapReference::Object(object) => self.objects.contains(object),
+        }
+    }
+
+    pub(crate) fn realm_object_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        self.realms
+            .get(realm)
+            .map(|state| state.object_prototype)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })
+    }
+
+    pub(crate) fn object_record(
+        &self,
+        reference: HeapReference,
+    ) -> Result<&ObjectRecord, crate::EngineFault> {
+        match reference {
+            HeapReference::Function(function) => self
+                .functions
+                .get(function)
+                .map(|function| &function.object)
+                .ok_or_else(|| stale_heap_reference(reference)),
+            HeapReference::Object(object) => self
+                .objects
+                .get(object)
+                .map(|object| &object.record)
+                .ok_or_else(|| stale_heap_reference(reference)),
+        }
+    }
+
+    pub(crate) fn object_record_mut(
+        &mut self,
+        reference: HeapReference,
+    ) -> Result<&mut ObjectRecord, crate::EngineFault> {
+        match reference {
+            HeapReference::Function(function) => self
+                .functions
+                .get_mut(function)
+                .map(|function| &mut function.object)
+                .ok_or_else(|| stale_heap_reference(reference)),
+            HeapReference::Object(object) => self
+                .objects
+                .get_mut(object)
+                .map(|object| &mut object.record)
+                .ok_or_else(|| stale_heap_reference(reference)),
+        }
+    }
+
+    pub(crate) fn allocate_ordinary_object(
+        &mut self,
+        prototype: ObjectId,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.objects.contains(prototype) {
+            return Err(stale_heap_reference(HeapReference::Object(prototype)).into());
+        }
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let object = self
+            .objects
+            .try_insert(HeapObject {
+                record: ObjectRecord::empty(Some(HeapReference::Object(prototype))),
+                public_roots: 0,
+            })
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    pub(crate) fn append_data_property(
+        &mut self,
+        reference: HeapReference,
+        key: PropertyKey,
+        layout: PropertyLayout,
+        value: StoredValue,
+    ) -> Result<(), crate::ExecutionError> {
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties.saturating_add(1),
+        )?;
+        self.object_record_mut(reference)?
+            .append_data(key, layout, value)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        self.object_properties += 1;
+        self.collection_pending = true;
+        Ok(())
     }
 
     pub(crate) fn prepare_execution_safe_point(&mut self) -> Result<(), crate::ExecutionError> {
@@ -681,9 +947,9 @@ impl Runtime {
         &mut self,
         value: StoredValue,
     ) -> Result<JsValue, crate::ExecutionError> {
-        let function = match value.into_root_target() {
+        let reference = match value.into_root_target() {
             RootTarget::Primitive(value) => return Ok(JsValue::primitive(&self.mailbox, value)),
-            RootTarget::Heap(HeapReference::Function(function)) => function,
+            RootTarget::Heap(reference) => reference,
         };
         check_execution_limit(
             RuntimeResource::PublicRoots,
@@ -696,16 +962,21 @@ impl Runtime {
                 resource: RuntimeResource::ReleaseMailbox,
                 additional: 1,
             })?;
-        let Some(node) = self.functions.get_mut(function) else {
-            self.mailbox.cancel_reserved_root();
-            return Err(crate::EngineFault::StaleHeapEdge {
-                edge: "function",
-                index: function.index(),
-                generation: function.generation(),
-            }
-            .into());
+        let public_roots = match reference {
+            HeapReference::Function(function) => self
+                .functions
+                .get_mut(function)
+                .map(|node| &mut node.public_roots),
+            HeapReference::Object(object) => self
+                .objects
+                .get_mut(object)
+                .map(|node| &mut node.public_roots),
         };
-        let Some(next_roots) = node.public_roots.checked_add(1) else {
+        let Some(public_roots) = public_roots else {
+            self.mailbox.cancel_reserved_root();
+            return Err(stale_heap_reference(reference).into());
+        };
+        let Some(next_roots) = public_roots.checked_add(1) else {
             self.mailbox.cancel_reserved_root();
             return Err(crate::ExecutionError::LimitExceeded {
                 resource: RuntimeResource::PublicRoots,
@@ -713,12 +984,9 @@ impl Runtime {
                 observed: u64::from(u32::MAX) + 1,
             });
         };
-        node.public_roots = next_roots;
+        *public_roots = next_roots;
         self.public_roots += 1;
-        Ok(JsValue::rooted_heap(
-            &self.mailbox,
-            HeapReference::Function(function),
-        ))
+        Ok(JsValue::rooted_heap(&self.mailbox, reference))
     }
 
     pub(crate) fn drain_releases(&mut self) {
@@ -730,6 +998,13 @@ impl Runtime {
             match reference {
                 HeapReference::Function(function) => {
                     if let Some(node) = self.functions.get_mut(function) {
+                        debug_assert!(node.public_roots > 0);
+                        node.public_roots = node.public_roots.saturating_sub(1);
+                        self.public_roots = self.public_roots.saturating_sub(1);
+                    }
+                }
+                HeapReference::Object(object) => {
+                    if let Some(node) = self.objects.get_mut(object) {
                         debug_assert!(node.public_roots > 0);
                         node.public_roots = node.public_roots.saturating_sub(1);
                         self.public_roots = self.public_roots.saturating_sub(1);
@@ -836,13 +1111,60 @@ impl Runtime {
 
 enum GraphNode {
     Function(FunctionId),
+    Object(ObjectId),
     Cell(BindingCellId),
+}
+
+fn mark_heap_reference(
+    reference: HeapReference,
+    marked_functions: &mut HashSet<FunctionId>,
+    marked_objects: &mut HashSet<ObjectId>,
+    work: &mut Vec<GraphNode>,
+) {
+    match reference {
+        HeapReference::Function(function) => {
+            if marked_functions.insert(function) {
+                work.push(GraphNode::Function(function));
+            }
+        }
+        HeapReference::Object(object) => {
+            if marked_objects.insert(object) {
+                work.push(GraphNode::Object(object));
+            }
+        }
+    }
+}
+
+fn mark_stored_value(
+    value: &StoredValue,
+    marked_functions: &mut HashSet<FunctionId>,
+    marked_objects: &mut HashSet<ObjectId>,
+    work: &mut Vec<GraphNode>,
+) {
+    if let Some(reference) = value.heap_reference() {
+        mark_heap_reference(reference, marked_functions, marked_objects, work);
+    }
+}
+
+fn mark_object_record(
+    record: &ObjectRecord,
+    marked_functions: &mut HashSet<FunctionId>,
+    marked_objects: &mut HashSet<ObjectId>,
+    work: &mut Vec<GraphNode>,
+) {
+    if let Some(prototype) = record.prototype() {
+        mark_heap_reference(prototype, marked_functions, marked_objects, work);
+    }
+    for value in record.values() {
+        mark_stored_value(value, marked_functions, marked_objects, work);
+    }
 }
 
 /// Counts reclaimed by one cycle-collection pass.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CollectionReport {
     functions: u64,
+    objects: u64,
     binding_cells: u64,
 }
 
@@ -851,6 +1173,12 @@ impl CollectionReport {
     #[must_use]
     pub const fn functions(self) -> u64 {
         self.functions
+    }
+
+    /// Returns reclaimed ordinary objects.
+    #[must_use]
+    pub const fn objects(self) -> u64 {
+        self.objects
     }
 
     /// Returns reclaimed binding cells.
@@ -1026,6 +1354,7 @@ impl Context<'_> {
             code,
             template: root_template,
             environment: Vec::new(),
+            object: ObjectRecord::empty(None),
             public_roots: 1,
         }) else {
             let removed = self.runtime.code.remove(code);
@@ -1102,11 +1431,15 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushAtomValue
             | FinalOpcode::Undefined
             | FinalOpcode::Null
+            | FinalOpcode::PushThis
             | FinalOpcode::PushFalse
             | FinalOpcode::PushTrue
+            | FinalOpcode::Object
             | FinalOpcode::Drop
             | FinalOpcode::Dup
+            | FinalOpcode::Insert2
             | FinalOpcode::Call
+            | FinalOpcode::CallMethod
             | FinalOpcode::Throw
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
@@ -1126,6 +1459,10 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetVarRefCheck
             | FinalOpcode::PutVarRefCheck
             | FinalOpcode::CloseLoc
+            | FinalOpcode::GetField
+            | FinalOpcode::GetField2
+            | FinalOpcode::PutField
+            | FinalOpcode::DefineField
             | FinalOpcode::IfFalse
             | FinalOpcode::IfTrue
             | FinalOpcode::Goto
@@ -1208,6 +1545,21 @@ fn check_limit(resource: RuntimeResource, limit: u64, observed: u64) -> Result<(
             limit,
             observed,
         })
+    }
+}
+
+fn stale_heap_reference(reference: HeapReference) -> crate::EngineFault {
+    match reference {
+        HeapReference::Function(function) => crate::EngineFault::StaleHeapEdge {
+            edge: "function",
+            index: function.index(),
+            generation: function.generation(),
+        },
+        HeapReference::Object(object) => crate::EngineFault::StaleHeapEdge {
+            edge: "object",
+            index: object.index(),
+            generation: object.generation(),
+        },
     }
 }
 

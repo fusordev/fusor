@@ -38,6 +38,29 @@ fn flow(
     imported_closures: u32,
     constant_kinds: &[CompilerConstantKind],
 ) -> Arc<VerifiedControlFlow> {
+    flow_with_strict(
+        instructions,
+        atoms,
+        arguments,
+        locals,
+        captures,
+        imported_closures,
+        constant_kinds,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flow_with_strict(
+    instructions: &[(FinalOpcode, Operands)],
+    atoms: u32,
+    arguments: u32,
+    locals: u32,
+    captures: &[CompilerCapturedBinding],
+    imported_closures: u32,
+    constant_kinds: &[CompilerConstantKind],
+    strict: bool,
+) -> Arc<VerifiedControlFlow> {
     Arc::new(
         verify_compiler_control_flow(
             UnverifiedCompilerFunctionBody::new(
@@ -50,7 +73,7 @@ fn flow(
                     imported_closures,
                 ),
                 UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
-                    false,
+                    strict,
                     arguments,
                     u32::try_from(captures.len()).expect("capture count"),
                 ),
@@ -269,7 +292,7 @@ fn final_authority_keeps_throw_error_fail_closed() {
 }
 
 #[test]
-fn final_authority_admits_only_direct_calls_and_records_the_requirement() {
+fn final_authority_admits_direct_calls_and_records_the_requirement() {
     let instructions = [
         (FinalOpcode::Undefined, Operands::None),
         (FinalOpcode::Call0, Operands::NPopX),
@@ -350,20 +373,122 @@ fn final_authority_admits_only_direct_calls_and_records_the_requirement() {
 }
 
 #[test]
-fn final_authority_keeps_non_direct_call_families_fail_closed() {
-    assert_final_authority_rejects_call_family(
-        &[
-            (FinalOpcode::Undefined, Operands::None),
-            (FinalOpcode::Undefined, Operands::None),
-            (
-                FinalOpcode::CallMethod,
-                Operands::NPop { argument_count: 0 },
-            ),
-            (FinalOpcode::Return, Operands::None),
-        ],
-        FinalOpcode::CallMethod,
-        &[0, 1, 2, 5],
+fn final_authority_admits_ordinary_object_properties_and_method_calls() {
+    let text = "function f(argument){var local;return undefined}";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let variables = [
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(1)),
+            ScopeLink::End,
+            parameter_policy(),
+            false,
+            None,
+        ),
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(2)),
+            ScopeLink::End,
+            var_policy(),
+            false,
+            None,
+        ),
+    ];
+    let instructions = [
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (
+            FinalOpcode::DefineField,
+            Operands::Atom(AtomPoolIndex::new(3)),
+        ),
+        (FinalOpcode::Dup, Operands::None),
+        (FinalOpcode::GetField, Operands::Atom(AtomPoolIndex::new(3))),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Insert2, Operands::None),
+        (FinalOpcode::PutField, Operands::Atom(AtomPoolIndex::new(3))),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Object, Operands::None),
+        (
+            FinalOpcode::GetField2,
+            Operands::Atom(AtomPoolIndex::new(3)),
+        ),
+        (
+            FinalOpcode::CallMethod,
+            Operands::NPop { argument_count: 0 },
+        ),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let pcs = [0, 1, 2, 7, 8, 13, 14, 15, 16, 21, 22, 23, 28, 31];
+
+    let verified = verified_single(
+        &instructions,
+        &[atom("f"), atom("argument"), atom("local"), atom("value")],
+        &variables,
+        source(
+            text,
+            function_span,
+            Some(SourceByteSpan::new(9, 10)),
+            &pcs.map(|pc| (pc, function_span)),
+        ),
+    )
+    .expect("ordinary static property and method-call opcodes gain final authority");
+
+    assert_eq!(
+        verified.requirements(),
+        [
+            ExecutionRequirement::CoreValues,
+            ExecutionRequirement::Numbers,
+            ExecutionRequirement::Strings,
+            ExecutionRequirement::OrdinaryObjects,
+            ExecutionRequirement::Calls,
+        ]
     );
+}
+
+#[test]
+fn push_this_authority_is_limited_to_strict_functions() {
+    let instructions = [
+        (FinalOpcode::PushThis, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let text = "function f(){\"use strict\";return this}";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let source = || {
+        source(
+            text,
+            function_span,
+            Some(SourceByteSpan::new(9, 10)),
+            &[(0, function_span), (1, function_span)],
+        )
+    };
+    let strict =
+        shaped_input_with_strict(&instructions, &[atom("f")], &[], 0, 0, &[], source(), true);
+    let verified =
+        verify_compiler_bytecode_graph(strict, BytecodeGraphVerificationLimits::default())
+            .expect("strict functions may load their raw receiver");
+    assert_eq!(
+        verified.requirements(),
+        [
+            ExecutionRequirement::CoreValues,
+            ExecutionRequirement::Strings,
+            ExecutionRequirement::Calls,
+        ]
+    );
+
+    let sloppy =
+        shaped_input_with_strict(&instructions, &[atom("f")], &[], 0, 0, &[], source(), false);
+    let error = verify_compiler_bytecode_graph(sloppy, BytecodeGraphVerificationLimits::default())
+        .expect_err("sloppy this normalization remains fail-closed");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::PushThis,
+        } if *pc == BytecodePc::ZERO
+    ));
+}
+
+#[test]
+fn final_authority_keeps_other_call_families_fail_closed() {
     assert_final_authority_rejects_call_family(
         &[
             (FinalOpcode::Undefined, Operands::None),
@@ -483,7 +608,30 @@ fn shaped_input(
     captures: &[CompilerCapturedBinding],
     source: CompilerSource,
 ) -> UnverifiedCompilerBytecodeGraph {
-    let flow = flow(
+    shaped_input_with_strict(
+        instructions,
+        atoms,
+        variables,
+        arguments,
+        locals,
+        captures,
+        source,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shaped_input_with_strict(
+    instructions: &[(FinalOpcode, Operands)],
+    atoms: &[CompilerAtom],
+    variables: &[VariableDefinition],
+    arguments: u32,
+    locals: u32,
+    captures: &[CompilerCapturedBinding],
+    source: CompilerSource,
+    strict: bool,
+) -> UnverifiedCompilerBytecodeGraph {
+    let flow = flow_with_strict(
         instructions,
         u32::try_from(atoms.len()).expect("atom count"),
         arguments,
@@ -491,6 +639,7 @@ fn shaped_input(
         captures,
         0,
         &[],
+        strict,
     );
     let graph = verify_compiler_function_graph(
         UnverifiedCompilerFunctionGraph::new(

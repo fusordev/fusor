@@ -553,7 +553,9 @@ pub enum ExecutionRequirement {
     BigInts,
     /// Nested function templates and closure environments.
     Closures,
-    /// Direct ordinary JavaScript calls with an `undefined` receiver.
+    /// Ordinary objects, static property access, and own data properties.
+    OrdinaryObjects,
+    /// Ordinary JavaScript calls, including receiver-aware method calls.
     Calls,
     /// Explicit JavaScript abrupt completions.
     AbruptCompletions,
@@ -1377,10 +1379,10 @@ pub fn verify_compiler_bytecode_graph(
         })
     })?;
     let mut requirements = Vec::new();
-    requirements.try_reserve_exact(10).map_err(|_| {
+    requirements.try_reserve_exact(11).map_err(|_| {
         BytecodeVerificationError::graph(BytecodeVerificationErrorKind::AllocationFailed {
             resource: BytecodeGraphResource::VerifiedMetadata,
-            requested: 10,
+            requested: 11,
         })
     })?;
     requirements.push(ExecutionRequirement::CoreValues);
@@ -2733,7 +2735,9 @@ fn verify_supported_opcodes(
     for instruction in flow.instructions() {
         let decoded = instruction.decoded();
         let opcode = decoded.instruction().opcode();
-        if !supported_compiler_opcode(opcode) {
+        if !supported_compiler_opcode(opcode)
+            || (opcode == FinalOpcode::PushThis && !flow.function_header().mode().is_strict())
+        {
             return Err(BytecodeVerificationError::function(
                 id,
                 BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
@@ -2756,11 +2760,15 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushAtomValue
             | FinalOpcode::Undefined
             | FinalOpcode::Null
+            | FinalOpcode::PushThis
             | FinalOpcode::PushFalse
             | FinalOpcode::PushTrue
+            | FinalOpcode::Object
             | FinalOpcode::Drop
             | FinalOpcode::Dup
+            | FinalOpcode::Insert2
             | FinalOpcode::Call
+            | FinalOpcode::CallMethod
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
             | FinalOpcode::Throw
@@ -2780,6 +2788,10 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetVarRefCheck
             | FinalOpcode::PutVarRefCheck
             | FinalOpcode::CloseLoc
+            | FinalOpcode::GetField
+            | FinalOpcode::GetField2
+            | FinalOpcode::PutField
+            | FinalOpcode::DefineField
             | FinalOpcode::IfFalse
             | FinalOpcode::IfTrue
             | FinalOpcode::Goto
@@ -3609,8 +3621,17 @@ fn collect_requirements(
             | FinalOpcode::Call0
             | FinalOpcode::Call1
             | FinalOpcode::Call2
-            | FinalOpcode::Call3 => {
+            | FinalOpcode::Call3
+            | FinalOpcode::CallMethod
+            | FinalOpcode::PushThis => {
                 push_requirement(requirements, ExecutionRequirement::Calls);
+            }
+            FinalOpcode::Object
+            | FinalOpcode::GetField
+            | FinalOpcode::GetField2
+            | FinalOpcode::PutField
+            | FinalOpcode::DefineField => {
+                push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
             }
             FinalOpcode::Throw => {
                 push_requirement(requirements, ExecutionRequirement::AbruptCompletions);

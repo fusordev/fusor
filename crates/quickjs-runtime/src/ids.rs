@@ -3,9 +3,11 @@ use crate::arena::Id;
 pub(crate) enum RealmMarker {}
 pub(crate) enum InstalledCodeMarker {}
 pub(crate) enum FunctionMarker {}
+pub(crate) enum ObjectMarker {}
 pub(crate) enum BindingCellMarker {}
 
 pub(crate) type RealmId = Id<RealmMarker>;
 pub(crate) type InstalledCodeId = Id<InstalledCodeMarker>;
 pub(crate) type FunctionId = Id<FunctionMarker>;
+pub(crate) type ObjectId = Id<ObjectMarker>;
 pub(crate) type BindingCellId = Id<BindingCellMarker>;

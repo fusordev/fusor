@@ -16,15 +16,19 @@ transactionally install that authority into a same-runtime realm and host-call
 the resulting function. The admitted profile executes primitive constants,
 arguments, locals, captured cells, nested closures, TDZ checks, cell rotation,
 branches, returns, direct ordinary JavaScript-to-JavaScript calls, truthiness,
-`typeof`, strict equality, nullish tests, and arbitrary explicit `throw`
-values. Nested calls, recursion, and abrupt unwinding use an explicit frame
-vector with cumulative frame/value ceilings and shared fuel. Escaping thrown
-heap values receive one `Arc`-backed public root only after source/caller
-provenance allocation succeeds. Installation scans every instruction in every
-template before mutation; BigInt, coercive numeric operations, object/dynamic
-operations, JavaScript method/constructor/tail-call opcodes, serialized
-bytecode, direct eval, and catch/finally typed-stack semantics remain deferred
-and fail closed.
+`typeof`, strict equality, nullish tests, ordinary object literals, static data
+property reads/writes, strict receiver-aware static method calls, and arbitrary
+explicit `throw` values. Functions and ordinary objects use typed `Arc`-backed
+public roots, and the iterative collector traces their properties, prototypes,
+closures, and binding cells. Nested calls, recursion, and abrupt unwinding use
+an explicit frame vector with cumulative frame/value ceilings and shared fuel.
+Installation scans every instruction in every template before mutation.
+Computed/accessor/exotic object operations, constructors, optional/spread/apply
+calls, BigInt, coercive numeric operations, dynamic operators, serialized
+bytecode, every form of eval, and catch/finally typed-stack semantics remain
+deferred and fail closed. The ordinary dynamic `Function` constructor also
+remains pending its full Script/global-environment execution path; it will not
+be implemented through eval or caller lexical capture.
 
 ## Contract
 

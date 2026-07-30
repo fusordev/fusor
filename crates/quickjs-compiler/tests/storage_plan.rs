@@ -781,10 +781,6 @@ fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
             "function f() { return arguments; }",
             UnsupportedFeature::ArgumentsBinding,
         ),
-        (
-            "function f() { return this; }",
-            UnsupportedFeature::FunctionSyntheticBinding,
-        ),
         ("class Box {}", UnsupportedFeature::ClassSyntheticSlots),
     ];
 

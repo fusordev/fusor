@@ -273,10 +273,12 @@ A milestone is complete only when all of its checked items pass in CI.
         The profile executes primitive
         constants, arguments/locals/captures, nested and forwarded closures,
         TDZ checks, `close_loc` rotation, branches, returns, truthiness,
-        `typeof`, strict equality, and nullish tests across compact/full
-        encodings. Frames and all traversals use explicit vectors. BigInt,
-        coercive numeric operations, object/dynamic operations, and
-        JavaScript method/construct/tail-call opcodes remain fail-closed.
+        `typeof`, strict equality, nullish tests, ordinary objects, static data
+        property operations, strict `this`, and static-property method calls
+        across compact/full encodings. Frames and all traversals use explicit
+        vectors. BigInt, coercive numeric operations, computed/accessor/exotic
+        object operations, dynamic operators, and constructor/tail-call
+        opcodes remain fail closed.
   - [x] Add direct ordinary JavaScript-to-JavaScript calls end to end:
         lowering evaluates the callee then arguments left-to-right and emits
         `call0`–`call3` or full `call`; final authority records the explicit
@@ -287,8 +289,22 @@ A milestone is complete only when all of its checked items pass in CI.
         are cumulative, recursive execution never consumes the Rust stack,
         and non-callable values throw exact `TypeError: not a function`.
         Escaping child exceptions retain immediate-to-outer caller PCs and
-        source spans. Methods, optional/spread/apply, constructors, tail calls,
-        observable `this`/`arguments`, and direct eval remain fail-closed.
+        source spans. Static-property methods now use the same frame vector and
+        preserve their raw receiver; optional/spread/apply, constructors, tail
+        calls, sloppy-`this` normalization, `arguments`, and direct eval remain
+        fail closed.
+  - [ ] Execute ordinary `Function(...)` and `new Function(...)` without eval:
+        convert already-evaluated arguments in order, retain the exact
+        QuickJS-compatible wrapper and fragment map, compile the complete
+        generated Script through published Oxc plus `oxc_semantic`, verify the
+        complete result, and install/execute it in the constructor realm's
+        global environment without capturing the caller frame. Wrapper escape
+        means this path must return the Script completion rather than extract
+        an assumed child function AST. Direct eval in generated code remains
+        rejected; Eval/ApplyEval are never used. GeneratorFunction,
+        AsyncFunction, and AsyncGeneratorFunction remain fail closed. This is
+        blocked on Script-root lowering, global declaration instantiation, and
+        realm-global execution.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
       stack traces, iterators, and generators.
   - [x] First escaping exception path: local/captured TDZ access returns a
@@ -322,11 +338,20 @@ A milestone is complete only when all of its checked items pass in CI.
       generational arenas, runtime-local functions/cells, exact logical
       resource ceilings, and iterative safe-point tracing that reclaims
       transient closures and function/cell cycles. Deterministic strong-count
-      release, the complete object graph, weak visibility, and finalization
-      remain pending below.
+      release, the complete future exotic/weak/finalizable graph, and
+      finalization remain pending below.
+- [x] Add the first ordinary-object execution slice: typed object IDs and
+      `Arc` public roots, one realm-owned `Object.prototype`, fallibly grown
+      data-only shapes/slots, object literals, duplicate-key replacement,
+      static reads and simple writes across objects/functions, strict
+      receiver-aware method calls, exact nullish/primitive errors, aggregate
+      object/property limits, and iterative tracing across prototype,
+      property, function, and cell edges. Computed keys, accessors, prototype
+      mutation, exotics, and transition interning remain pending.
 - [ ] ECMAScript primitive conversions, parsing/printing, and remaining numeric
       edge cases.
-- [ ] Property descriptors, shapes, prototypes, and exotic objects.
+- [ ] Complete property descriptors, interned shapes, mutable prototypes, and
+      exotic objects.
 - [ ] Dense/sparse arrays and typed indexed access.
 - [ ] Deterministic reference ownership plus cycle collection with explicit
       roots and finalization rules.

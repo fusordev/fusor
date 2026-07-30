@@ -214,12 +214,8 @@ fn supported_parenthesized_and_conditional_callees_remain_expressions() {
 }
 
 #[test]
-fn method_optional_spread_and_constructor_calls_remain_fail_closed() {
+fn optional_spread_and_constructor_calls_remain_fail_closed() {
     let cases = [
-        (
-            "function invoke(object){return object.method();}",
-            "object.method",
-        ),
         ("function invoke(fn){return fn?.();}", "fn?.()"),
         (
             "function invoke(fn,values){return fn(...values);}",

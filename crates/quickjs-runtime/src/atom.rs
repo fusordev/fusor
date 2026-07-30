@@ -197,6 +197,11 @@ impl PropertyKey {
         Self(PropertyKeyRepr::Atom(atom))
     }
 
+    pub(crate) fn from_validated_atom(atom: Atom) -> Self {
+        debug_assert_eq!(atom.kind(), AtomKind::String);
+        Self::from_atom(atom)
+    }
+
     /// Returns the array index when this is an integer property key.
     #[must_use]
     pub const fn as_index(&self) -> Option<ArrayIndex> {

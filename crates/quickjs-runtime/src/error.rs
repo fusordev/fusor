@@ -13,6 +13,8 @@ pub enum HandleKind {
     Value,
     /// A rooted bytecode function.
     Function,
+    /// A rooted ordinary object.
+    Object,
 }
 
 impl fmt::Display for HandleKind {
@@ -21,6 +23,7 @@ impl fmt::Display for HandleKind {
             Self::Realm => "realm",
             Self::Value => "value",
             Self::Function => "function",
+            Self::Object => "object",
         })
     }
 }
@@ -40,6 +43,8 @@ pub enum ValueKind {
     String,
     /// An ordinary bytecode function object.
     Function,
+    /// An ordinary JavaScript object.
+    Object,
 }
 
 impl fmt::Display for ValueKind {
@@ -51,6 +56,7 @@ impl fmt::Display for ValueKind {
             Self::Number => "Number",
             Self::String => "String",
             Self::Function => "function",
+            Self::Object => "object",
         })
     }
 }
@@ -125,9 +131,13 @@ pub enum RuntimeResource {
     InstalledConstants,
     /// Runtime function objects.
     HeapFunctions,
+    /// Runtime ordinary objects.
+    HeapObjects,
+    /// Own property slots across ordinary objects and functions.
+    ObjectProperties,
     /// Captured binding cells.
     BindingCells,
-    /// Independently rooted public function values.
+    /// Independently rooted public function and ordinary-object values.
     PublicRoots,
     /// Values retained by one active frame.
     FrameValues,
@@ -150,6 +160,8 @@ impl fmt::Display for RuntimeResource {
             Self::InstalledAtoms => "installed atoms",
             Self::InstalledConstants => "installed constants",
             Self::HeapFunctions => "heap functions",
+            Self::HeapObjects => "heap objects",
+            Self::ObjectProperties => "object properties",
             Self::BindingCells => "binding cells",
             Self::PublicRoots => "public roots",
             Self::FrameValues => "active frame values",

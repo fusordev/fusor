@@ -124,15 +124,16 @@ guard is used.
 `VerifiedBytecode` retains the staged graph, final metadata, resource usage,
 and a sorted conservative set of `ExecutionRequirement` families:
 `CoreValues`, `Numbers`, `Strings`, `BigInts`, `Closures`, `Calls`,
-`AbruptCompletions`, `LexicalBindings`, `ObjectOperators`, and
-`DynamicOperators`. These are runtime implementation requirements, not a
+`AbruptCompletions`, `LexicalBindings`, `OrdinaryObjects`, `ObjectOperators`,
+and `DynamicOperators`. These are runtime implementation requirements, not a
 proof of whole-program value types. The immutable authority is shared through
 `Arc` and needs no lock.
 
 This type is the code-and-metadata authority for the admitted ordinary
-compiler profile, not a runtime function or closure. A future materializer
-must separately require a realm in the same runtime and the exact root or
-parent closure environment. Direct eval remains deferred and fail-closed.
+compiler profile, not a runtime function or closure. The current materializer
+requires a realm in the same runtime and an empty external environment for the
+selected root; nested closures receive only verifier-certified parent
+captures. Direct eval remains deferred and fail closed.
 The current compiler profile admits `throw` only as a verified terminal that
 consumes exactly one ordinary value. Its runtime transports that value through
 the explicit frame vector and roots it only if it escapes to the host.

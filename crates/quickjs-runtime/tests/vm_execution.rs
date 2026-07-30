@@ -633,7 +633,7 @@ fn failed_multi_capture_closure_creation_is_failure_atomic() {
 #[test]
 fn ignored_extra_arguments_are_validated_without_becoming_frame_values() {
     let authority = compile("function constant(){return 1;}", "constant");
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_active_frame_values(1))
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_active_frame_values(2))
         .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");

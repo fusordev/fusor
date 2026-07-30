@@ -29,17 +29,22 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use crate::{HandleError, HandleKind, JsNumber, JsString, ValueKind, ids::FunctionId};
+use crate::{
+    HandleError, HandleKind, JsNumber, JsString, ValueKind,
+    ids::{FunctionId, ObjectId},
+};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum HeapReference {
     Function(FunctionId),
+    Object(ObjectId),
 }
 
 impl HeapReference {
     fn into_stored_value(self) -> StoredValue {
         match self {
             Self::Function(function) => StoredValue::Function(function),
+            Self::Object(object) => StoredValue::Object(object),
         }
     }
 }
@@ -78,6 +83,7 @@ pub(crate) enum StoredValue {
     Number(JsNumber),
     String(JsString),
     Function(FunctionId),
+    Object(ObjectId),
 }
 
 impl StoredValue {
@@ -89,6 +95,7 @@ impl StoredValue {
             Self::Number(value) => RootTarget::Primitive(PrimitiveValue::Number(value)),
             Self::String(value) => RootTarget::Primitive(PrimitiveValue::String(value)),
             Self::Function(function) => RootTarget::Heap(HeapReference::Function(function)),
+            Self::Object(object) => RootTarget::Heap(HeapReference::Object(object)),
         }
     }
 
@@ -100,6 +107,7 @@ impl StoredValue {
             Self::Number(_) => ValueKind::Number,
             Self::String(_) => ValueKind::String,
             Self::Function(_) => ValueKind::Function,
+            Self::Object(_) => ValueKind::Object,
         }
     }
 
@@ -111,6 +119,7 @@ impl StoredValue {
             Self::Number(value) => Self::Number(*value),
             Self::String(value) => Self::String(value.clone()),
             Self::Function(value) => Self::Function(*value),
+            Self::Object(value) => Self::Object(*value),
         }
     }
 
@@ -123,7 +132,7 @@ impl StoredValue {
                 value != 0.0 && !value.is_nan()
             }
             Self::String(value) => !value.is_empty(),
-            Self::Function(_) => true,
+            Self::Function(_) | Self::Object(_) => true,
         }
     }
 
@@ -134,15 +143,27 @@ impl StoredValue {
             (Self::Number(left), Self::Number(right)) => left.strict_equals(*right),
             (Self::String(left), Self::String(right)) => left == right,
             (Self::Function(left), Self::Function(right)) => left == right,
+            (Self::Object(left), Self::Object(right)) => left == right,
             (
                 Self::Undefined
                 | Self::Null
                 | Self::Boolean(_)
                 | Self::Number(_)
                 | Self::String(_)
-                | Self::Function(_),
+                | Self::Function(_)
+                | Self::Object(_),
                 _,
             ) => false,
+        }
+    }
+
+    pub(crate) const fn heap_reference(&self) -> Option<HeapReference> {
+        match self {
+            Self::Undefined | Self::Null | Self::Boolean(_) | Self::Number(_) | Self::String(_) => {
+                None
+            }
+            Self::Function(function) => Some(HeapReference::Function(*function)),
+            Self::Object(object) => Some(HeapReference::Object(*object)),
         }
     }
 }
@@ -354,11 +375,37 @@ impl JsValue {
         Ok(Function(self))
     }
 
+    /// Converts a live ordinary object value into its typed embedding handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an orphaned-handle error or a value-kind mismatch.
+    pub fn into_object(self) -> Result<Object, HandleError> {
+        let actual = self.kind()?;
+        if actual != ValueKind::Object {
+            return Err(HandleError::WrongValueKind {
+                expected: ValueKind::Object,
+                actual,
+            });
+        }
+        Ok(Object(self))
+    }
+
     pub(crate) fn function_id(&self) -> Result<FunctionId, HandleError> {
         match self.stored()? {
             StoredValue::Function(function) => Ok(*function),
             other => Err(HandleError::WrongValueKind {
                 expected: ValueKind::Function,
+                actual: other.kind(),
+            }),
+        }
+    }
+
+    pub(crate) fn object_id(&self) -> Result<ObjectId, HandleError> {
+        match self.stored()? {
+            StoredValue::Object(object) => Ok(*object),
+            other => Err(HandleError::WrongValueKind {
+                expected: ValueKind::Object,
                 actual: other.kind(),
             }),
         }
@@ -425,6 +472,58 @@ impl Function {
         if !Arc::ptr_eq(&owner, &other_owner) {
             return Err(HandleError::ForeignRuntime {
                 kind: HandleKind::Function,
+            });
+        }
+        Ok(self.id()? == other.id()?)
+    }
+}
+
+/// A rooted runtime-local ordinary JavaScript object.
+///
+/// Clones share one [`Arc`]-backed logical public root. The object heap node
+/// remains uniquely owned by its runtime and the handle is `!Send + !Sync`.
+///
+/// ```compile_fail
+/// use quickjs_runtime::Object;
+///
+/// fn require_send<T: Send>() {}
+/// require_send::<Object>();
+/// ```
+#[derive(Clone, Debug)]
+pub struct Object(JsValue);
+
+impl Object {
+    /// Returns this object as an arbitrary value root.
+    #[must_use]
+    pub fn as_value(&self) -> JsValue {
+        self.0.clone()
+    }
+
+    fn owner(&self) -> Result<Arc<ReleaseMailbox>, HandleError> {
+        self.0.owner().map_err(|error| match error {
+            HandleError::Orphaned { .. } => HandleError::Orphaned {
+                kind: HandleKind::Object,
+            },
+            other => other,
+        })
+    }
+
+    fn id(&self) -> Result<ObjectId, HandleError> {
+        self.0.object_id()
+    }
+
+    /// Tests runtime-local object identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either object is orphaned or belongs to a different
+    /// runtime.
+    pub fn same_identity(&self, other: &Self) -> Result<bool, HandleError> {
+        let owner = self.owner()?;
+        let other_owner = other.owner()?;
+        if !Arc::ptr_eq(&owner, &other_owner) {
+            return Err(HandleError::ForeignRuntime {
+                kind: HandleKind::Object,
             });
         }
         Ok(self.id()? == other.id()?)

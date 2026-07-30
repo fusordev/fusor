@@ -273,15 +273,17 @@ opcodes, serialized `close_loc`, and all reference-construction opcodes remain
 fail-closed pending a serialized graph format and verifier that own complete
 constant, vardef, child, and closure metadata.
 
-Module functions, object methods/accessors, and named function expressions fail
-closed until their distinct surrounding-storage, header, and self-binding
-behavior is implemented. The compiled artifact keeps the exact source text,
-storage plan, local layout, exact atom and heterogeneous constant pools,
-normalized capture descriptors, source table, and staged/final certificates
-in immutable `Arc` storage after the Oxc arena is dropped. Lowering accepts
-only an opaque executable selection issued by that context. A same-index
-selection from another context is rejected. Unsupported bodies, unresolved
-names, global/module references requiring atom-backed operations, and
+Module functions, object-literal method/accessor definitions, and named
+function expressions fail closed until their distinct surrounding-storage,
+header, and self-binding behavior is implemented. Ordinary function values may
+already be stored in data properties and called through a static member
+reference. The compiled artifact keeps the exact source text, storage plan,
+local layout, exact atom and heterogeneous constant pools, normalized capture
+descriptors, source table, and staged/final certificates in immutable `Arc`
+storage after the Oxc arena is dropped. Lowering accepts only an opaque
+executable selection issued by that context. A same-index selection from
+another context is rejected. Unsupported bodies, unresolved names,
+global/module references requiring atom-backed operations, and
 async/generator functions fail before byte emission.
 
 Every successful unit also owns a `ModuleSyntaxRecord` for the module data that
@@ -308,6 +310,21 @@ parser, profile, or semantic failure after preparation. Preflight resource
 failures allocate no wrapper. The compatibility release permits source to
 escape that wrapper, so the adapter deliberately does not require the Script
 AST to contain exactly one function expression.
+
+Runtime execution of that adapter is still pending. Ordinary `Function(...)`
+and `new Function(...)` will evaluate and convert constructor arguments in
+order, retain the exact wrapper and fragment map, compile the complete
+generated Script through Oxc semantic analysis and the project compiler, and
+execute only whole-function `VerifiedBytecode`. The Script completion value is
+the result; extracting an assumed child function expression would be
+incorrect because wrapper escape is observable. Compilation and installation
+belong to the constructor realm's global environment and never capture the
+caller frame. This path is not eval, must not emit `eval`/`apply_eval`, and
+continues to reject direct eval in generated code. Direct and indirect eval
+remain wholly unimplemented. GeneratorFunction, AsyncFunction, and
+AsyncGeneratorFunction also remain fail closed. Correct implementation first
+requires Script-root storage/lowering, global declaration instantiation, and
+realm-global execution rather than a host shortcut around those boundaries.
 
 ## Bytecode
 
@@ -365,20 +382,29 @@ until the child returns, so results resume only at the certified fallthrough
 and escaping exceptions retain exact caller locations.
 
 The admitted execution families are primitive Number/String/Boolean/nullish
-values, stack operations, arguments and locals, imported captures, closure
-creation, TDZ checks, `close_loc` cell rotation, branches, returns, truthiness,
-`typeof`, strict equality, the nullish predicate, and direct `call` plus
-`call0`–`call3`, including compact and full-width encodings, plus explicit
-`throw`. Calls evaluate the callee before arguments, pass `undefined` as the
-not-yet-observable direct receiver, fill missing formals with `undefined`, and
-share aggregate frame limits and instruction fuel. An escaping throw carries
-its exact JavaScript value through the same frame vector, allocates caller
-provenance before publishing any heap root, and preserves caller order from
-immediate to outermost. Method calls, constructors, tail calls, spread and
-apply, BigInt, coercive numeric operations, object/dynamic operators,
-serialized input, non-string atom namespaces, raw function slots, catch
-handlers, finally return addresses, iterator markers, and packed exceptional
-stack values remain fail-closed.
+values, ordinary objects, stack operations, arguments and locals, imported
+captures, closure creation, TDZ checks, `close_loc` cell rotation, branches,
+returns, truthiness, `typeof`, strict equality, the nullish predicate, direct
+`call` plus `call0`–`call3`, static-property method calls, and explicit
+`throw`. Object literals create realm-owned ordinary objects, define static
+data properties in source order, and support static reads and simple writes
+across ordinary objects and function objects. Missing reads produce
+`undefined`; nullish access and strict primitive writes produce exact
+`TypeError`s; sloppy primitive writes are ignored. A method call preserves a
+static member reference through parentheses, evaluates lookup before
+arguments, and passes its base as the raw receiver; a sequence expression
+deliberately yields an unbound value. `PushThis` is admitted only in strict
+functions, while direct calls pass `undefined`. Calls fill missing formals
+with `undefined` and share aggregate frame limits and instruction fuel. An
+escaping throw carries its exact JavaScript value through the same frame
+vector, allocates caller provenance before publishing any heap root, and
+preserves caller order from immediate to outermost. Computed properties,
+accessors, object-method syntax, prototype mutation, proxies and exotics,
+constructors, optional/spread/apply/tail calls, sloppy-`this` normalization,
+BigInt, coercive numeric operations, dynamic operators, serialized input,
+non-string atom namespaces, raw function slots, catch handlers, finally
+return addresses, iterator markers, and packed exceptional stack values
+remain fail closed.
 
 The symbolic assembler chooses the componentwise shortest valid final branch
 layout. This can differ from a conservative QuickJS peephole boundary while
@@ -392,9 +418,10 @@ resource limits, and acceptance suite are normative in
 
 The target architecture gives each runtime one object heap, shared by its
 contexts/realms. The current executable slice owns realm records plus
-function/binding-cell arenas; ordinary objects are not implemented yet.
-Runtime, context, realm, and value handles are `!Send + !Sync`, and separate
-runtimes cannot exchange JavaScript values.
+function, ordinary-object, and binding-cell arenas. Every realm owns an
+internal `Object.prototype` root used by its object literals. Runtime, context,
+realm, and value handles are `!Send + !Sync`, and separate runtimes cannot
+exchange JavaScript values.
 
 Runtime-local nodes use generational typed IDs:
 
@@ -410,11 +437,17 @@ Every access validates runtime identity, generation, expected kind, and live
 state. Internal nodes hold IDs and stored values, never public rooted `Value`
 handles or an owning reference back to the runtime.
 
-Public function values use immutable `Arc` root headers. Cloning a handle does
-not create another logical root; dropping the last clone records one
-allocation-free deferred release without borrowing the heap. Mutable runtime
-boundaries drain those releases at a safe point before creating any new heap
-borrow; still-live public headers remain represented by their root counts.
+Public function and ordinary-object values use immutable `Arc` root headers.
+Cloning a handle does not create another logical root; dropping the last clone
+records one allocation-free deferred release without borrowing the heap.
+Mutable runtime boundaries drain those releases at a safe point before
+creating any new heap borrow; still-live public headers remain represented by
+their root counts.
+
+Backing vectors reserve fallibly and return structured allocation failures.
+Stable Rust does not yet expose fallible `Arc` header allocation, so public
+root headers, private object-shape owners, and immutable string nodes follow
+the global allocator policy until the runtime memory-budget layer lands.
 
 Immutable string leaves and rope nodes use standard-library `Arc` ownership.
 This keeps immutable `JsString` handles safe to move through host integration
@@ -434,20 +467,21 @@ backing has no lock.
 
 ## Reference counting and cycles
 
-The current executable slice owns function and binding-cell nodes in private
-generational arenas. A dirty safe point drains deferred public roots and
-iteratively traces the function/cell graph from remaining public roots before
-the next host call or installation; an explicit collection API exposes the
-same pass. This reclaims both transient acyclic closures and self/mutual capture
-cycles, and installed code/atoms are released when their last function
-disappears. Collection preallocates all scratch state before mutation.
+The current executable slice owns function, ordinary-object, and binding-cell
+nodes in private generational arenas. A dirty safe point drains deferred public
+roots and iteratively traces function environments, cells, object/function
+property slots, prototypes, and realm roots before the next host call or
+installation; an explicit collection API exposes the same pass. This reclaims
+transient values plus cycles spanning functions, cells, and objects, and
+installed code/atoms are released when their last function disappears.
+Collection preallocates all scratch state before mutation.
 
 This is a foundational collector for the currently admitted graph, not the
 complete QuickJS ownership model. Deterministic logical strong counts,
-non-recursive zero-count release, trial deletion across the future object
-graph, weak visibility, finalization ordering, and collection while active
-frames are live remain M3 work. Until that work lands, a single host call can
-temporarily retain discarded closures until the next safe boundary.
+non-recursive zero-count release, weak visibility, finalization ordering, the
+future exotic-object edge set, and collection while active frames are live
+remain M3 work. Until that work lands, a single host call can temporarily
+retain discarded heap nodes until the next safe boundary.
 
 No getter, proxy trap, host function, loader, interrupt callback, promise
 tracker, or finalizer may run while an arena/node borrow is live. Finalizers
@@ -482,8 +516,15 @@ will not be admitted until zombie-state and resurrection rules are complete.
   are validated function-local pool indices; serialized units carry bounded
   atom contents and namespace metadata, and loading reinterns or creates each
   pool entry exactly once in the destination runtime.
-- Shapes are immutable and transition-interned. Deletion, flag changes, or
-  prototype mutation move an object to an uninterned/dictionary shape.
+- The current data-only object slice keeps each shape in a private
+  `Arc<Vec<_>>`. Property growth reserves the unique vector and value slots
+  fallibly before mutating either logical sequence; transition interning is not
+  implemented yet. Deletion, flag changes, accessors, and prototype mutation
+  remain fail closed.
+- Object literals inherit their realm's internal `Object.prototype`.
+  Ordinary objects and function objects share own data-property storage.
+  `DefineField` creates configurable, writable, enumerable properties;
+  duplicate literal keys replace one slot without double charging.
 - Ordinary data/accessor layouts have an opaque value-independent
   representation; accessor layouts cannot carry a writable flag. Future
   property slots are typed as data, accessor, binding cell, or lazy value.
@@ -519,13 +560,11 @@ immediately published as one public `JsValue` root; collection is forbidden
 between those operations. Cloning the exception shares that `Arc` root header,
 and dropping its last clone schedules the normal deferred release.
 `StoredValue` crosses the public-handle boundary through an exhaustive
-primitive-versus-`HeapReference` split, and the release mailbox carries the
-typed heap reference. Adding a future object value therefore cannot compile
-until its root publication, deferred release, and collector handling are
-explicitly extended. Catch/finally, JavaScript Error objects, and catchable
-engine-created errors remain pending; ordinary host/resource/engine failures
-are not mislabeled as JavaScript throws. Miette remains presentation, not
-semantic truth.
+primitive-versus-`HeapReference` split covering both functions and ordinary
+objects, and the release mailbox carries the typed heap reference. Catch/finally,
+JavaScript Error objects, and catchable engine-created errors remain pending;
+ordinary host/resource/engine failures are not mislabeled as JavaScript
+throws. Miette remains presentation, not semantic truth.
 
 The leaf compiler maps instruction-local verifier failures back through its
 strictly ordered final-PC table with exact `BytecodePc` lookup. It never treats
@@ -610,11 +649,13 @@ function outer(value) {
 }
 ```
 
-It proves runtime-local realm installation, host calls, forwarded closure
-cells, TDZ diagnostics, `close_loc` rotation, compact/full operand forms,
-allocation-free public-root release, and safe-point collection of transient and
-cyclic function/cell graphs. Object allocation, property assignment, coercive
-`+`, catch/finally, and JavaScript Error objects remain later slices.
+It proves runtime-local realm installation, host and JavaScript calls,
+forwarded closure cells, TDZ diagnostics, `close_loc` rotation, compact/full
+operand forms, allocation-free public-root release, ordinary object allocation
+and static data properties, strict receiver-aware method calls, and safe-point
+collection of transient/cyclic function, cell, and object graphs. Full
+descriptors/accessors, computed properties, coercive `+`, catch/finally, and
+JavaScript Error objects remain later slices.
 
 The planned asynchronous slice creates a host timer Promise. A Tokio wakeup
 must be observed on the runtime owner, the FIFO job queue must drain

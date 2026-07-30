@@ -32,13 +32,14 @@ use quickjs_bytecode::{
 
 use crate::{
     Context, EngineFault, ExceptionKind, ExecutionError, Function, HandleError, HandleKind,
-    JsException, JsStackFrame, JsString, JsValue, Runtime, RuntimeResource,
+    JsException, JsNumber, JsStackFrame, JsString, JsValue, PredefinedAtom, PropertyKey,
+    PropertyLayout, Runtime, RuntimeResource,
     ids::{BindingCellId, FunctionId, InstalledCodeId},
     runtime::{
         BindingCell, FrameBindingAddress, HeapFunction, InstalledCode, InstalledConstant,
         InstalledTemplate, check_execution_limit, usize_to_u64,
     },
-    value::{SlotValue, StoredValue},
+    value::{HeapReference, SlotValue, StoredValue},
 };
 
 /// Inclusive per-call interpreter limits.
@@ -73,6 +74,8 @@ struct Frame {
     function: FunctionId,
     code: InstalledCodeId,
     template: FunctionTemplateId,
+    strict: bool,
+    receiver: StoredValue,
     instruction: InstructionIndex,
     return_to: Option<InstructionIndex>,
     reserved_values: u64,
@@ -93,7 +96,14 @@ struct FramePlan {
     local_count: usize,
     stack_capacity: usize,
     reserved_values: u64,
+    strict: bool,
     instruction: InstructionIndex,
+}
+
+#[derive(Clone, Copy)]
+enum CallKind {
+    Direct,
+    Method,
 }
 
 enum Step {
@@ -102,6 +112,7 @@ enum Step {
         function: FunctionId,
         argument_count: usize,
         return_to: InstructionIndex,
+        kind: CallKind,
     },
     Abrupt(PendingException),
     Return(StoredValue),
@@ -146,9 +157,9 @@ impl Context<'_> {
     /// Invokes one runtime-installed ordinary bytecode function.
     ///
     /// Execution starts only at verified instruction zero and advances only
-    /// through verified successor identities. Direct ordinary JavaScript calls
+    /// through verified successor identities. Ordinary direct and method calls
     /// push runtime frames onto one explicit vector; Rust stack recursion is
-    /// never used. Method calls and constructors remain outside this profile.
+    /// never used. Constructors remain outside this profile.
     ///
     /// # Errors
     ///
@@ -180,20 +191,30 @@ impl Context<'_> {
         for argument in arguments {
             let owner = argument.owner()?;
             self.runtime.validate_owner(&owner, HandleKind::Value)?;
-            if let StoredValue::Function(id) = argument.stored()?
-                && !self.runtime.functions.contains(*id)
+            if let Some(reference) = argument.stored()?.heap_reference()
+                && !self.runtime.heap_reference_is_live(reference)
             {
+                let (index, generation) = match reference {
+                    HeapReference::Function(id) => (id.index(), id.generation()),
+                    HeapReference::Object(id) => (id.index(), id.generation()),
+                };
                 return Err(HandleError::Stale {
                     kind: HandleKind::Value,
-                    index: id.index(),
-                    generation: id.generation(),
+                    index,
+                    generation,
                 }
                 .into());
             }
         }
 
         let plan = plan_frame(self.runtime, function_id, 0, 0)?;
-        let frame = create_frame(self.runtime, plan, FrameArguments::Public(arguments), None)?;
+        let frame = create_frame(
+            self.runtime,
+            plan,
+            StoredValue::Undefined,
+            FrameArguments::Public(arguments),
+            None,
+        )?;
         let value = execute_frames(self.runtime, frame, limits)?;
         self.runtime.public_value(value)
     }
@@ -234,6 +255,7 @@ fn execute_frames(
                 function,
                 argument_count,
                 return_to,
+                kind,
             } => {
                 let plan = plan_frame(runtime, function, frames.len(), active_frame_values)?;
                 frames
@@ -242,17 +264,19 @@ fn execute_frames(
                         resource: RuntimeResource::Frames,
                         additional: 1,
                     })?;
-                let arguments = take_direct_call_arguments(
+                let (receiver, arguments) = take_call_inputs(
                     frames.last_mut().ok_or(EngineFault::MissingInstruction {
                         function: FunctionTemplateId::new(0),
                         instruction: 0,
                     })?,
                     function,
                     argument_count,
+                    kind,
                 )?;
                 let child = create_frame(
                     runtime,
                     plan,
+                    receiver,
                     FrameArguments::Owned(arguments),
                     Some(return_to),
                 )?;
@@ -372,6 +396,7 @@ fn plan_frame(
     let frame_values = argument_count
         .checked_add(local_count)
         .and_then(|value| value.checked_add(stack_capacity))
+        .and_then(|value| value.checked_add(1))
         .map_or(u64::MAX, usize_to_u64);
     let observed_frame_values = active_frame_values.saturating_add(frame_values);
     check_execution_limit(
@@ -405,6 +430,7 @@ fn plan_frame(
         local_count,
         stack_capacity,
         reserved_values: frame_values,
+        strict: control_flow.function_header().mode().is_strict(),
         instruction,
     })
 }
@@ -416,6 +442,7 @@ fn plan_frame(
 fn create_frame(
     runtime: &Runtime,
     plan: FramePlan,
+    receiver: StoredValue,
     supplied: FrameArguments<'_>,
     return_to: Option<InstructionIndex>,
 ) -> Result<Frame, ExecutionError> {
@@ -510,6 +537,8 @@ fn create_frame(
         function: plan.function,
         code: plan.code,
         template: plan.template,
+        strict: plan.strict,
+        receiver,
         instruction: plan.instruction,
         return_to,
         reserved_values: plan.reserved_values,
@@ -638,8 +667,23 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
         }
         FinalOpcode::Undefined => frame.stack.push(StoredValue::Undefined),
         FinalOpcode::Null => frame.stack.push(StoredValue::Null),
+        FinalOpcode::PushThis => {
+            if !frame.strict {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "sloppy push_this entered the strict-only receiver profile",
+                }
+                .into());
+            }
+            frame.stack.push(frame.receiver.duplicate());
+        }
         FinalOpcode::PushFalse => frame.stack.push(StoredValue::Boolean(false)),
         FinalOpcode::PushTrue => frame.stack.push(StoredValue::Boolean(true)),
+        FinalOpcode::Object => {
+            let realm = code(runtime, frame.code)?.realm;
+            let prototype = runtime.realm_object_prototype(realm)?;
+            let object = runtime.allocate_ordinary_object(prototype)?;
+            frame.stack.push(StoredValue::Object(object));
+        }
         FinalOpcode::Drop => {
             pop(frame)?;
         }
@@ -655,6 +699,13 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
                 })?
                 .duplicate();
             frame.stack.push(value);
+        }
+        FinalOpcode::Insert2 => {
+            let right = pop(frame)?;
+            let left = pop(frame)?;
+            frame.stack.push(right.duplicate());
+            frame.stack.push(left);
+            frame.stack.push(right);
         }
         FinalOpcode::Call
         | FinalOpcode::Call0
@@ -688,6 +739,41 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
                 function: *function,
                 argument_count,
                 return_to,
+                kind: CallKind::Direct,
+            });
+        }
+        FinalOpcode::CallMethod => {
+            let Operands::NPop { argument_count } = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let argument_count = usize::from(argument_count);
+            let required = argument_count.saturating_add(2);
+            if frame.stack.len() < required {
+                return Err(EngineFault::StackDepthMismatch {
+                    function: frame.template,
+                    pc: source_pc,
+                    expected: u32::try_from(required).unwrap_or(u32::MAX),
+                    actual: frame.stack.len(),
+                }
+                .into());
+            }
+            let callee_index = frame.stack.len() - argument_count - 1;
+            let StoredValue::Function(function) = &frame.stack[callee_index] else {
+                return Ok(Step::Abrupt(not_callable_exception(
+                    runtime, frame, source_pc,
+                )?));
+            };
+            let return_to = verified_instruction.successors().fallthrough().ok_or(
+                EngineFault::InvalidSuccessor {
+                    function: frame.template,
+                    pc: source_pc,
+                },
+            )?;
+            return Ok(Step::Call {
+                function: *function,
+                argument_count,
+                return_to,
+                kind: CallKind::Method,
             });
         }
         FinalOpcode::FClosure | FinalOpcode::FClosure8 => {
@@ -698,6 +784,58 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             let child = function_constant(runtime, frame.code, frame.template, index)?;
             let function = create_closure(runtime, frame, child)?;
             frame.stack.push(StoredValue::Function(function));
+        }
+        FinalOpcode::GetField | FinalOpcode::GetField2 => {
+            let property = static_property_operand(runtime, frame, operands)?;
+            let base = if opcode == FinalOpcode::GetField {
+                pop(frame)?
+            } else {
+                peek(frame)?.duplicate()
+            };
+            match read_static_property(runtime, &base, &property.key)? {
+                PropertyReadOutcome::Value(value) => frame.stack.push(value),
+                PropertyReadOutcome::Failed(failure) => {
+                    return Ok(Step::Abrupt(property_exception(
+                        runtime,
+                        frame,
+                        source_pc,
+                        &property.name,
+                        failure,
+                    )?));
+                }
+            }
+        }
+        FinalOpcode::PutField => {
+            let property = static_property_operand(runtime, frame, operands)?;
+            let value = pop(frame)?;
+            let base = pop(frame)?;
+            if let PropertyWriteOutcome::Failed(failure) =
+                write_static_property(runtime, &base, property.key, value, frame.strict)?
+            {
+                return Ok(Step::Abrupt(property_exception(
+                    runtime,
+                    frame,
+                    source_pc,
+                    &property.name,
+                    failure,
+                )?));
+            }
+        }
+        FinalOpcode::DefineField => {
+            let property = static_property_operand(runtime, frame, operands)?;
+            let value = pop(frame)?;
+            let base = peek(frame)?.duplicate();
+            if let PropertyWriteOutcome::Failed(failure) =
+                define_static_property(runtime, &base, property.key, value)?
+            {
+                return Ok(Step::Abrupt(property_exception(
+                    runtime,
+                    frame,
+                    source_pc,
+                    &property.name,
+                    failure,
+                )?));
+            }
         }
         FinalOpcode::GetArg
         | FinalOpcode::GetArg0
@@ -892,7 +1030,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             let value = pop(frame)?;
             let name = match value {
                 StoredValue::Undefined => "undefined",
-                StoredValue::Null => "object",
+                StoredValue::Null | StoredValue::Object(_) => "object",
                 StoredValue::Boolean(_) => "boolean",
                 StoredValue::Number(_) => "number",
                 StoredValue::String(_) => "string",
@@ -954,6 +1092,282 @@ impl AtomDescription for crate::Atom {
     fn description(&self) -> Option<&JsString> {
         crate::Atom::description(self)
     }
+}
+
+struct StaticPropertyOperand {
+    key: PropertyKey,
+    name: JsString,
+}
+
+enum PropertyReadOutcome {
+    Value(StoredValue),
+    Failed(PropertyFailure),
+}
+
+enum PropertyWriteOutcome {
+    Complete,
+    Failed(PropertyFailure),
+}
+
+#[derive(Clone, Copy)]
+enum PropertyFailure {
+    ReadNull,
+    ReadUndefined,
+    WriteNull,
+    WriteUndefined,
+    NotObject,
+    ReadOnly,
+    NonExtensible,
+}
+
+fn static_property_operand(
+    runtime: &Runtime,
+    frame: &Frame,
+    operands: Operands,
+) -> Result<StaticPropertyOperand, EngineFault> {
+    let Operands::Atom(index) = operands else {
+        return Err(EngineFault::MissingPoolEntry {
+            pool: "property atom",
+            index: u32::MAX,
+        });
+    };
+    let atom = installed_template(runtime, frame.code, frame.template)?
+        .atoms
+        .get(index.get() as usize)
+        .cloned()
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "property atom",
+            index: index.get(),
+        })?;
+    let name = atom
+        .description()
+        .cloned()
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "property atom description",
+            index: index.get(),
+        })?;
+    Ok(StaticPropertyOperand {
+        key: PropertyKey::from_validated_atom(atom),
+        name,
+    })
+}
+
+fn read_static_property(
+    runtime: &Runtime,
+    base: &StoredValue,
+    key: &PropertyKey,
+) -> Result<PropertyReadOutcome, ExecutionError> {
+    Ok(match base {
+        StoredValue::Undefined => PropertyReadOutcome::Failed(PropertyFailure::ReadUndefined),
+        StoredValue::Null => PropertyReadOutcome::Failed(PropertyFailure::ReadNull),
+        StoredValue::Boolean(_) | StoredValue::Number(_) => {
+            PropertyReadOutcome::Value(StoredValue::Undefined)
+        }
+        StoredValue::String(value) => {
+            if key.as_atom().and_then(crate::Atom::predefined_atom) == Some(PredefinedAtom::Length)
+            {
+                PropertyReadOutcome::Value(StoredValue::Number(JsNumber::from_f64(f64::from(
+                    value.len(),
+                ))))
+            } else {
+                PropertyReadOutcome::Value(StoredValue::Undefined)
+            }
+        }
+        StoredValue::Function(function) => PropertyReadOutcome::Value(read_heap_property(
+            runtime,
+            HeapReference::Function(*function),
+            key,
+        )?),
+        StoredValue::Object(object) => PropertyReadOutcome::Value(read_heap_property(
+            runtime,
+            HeapReference::Object(*object),
+            key,
+        )?),
+    })
+}
+
+fn read_heap_property(
+    runtime: &Runtime,
+    reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<StoredValue, ExecutionError> {
+    let mut current = Some(reference);
+    let mut remaining = runtime
+        .functions
+        .len()
+        .saturating_add(runtime.objects.len())
+        .saturating_add(1);
+    while let Some(reference) = current {
+        if remaining == 0 {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ordinary prototype chain contains a cycle",
+            }
+            .into());
+        }
+        remaining -= 1;
+        let record = runtime.object_record(reference)?;
+        if let Some((_, value)) = record.own_data_property(key) {
+            return Ok(value);
+        }
+        current = record.prototype();
+    }
+    Ok(StoredValue::Undefined)
+}
+
+fn inherited_data_layout(
+    runtime: &Runtime,
+    mut current: Option<HeapReference>,
+    key: &PropertyKey,
+) -> Result<Option<PropertyLayout>, ExecutionError> {
+    let mut remaining = runtime
+        .functions
+        .len()
+        .saturating_add(runtime.objects.len())
+        .saturating_add(1);
+    while let Some(reference) = current {
+        if remaining == 0 {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ordinary prototype chain contains a cycle",
+            }
+            .into());
+        }
+        remaining -= 1;
+        let record = runtime.object_record(reference)?;
+        if let Some((layout, _)) = record.own_data_property(key) {
+            return Ok(Some(layout));
+        }
+        current = record.prototype();
+    }
+    Ok(None)
+}
+
+fn write_static_property(
+    runtime: &mut Runtime,
+    base: &StoredValue,
+    key: PropertyKey,
+    value: StoredValue,
+    strict: bool,
+) -> Result<PropertyWriteOutcome, ExecutionError> {
+    let reference = match base {
+        StoredValue::Undefined => {
+            return Ok(PropertyWriteOutcome::Failed(
+                PropertyFailure::WriteUndefined,
+            ));
+        }
+        StoredValue::Null => {
+            return Ok(PropertyWriteOutcome::Failed(PropertyFailure::WriteNull));
+        }
+        StoredValue::Boolean(_) | StoredValue::Number(_) | StoredValue::String(_) => {
+            return Ok(if strict {
+                PropertyWriteOutcome::Failed(PropertyFailure::NotObject)
+            } else {
+                PropertyWriteOutcome::Complete
+            });
+        }
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+    };
+
+    let (own, prototype, extensible) = {
+        let record = runtime.object_record(reference)?;
+        (
+            record.own_data_property(&key).map(|(layout, _)| layout),
+            record.prototype(),
+            record.is_extensible(),
+        )
+    };
+    if let Some(layout) = own {
+        if layout.writable() == Some(true) {
+            let replaced = runtime
+                .object_record_mut(reference)?
+                .replace_existing_data(&key, value);
+            if !replaced {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "located own data property disappeared before its update",
+                }
+                .into());
+            }
+            runtime.collection_pending = true;
+            return Ok(PropertyWriteOutcome::Complete);
+        }
+        return Ok(if strict {
+            PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+        } else {
+            PropertyWriteOutcome::Complete
+        });
+    }
+    if let Some(layout) = inherited_data_layout(runtime, prototype, &key)?
+        && layout.writable() != Some(true)
+    {
+        return Ok(if strict {
+            PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+        } else {
+            PropertyWriteOutcome::Complete
+        });
+    }
+    if !extensible {
+        return Ok(if strict {
+            PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible)
+        } else {
+            PropertyWriteOutcome::Complete
+        });
+    }
+    runtime.append_data_property(
+        reference,
+        key,
+        PropertyLayout::data(true, true, true),
+        value,
+    )?;
+    Ok(PropertyWriteOutcome::Complete)
+}
+
+fn define_static_property(
+    runtime: &mut Runtime,
+    base: &StoredValue,
+    key: PropertyKey,
+    value: StoredValue,
+) -> Result<PropertyWriteOutcome, ExecutionError> {
+    let reference = match base {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_) => {
+            return Ok(PropertyWriteOutcome::Failed(PropertyFailure::NotObject));
+        }
+    };
+    let (exists, extensible) = {
+        let record = runtime.object_record(reference)?;
+        (
+            record.own_data_property(&key).is_some(),
+            record.is_extensible(),
+        )
+    };
+    if exists {
+        let replaced = runtime
+            .object_record_mut(reference)?
+            .replace_existing_data(&key, value);
+        if !replaced {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "located own data property disappeared before its definition",
+            }
+            .into());
+        }
+        runtime.collection_pending = true;
+        return Ok(PropertyWriteOutcome::Complete);
+    }
+    if !extensible {
+        return Ok(PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible));
+    }
+    runtime.append_data_property(
+        reference,
+        key,
+        PropertyLayout::data(true, true, true),
+        value,
+    )?;
+    Ok(PropertyWriteOutcome::Complete)
 }
 
 fn code(runtime: &Runtime, id: InstalledCodeId) -> Result<&InstalledCode, EngineFault> {
@@ -1257,6 +1671,7 @@ fn create_closure(
         code: frame.code,
         template: child,
         environment,
+        object: crate::object::ObjectRecord::empty(None),
         public_roots: 0,
     }) else {
         rollback_new_cells(runtime, frame, &pending_cells, &new_cells);
@@ -1589,6 +2004,49 @@ fn not_callable_exception(
     })
 }
 
+fn property_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    pc: BytecodePc,
+    name: &JsString,
+    failure: PropertyFailure,
+) -> Result<PendingException, ExecutionError> {
+    let message = match failure {
+        PropertyFailure::ReadNull => {
+            named_property_message("cannot read property '", name, "' of null")?
+        }
+        PropertyFailure::ReadUndefined => {
+            named_property_message("cannot read property '", name, "' of undefined")?
+        }
+        PropertyFailure::WriteNull => {
+            named_property_message("cannot set property '", name, "' of null")?
+        }
+        PropertyFailure::WriteUndefined => {
+            named_property_message("cannot set property '", name, "' of undefined")?
+        }
+        PropertyFailure::NotObject => JsString::from_utf8("not an object")?,
+        PropertyFailure::ReadOnly => named_property_message("'", name, "' is read-only")?,
+        PropertyFailure::NonExtensible => JsString::from_utf8("object is not extensible")?,
+    };
+    Ok(PendingException {
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
+fn named_property_message(
+    prefix: &str,
+    name: &JsString,
+    suffix: &str,
+) -> Result<JsString, crate::JsStringError> {
+    JsString::from_utf8(prefix)?
+        .concat(name)?
+        .concat(&JsString::from_utf8(suffix)?)
+}
+
 fn instruction_location(
     runtime: &Runtime,
     frame: &Frame,
@@ -1651,9 +2109,10 @@ fn exception_caller_frames(
                 | FinalOpcode::Call1
                 | FinalOpcode::Call2
                 | FinalOpcode::Call3
+                | FinalOpcode::CallMethod
         ) {
             return Err(EngineFault::RuntimeInvariant {
-                message: "exception caller is not parked at a direct call",
+                message: "exception caller is not parked at an ordinary call",
             }
             .into());
         }
@@ -1722,12 +2181,16 @@ fn frame_local_mut(frame: &mut Frame, index: u32) -> Result<&mut FrameBinding, E
         })
 }
 
-fn take_direct_call_arguments(
+fn take_call_inputs(
     frame: &mut Frame,
     expected_function: FunctionId,
     argument_count: usize,
-) -> Result<Vec<StoredValue>, ExecutionError> {
-    let required = argument_count.saturating_add(1);
+    kind: CallKind,
+) -> Result<(StoredValue, Vec<StoredValue>), ExecutionError> {
+    let required = argument_count.saturating_add(match kind {
+        CallKind::Direct => 1,
+        CallKind::Method => 2,
+    });
     if frame.stack.len() < required {
         return Err(EngineFault::StackDepthMismatch {
             function: frame.template,
@@ -1749,20 +2212,30 @@ fn take_direct_call_arguments(
     }
     arguments.reverse();
     match pop(frame)? {
-        StoredValue::Function(actual) if actual == expected_function => Ok(arguments),
-        StoredValue::Function(_) => Err(EngineFault::RuntimeInvariant {
-            message: "parked direct-call callee changed before frame creation",
+        StoredValue::Function(actual) if actual == expected_function => {}
+        StoredValue::Function(_) => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "parked ordinary-call callee changed before frame creation",
+            }
+            .into());
         }
-        .into()),
         StoredValue::Undefined
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
-        | StoredValue::String(_) => Err(EngineFault::RuntimeInvariant {
-            message: "validated direct-call callee changed value kind",
+        | StoredValue::String(_)
+        | StoredValue::Object(_) => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "validated ordinary-call callee changed value kind",
+            }
+            .into());
         }
-        .into()),
     }
+    let receiver = match kind {
+        CallKind::Direct => StoredValue::Undefined,
+        CallKind::Method => pop(frame)?,
+    };
+    Ok((receiver, arguments))
 }
 
 fn pop(frame: &mut Frame) -> Result<StoredValue, EngineFault> {

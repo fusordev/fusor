@@ -1224,7 +1224,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn reject_synthetic_binding_uses(&self) -> Result<(), CompilerError> {
         for node in self.unit.semantic().nodes().iter() {
             let span = match node.kind() {
-                AstKind::ThisExpression(expression) => expression.span,
                 AstKind::NewTarget(expression) => expression.span,
                 AstKind::Super(expression) => expression.span,
                 _ => continue,

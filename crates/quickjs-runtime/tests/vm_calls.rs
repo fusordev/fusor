@@ -50,6 +50,7 @@ fn reserved_frame_values(
     u64::from(domains.argument_count())
         + u64::from(domains.local_count())
         + u64::from(control_flow.computed_stack_size())
+        + 1
 }
 
 #[test]

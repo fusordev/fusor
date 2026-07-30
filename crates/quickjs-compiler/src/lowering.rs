@@ -6,9 +6,10 @@ use oxc_ast::{
         AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement, CallExpression,
         ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForStatement,
         ForStatementInit, Function, FunctionBody, FunctionType, IfStatement, LogicalExpression,
-        PropertyKind, ReturnStatement, SequenceExpression, SimpleAssignmentTarget, Statement,
-        ThrowStatement, UnaryExpression, UpdateExpression, VariableDeclaration,
-        VariableDeclarationKind, WhileStatement,
+        ObjectExpression, ObjectPropertyKind, PropertyKey as OxcPropertyKey, PropertyKind,
+        ReturnStatement, SequenceExpression, SimpleAssignmentTarget, Statement,
+        StaticMemberExpression, ThrowStatement, UnaryExpression, UpdateExpression,
+        VariableDeclaration, VariableDeclarationKind, WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
@@ -1090,6 +1091,24 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 let value =
                     decode_compiler_string(cooked.as_str(), quasi.lone_surrogates, template.span)?;
                 record_string_candidate(owner, value, template.span, candidates, atom_candidates)?;
+            }
+            AstKind::ObjectProperty(property) => {
+                if let OxcPropertyKey::StaticIdentifier(identifier) = &property.key {
+                    record_property_candidate(
+                        owner,
+                        identifier.name.as_str(),
+                        identifier.span,
+                        atom_candidates,
+                    )?;
+                }
+            }
+            AstKind::StaticMemberExpression(member) => {
+                record_property_candidate(
+                    owner,
+                    member.property.name.as_str(),
+                    member.property.span,
+                    atom_candidates,
+                )?;
             }
             _ => {}
         }
@@ -2185,14 +2204,22 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         Expression::LogicalExpression(logical) => {
                             Self::plan_logical_expression(logical, flow, &mut work)?;
                         }
+                        Expression::ObjectExpression(object) => {
+                            Self::plan_object_expression(object, constants, &mut work)?;
+                        }
+                        Expression::StaticMemberExpression(member) => {
+                            Self::plan_static_member_read(member, constants, &mut work)?;
+                        }
                         Expression::AssignmentExpression(assignment) => {
-                            self.plan_assignment_expression(assignment, layout, flow, &mut work)?;
+                            self.plan_assignment_expression(
+                                assignment, layout, constants, flow, &mut work,
+                            )?;
                         }
                         Expression::UpdateExpression(update) => {
                             self.plan_update_expression(update, layout, &mut work)?;
                         }
                         Expression::CallExpression(call) => {
-                            Self::plan_call_expression(call, &mut work)?;
+                            Self::plan_call_expression(call, constants, &mut work)?;
                         }
                         Expression::FunctionExpression(function) => {
                             flow.emit(self.plan_function_closure(
@@ -2201,6 +2228,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                                 tree_layout,
                                 constants,
                             )?)?;
+                        }
+                        Expression::ThisExpression(this) => {
+                            flow.emit(self.plan_this_expression(this.span, layout)?)?;
                         }
                         _ => {
                             return unsupported(
@@ -2215,8 +2245,29 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    fn plan_this_expression(
+        &self,
+        span: Span,
+        layout: &FrameLayout,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        let executable = self.planned.plan.executable(layout.executable).ok_or(
+            LeafCompilationError::InvalidExecutable {
+                executable: layout.executable,
+            },
+        )?;
+        if !executable.is_strict() {
+            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, span);
+        }
+        Ok(PlannedInstruction::new(
+            FinalOpcode::PushThis,
+            Operands::None,
+            span,
+        ))
+    }
+
     fn plan_call_expression<'expression>(
         call: &'expression CallExpression<'arena>,
+        constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if call.optional || call.type_arguments.is_some() {
@@ -2231,10 +2282,16 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 domain: "call arguments",
             }
         })?;
-        work.push(ExpressionWork::Emit(plan_direct_call(
-            argument_count,
-            call.span,
-        )));
+        let static_member = Self::static_member_callee(&call.callee)?;
+        work.push(ExpressionWork::Emit(if static_member.is_some() {
+            PlannedInstruction::new(
+                FinalOpcode::CallMethod,
+                Operands::NPop { argument_count },
+                call.span,
+            )
+        } else {
+            plan_direct_call(argument_count, call.span)
+        }));
         for argument in call.arguments.iter().rev() {
             let expression =
                 argument
@@ -2245,7 +2302,109 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     })?;
             work.push(ExpressionWork::Visit(expression));
         }
-        work.push(ExpressionWork::Visit(&call.callee));
+        if let Some(member) = static_member {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::GetField2,
+                Operands::Atom(constants.property_atom_index(member.property.span)?),
+                member.span,
+            )));
+            work.push(ExpressionWork::Visit(&member.object));
+        } else {
+            work.push(ExpressionWork::Visit(&call.callee));
+        }
+        Ok(())
+    }
+
+    fn static_member_callee<'expression>(
+        callee: &'expression Expression<'arena>,
+    ) -> Result<Option<&'expression StaticMemberExpression<'arena>>, LeafCompilationError> {
+        let mut expression = callee;
+        loop {
+            match expression {
+                Expression::ParenthesizedExpression(parenthesized) => {
+                    expression = &parenthesized.expression;
+                }
+                Expression::StaticMemberExpression(member) if !member.optional => {
+                    return Ok(Some(member));
+                }
+                Expression::StaticMemberExpression(member) => {
+                    return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+                }
+                _ => return Ok(None),
+            }
+        }
+    }
+
+    fn plan_object_expression<'expression>(
+        object: &'expression ObjectExpression<'arena>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        for property in object.properties.iter().rev() {
+            let ObjectPropertyKind::ObjectProperty(property) = property else {
+                return unsupported(
+                    UnsupportedLeafFeature::UnsupportedExpression,
+                    property.span(),
+                );
+            };
+            if property.computed
+                || property.shorthand
+                || property.method
+                || property.kind != PropertyKind::Init
+            {
+                return unsupported(
+                    if property.method || property.kind != PropertyKind::Init {
+                        UnsupportedLeafFeature::ObjectMethodOrAccessor
+                    } else {
+                        UnsupportedLeafFeature::UnsupportedExpression
+                    },
+                    property.span,
+                );
+            }
+            let OxcPropertyKey::StaticIdentifier(identifier) = &property.key else {
+                return unsupported(
+                    UnsupportedLeafFeature::UnsupportedExpression,
+                    property.key.span(),
+                );
+            };
+            if identifier.name == "__proto__" {
+                return unsupported(
+                    UnsupportedLeafFeature::UnsupportedExpression,
+                    identifier.span,
+                );
+            }
+            if let Some(span) = anonymous_function_definition_span(&property.value) {
+                return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+            }
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::DefineField,
+                Operands::Atom(constants.property_atom_index(identifier.span)?),
+                property.span,
+            )));
+            work.push(ExpressionWork::Visit(&property.value));
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Object,
+            Operands::None,
+            object.span,
+        )));
+        Ok(())
+    }
+
+    fn plan_static_member_read<'expression>(
+        member: &'expression StaticMemberExpression<'arena>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetField,
+            Operands::Atom(constants.property_atom_index(member.property.span)?),
+            member.span,
+        )));
+        work.push(ExpressionWork::Visit(&member.object));
         Ok(())
     }
 
@@ -2310,11 +2469,15 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         &self,
         assignment: &'expression AssignmentExpression<'arena>,
         layout: &FrameLayout,
+        constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if let Some(span) = anonymous_function_definition_span(&assignment.right) {
             return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+        }
+        if let AssignmentTarget::StaticMemberExpression(member) = &assignment.left {
+            return Self::plan_static_member_assignment(assignment, member, constants, work);
         }
         let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &assignment.left else {
             return unsupported(
@@ -2406,6 +2569,33 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 )?));
             }
         }
+        Ok(())
+    }
+
+    fn plan_static_member_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression StaticMemberExpression<'arena>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if assignment.operator != AssignmentOperator::Assign || member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                assignment.left.span(),
+            );
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutField,
+            Operands::Atom(constants.property_atom_index(member.property.span)?),
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert2,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Visit(&member.object));
         Ok(())
     }
 
@@ -4154,6 +4344,7 @@ struct CompiledConstantPool {
     function_indices: Box<[(ExecutableId, u32)]>,
     number_indices: Box<[(Span, u32)]>,
     string_indices: Box<[(Span, CompiledStringLocation)]>,
+    property_atom_indices: Box<[(Span, u32)]>,
     metadata_atom_indices: Box<[(CompiledMetadataAtomKey, u32)]>,
 }
 
@@ -4185,12 +4376,19 @@ impl CompiledConstantCandidate {
 struct CompiledAtomCandidate {
     value: CompilerString,
     span: Span,
+    purpose: CompiledAtomPurpose,
 }
 
 impl CompiledAtomCandidate {
-    const fn order_key(&self) -> (u32, u32) {
-        (self.span.start, self.span.end)
+    const fn order_key(&self) -> (u32, u32, CompiledAtomPurpose) {
+        (self.span.start, self.span.end, self.purpose)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum CompiledAtomPurpose {
+    RuntimeString,
+    Property,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -4222,6 +4420,7 @@ struct FrozenConstantCandidates {
     function_indices: Vec<(ExecutableId, u32)>,
     number_indices: Vec<(Span, u32)>,
     string_indices: Vec<(Span, CompiledStringLocation)>,
+    property_atom_indices: Vec<(Span, u32)>,
 }
 
 fn freeze_constant_candidates(
@@ -4239,6 +4438,7 @@ fn freeze_constant_candidates(
             },
         )?),
         string_indices: Vec::with_capacity(string_capacity),
+        property_atom_indices: Vec::with_capacity(string_capacity),
     };
     for (index, candidate) in candidates.into_iter().enumerate() {
         let index = u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
@@ -4291,6 +4491,7 @@ fn freeze_constant_candidates(
 fn freeze_atom_candidates(
     candidates: Vec<CompiledAtomCandidate>,
     string_indices: &mut Vec<(Span, CompiledStringLocation)>,
+    property_atom_indices: &mut Vec<(Span, u32)>,
 ) -> Result<(Vec<CompilerAtom>, HashMap<CompilerString, u32>), LeafCompilationError> {
     let mut atoms = Vec::with_capacity(candidates.len());
     let mut interner = HashMap::with_capacity(candidates.len());
@@ -4320,7 +4521,14 @@ fn freeze_atom_candidates(
             interner.insert(candidate.value, index);
             index
         };
-        string_indices.push((candidate.span, CompiledStringLocation::Atom(atom_index)));
+        match candidate.purpose {
+            CompiledAtomPurpose::RuntimeString => {
+                string_indices.push((candidate.span, CompiledStringLocation::Atom(atom_index)));
+            }
+            CompiledAtomPurpose::Property => {
+                property_atom_indices.push((candidate.span, atom_index));
+            }
+        }
     }
     Ok((atoms, interner))
 }
@@ -4408,6 +4616,19 @@ fn validate_frozen_constant_candidates(
             span: Some(span),
         });
     }
+    frozen
+        .property_atom_indices
+        .sort_unstable_by_key(|(span, _)| (span.start, span.end));
+    if let Some(span) = frozen
+        .property_atom_indices
+        .windows(2)
+        .find_map(|pair| (pair[0].0 == pair[1].0).then_some(pair[0].0))
+    {
+        return Err(LeafCompilationError::SemanticInvariant {
+            invariant: "static property spans are unique within a function",
+            span: Some(span),
+        });
+    }
     Ok(())
 }
 
@@ -4431,8 +4652,11 @@ impl CompiledConstantPool {
             },
         )?;
         let mut frozen = freeze_constant_candidates(children, candidates, string_capacity)?;
-        let (mut atoms, mut atom_interner) =
-            freeze_atom_candidates(atom_candidates, &mut frozen.string_indices)?;
+        let (mut atoms, mut atom_interner) = freeze_atom_candidates(
+            atom_candidates,
+            &mut frozen.string_indices,
+            &mut frozen.property_atom_indices,
+        )?;
         let metadata_atom_indices = freeze_metadata_atom_candidates(
             metadata_atom_candidates,
             &mut atoms,
@@ -4445,6 +4669,7 @@ impl CompiledConstantPool {
             function_indices: frozen.function_indices.into_boxed_slice(),
             number_indices: frozen.number_indices.into_boxed_slice(),
             string_indices: frozen.string_indices.into_boxed_slice(),
+            property_atom_indices: frozen.property_atom_indices.into_boxed_slice(),
             metadata_atom_indices: metadata_atom_indices.into_boxed_slice(),
         })
     }
@@ -4559,6 +4784,19 @@ impl CompiledConstantPool {
         Ok(PlannedInstruction::new(instruction.0, instruction.1, span))
     }
 
+    fn property_atom_index(&self, span: Span) -> Result<AtomPoolIndex, LeafCompilationError> {
+        let position = self
+            .property_atom_indices
+            .binary_search_by_key(&(span.start, span.end), |(candidate, _)| {
+                (candidate.start, candidate.end)
+            })
+            .map_err(|_| LeafCompilationError::SemanticInvariant {
+                invariant: "static property has one function-local atom",
+                span: Some(span),
+            })?;
+        Ok(AtomPoolIndex::new(self.property_atom_indices[position].1))
+    }
+
     fn function_index(&self, executable: ExecutableId) -> Result<u32, LeafCompilationError> {
         self.function_indices
             .binary_search_by_key(&executable, |(candidate, _)| *candidate)
@@ -4609,8 +4847,36 @@ fn record_string_candidate(
         atoms
             .get_mut(owner.index())
             .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
-            .push(CompiledAtomCandidate { value, span });
+            .push(CompiledAtomCandidate {
+                value,
+                span,
+                purpose: CompiledAtomPurpose::RuntimeString,
+            });
     }
+    Ok(())
+}
+
+fn record_property_candidate(
+    owner: ExecutableId,
+    name: &str,
+    span: Span,
+    atoms: &mut [Vec<CompiledAtomCandidate>],
+) -> Result<(), LeafCompilationError> {
+    let value = compiler_identifier_string(name, span)?;
+    if value.is_empty() || value.is_tagged_integer_atom() {
+        return Err(LeafCompilationError::SemanticInvariant {
+            invariant: "static property identifiers are nonempty non-index atoms",
+            span: Some(span),
+        });
+    }
+    atoms
+        .get_mut(owner.index())
+        .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
+        .push(CompiledAtomCandidate {
+            value,
+            span,
+            purpose: CompiledAtomPurpose::Property,
+        });
     Ok(())
 }
 

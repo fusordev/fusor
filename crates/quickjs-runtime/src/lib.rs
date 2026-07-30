@@ -2,13 +2,15 @@
 //!
 //! The crate is under active construction. It exposes a first fail-closed
 //! interpreter profile for runtime-installed [`quickjs_bytecode::VerifiedBytecode`]
-//! together with tested JavaScript value, closure, binding-cell, and atom
-//! invariants. It is not yet the complete object heap or language runtime.
+//! together with tested JavaScript value, closure, binding-cell, atom, and
+//! ordinary-object invariants. It is not yet the complete object model or
+//! language runtime.
 //!
 //! Recoverable backing-buffer growth failures are returned as structured
-//! errors. Allocation of immutable reference-counted string nodes currently
-//! follows Rust's global allocator policy; the runtime memory-budget layer
-//! remains a separate, unfinished milestone.
+//! errors. Allocation of reference-counted headers and immutable backing nodes,
+//! including public roots, object-shape owners, and strings, currently follows
+//! Rust's global allocator policy; the runtime memory-budget layer remains a
+//! separate, unfinished milestone.
 
 #![forbid(unsafe_code)]
 
@@ -18,6 +20,7 @@ mod atom;
 mod error;
 mod ids;
 mod number;
+mod object;
 mod predefined_atoms;
 mod property;
 mod runtime;
@@ -43,5 +46,5 @@ pub use property::{
 };
 pub use runtime::{CollectionReport, Context, Realm, Runtime, RuntimeLimits, RuntimeUsage};
 pub use string::{CodeUnits, JsString, JsStringError, MAX_STRING_CODE_UNITS};
-pub use value::{Function, JsValue};
+pub use value::{Function, JsValue, Object};
 pub use vm::ExecutionLimits;
