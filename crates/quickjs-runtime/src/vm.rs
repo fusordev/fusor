@@ -1803,7 +1803,7 @@ fn create_closure(
         }
         .into());
     }
-    let (sources, expected) = {
+    let (sources, expected, realm) = {
         let code = code(runtime, frame.code)?;
         let function = code
             .authority
@@ -1818,7 +1818,7 @@ fn create_closure(
                 additional: source.len(),
             })?;
         copied.extend_from_slice(source);
-        (copied, function.metadata().closures().len())
+        (copied, function.metadata().closures().len(), code.realm)
     };
     if sources.len() != expected {
         return Err(EngineFault::InvalidClosureEnvironment { function: child }.into());
@@ -1921,7 +1921,11 @@ fn create_closure(
                         }
                     }
                     EnvironmentBinding::RealmGlobal(global) => {
-                        if !runtime.global_bindings.contains(global) {
+                        let valid = runtime
+                            .global_bindings
+                            .get(global)
+                            .is_some_and(|binding| binding.realm == realm);
+                        if !valid {
                             return Err(EngineFault::StaleHeapEdge {
                                 edge: "realm global binding",
                                 index: global.index(),

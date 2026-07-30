@@ -333,17 +333,31 @@ object property. Sloppy dynamic-function `this` is normalized lazily at
 constructor realm's global object. Primitive boxing remains fail closed until
 the primitive wrapper object model lands.
 
-Program declarations still fail closed. This boundary matters for wrapper
-escape: indirect-eval `var` is a configurable global-object declaration,
-whereas escaped `let` and `const` are evaluation-local cells that may be
-captured by an escaping child but are not persistent realm globals. Those
-declaration paths, JavaScript argument `ToString`, the global `Function`
-call/constructor builtin, and the pinned post-completion
-`new_target.prototype` adjustment remain pending. The path is not eval, never
-emits `eval`/`apply_eval`, and continues to reject direct eval anywhere in
-generated code. Direct and indirect eval remain wholly unimplemented.
-GeneratorFunction, AsyncFunction, and AsyncGeneratorFunction also remain fail
-closed.
+Program `var` and function declarations use typed constructor-realm
+global-object slots. Installation preflights the complete declaration set
+before mutation: new properties are writable, enumerable, and configurable;
+an existing `var` property is preserved; a configurable function property is
+normalized to those three flags; and a compatible nonconfigurable function
+property retains its flags. Incompatible function declarations become a
+sourced JavaScript `TypeError`.
+Function declarations are bound to one verified named child and one isolated
+root-entry `fclosure; put_var` pair. The compiler selects the last duplicate
+declaration, emits every function initializer before user statements, and
+leaves later `var` initializers in source order.
+
+Escaped `let` and `const` instead remain evaluation-local TDZ cells. A hoisted
+global function may capture those cells before their certified
+`set_loc_uninitialized` setup, and the verifier proves that setup completes
+before user bytecode. Retiring the internal Script root preserves only cells,
+functions, and installed code still reachable from the realm or a public
+completion. Configurable accessor replacement and persistent global lexical
+collision checks remain fail closed until those object/environment forms
+exist. JavaScript argument `ToString`, the global `Function` call/constructor
+builtin, and the pinned post-completion `new_target.prototype` adjustment also
+remain pending. The path is not eval, never emits `eval`/`apply_eval`, and
+continues to reject direct eval anywhere in generated code. Direct and
+indirect eval remain wholly unimplemented. GeneratorFunction, AsyncFunction,
+and AsyncGeneratorFunction also remain fail closed.
 
 ## Bytecode
 

@@ -198,6 +198,8 @@ pub struct CompiledRealmGlobal {
     atom: AtomPoolIndex,
     slot: u16,
     source: CompiledRealmGlobalSource,
+    policy: CompilerBindingPolicy,
+    function_initializer: Option<u32>,
 }
 
 impl CompiledRealmGlobal {
@@ -207,7 +209,7 @@ impl CompiledRealmGlobal {
         self.id
     }
 
-    /// Returns the exact unresolved identifier text.
+    /// Returns the exact declared or unresolved identifier text.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -229,6 +231,20 @@ impl CompiledRealmGlobal {
     #[must_use]
     pub const fn source(&self) -> CompiledRealmGlobalSource {
         self.source
+    }
+
+    /// Returns whether this name is an unresolved lookup, property-backed
+    /// `var`, or hoisted function declaration.
+    #[must_use]
+    pub const fn policy(&self) -> CompilerBindingPolicy {
+        self.policy
+    }
+
+    /// Returns the root-only function-template initializer for a declared
+    /// constructor-realm function.
+    #[must_use]
+    pub const fn function_initializer(&self) -> Option<u32> {
+        self.function_initializer
     }
 }
 
@@ -658,10 +674,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     /// # Errors
     ///
     /// Rejects every non-dynamic source unit, nonordinary dynamic-function
-    /// family, Program-level global declaration, unsupported syntax, resource
-    /// limit, and staged or final verification failure. Unresolved identifier
-    /// references are instead typed as constructor-realm global lookups and
-    /// never become caller-frame captures.
+    /// family, unsupported declaration or syntax, resource limit, and staged
+    /// or final verification failure. Program `var` and function declarations
+    /// plus unresolved identifier references are typed as constructor-realm
+    /// globals; functions are initialized from the last duplicate declaration.
+    /// Program `let` and `const` remain evaluation-local frame cells. Neither
+    /// domain becomes a caller-frame capture.
     pub fn compile_dynamic_function_script(
         &self,
         limits: VerificationLimits,
@@ -1049,21 +1067,6 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         limits: VerificationLimits,
     ) -> Result<ValidatedFunction, LeafCompilationError> {
         let (executable, program) = self.selected_dynamic_function_script(executable_id)?;
-        if let Some(binding) = self
-            .planned
-            .plan
-            .bindings_for(executable_id)
-            .and_then(|bindings| bindings.first())
-        {
-            return unsupported(
-                UnsupportedLeafFeature::GlobalEnvironment,
-                binding
-                    .declaration_spans()
-                    .first()
-                    .copied()
-                    .unwrap_or(program.span),
-            );
-        }
         let mut layout = FrameLayout::new(&self.planned.plan, executable_id)?;
         let completion = layout.push_internal_local()?;
         let mut flow = PlannedControlFlow::new(limits);
@@ -2084,6 +2087,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         )?;
         entries.sort_unstable_by_key(ScopeEntryInitialization::order_key);
         if function_scope {
+            self.emit_realm_global_function_initializers(
+                executable,
+                planning.tree_layout,
+                planning.constants,
+                flow,
+            )?;
             for entry in entries
                 .iter()
                 .rev()
@@ -2194,6 +2203,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     span: Some(declaration_span),
                 });
             }
+            if Self::realm_global_scope_entry_is_runtime_instantiated(storage, declaration_span)? {
+                continue;
+            }
             let frame_slot =
                 layout
                     .slot(binding)
@@ -2259,6 +2271,111 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
         }
         Ok(entries)
+    }
+
+    fn realm_global_scope_entry_is_runtime_instantiated(
+        storage: &crate::storage::BindingStorage,
+        span: Span,
+    ) -> Result<bool, LeafCompilationError> {
+        if storage.placement() != StoragePlacement::GlobalObject {
+            return Ok(false);
+        }
+        let supported_policy = matches!(
+            (storage.policy().kind(), storage.policy().initialization()),
+            (
+                DeclarationKind::Var,
+                InitializationPolicy::UndefinedAtInstantiation
+            ) | (
+                DeclarationKind::Function,
+                InitializationPolicy::FunctionAtInstantiation
+            )
+        );
+        if !supported_policy
+            || storage.policy().writes() != WritePolicy::Mutable
+            || storage.policy().has_temporal_dead_zone()
+        {
+            return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, span);
+        }
+        Ok(true)
+    }
+
+    fn emit_realm_global_function_initializers(
+        &self,
+        executable: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
+            || executable.index() != 0
+        {
+            return Ok(());
+        }
+        let root = self
+            .planned
+            .plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        if root.parent().is_some()
+            || !matches!(
+                root.kind(),
+                ExecutableKind::Script {
+                    asynchronous: false
+                }
+            )
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "constructor-realm function initializers belong to the dynamic Script root",
+                span: Some(root.span()),
+            });
+        }
+
+        for &global in tree_layout.realm_globals.imports_for(executable)? {
+            let descriptor = tree_layout.realm_globals.binding(global).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "root realm-global initializer has a binding descriptor",
+                    span: Some(root.span()),
+                },
+            )?;
+            if descriptor.policy.kind() != VerifiedBindingKind::Function {
+                continue;
+            }
+            let binding =
+                descriptor
+                    .declaration
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "constructor-realm function initializer has a declared binding",
+                        span: Some(descriptor.first_span),
+                    })?;
+            let child = tree_layout.function_declaration(binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "constructor-realm function initializer selects its last child",
+                    span: Some(descriptor.first_span),
+                },
+            )?;
+            let child_span = self
+                .planned
+                .plan
+                .executable(child)
+                .map_or(descriptor.first_span, Executable::span);
+            flow.emit(self.plan_child_function_closure(
+                child,
+                executable,
+                child_span,
+                tree_layout,
+                constants,
+            )?)?;
+            let slot =
+                tree_layout
+                    .realm_globals
+                    .closure_slot(&self.planned.plan, executable, global)?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::PutVar,
+                Operands::VarRef(slot),
+                descriptor.first_span,
+            ))?;
+        }
+        Ok(())
     }
 
     fn emit_scope_entry_initialization(
@@ -2448,6 +2565,44 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             };
             let binding =
                 self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+            let storage = self.planned.plan.binding(binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "declared compiler binding exists",
+                    span: Some(identifier.span),
+                },
+            )?;
+            if storage.placement() == StoragePlacement::GlobalObject {
+                self.validate_realm_global_var_declaration(
+                    declaration.kind,
+                    storage,
+                    identifier.span,
+                )?;
+                if let Some(initializer) = &declarator.init {
+                    if let Some(span) = anonymous_function_definition_span(initializer) {
+                        return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+                    }
+                    self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
+                    let global = tree_layout.realm_globals.for_binding(binding).ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant:
+                                "declared Program var has a constructor-realm global identity",
+                            span: Some(identifier.span),
+                        },
+                    )?;
+                    let slot = tree_layout.realm_globals.closure_slot(
+                        &self.planned.plan,
+                        layout.executable,
+                        global,
+                    )?;
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::PutVar,
+                        Operands::VarRef(slot),
+                        identifier.span,
+                    ))?;
+                }
+                continue;
+            }
+
             let frame_slot = layout
                 .slot(binding)
                 .ok_or(LeafCompilationError::Unsupported {
@@ -2485,6 +2640,33 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     );
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn validate_realm_global_var_declaration(
+        &self,
+        declaration_kind: VariableDeclarationKind,
+        storage: &crate::storage::BindingStorage,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        let merged_global_policy = matches!(
+            (storage.policy().kind(), storage.policy().initialization()),
+            (
+                DeclarationKind::Var,
+                InitializationPolicy::UndefinedAtInstantiation
+            ) | (
+                DeclarationKind::Function,
+                InitializationPolicy::FunctionAtInstantiation
+            )
+        );
+        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
+            || declaration_kind != VariableDeclarationKind::Var
+            || !merged_global_policy
+            || storage.policy().writes() != WritePolicy::Mutable
+            || storage.policy().has_temporal_dead_zone()
+        {
+            return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, span);
         }
         Ok(())
     }
@@ -3814,16 +3996,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     CompilerGraphClosureSource::ParentClosure(u32::from(index))
                 }
             };
-            definitions.push(VerifiedClosureVariableDefinition::realm_global(
-                Some(name),
-                CompilerBindingPolicy::new(
-                    VerifiedBindingKind::GlobalReference,
-                    VerifiedInitializationPolicy::ConstructorRealmLookup,
-                    VerifiedWritePolicy::Mutable,
-                    false,
-                ),
-                source,
-            ));
+            let mut definition =
+                VerifiedClosureVariableDefinition::realm_global(Some(name), global.policy, source);
+            if let Some(initializer) = global.function_initializer {
+                definition = definition.with_function_initializer(initializer);
+            }
+            definitions.push(definition);
         }
         Ok(definitions)
     }
@@ -3974,12 +4152,35 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 }
                 CompiledRealmGlobalSource::ConstructorRealm
             };
+            let function_initializer = if source == CompiledRealmGlobalSource::ConstructorRealm
+                && binding.policy.kind() == VerifiedBindingKind::Function
+            {
+                let declaration = binding.declaration.ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant:
+                            "constructor-realm function retains its declared binding identity",
+                        span: Some(binding.first_span),
+                    },
+                )?;
+                let child = tree_layout.function_declaration(declaration).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant:
+                            "constructor-realm function declaration selects its last initializer",
+                        span: Some(binding.first_span),
+                    },
+                )?;
+                Some(constants.function_index(child)?)
+            } else {
+                None
+            };
             globals.push(CompiledRealmGlobal {
                 id,
                 name: Arc::clone(&binding.name),
                 atom: constants.metadata_atom_index(CompiledMetadataAtomKey::RealmGlobal(id))?,
                 slot,
                 source,
+                policy: binding.policy,
+                function_initializer,
             });
         }
         Ok(globals)
@@ -4235,7 +4436,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                             access: reference.access(),
                         })
                     }
-                    StoragePlacement::GlobalObject | StoragePlacement::GlobalLexical => {
+                    StoragePlacement::GlobalObject => self.lowered_realm_global_binding_reference(
+                        binding.id(),
+                        reference.access(),
+                        span,
+                        layout,
+                        tree_layout,
+                    ),
+                    StoragePlacement::GlobalLexical => {
                         unsupported(UnsupportedLeafFeature::GlobalEnvironment, span)
                     }
                     StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport => {
@@ -4244,45 +4452,76 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 }
             }
             NativeReferenceId::Unresolved(unresolved_id) => {
-                let reference = self
-                    .planned
-                    .plan
-                    .unresolved_globals()
-                    .get(unresolved_id.index())
-                    .ok_or(LeafCompilationError::SemanticInvariant {
-                        invariant: "unresolved compiler reference exists",
-                        span: Some(span),
-                    })?;
-                if reference.span() != span {
-                    return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "unresolved compiler reference retains its Oxc span",
-                        span: Some(span),
-                    });
-                }
-                if self.unit.goal()
-                    != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
-                {
-                    return unsupported(UnsupportedLeafFeature::UnresolvedReference, span);
-                }
-                let global = tree_layout
-                    .realm_globals
-                    .for_unresolved(unresolved_id)
-                    .ok_or(LeafCompilationError::SemanticInvariant {
-                        invariant:
-                            "dynamic unresolved reference has a constructor-realm global identity",
-                        span: Some(span),
-                    })?;
-                let slot = tree_layout.realm_globals.closure_slot(
-                    &self.planned.plan,
-                    layout.executable,
-                    global,
-                )?;
-                Ok(LoweredReference::RealmGlobal {
-                    slot,
-                    access: reference.access(),
-                })
+                self.lowered_unresolved_reference(unresolved_id, span, layout, tree_layout)
             }
         }
+    }
+
+    fn lowered_unresolved_reference(
+        &self,
+        unresolved: UnresolvedGlobalId,
+        span: Span,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<LoweredReference, LeafCompilationError> {
+        let reference = self
+            .planned
+            .plan
+            .unresolved_globals()
+            .get(unresolved.index())
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "unresolved compiler reference exists",
+                span: Some(span),
+            })?;
+        if reference.span() != span {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "unresolved compiler reference retains its Oxc span",
+                span: Some(span),
+            });
+        }
+        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) {
+            return unsupported(UnsupportedLeafFeature::UnresolvedReference, span);
+        }
+        let global = tree_layout.realm_globals.for_unresolved(unresolved).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "dynamic unresolved reference has a constructor-realm global identity",
+                span: Some(span),
+            },
+        )?;
+        let slot = tree_layout.realm_globals.closure_slot(
+            &self.planned.plan,
+            layout.executable,
+            global,
+        )?;
+        Ok(LoweredReference::RealmGlobal {
+            slot,
+            access: reference.access(),
+        })
+    }
+
+    fn lowered_realm_global_binding_reference(
+        &self,
+        binding: BindingId,
+        access: ReferenceAccess,
+        span: Span,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<LoweredReference, LeafCompilationError> {
+        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) {
+            return unsupported(UnsupportedLeafFeature::GlobalEnvironment, span);
+        }
+        let global = tree_layout.realm_globals.for_binding(binding).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "dynamic Program global binding has a realm-global identity",
+                span: Some(span),
+            },
+        )?;
+        let slot = tree_layout.realm_globals.closure_slot(
+            &self.planned.plan,
+            layout.executable,
+            global,
+        )?;
+        Ok(LoweredReference::RealmGlobal { slot, access })
     }
 
     fn validate_lowered_mutation_reference(
@@ -4746,52 +4985,146 @@ impl ScopeEntryInitialization {
 struct RealmGlobalBinding {
     name: Arc<str>,
     first_span: Span,
+    policy: CompilerBindingPolicy,
+    declaration: Option<BindingId>,
 }
 
 struct RealmGlobalLayout {
     bindings: Box<[RealmGlobalBinding]>,
+    by_binding: Box<[Option<RealmGlobalId>]>,
     by_unresolved: Box<[Option<RealmGlobalId>]>,
     import_ranges: Box<[Range<usize>]>,
     imports: Box<[RealmGlobalId]>,
 }
 
-impl RealmGlobalLayout {
-    fn new(plan: &StoragePlan, enabled: bool) -> Result<Self, LeafCompilationError> {
-        let executable_count = plan.executables().len();
-        if !enabled {
-            return Ok(Self {
-                bindings: Box::default(),
-                by_unresolved: vec![None; plan.unresolved_globals().len()].into_boxed_slice(),
-                import_ranges: vec![0..0; executable_count].into_boxed_slice(),
-                imports: Box::default(),
+struct RealmGlobalLayoutBuilder {
+    bindings: Vec<RealmGlobalBinding>,
+    by_name: HashMap<Arc<str>, RealmGlobalId>,
+    by_binding: Vec<Option<RealmGlobalId>>,
+    by_unresolved: Vec<Option<RealmGlobalId>>,
+    needs: Vec<Vec<RealmGlobalId>>,
+}
+
+impl RealmGlobalLayoutBuilder {
+    fn new(plan: &StoragePlan) -> Self {
+        Self {
+            bindings: Vec::new(),
+            by_name: HashMap::new(),
+            by_binding: vec![None; plan.bindings().len()],
+            by_unresolved: vec![None; plan.unresolved_globals().len()],
+            needs: (0..plan.executables().len()).map(|_| Vec::new()).collect(),
+        }
+    }
+
+    fn collect_declarations(&mut self, plan: &StoragePlan) -> Result<(), LeafCompilationError> {
+        for binding in plan.bindings() {
+            match binding.placement() {
+                StoragePlacement::GlobalObject => {
+                    self.collect_declaration(plan, binding)?;
+                }
+                StoragePlacement::GlobalLexical => {
+                    return unsupported(
+                        UnsupportedLeafFeature::GlobalEnvironment,
+                        binding
+                            .declaration_spans()
+                            .first()
+                            .copied()
+                            .unwrap_or_default(),
+                    );
+                }
+                StoragePlacement::Argument { .. }
+                | StoragePlacement::Local
+                | StoragePlacement::ModuleLocal
+                | StoragePlacement::ModuleImport => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_declaration(
+        &mut self,
+        plan: &StoragePlan,
+        binding: &crate::storage::BindingStorage,
+    ) -> Result<(), LeafCompilationError> {
+        let first_span = binding.declaration_spans().first().copied().ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "constructor-realm declaration retains a source span",
+                span: None,
+            },
+        )?;
+        let supported_policy = matches!(
+            (binding.policy().kind(), binding.policy().initialization()),
+            (
+                DeclarationKind::Var,
+                InitializationPolicy::UndefinedAtInstantiation
+            ) | (
+                DeclarationKind::Function,
+                InitializationPolicy::FunctionAtInstantiation
+            )
+        );
+        if !supported_policy
+            || binding.policy().writes() != WritePolicy::Mutable
+            || binding.policy().has_temporal_dead_zone()
+        {
+            return unsupported(UnsupportedLeafFeature::GlobalEnvironment, first_span);
+        }
+        let owner = plan.executable(binding.executable()).ok_or(
+            LeafCompilationError::InvalidExecutable {
+                executable: binding.executable(),
+            },
+        )?;
+        if binding.executable().index() != 0 || owner.parent().is_some() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "constructor-realm declaration belongs to the dynamic Script root",
+                span: Some(first_span),
             });
         }
 
-        let mut bindings = Vec::<RealmGlobalBinding>::new();
-        let mut by_name = HashMap::<Arc<str>, RealmGlobalId>::new();
-        let mut by_unresolved = vec![None; plan.unresolved_globals().len()];
-        let mut needs = (0..executable_count)
-            .map(|_| Vec::<RealmGlobalId>::new())
-            .collect::<Vec<_>>();
+        let name: Arc<str> = Arc::from(binding.name());
+        if self.by_name.contains_key(&name) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "one declared constructor-realm binding per name",
+                span: Some(first_span),
+            });
+        }
+        let id = self.push_binding(RealmGlobalBinding {
+            name: Arc::clone(&name),
+            first_span,
+            policy: verified_storage_policy(binding)?,
+            declaration: Some(binding.id()),
+        })?;
+        self.by_name.insert(name, id);
+        let mapping = self.by_binding.get_mut(binding.id().index()).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "binding identity indexes its realm-global mapping",
+                span: Some(first_span),
+            },
+        )?;
+        if mapping.replace(id).is_some() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "one realm-global mapping per declared binding",
+                span: Some(first_span),
+            });
+        }
+        self.push_need(binding.executable(), id)
+    }
+
+    fn collect_unresolved(&mut self, plan: &StoragePlan) -> Result<(), LeafCompilationError> {
         for reference in plan.unresolved_globals() {
             let name: Arc<str> = Arc::from(reference.name());
-            let id = if let Some(&id) = by_name.get(&name) {
+            let id = if let Some(&id) = self.by_name.get(&name) {
                 id
             } else {
-                let raw = u32::try_from(bindings.len()).map_err(|_| {
-                    LeafCompilationError::CapacityExceeded {
-                        domain: "constructor-realm global names",
-                    }
-                })?;
-                let id = RealmGlobalId(raw);
-                by_name.insert(Arc::clone(&name), id);
-                bindings.push(RealmGlobalBinding {
-                    name,
+                let id = self.push_binding(RealmGlobalBinding {
+                    name: Arc::clone(&name),
                     first_span: reference.span(),
-                });
+                    policy: constructor_realm_lookup_policy(),
+                    declaration: None,
+                })?;
+                self.by_name.insert(name, id);
                 id
             };
-            let mapping = by_unresolved.get_mut(reference.id().index()).ok_or(
+            let mapping = self.by_unresolved.get_mut(reference.id().index()).ok_or(
                 LeafCompilationError::SemanticInvariant {
                     invariant: "unresolved global identity indexes its realm-global mapping",
                     span: Some(reference.span()),
@@ -4803,30 +5136,69 @@ impl RealmGlobalLayout {
                     span: Some(reference.span()),
                 });
             }
-            needs
-                .get_mut(reference.executable().index())
-                .ok_or(LeafCompilationError::InvalidExecutable {
-                    executable: reference.executable(),
-                })?
-                .push(id);
+            self.push_need(reference.executable(), id)?;
         }
+        Ok(())
+    }
 
-        for index in (0..executable_count).rev() {
-            needs[index].sort_unstable();
-            needs[index].dedup();
+    fn collect_resolved_needs(&mut self, plan: &StoragePlan) -> Result<(), LeafCompilationError> {
+        for reference in plan.resolved_references() {
+            let Some(global) = self
+                .by_binding
+                .get(reference.binding().index())
+                .copied()
+                .flatten()
+            else {
+                continue;
+            };
+            self.push_need(reference.executable(), global)?;
+        }
+        Ok(())
+    }
+
+    fn push_binding(
+        &mut self,
+        binding: RealmGlobalBinding,
+    ) -> Result<RealmGlobalId, LeafCompilationError> {
+        let raw = u32::try_from(self.bindings.len()).map_err(|_| {
+            LeafCompilationError::CapacityExceeded {
+                domain: "constructor-realm global names",
+            }
+        })?;
+        let id = RealmGlobalId(raw);
+        self.bindings.push(binding);
+        Ok(id)
+    }
+
+    fn push_need(
+        &mut self,
+        executable: ExecutableId,
+        global: RealmGlobalId,
+    ) -> Result<(), LeafCompilationError> {
+        self.needs
+            .get_mut(executable.index())
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?
+            .push(global);
+        Ok(())
+    }
+
+    fn finish(mut self, plan: &StoragePlan) -> Result<RealmGlobalLayout, LeafCompilationError> {
+        for index in (0..self.needs.len()).rev() {
+            self.needs[index].sort_unstable();
+            self.needs[index].dedup();
             let Some(parent) = plan.executables()[index].parent() else {
                 continue;
             };
-            let inherited = needs[index].clone();
-            needs
+            let inherited = self.needs[index].clone();
+            self.needs
                 .get_mut(parent.index())
                 .ok_or(LeafCompilationError::InvalidExecutable { executable: parent })?
                 .extend(inherited);
         }
 
-        let mut import_ranges = Vec::with_capacity(executable_count);
+        let mut import_ranges = Vec::with_capacity(self.needs.len());
         let mut imports = Vec::new();
-        for mut executable_needs in needs {
+        for mut executable_needs in self.needs {
             executable_needs.sort_unstable();
             executable_needs.dedup();
             checked_function_entry_count(executable_needs.len(), "constructor-realm global slots")?;
@@ -4834,12 +5206,34 @@ impl RealmGlobalLayout {
             imports.extend(executable_needs);
             import_ranges.push(start..imports.len());
         }
-        Ok(Self {
-            bindings: bindings.into_boxed_slice(),
-            by_unresolved: by_unresolved.into_boxed_slice(),
+        Ok(RealmGlobalLayout {
+            bindings: self.bindings.into_boxed_slice(),
+            by_binding: self.by_binding.into_boxed_slice(),
+            by_unresolved: self.by_unresolved.into_boxed_slice(),
             import_ranges: import_ranges.into_boxed_slice(),
             imports: imports.into_boxed_slice(),
         })
+    }
+}
+
+impl RealmGlobalLayout {
+    fn new(plan: &StoragePlan, enabled: bool) -> Result<Self, LeafCompilationError> {
+        let executable_count = plan.executables().len();
+        if !enabled {
+            return Ok(Self {
+                bindings: Box::default(),
+                by_binding: vec![None; plan.bindings().len()].into_boxed_slice(),
+                by_unresolved: vec![None; plan.unresolved_globals().len()].into_boxed_slice(),
+                import_ranges: vec![0..0; executable_count].into_boxed_slice(),
+                imports: Box::default(),
+            });
+        }
+
+        let mut builder = RealmGlobalLayoutBuilder::new(plan);
+        builder.collect_declarations(plan)?;
+        builder.collect_unresolved(plan)?;
+        builder.collect_resolved_needs(plan)?;
+        builder.finish(plan)
     }
 
     fn binding(&self, id: RealmGlobalId) -> Option<&RealmGlobalBinding> {
@@ -4848,6 +5242,10 @@ impl RealmGlobalLayout {
 
     fn for_unresolved(&self, id: UnresolvedGlobalId) -> Option<RealmGlobalId> {
         self.by_unresolved.get(id.index()).copied().flatten()
+    }
+
+    fn for_binding(&self, id: BindingId) -> Option<RealmGlobalId> {
+        self.by_binding.get(id.index()).copied().flatten()
     }
 
     fn imports_for(
@@ -5234,7 +5632,7 @@ impl FrameLayout {
                 StoragePlacement::Argument { parameter_index } => {
                     let parameter_index =
                         checked_function_index(parameter_index, "function argument slots")?;
-                    FrameSlot::Argument(ArgumentSlot(parameter_index))
+                    Some(FrameSlot::Argument(ArgumentSlot(parameter_index)))
                 }
                 StoragePlacement::Local => {
                     let slot =
@@ -5244,10 +5642,10 @@ impl FrameLayout {
                         binding: binding.id(),
                         slot,
                     });
-                    FrameSlot::Local(slot)
+                    Some(FrameSlot::Local(slot))
                 }
-                StoragePlacement::GlobalObject
-                | StoragePlacement::GlobalLexical
+                StoragePlacement::GlobalObject => None,
+                StoragePlacement::GlobalLexical
                 | StoragePlacement::ModuleLocal
                 | StoragePlacement::ModuleImport => {
                     let span = binding
@@ -5257,6 +5655,9 @@ impl FrameLayout {
                         .unwrap_or_default();
                     return unsupported(UnsupportedLeafFeature::UnsupportedBinding, span);
                 }
+            };
+            let Some(slot) = slot else {
+                continue;
             };
             slots.push(FrameBindingSlot {
                 binding: binding.id(),
@@ -6596,6 +6997,15 @@ fn verified_storage_policy(
         ));
     }
     verified_binding_policy(binding.policy())
+}
+
+const fn constructor_realm_lookup_policy() -> CompilerBindingPolicy {
+    CompilerBindingPolicy::new(
+        VerifiedBindingKind::GlobalReference,
+        VerifiedInitializationPolicy::ConstructorRealmLookup,
+        VerifiedWritePolicy::Mutable,
+        false,
+    )
 }
 
 fn script_completion_variable_definition(

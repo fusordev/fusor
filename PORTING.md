@@ -314,12 +314,18 @@ A milestone is complete only when all of its checked items pass in CI.
           exact missing-name and `typeof` behavior, cross-realm ownership,
           and lazy sloppy dynamic-function `this` normalization without caller
           capture. Keep primitive receiver boxing fail closed.
-    - [ ] Add escaped Program declaration instantiation: indirect-eval `var`
-          and function declarations are configurable global-object bindings,
-          while `let` and `const` are evaluation-local cells capturable by an
-          escaping child. Then add ordered JavaScript `ToString` argument
-          conversion, the global `Function` call/construct object, and
-          `new_target.prototype` post-processing.
+    - [x] Add escaped Program declaration instantiation: indirect-eval `var`
+          and function declarations create configurable global-object
+          bindings while preserving compatible existing properties, with
+          verified hoisting, duplicate-last-wins selection, descriptor
+          preflight/rollback, and sourced declaration `TypeError`s; `let` and
+          `const` are evaluation-local TDZ cells capturable by escaping
+          functions.
+    - [ ] Add configurable-accessor replacement and persistent global lexical
+          collision checks when those object/environment forms exist. Then add
+          ordered JavaScript `ToString` argument conversion, the global
+          `Function` call/construct object, and `new_target.prototype`
+          post-processing.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
       stack traces, iterators, and generators.
   - [x] First escaping exception path: local/captured TDZ access returns a

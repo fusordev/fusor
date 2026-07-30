@@ -33,9 +33,15 @@ only whole-graph `VerifiedBytecode` with a constructor-realm global receiver,
 and returns the exact Script completion. Unresolved names use typed
 constructor-realm lookup/write slots, and sloppy dynamic functions normalize
 `this` lazily against their installed constructor realm. Escaped Program
-declarations, JavaScript argument-to-source coercion, the global `Function`
-object, and `new.target` prototype adjustment remain pending and fail closed.
-No dynamic-Function path uses eval or captures a caller lexical frame.
+`var` and function declarations now create configurable constructor-realm data
+properties, with correct existing-property handling, function hoisting,
+duplicate-last-wins initialization, and failure-atomic descriptor preflight.
+Escaped `let` and `const` remain
+evaluation-local TDZ cells and can survive only through escaping closures.
+Configurable accessor replacement, JavaScript argument-to-source coercion, the
+global `Function` object, and `new.target` prototype adjustment remain pending
+and fail closed. No dynamic-Function path uses eval or captures a caller
+lexical frame.
 
 ## Contract
 

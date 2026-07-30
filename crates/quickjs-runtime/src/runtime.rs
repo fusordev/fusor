@@ -31,7 +31,7 @@ use std::{
 use quickjs_bytecode::{
     CompilerBindingKind, CompilerBindingPolicy, CompilerCapturedBinding, CompilerClosureBinding,
     CompilerConstant, CompilerConstantValue, CompilerExecutableKind, FinalOpcode,
-    FunctionTemplateId, VerifiedBytecode,
+    FunctionTemplateId, Operands, VerifiedBytecode,
 };
 
 use crate::{
@@ -382,7 +382,7 @@ pub(crate) struct RealmGlobalBinding {
     pub(crate) state: RealmGlobalBindingState,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RealmGlobalBindingState {
     Unresolved,
     Object,
@@ -391,20 +391,37 @@ pub(crate) enum RealmGlobalBindingState {
 #[derive(Clone, Copy)]
 enum RealmGlobalRequest {
     Lookup,
-    Object,
+    Var,
+    Function,
 }
 
 impl RealmGlobalRequest {
     fn from_policy(policy: CompilerBindingPolicy) -> Result<Self, InstallError> {
-        match policy.kind() {
-            CompilerBindingKind::GlobalReference => Ok(Self::Lookup),
-            CompilerBindingKind::Var => Ok(Self::Object),
-            CompilerBindingKind::Parameter
-            | CompilerBindingKind::Function
-            | CompilerBindingKind::FunctionName
-            | CompilerBindingKind::Catch
-            | CompilerBindingKind::Let
-            | CompilerBindingKind::Const => Err(InstallError::AuthorityInvariant {
+        match (
+            policy.kind(),
+            policy.initialization(),
+            policy.writes(),
+            policy.has_temporal_dead_zone(),
+        ) {
+            (
+                CompilerBindingKind::GlobalReference,
+                quickjs_bytecode::CompilerInitializationPolicy::ConstructorRealmLookup,
+                quickjs_bytecode::CompilerWritePolicy::Mutable,
+                false,
+            ) => Ok(Self::Lookup),
+            (
+                CompilerBindingKind::Var,
+                quickjs_bytecode::CompilerInitializationPolicy::UndefinedAtInstantiation,
+                quickjs_bytecode::CompilerWritePolicy::Mutable,
+                false,
+            ) => Ok(Self::Var),
+            (
+                CompilerBindingKind::Function,
+                quickjs_bytecode::CompilerInitializationPolicy::FunctionAtInstantiation,
+                quickjs_bytecode::CompilerWritePolicy::Mutable,
+                false,
+            ) => Ok(Self::Function),
+            _ => Err(InstallError::AuthorityInvariant {
                 message: "unsupported constructor-realm global declaration policy",
             }),
         }
@@ -413,13 +430,132 @@ impl RealmGlobalRequest {
     const fn initial_state(self) -> RealmGlobalBindingState {
         match self {
             Self::Lookup => RealmGlobalBindingState::Unresolved,
-            Self::Object => RealmGlobalBindingState::Object,
+            Self::Var | Self::Function => RealmGlobalBindingState::Object,
         }
+    }
+
+    const fn upgraded_state(self, current: RealmGlobalBindingState) -> RealmGlobalBindingState {
+        match (self, current) {
+            (Self::Lookup, current)
+            | (Self::Var | Self::Function, current @ RealmGlobalBindingState::Object) => current,
+            (Self::Var | Self::Function, RealmGlobalBindingState::Unresolved) => {
+                RealmGlobalBindingState::Object
+            }
+        }
+    }
+
+    const fn declares_object_property(self) -> bool {
+        !matches!(self, Self::Lookup)
     }
 }
 
-const fn dynamic_function_var_property_layout() -> PropertyLayout {
+const fn dynamic_function_declaration_property_layout() -> PropertyLayout {
     PropertyLayout::data(true, true, true)
+}
+
+fn global_function_replacement_layout(existing: PropertyLayout) -> Option<PropertyLayout> {
+    if existing.is_configurable() {
+        Some(dynamic_function_declaration_property_layout())
+    } else if existing.writable() == Some(true) && existing.is_enumerable() {
+        Some(existing)
+    } else {
+        None
+    }
+}
+
+fn rejected_global_declaration(
+    authority: &VerifiedBytecode,
+    closure: u32,
+    name: &Atom,
+) -> Result<InstallError, InstallError> {
+    let root = authority.root();
+    let constant = root
+        .metadata()
+        .closures()
+        .get(closure as usize)
+        .and_then(quickjs_bytecode::ClosureVariableDefinition::function_initializer);
+    let instructions = root.function().control_flow().instructions();
+    let site = if let Some(constant) = constant {
+        instructions
+            .windows(2)
+            .enumerate()
+            .find_map(|(index, pair)| {
+                let initializer = pair[0].decoded().instruction();
+                let initializer_constant = match (initializer.opcode(), initializer.operands()) {
+                    (FinalOpcode::FClosure, Operands::Const(value)) => Some(value),
+                    (FinalOpcode::FClosure8, Operands::Const8(value)) => Some(u32::from(value)),
+                    _ => None,
+                };
+                let put = pair[1].decoded().instruction();
+                (initializer_constant == Some(constant)
+                    && matches!(
+                        (put.opcode(), put.operands()),
+                        (FinalOpcode::PutVar, Operands::VarRef(slot))
+                            if u32::from(slot) == closure
+                    ))
+                .then_some((index, pair[0].decoded().pc()))
+            })
+            .ok_or(InstallError::AuthorityInvariant {
+                message: "global function declaration has no verified initializer site",
+            })?
+    } else {
+        let first = instructions
+            .first()
+            .ok_or(InstallError::AuthorityInvariant {
+                message: "global declaration Script has no instruction",
+            })?;
+        (0, first.decoded().pc())
+    };
+    let source_span = root
+        .metadata()
+        .source()
+        .mappings()
+        .get(site.0)
+        .ok_or(InstallError::AuthorityInvariant {
+            message: "global function declaration source mapping is missing",
+        })?
+        .span();
+    let name = name
+        .description()
+        .cloned()
+        .ok_or(InstallError::AuthorityInvariant {
+            message: "global declaration name is not a string atom",
+        })?;
+    Ok(InstallError::GlobalDeclarationRejected {
+        name,
+        function: authority.root_id(),
+        pc: site.1,
+        source_span,
+    })
+}
+
+fn global_declaration_exception(
+    authority: &VerifiedBytecode,
+    name: &JsString,
+    function: FunctionTemplateId,
+    pc: quickjs_bytecode::BytecodePc,
+    source_span: quickjs_bytecode::SourceByteSpan,
+) -> Result<crate::JsException, crate::ExecutionError> {
+    let source = authority
+        .function(function)
+        .ok_or(crate::EngineFault::InvalidClosureEnvironment { function })?
+        .metadata()
+        .source();
+    let message = JsString::from_utf8("cannot define variable '")?
+        .concat(name)?
+        .concat(&JsString::from_utf8("'")?)?;
+    Ok(crate::JsException::engine_error(
+        crate::ExceptionKind::TypeError,
+        message,
+        crate::JsStackFrame::new(
+            function,
+            pc,
+            source.display_name_arc(),
+            source.text_arc(),
+            source_span,
+        ),
+        Vec::new(),
+    ))
 }
 
 /// One uniquely owned JavaScript runtime.
@@ -1344,7 +1480,16 @@ impl Runtime {
                 resource: RuntimeResource::RealmGlobalBindings,
                 additional: sources.len(),
             })?;
-        for (source, definition) in sources.iter().zip(root.metadata().closures()) {
+        let mut requested_names = HashSet::new();
+        requested_names
+            .try_reserve(sources.len())
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::RealmGlobalBindings,
+                additional: sources.len(),
+            })?;
+        for (closure, (source, definition)) in
+            sources.iter().zip(root.metadata().closures()).enumerate()
+        {
             let quickjs_bytecode::CompilerClosureSource::ConstructorRealmGlobal(atom) = *source
             else {
                 return Err(InstallError::AuthorityInvariant {
@@ -1361,7 +1506,18 @@ impl Runtime {
                     message: "constructor-realm global atom is missing",
                 },
             )?;
-            requests.push((name, RealmGlobalRequest::from_policy(policy)?));
+            if !requested_names.insert(name.clone()) {
+                return Err(InstallError::AuthorityInvariant {
+                    message: "constructor-realm global names are not unique",
+                });
+            }
+            requests.push((
+                name,
+                RealmGlobalRequest::from_policy(policy)?,
+                u32::try_from(closure).map_err(|_| InstallError::AuthorityInvariant {
+                    message: "constructor-realm global index is not representable",
+                })?,
+            ));
         }
 
         let realm_state = self
@@ -1373,7 +1529,7 @@ impl Runtime {
         let global_object = realm_state.global_object;
         let missing = requests
             .iter()
-            .filter(|(name, _)| !realm_state.global_bindings.contains_key(name))
+            .filter(|(name, _, _)| !realm_state.global_bindings.contains_key(name))
             .count();
         let global_record =
             self.objects
@@ -1382,7 +1538,7 @@ impl Runtime {
                     message: "constructor-realm global object is stale",
                 })?;
         let mut new_object_properties = 0_usize;
-        for (name, request) in &requests {
+        for (name, request, closure) in &requests {
             let key = PropertyKey::from_validated_atom(name.clone());
             if let Some(global) = realm_state.global_bindings.get(name).copied() {
                 let binding =
@@ -1399,12 +1555,16 @@ impl Runtime {
             }
             match request {
                 RealmGlobalRequest::Lookup => {}
-                RealmGlobalRequest::Object => {
-                    if global_record.record.own_data_property(&key).is_none() {
+                RealmGlobalRequest::Var | RealmGlobalRequest::Function => {
+                    if let Some((layout, _)) = global_record.record.own_data_property(&key) {
+                        if matches!(request, RealmGlobalRequest::Function)
+                            && global_function_replacement_layout(layout).is_none()
+                        {
+                            return Err(rejected_global_declaration(authority, *closure, name)?);
+                        }
+                    } else {
                         if !global_record.record.is_extensible() {
-                            return Err(InstallError::AuthorityInvariant {
-                                message: "constructor-realm global object rejects a declaration",
-                            });
+                            return Err(rejected_global_declaration(authority, *closure, name)?);
                         }
                         new_object_properties = new_object_properties.saturating_add(1);
                     }
@@ -1480,8 +1640,15 @@ impl Runtime {
                 resource: RuntimeResource::ObjectProperties,
                 additional: new_object_properties,
             })?;
+        let mut updated_global_properties = Vec::new();
+        updated_global_properties
+            .try_reserve_exact(requests.len())
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: requests.len(),
+            })?;
 
-        for (name, request) in requests {
+        for (name, request, _) in requests {
             let existing = self
                 .realms
                 .get(realm)
@@ -1496,21 +1663,23 @@ impl Runtime {
                         inserted_globals,
                         updated_globals,
                         inserted_global_properties,
+                        updated_global_properties,
                     };
                     self.rollback_root_environment(realm, &partial);
                     return Err(InstallError::AuthorityInvariant {
                         message: "constructor-realm global binding is stale",
                     });
                 }
-                if !matches!(request, RealmGlobalRequest::Lookup) {
+                {
                     let binding = self.global_bindings.get_mut(global).ok_or(
                         InstallError::AuthorityInvariant {
                             message: "constructor-realm global binding is stale",
                         },
                     )?;
-                    if matches!(binding.state, RealmGlobalBindingState::Unresolved) {
+                    let upgraded = request.upgraded_state(binding.state);
+                    if upgraded != binding.state {
                         updated_globals.push((global, binding.state));
-                        binding.state = request.initial_state();
+                        binding.state = upgraded;
                     }
                 }
                 global
@@ -1525,6 +1694,7 @@ impl Runtime {
                         inserted_globals,
                         updated_globals,
                         inserted_global_properties,
+                        updated_global_properties,
                     };
                     self.rollback_root_environment(realm, &partial);
                     return Err(InstallError::AllocationFailed {
@@ -1548,6 +1718,7 @@ impl Runtime {
                         inserted_globals,
                         updated_globals,
                         inserted_global_properties,
+                        updated_global_properties,
                     };
                     self.rollback_root_environment(realm, &partial);
                     return Err(InstallError::AuthorityInvariant {
@@ -1557,17 +1728,46 @@ impl Runtime {
                 inserted_globals.push((name.clone(), global));
                 global
             };
-            if matches!(request, RealmGlobalRequest::Object) {
+            if request.declares_object_property() {
                 let key = PropertyKey::from_validated_atom(name.clone());
-                let exists = self
+                let existing_layout = self
                     .objects
                     .get(global_object)
-                    .is_some_and(|object| object.record.own_data_property(&key).is_some());
-                if !exists {
+                    .and_then(|object| object.record.own_data_property(&key))
+                    .map(|(layout, _)| layout);
+                if let Some(existing_layout) = existing_layout {
+                    if matches!(request, RealmGlobalRequest::Function) {
+                        let replacement = global_function_replacement_layout(existing_layout)
+                            .ok_or(InstallError::AuthorityInvariant {
+                                message: "preflighted global function property became incompatible",
+                            })?;
+                        if replacement != existing_layout {
+                            updated_global_properties.push((key.clone(), existing_layout));
+                            let replaced = self.objects.get_mut(global_object).and_then(|object| {
+                                object
+                                    .record
+                                    .replace_existing_data_layout(&key, replacement)
+                            });
+                            if replaced != Some(existing_layout) {
+                                let partial = RootEnvironment {
+                                    bindings,
+                                    inserted_globals,
+                                    updated_globals,
+                                    inserted_global_properties,
+                                    updated_global_properties,
+                                };
+                                self.rollback_root_environment(realm, &partial);
+                                return Err(InstallError::AuthorityInvariant {
+                                    message: "preflighted global function property layout disappeared",
+                                });
+                            }
+                        }
+                    }
+                } else {
                     if let Err(error) = self.append_data_property(
                         HeapReference::Object(global_object),
                         key.clone(),
-                        dynamic_function_var_property_layout(),
+                        dynamic_function_declaration_property_layout(),
                         StoredValue::Undefined,
                     ) {
                         let partial = RootEnvironment {
@@ -1575,6 +1775,7 @@ impl Runtime {
                             inserted_globals,
                             updated_globals,
                             inserted_global_properties,
+                            updated_global_properties,
                         };
                         self.rollback_root_environment(realm, &partial);
                         return Err(match error {
@@ -1616,11 +1817,18 @@ impl Runtime {
             inserted_globals,
             updated_globals,
             inserted_global_properties,
+            updated_global_properties,
         })
     }
 
     fn rollback_root_environment(&mut self, realm: RealmId, environment: &RootEnvironment) {
         if let Some(global_object) = self.realms.get(realm).map(|state| state.global_object) {
+            for (key, layout) in environment.updated_global_properties.iter().rev() {
+                if let Some(object) = self.objects.get_mut(global_object) {
+                    let restored = object.record.replace_existing_data_layout(key, *layout);
+                    debug_assert!(restored.is_some());
+                }
+            }
             for key in environment.inserted_global_properties.iter().rev() {
                 if let Some(object) = self.objects.get_mut(global_object) {
                     let removed = object.record.pop_last_data(key);
@@ -1761,6 +1969,7 @@ struct RootEnvironment {
     inserted_globals: Vec<(Atom, RealmGlobalBindingId)>,
     updated_globals: Vec<(RealmGlobalBindingId, RealmGlobalBindingState)>,
     inserted_global_properties: Vec<PropertyKey>,
+    updated_global_properties: Vec<(PropertyKey, PropertyLayout)>,
 }
 
 impl Context<'_> {
@@ -1849,7 +2058,29 @@ impl Context<'_> {
             .runtime
             .realm_global_object(self.realm)
             .map_err(crate::ExecutionError::from)?;
-        let installed = self.install_root(authority, RootPublication::Internal)?;
+        let exception_authority = Arc::clone(&authority);
+        let installed = match self.install_root(authority, RootPublication::Internal) {
+            Ok(installed) => installed,
+            Err(InstallError::GlobalDeclarationRejected {
+                name,
+                function,
+                pc,
+                source_span,
+            }) => {
+                let exception = global_declaration_exception(
+                    &exception_authority,
+                    &name,
+                    function,
+                    pc,
+                    source_span,
+                )
+                .map_err(DynamicFunctionScriptError::Execution)?;
+                return Err(DynamicFunctionScriptError::Execution(
+                    crate::ExecutionError::Exception(exception),
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
         let result = self
             .execute_internal_root(
                 installed.function,
@@ -2272,14 +2503,36 @@ pub(crate) fn usize_to_u64(value: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::dynamic_function_var_property_layout;
+    use super::{dynamic_function_declaration_property_layout, global_function_replacement_layout};
+    use crate::PropertyLayout;
 
     #[test]
-    fn dynamic_function_var_properties_are_deletable_eval_properties() {
-        let layout = dynamic_function_var_property_layout();
+    fn dynamic_function_declaration_properties_are_deletable_eval_properties() {
+        let layout = dynamic_function_declaration_property_layout();
 
         assert_eq!(layout.writable(), Some(true));
         assert!(layout.is_enumerable());
         assert!(layout.is_configurable());
+    }
+
+    #[test]
+    fn global_function_descriptor_compatibility_matches_quickjs() {
+        let replacement = dynamic_function_declaration_property_layout();
+        assert_eq!(
+            global_function_replacement_layout(PropertyLayout::data(false, false, true)),
+            Some(replacement)
+        );
+        assert_eq!(
+            global_function_replacement_layout(PropertyLayout::data(true, true, false)),
+            Some(PropertyLayout::data(true, true, false))
+        );
+        assert_eq!(
+            global_function_replacement_layout(PropertyLayout::data(false, true, false)),
+            None
+        );
+        assert_eq!(
+            global_function_replacement_layout(PropertyLayout::data(true, false, false)),
+            None
+        );
     }
 }

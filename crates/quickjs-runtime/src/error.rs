@@ -271,6 +271,17 @@ pub enum InstallError {
     String(JsStringError),
     /// Runtime-local atom interning failed.
     Atom(AtomError),
+    /// Global declaration instantiation rejected an existing object property.
+    GlobalDeclarationRejected {
+        /// Exact declared binding name.
+        name: JsString,
+        /// Dynamic Script root containing the rejected declaration.
+        function: FunctionTemplateId,
+        /// Declaration-instantiation bytecode position.
+        pc: BytecodePc,
+        /// Exact retained source span for the declaration initializer.
+        source_span: SourceByteSpan,
+    },
     /// Verified authority contradicted an installation invariant.
     AuthorityInvariant {
         /// Concise invariant description.
@@ -308,6 +319,12 @@ impl fmt::Display for InstallError {
             ),
             Self::String(source) => source.fmt(formatter),
             Self::Atom(source) => source.fmt(formatter),
+            Self::GlobalDeclarationRejected { name, .. } => write!(
+                formatter,
+                "cannot define variable '{}'",
+                name.to_utf8_lossy()
+                    .unwrap_or_else(|_| "<name allocation failed>".to_owned())
+            ),
             Self::AuthorityInvariant { message } => {
                 write!(formatter, "verified bytecode invariant failed: {message}")
             }
@@ -323,6 +340,7 @@ impl Error for InstallError {
             Self::UnsupportedOpcode { .. }
             | Self::LimitExceeded { .. }
             | Self::AllocationFailed { .. }
+            | Self::GlobalDeclarationRejected { .. }
             | Self::AuthorityInvariant { .. } => None,
         }
     }

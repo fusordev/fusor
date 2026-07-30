@@ -3,7 +3,10 @@ use quickjs::{
     construct_dynamic_function,
 };
 use quickjs_frontend::{DynamicFunctionKind, DynamicFunctionSource, SourceFragment};
-use quickjs_runtime::{ExecutionLimits, JsNumber, Runtime, RuntimeLimits, ValueKind};
+use quickjs_runtime::{
+    DynamicFunctionScriptError, ExceptionKind, ExecutionError, ExecutionLimits, JsNumber, Runtime,
+    RuntimeLimits, ValueKind,
+};
 
 fn source<'source>(
     parameters: &'source [SourceFragment<'source>],
@@ -180,6 +183,148 @@ fn separately_constructed_functions_share_constructor_realm_globals() {
             .expect("numeric getter result")
             .strict_equals(JsNumber::from_i32(7))
     );
+}
+
+#[test]
+fn escaped_program_var_is_instantiated_once_in_the_constructor_realm() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    construct_dynamic_function(
+        &mut context,
+        source(&[], "}); var escapedVar = 5; (function(){"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("initialized Program var");
+    construct_dynamic_function(
+        &mut context,
+        source(&[], "}); var escapedVar; (function(){"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("uninitialized redeclaration preserves the property value");
+    let getter = construct_dynamic_function(
+        &mut context,
+        source(&[], "return escapedVar;"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("separate construction resolves the persisted var")
+    .into_value()
+    .into_function()
+    .expect("getter function");
+
+    let value = context
+        .call(&getter, &[], ExecutionLimits::default())
+        .expect("read escaped Program var")
+        .as_number()
+        .expect("live result")
+        .expect("number result");
+    assert!(value.strict_equals(JsNumber::from_i32(5)));
+}
+
+#[test]
+fn escaped_program_lexical_is_private_but_survives_through_a_closure() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let reader = construct_dynamic_function(
+        &mut context,
+        source(&[], "}); let hidden = 2; (function(){ return hidden;"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("escaped lexical closure")
+    .into_value()
+    .into_function()
+    .expect("reader function");
+    let hidden = context
+        .call(&reader, &[], ExecutionLimits::default())
+        .expect("captured lexical read")
+        .as_number()
+        .expect("live result")
+        .expect("number result");
+    assert!(hidden.strict_equals(JsNumber::from_i32(2)));
+
+    let global_probe = construct_dynamic_function(
+        &mut context,
+        source(&[], "return typeof hidden;"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("separate global probe")
+    .into_value()
+    .into_function()
+    .expect("probe function");
+    let probe = context
+        .call(&global_probe, &[], ExecutionLimits::default())
+        .expect("probe result");
+    assert_eq!(
+        probe
+            .as_string()
+            .expect("live result")
+            .expect("string result")
+            .to_utf8_lossy()
+            .expect("short ASCII string"),
+        "undefined"
+    );
+}
+
+#[test]
+fn escaped_program_function_is_hoisted_and_captures_program_lexicals() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let resolver = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "}); let before = declared(); function declared(){ return cell; } \
+             let cell = 8; (function(){ return before;",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect_err("calling the hoisted function before its lexical initializes must throw");
+    let DynamicFunctionConstructionError::Runtime {
+        source: DynamicFunctionScriptError::Execution(ExecutionError::Exception(tdz)),
+        ..
+    } = resolver
+    else {
+        panic!("hoisted call must fail with a JavaScript exception");
+    };
+    assert_eq!(tdz.kind(), Some(ExceptionKind::ReferenceError));
+    assert_eq!(
+        tdz.message()
+            .expect("engine-created error message")
+            .to_utf8_lossy()
+            .expect("short ASCII message"),
+        "cell is not initialized"
+    );
+
+    let resolver = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "}); function declared(){ return cell; } let cell = 8; \
+             (function(){ return declared;",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("hoisted Program function")
+    .into_value()
+    .into_function()
+    .expect("resolver function");
+    let declared = context
+        .call(&resolver, &[], ExecutionLimits::default())
+        .expect("resolve declaration")
+        .into_function()
+        .expect("declared function");
+    let result = context
+        .call(&declared, &[], ExecutionLimits::default())
+        .expect("declared function captures Program lexical")
+        .as_number()
+        .expect("live result")
+        .expect("number result");
+    assert!(result.strict_equals(JsNumber::from_i32(8)));
 }
 
 #[test]

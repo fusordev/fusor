@@ -342,6 +342,7 @@ pub struct ClosureVariableDefinition {
     name: Option<AtomPoolIndex>,
     binding: CompilerClosureBinding,
     source: CompilerClosureSource,
+    function_initializer: Option<u32>,
 }
 
 impl ClosureVariableDefinition {
@@ -356,6 +357,7 @@ impl ClosureVariableDefinition {
             name,
             binding: CompilerClosureBinding::Captured(policy),
             source,
+            function_initializer: None,
         }
     }
 
@@ -371,7 +373,16 @@ impl ClosureVariableDefinition {
             name,
             binding: CompilerClosureBinding::RealmGlobal(policy),
             source,
+            function_initializer: None,
         }
+    }
+
+    /// Attaches the function-template constant that initializes a
+    /// constructor-realm global function declaration.
+    #[must_use]
+    pub const fn with_function_initializer(mut self, constant: u32) -> Self {
+        self.function_initializer = Some(constant);
+        self
     }
 
     /// Returns the optional function-local name atom.
@@ -396,6 +407,13 @@ impl ClosureVariableDefinition {
     #[must_use]
     pub const fn source(&self) -> CompilerClosureSource {
         self.source
+    }
+
+    /// Returns the function-template constant used for a constructor-realm
+    /// global function declaration.
+    #[must_use]
+    pub const fn function_initializer(&self) -> Option<u32> {
+        self.function_initializer
     }
 }
 
@@ -1279,6 +1297,32 @@ pub enum BytecodeVerificationErrorKind {
         /// Actual closure PC.
         pc: BytecodePc,
     },
+    /// A constructor-realm function declaration does not name one valid
+    /// function constant.
+    RealmGlobalFunctionInitializerMetadataMismatch {
+        /// Root closure-domain slot.
+        closure: u32,
+        /// Supplied constant index, when present.
+        constant: Option<u32>,
+    },
+    /// Constructor-realm function bytecode does not contain one isolated
+    /// initializer pair.
+    RealmGlobalFunctionInitializerOpcodeMismatch {
+        /// Root closure-domain slot.
+        closure: u32,
+        /// Required function constant.
+        constant: u32,
+        /// Matching `FClosure` plus `PutVar` pairs.
+        matches: u32,
+    },
+    /// A constructor-realm function initializer is outside the isolated entry
+    /// prefix.
+    RealmGlobalFunctionInitializerPlacementMismatch {
+        /// Root closure-domain slot.
+        closure: u32,
+        /// Actual closure PC.
+        pc: BytecodePc,
+    },
     /// A function template is not owned by exactly one parent constant edge.
     FunctionTemplateOwnershipMismatch {
         /// Function template with invalid ownership.
@@ -1486,6 +1530,22 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::FunctionInitializerPlacementMismatch { definition, pc } => write!(
                 formatter,
                 "function definition {definition} initializer at PC {pc} is outside the isolated entry prefix"
+            ),
+            Self::RealmGlobalFunctionInitializerMetadataMismatch { closure, constant } => write!(
+                formatter,
+                "realm-global function closure {closure} has invalid initializer constant {constant:?}"
+            ),
+            Self::RealmGlobalFunctionInitializerOpcodeMismatch {
+                closure,
+                constant,
+                matches,
+            } => write!(
+                formatter,
+                "realm-global function closure {closure} constant {constant} has {matches} initializer pairs"
+            ),
+            Self::RealmGlobalFunctionInitializerPlacementMismatch { closure, pc } => write!(
+                formatter,
+                "realm-global function closure {closure} initializer at PC {pc} is outside the isolated entry prefix"
             ),
             Self::FunctionTemplateOwnershipMismatch { child, incoming } => write!(
                 formatter,
@@ -1860,13 +1920,24 @@ fn verify_function_metadata(
         function,
     )?;
     verify_variables(id, function, &metadata.variables)?;
-    let initializer_sites = verify_function_initializers(id, function, &metadata.variables)?;
     verify_closures(
         id,
         graph.root_id(),
         authority_kind,
         function,
         &metadata.closures,
+    )?;
+    let realm_global_initializer_prefix = verify_realm_global_function_initializers(
+        id,
+        graph.root_id(),
+        function,
+        &metadata.closures,
+    )?;
+    let initializer_sites = verify_function_initializers(
+        id,
+        function,
+        &metadata.variables,
+        realm_global_initializer_prefix,
     )?;
     verify_source(id, flow, metadata)?;
     verify_supported_opcodes(id, flow, metadata.executable_kind, authority_kind)?;
@@ -1877,6 +1948,7 @@ fn verify_function_metadata(
         function,
         &metadata.variables,
         &initializer_sites,
+        realm_global_initializer_prefix,
         usage.policy_transfers,
         limits.max_policy_transfers,
     )?;
@@ -2204,6 +2276,7 @@ struct FunctionInitializerSite {
 
 struct VerifiedFunctionInitializers {
     put_definitions: Vec<Option<usize>>,
+    entry_prefix_end: usize,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2211,6 +2284,7 @@ fn verify_function_initializers(
     id: FunctionTemplateId,
     function: &VerifiedCompilerFunction,
     variables: &[VariableDefinition],
+    entry_prefix: usize,
 ) -> Result<VerifiedFunctionInitializers, BytecodeVerificationError> {
     let flow = function.control_flow();
     let instructions = flow.instructions();
@@ -2318,8 +2392,8 @@ fn verify_function_initializers(
                         != CompilerInitializationPolicy::FunctionAtScopeEntry)
                     .then_some(index)
             });
-    let mut prefix_index = 0_usize;
-    if let Some(first_definition) = first_instantiation_definition {
+    let mut prefix_index = entry_prefix;
+    if first_instantiation_definition.is_some() || entry_prefix != 0 {
         while let Some(verified) = instructions.get(prefix_index) {
             let instruction = verified.decoded().instruction();
             if instruction.opcode() != FinalOpcode::SetLocUninitialized {
@@ -2333,12 +2407,22 @@ fn verify_function_initializers(
                     .map(InstructionIndex::get)
                     != Some(usize_to_u32(prefix_index + 1))
             {
-                return Err(BytecodeVerificationError::function(
+                if let Some(first_definition) = first_instantiation_definition {
+                    return Err(BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::FunctionInitializerPlacementMismatch {
+                            definition: usize_to_u32(first_definition),
+                            pc: verified.decoded().pc(),
+                        },
+                    ));
+                }
+                let local =
+                    local_operand(instruction.opcode(), instruction.operands()).unwrap_or(0);
+                return Err(policy_error(
                     id,
-                    BytecodeVerificationErrorKind::FunctionInitializerPlacementMismatch {
-                        definition: usize_to_u32(first_definition),
-                        pc: verified.decoded().pc(),
-                    },
+                    BindingSlot::Local(local),
+                    Some(verified.decoded().pc()),
+                    BindingPolicyViolationReason::InvalidLexicalInitialization,
                 ));
             }
             prefix_index += 1;
@@ -2393,7 +2477,10 @@ fn verify_function_initializers(
         }
     }
 
-    Ok(VerifiedFunctionInitializers { put_definitions })
+    Ok(VerifiedFunctionInitializers {
+        put_definitions,
+        entry_prefix_end: prefix_index,
+    })
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -2691,6 +2778,163 @@ fn verify_capture_layout(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct RealmGlobalFunctionInitializerSite {
+    closure_index: usize,
+    closure_pc: BytecodePc,
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "global function initializer matching and entry placement form one authority check"
+)]
+fn verify_realm_global_function_initializers(
+    id: FunctionTemplateId,
+    root: FunctionTemplateId,
+    function: &VerifiedCompilerFunction,
+    closures: &[ClosureVariableDefinition],
+) -> Result<usize, BytecodeVerificationError> {
+    if !closures
+        .iter()
+        .any(|definition| definition.function_initializer.is_some())
+    {
+        return Ok(0);
+    }
+    if id != root {
+        let closure = closures
+            .iter()
+            .position(|definition| definition.function_initializer.is_some())
+            .map_or(0, usize_to_u32);
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerMetadataMismatch {
+                closure,
+                constant: closures
+                    .get(closure as usize)
+                    .and_then(ClosureVariableDefinition::function_initializer),
+            },
+        ));
+    }
+
+    let instructions = function.control_flow().instructions();
+    let mut predecessor_counts = try_filled_vec(
+        id,
+        instructions.len(),
+        0_u32,
+        BytecodeGraphResource::SourceMappings,
+    )?;
+    for instruction in instructions {
+        let successors = instruction.successors();
+        for successor in [
+            successors.fallthrough(),
+            successors.branch_target(),
+            successors.jump_target(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            predecessor_counts[successor.get() as usize] =
+                predecessor_counts[successor.get() as usize].saturating_add(1);
+        }
+    }
+
+    let mut sites = try_filled_vec(
+        id,
+        closures.len(),
+        None,
+        BytecodeGraphResource::ClosureDefinitions,
+    )?;
+    let mut matches = try_filled_vec(
+        id,
+        closures.len(),
+        0_u32,
+        BytecodeGraphResource::ClosureDefinitions,
+    )?;
+    for index in 0..instructions.len().saturating_sub(1) {
+        let closure_instruction = instructions[index].decoded().instruction();
+        let Some(constant) =
+            closure_constant(closure_instruction.opcode(), closure_instruction.operands())
+        else {
+            continue;
+        };
+        let put_instruction = instructions[index + 1].decoded().instruction();
+        let (FinalOpcode::PutVar, Operands::VarRef(closure)) =
+            (put_instruction.opcode(), put_instruction.operands())
+        else {
+            continue;
+        };
+        let Some(definition) = closures.get(closure as usize) else {
+            continue;
+        };
+        if definition.function_initializer != Some(constant)
+            || instructions[index]
+                .successors()
+                .fallthrough()
+                .map(InstructionIndex::get)
+                != Some(usize_to_u32(index + 1))
+            || predecessor_counts[index + 1] != 1
+        {
+            continue;
+        }
+        matches[closure as usize] = matches[closure as usize].saturating_add(1);
+        if matches[closure as usize] == 1 {
+            sites[closure as usize] = Some(RealmGlobalFunctionInitializerSite {
+                closure_index: index,
+                closure_pc: instructions[index].decoded().pc(),
+            });
+        }
+    }
+
+    let mut prefix_index = 0_usize;
+    for (closure, definition) in closures.iter().enumerate() {
+        let Some(constant) = definition.function_initializer else {
+            continue;
+        };
+        if matches[closure] != 1 {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerOpcodeMismatch {
+                    closure: usize_to_u32(closure),
+                    constant,
+                    matches: matches[closure],
+                },
+            ));
+        }
+        let Some(site) = sites[closure] else {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerOpcodeMismatch {
+                    closure: usize_to_u32(closure),
+                    constant,
+                    matches: matches[closure],
+                },
+            ));
+        };
+        let expected_predecessors = u32::from(prefix_index != 0);
+        if site.closure_index != prefix_index
+            || predecessor_counts[site.closure_index] != expected_predecessors
+        {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerPlacementMismatch {
+                    closure: usize_to_u32(closure),
+                    pc: site.closure_pc,
+                },
+            ));
+        }
+        prefix_index = prefix_index.checked_add(2).ok_or_else(|| {
+            BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerPlacementMismatch {
+                    closure: usize_to_u32(closure),
+                    pc: site.closure_pc,
+                },
+            )
+        })?;
+    }
+    Ok(prefix_index)
+}
+
 fn verify_closures(
     id: FunctionTemplateId,
     root: FunctionTemplateId,
@@ -2713,6 +2957,7 @@ fn verify_closures(
             CompilerClosureBinding::Captured(_) => {
                 policy.is_valid()
                     && policy.kind() != CompilerBindingKind::GlobalReference
+                    && closure.function_initializer.is_none()
                     && matches!(
                         staged_source,
                         CompilerClosureSource::ParentVariableReference(_)
@@ -2748,6 +2993,36 @@ fn verify_closures(
                 BindingPolicyViolationReason::InvalidDeclarationPolicy,
             ));
         }
+        let realm_global_function = matches!(
+            closure.binding,
+            CompilerClosureBinding::RealmGlobal(policy)
+                if policy.kind() == CompilerBindingKind::Function
+        );
+        let originates_in_constructor_realm = matches!(
+            staged_source,
+            CompilerClosureSource::ConstructorRealmGlobal(_)
+        );
+        let initializer_valid = match (
+            realm_global_function,
+            originates_in_constructor_realm,
+            closure.function_initializer,
+        ) {
+            (true, true, Some(constant)) => matches!(
+                function.constants().get(constant as usize),
+                Some(crate::CompilerConstant::Function(_))
+            ),
+            (true, false, None) | (false, _, None) => true,
+            (true, true, None) | (true, false, Some(_)) | (false, _, Some(_)) => false,
+        };
+        if !initializer_valid {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerMetadataMismatch {
+                    closure: usize_to_u32(index),
+                    constant: closure.function_initializer,
+                },
+            ));
+        }
         if closure.source != *staged_source {
             return Err(BytecodeVerificationError::function(
                 id,
@@ -2762,11 +3037,34 @@ fn verify_closures(
 }
 
 const fn realm_global_policy_supported(policy: CompilerBindingPolicy) -> bool {
-    policy.is_valid()
-        && matches!(
-            policy.kind(),
-            CompilerBindingKind::GlobalReference | CompilerBindingKind::Var
-        )
+    match policy.kind() {
+        CompilerBindingKind::GlobalReference => {
+            matches!(
+                policy.initialization(),
+                CompilerInitializationPolicy::ConstructorRealmLookup
+            ) && matches!(policy.writes(), CompilerWritePolicy::Mutable)
+                && !policy.has_temporal_dead_zone()
+        }
+        CompilerBindingKind::Var => {
+            matches!(
+                policy.initialization(),
+                CompilerInitializationPolicy::UndefinedAtInstantiation
+            ) && matches!(policy.writes(), CompilerWritePolicy::Mutable)
+                && !policy.has_temporal_dead_zone()
+        }
+        CompilerBindingKind::Function => {
+            matches!(
+                policy.initialization(),
+                CompilerInitializationPolicy::FunctionAtInstantiation
+            ) && matches!(policy.writes(), CompilerWritePolicy::Mutable)
+                && !policy.has_temporal_dead_zone()
+        }
+        CompilerBindingKind::Parameter
+        | CompilerBindingKind::FunctionName
+        | CompilerBindingKind::Catch
+        | CompilerBindingKind::Let
+        | CompilerBindingKind::Const => false,
+    }
 }
 
 fn verify_optional_atom(
@@ -2904,6 +3202,10 @@ const fn contains(outer: SourceByteSpan, inner: SourceByteSpan) -> bool {
     outer.start <= inner.start && inner.end <= outer.end
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "parent-child variable, global initializer, and forwarded closure metadata are verified together"
+)]
 fn verify_closure_metadata(
     graph: &VerifiedCompilerFunctionGraph,
     metadata: &[VerifiedFunctionMetadata],
@@ -2940,6 +3242,40 @@ fn verify_closure_metadata(
                     parent_id,
                     BytecodeVerificationErrorKind::FunctionInitializerMetadataMismatch {
                         definition: usize_to_u32(definition_index),
+                        constant: Some(constant_index),
+                    },
+                ));
+            }
+        }
+        for (closure_index, definition) in parent_metadata.closures.iter().enumerate() {
+            let Some(constant_index) = definition.function_initializer else {
+                continue;
+            };
+            let Some(crate::CompilerConstant::Function(child_id)) =
+                parent.constants().get(constant_index as usize)
+            else {
+                return Err(BytecodeVerificationError::function(
+                    parent_id,
+                    BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerMetadataMismatch {
+                        closure: usize_to_u32(closure_index),
+                        constant: Some(constant_index),
+                    },
+                ));
+            };
+            let child_index = usize::try_from(child_id.get()).ok();
+            let child = child_index.and_then(|index| graph.functions().get(index));
+            let child_metadata = child_index.and_then(|index| metadata.get(index));
+            let names_match = child
+                .zip(child_metadata)
+                .is_some_and(|(child, child_metadata)| {
+                    atom_contents(definition.name, parent.atoms())
+                        == atom_contents(child_metadata.function_name, child.atoms())
+                });
+            if !names_match {
+                return Err(BytecodeVerificationError::function(
+                    parent_id,
+                    BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerMetadataMismatch {
+                        closure: usize_to_u32(closure_index),
                         constant: Some(constant_index),
                     },
                 ));
@@ -3366,7 +3702,9 @@ fn verify_closure_opcode(
                 return Err(closure_opcode_mismatch(id, pc, closure, opcode));
             }
             let allowed = match policy.kind() {
-                CompilerBindingKind::GlobalReference | CompilerBindingKind::Var => matches!(
+                CompilerBindingKind::GlobalReference
+                | CompilerBindingKind::Var
+                | CompilerBindingKind::Function => matches!(
                     opcode,
                     FinalOpcode::GetVarUndef | FinalOpcode::GetVar | FinalOpcode::PutVar
                 ),
@@ -3441,13 +3779,18 @@ fn closure_opcode_mismatch(
     )
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "binding-state analysis requires the complete verified function and entry authority"
+)]
 fn verify_binding_states(
     id: FunctionTemplateId,
     graph: &VerifiedCompilerFunctionGraph,
     function: &VerifiedCompilerFunction,
     variables: &[VariableDefinition],
     initializers: &VerifiedFunctionInitializers,
+    realm_global_initializer_prefix: usize,
     prior_transfers: u64,
     transfer_limit: u64,
 ) -> Result<u64, BytecodeVerificationError> {
@@ -3546,6 +3889,20 @@ fn verify_binding_states(
         let start = index * tracked.len();
         let state = &entries[start..start + tracked.len()];
         let mut state = try_copy_slice(id, state, BytecodeGraphResource::FrameStateEntries)?;
+        if realm_global_initializer_prefix != 0 && index == initializers.entry_prefix_end {
+            for (position, (local, _)) in tracked.iter().enumerate() {
+                if state[position] & BindingState::VALUE_INACTIVE != 0
+                    && state[position] & BindingState::CELL_ACTIVE != 0
+                {
+                    return Err(policy_error(
+                        id,
+                        BindingSlot::Local(usize_to_u32(*local)),
+                        Some(instructions[index].decoded().pc()),
+                        BindingPolicyViolationReason::MissingLexicalScopeInitialization,
+                    ));
+                }
+            }
+        }
         let instruction = instructions[index].decoded().instruction();
         let opcode = instruction.opcode();
         if let Some(constant) = closure_constant(opcode, instruction.operands())
@@ -3573,7 +3930,11 @@ fn verify_binding_states(
                 let Some(position) = tracked_by_local[local as usize] else {
                     continue;
                 };
-                if state[position] & BindingState::VALUE_INACTIVE != 0 {
+                let certified_realm_global_initializer =
+                    index < realm_global_initializer_prefix && index % 2 == 0;
+                if state[position] & BindingState::VALUE_INACTIVE != 0
+                    && !certified_realm_global_initializer
+                {
                     return Err(policy_error(
                         id,
                         BindingSlot::Local(local),
@@ -3585,11 +3946,12 @@ fn verify_binding_states(
                     (state[position] & BindingState::VALUE_MASK) | BindingState::CELL_ACTIVE;
             }
         }
+        let mut normal_completion_possible = true;
         if let Some(local) = local_operand(opcode, instruction.operands())
             && let Some(position) = tracked_by_local[local as usize]
         {
             let definition_index = arguments + local as usize;
-            transfer_local_state(
+            normal_completion_possible = transfer_local_state(
                 id,
                 instructions[index].decoded().pc(),
                 local,
@@ -3598,6 +3960,9 @@ fn verify_binding_states(
                 initializers.put_definitions[index] == Some(definition_index),
                 &mut state[position],
             )?;
+        }
+        if !normal_completion_possible {
+            continue;
         }
         let successors = instructions[index].successors();
         for successor in [
@@ -3712,7 +4077,7 @@ fn transfer_local_state(
     definition: &VariableDefinition,
     is_function_initializer: bool,
     state: &mut u8,
-) -> Result<(), BytecodeVerificationError> {
+) -> Result<bool, BytecodeVerificationError> {
     let slot = BindingSlot::Local(local);
     match opcode {
         FinalOpcode::SetLocUninitialized => {
@@ -3780,6 +4145,9 @@ fn transfer_local_state(
                     BindingPolicyViolationReason::MissingLexicalScopeInitialization,
                 ));
             }
+            if *state & BindingState::VALUE_INITIALIZED == 0 {
+                return Ok(false);
+            }
             *state = BindingState::VALUE_INITIALIZED | (*state & BindingState::CELL_MASK);
         }
         FinalOpcode::CloseLoc => {
@@ -3798,7 +4166,7 @@ fn transfer_local_state(
         }
         _ => {}
     }
-    Ok(())
+    Ok(true)
 }
 
 fn propagate_binding_state(

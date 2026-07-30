@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use quickjs_bytecode::{
-    AtomPoolIndex, BindingPolicyViolationReason, BytecodeBuilder, BytecodeGraphResource,
-    BytecodeGraphVerificationLimits, BytecodePc, BytecodeVerificationErrorKind,
-    ClosureVariableDefinition, CompilerAtom, CompilerBindingKind, CompilerBindingPolicy,
-    CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureBinding, CompilerClosureSource,
-    CompilerConstantKind, CompilerConstantLayout, CompilerExecutableKind,
+    AtomPoolIndex, BindingPolicyViolationReason, BindingSlot, BytecodeBuilder,
+    BytecodeGraphResource, BytecodeGraphVerificationLimits, BytecodePc,
+    BytecodeVerificationErrorKind, ClosureVariableDefinition, CompilerAtom, CompilerBindingKind,
+    CompilerBindingPolicy, CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureBinding,
+    CompilerClosureSource, CompilerConstantKind, CompilerConstantLayout, CompilerExecutableKind,
     CompilerInitializationPolicy, CompilerSource, CompilerString, CompilerWritePolicy,
     ExecutionRequirement, FinalOpcode, FunctionGraphVerificationLimits, FunctionIndexDomains,
     FunctionTemplateId, Operands, PcSourceSpan, ScopeLink, SourceByteSpan,
@@ -1022,6 +1022,92 @@ fn function_initializer_input(
     )
 }
 
+fn realm_global_function_initializer_input(
+    instructions: &[(FinalOpcode, Operands)],
+    definition_name: &str,
+    definition: ClosureVariableDefinition,
+) -> UnverifiedCompilerBytecodeGraph {
+    let root_flow = flow_with_header(
+        instructions,
+        1,
+        0,
+        0,
+        &[],
+        1,
+        &[CompilerConstantKind::Function],
+        UnverifiedFunctionHeader::dynamic_function_script(0),
+    );
+    let child_flow = flow(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        1,
+        0,
+        0,
+        &[],
+        0,
+        &[],
+    );
+    let source = CompilerClosureSource::ConstructorRealmGlobal(AtomPoolIndex::new(0));
+    let graph = Arc::new(
+        verify_compiler_function_graph(
+            UnverifiedCompilerFunctionGraph::new(
+                FunctionTemplateId::new(0),
+                Arc::from([
+                    UnverifiedCompilerFunction::new(
+                        Arc::clone(&root_flow),
+                        Arc::from([quickjs_bytecode::CompilerConstant::Function(
+                            FunctionTemplateId::new(1),
+                        )]),
+                        Arc::from([source]),
+                    )
+                    .with_atom_pool(Arc::from([atom(definition_name)])),
+                    UnverifiedCompilerFunction::new(
+                        Arc::clone(&child_flow),
+                        Arc::from([]),
+                        Arc::from([]),
+                    )
+                    .with_atom_pool(Arc::from([atom("declared")])),
+                ]),
+            ),
+            FunctionGraphVerificationLimits::default(),
+        )
+        .expect("realm-global function fixture graph"),
+    );
+    let text: Arc<str> = Arc::from("function declared(){}");
+    let full_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let mapped_source = |flow: &VerifiedControlFlow, name_span| {
+        CompilerSource::new(
+            Arc::from("fixture.js"),
+            Arc::clone(&text),
+            full_span,
+            name_span,
+            Arc::from(
+                flow.instructions()
+                    .iter()
+                    .map(|instruction| PcSourceSpan::new(instruction.decoded().pc(), full_span))
+                    .collect::<Vec<_>>(),
+            ),
+        )
+    };
+    UnverifiedCompilerBytecodeGraph::new(
+        graph,
+        Arc::from([
+            UnverifiedFunctionMetadata::new(
+                None,
+                Arc::from([]),
+                Arc::from([definition]),
+                mapped_source(&root_flow, None),
+            )
+            .with_executable_kind(CompilerExecutableKind::DynamicFunctionScript),
+            UnverifiedFunctionMetadata::new(
+                Some(AtomPoolIndex::new(0)),
+                Arc::from([]),
+                Arc::from([]),
+                mapped_source(&child_flow, Some(SourceByteSpan::new(9, 17))),
+            ),
+        ]),
+    )
+}
+
 fn assert_limit(
     input: &UnverifiedCompilerBytecodeGraph,
     accepted: BytecodeGraphVerificationLimits,
@@ -1486,7 +1572,7 @@ fn constructor_realm_global_opcodes_cannot_cross_captured_slot_boundaries() {
     assert_eq!(
         error.kind(),
         &BytecodeVerificationErrorKind::BindingPolicyViolation {
-            slot: quickjs_bytecode::BindingSlot::Closure(0),
+            slot: BindingSlot::Closure(0),
             pc: None,
             reason: BindingPolicyViolationReason::InvalidDeclarationPolicy,
         }
@@ -1507,7 +1593,7 @@ fn constructor_realm_global_opcodes_cannot_cross_captured_slot_boundaries() {
     assert_eq!(
         error.kind(),
         &BytecodeVerificationErrorKind::BindingPolicyViolation {
-            slot: quickjs_bytecode::BindingSlot::Closure(0),
+            slot: BindingSlot::Closure(0),
             pc: None,
             reason: BindingPolicyViolationReason::InvalidDeclarationPolicy,
         }
@@ -1684,14 +1770,14 @@ fn realm_global_authority_supports_indirect_eval_var_but_rejects_lexical_declara
         assert_eq!(
             error.kind(),
             &BytecodeVerificationErrorKind::BindingPolicyViolation {
-                slot: quickjs_bytecode::BindingSlot::Closure(0),
+                slot: BindingSlot::Closure(0),
                 pc: None,
                 reason: BindingPolicyViolationReason::InvalidDeclarationPolicy,
             }
         );
     }
 
-    let unsupported_function = verify_compiler_bytecode_graph(
+    let missing_function_initializer = verify_compiler_bytecode_graph(
         dynamic_realm_global_input(
             &[(FinalOpcode::ReturnUndef, Operands::None)],
             &[atom("anonymous"), atom("realmValue")],
@@ -1701,10 +1787,107 @@ fn realm_global_authority_supports_indirect_eval_var_but_rejects_lexical_declara
         ),
         BytecodeGraphVerificationLimits::default(),
     )
-    .expect_err("realm-global Function declarations remain fail closed");
+    .expect_err("realm-global Function declarations require an exact child initializer");
+    assert_eq!(
+        missing_function_initializer.kind(),
+        &BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerMetadataMismatch {
+            closure: 0,
+            constant: None,
+        }
+    );
+}
+
+#[test]
+fn realm_global_function_initializer_requires_an_exact_root_entry_pair_and_named_child() {
+    let source = CompilerClosureSource::ConstructorRealmGlobal(AtomPoolIndex::new(0));
+    let definition = ClosureVariableDefinition::realm_global(
+        Some(AtomPoolIndex::new(0)),
+        function_policy(CompilerInitializationPolicy::FunctionAtInstantiation),
+        source,
+    )
+    .with_function_initializer(0);
+    let valid = [
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::PutVar, Operands::VarRef(0)),
+        (FinalOpcode::GetVar, Operands::VarRef(0)),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let verified = verify_compiler_bytecode_graph(
+        realm_global_function_initializer_input(&valid, "declared", definition.clone()),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a root global function is tied to its exact initializer child");
+    assert_eq!(
+        verified.root().metadata().closures()[0].function_initializer(),
+        Some(0)
+    );
+
+    let missing_pair = verify_compiler_bytecode_graph(
+        realm_global_function_initializer_input(
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            "declared",
+            definition.clone(),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("metadata cannot initialize a global function without executable bytecode");
+    assert_eq!(
+        missing_pair.kind(),
+        &BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerOpcodeMismatch {
+            closure: 0,
+            constant: 0,
+            matches: 0,
+        }
+    );
+
+    let misplaced = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::PutVar, Operands::VarRef(0)),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let misplaced = verify_compiler_bytecode_graph(
+        realm_global_function_initializer_input(&misplaced, "declared", definition.clone()),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("global declaration initialization precedes user bytecode");
     assert!(matches!(
-        unsupported_function.kind(),
+        misplaced.kind(),
+        BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerPlacementMismatch {
+            closure: 0,
+            ..
+        }
+    ));
+
+    let wrong_name = verify_compiler_bytecode_graph(
+        realm_global_function_initializer_input(&valid, "other", definition),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("the global binding and initializing child must have the same name");
+    assert_eq!(
+        wrong_name.kind(),
+        &BytecodeVerificationErrorKind::RealmGlobalFunctionInitializerMetadataMismatch {
+            closure: 0,
+            constant: Some(0),
+        }
+    );
+
+    let scope_entry = ClosureVariableDefinition::realm_global(
+        Some(AtomPoolIndex::new(0)),
+        function_policy(CompilerInitializationPolicy::FunctionAtScopeEntry),
+        source,
+    )
+    .with_function_initializer(0);
+    let error = verify_compiler_bytecode_graph(
+        realm_global_function_initializer_input(&valid, "declared", scope_entry),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a Program global function is instantiated once, never at block scope entry");
+    assert!(matches!(
+        error.kind(),
         BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: BindingSlot::Closure(0),
             reason: BindingPolicyViolationReason::InvalidDeclarationPolicy,
             ..
         }
@@ -2534,6 +2717,73 @@ fn frame_state_distinguishes_proven_let_access_from_repeated_const_initializatio
         error.kind(),
         BytecodeVerificationErrorKind::BindingPolicyViolation { .. }
     ));
+}
+
+#[test]
+fn checked_tdz_access_suppresses_definite_throw_and_narrows_mixed_normal_paths() {
+    let variables = [
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(1)),
+            ScopeLink::End,
+            parameter_policy(),
+            false,
+            None,
+        ),
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(2)),
+            ScopeLink::End,
+            const_policy(),
+            true,
+            None,
+        ),
+    ];
+    let text = "function f(a){const x=1}";
+    let function_span =
+        SourceByteSpan::new(0, u32::try_from(text.len()).expect("fixture source length"));
+    let make_source = |pcs: &[u32]| {
+        source(
+            text,
+            function_span,
+            Some(SourceByteSpan::new(9, 10)),
+            &pcs.iter()
+                .map(|&pc| (pc, function_span))
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    verified_single(
+        &[
+            (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+            (FinalOpcode::GetLocCheck, Operands::Loc(0)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::PutLoc0, Operands::NoneLoc),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        &[atom("f"), atom("a"), atom("x")],
+        &variables,
+        make_source(&[0, 3, 6, 7, 8, 9]),
+    )
+    .expect("a definite TDZ throw has no normal path to poison a later const initializer");
+
+    verified_single(
+        &[
+            (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+            (FinalOpcode::PushTrue, Operands::None),
+            (FinalOpcode::IfFalse8, Operands::Label8(5)),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::PutLoc0, Operands::NoneLoc),
+            (FinalOpcode::Goto8, Operands::Label8(1)),
+            (FinalOpcode::GetLocCheck, Operands::Loc(0)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::GetLoc0, Operands::NoneLoc),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("f"), atom("a"), atom("x")],
+        &variables,
+        make_source(&[0, 3, 4, 6, 7, 8, 10, 13, 14, 15]),
+    )
+    .expect("the normal edge of a mixed checked access contains only initialized states");
 }
 
 #[test]

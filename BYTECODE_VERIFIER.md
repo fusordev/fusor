@@ -103,6 +103,15 @@ entry prefix, and validates each scope-entry activation-and-initializer group.
 This prevents a branch from entering the store or a different child template
 from initializing the declared name.
 
+A dynamic-Function Script root may instead attach a function initializer to a
+constructor-realm `FunctionAtInstantiation` closure slot. Verification ties the
+slot, exact name, child constant, and one `fclosure*; put_var` pair together;
+all such pairs form the absolute linear entry prefix. A certified pair may
+create captured Program lexical cells from their inactive frame slots, but the
+same proof requires every such cell to enter TDZ through the following
+scope-setup prefix before any user instruction. Forwarded descendant
+realm-global slots carry no initializer authority.
+
 Strict block declarations deliberately use a narrow two-phase lexical
 normalization. The compiler first emits `set_loc_uninitialized` to activate
 the local or captured cell, then emits the declaration closure and store in an

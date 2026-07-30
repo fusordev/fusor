@@ -422,14 +422,427 @@ fn ordinary_tree_entry_cannot_extract_the_wrapper_child() {
 }
 
 #[test]
-fn escaped_program_global_declarations_remain_fail_closed() {
-    let global = compile_dynamic_function(&[], SourceFragment::new("}); var escaped; ({"))
-        .expect_err("Program global declaration needs a realm environment");
+fn program_var_without_initializer_is_a_declared_realm_global() {
+    let tree = compile_dynamic_function(&[], SourceFragment::new("}); var realmVar; ({"))
+        .expect("Program var declaration");
+    let root = tree.root();
+    let definitions = tree.verified_bytecode().root().metadata().closures();
+
+    assert_eq!(root.realm_globals().len(), 1);
+    assert_eq!(root.realm_globals()[0].name(), "realmVar");
+    assert_eq!(
+        root.realm_globals()[0].source(),
+        CompiledRealmGlobalSource::ConstructorRealm
+    );
+    assert_eq!(definitions.len(), 1);
     assert!(matches!(
-        global,
-        LeafCompilationError::Unsupported {
-            feature: UnsupportedLeafFeature::GlobalEnvironment,
-            ..
-        }
+        definitions[0].binding(),
+        CompilerClosureBinding::RealmGlobal(policy)
+            if policy.kind() == CompilerBindingKind::Var
+                && policy.initialization()
+                    == CompilerInitializationPolicy::UndefinedAtInstantiation
+                && !policy.has_temporal_dead_zone()
     ));
+    assert!(
+        opcodes(root)
+            .iter()
+            .all(|(opcode, _)| *opcode != FinalOpcode::PutVar),
+        "declaration instantiation creates the property; an absent initializer emits no write"
+    );
+}
+
+#[test]
+fn program_var_initializer_writes_the_declared_realm_global() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new("}); var realmVar = 1; realmVar; ({"),
+    )
+    .expect("initialized Program var declaration");
+    let root = tree.root();
+
+    assert_eq!(root.realm_globals().len(), 1);
+    assert!(opcodes(root).iter().any(|(opcode, operands)| {
+        *opcode == FinalOpcode::PutVar
+            && *operands == Operands::VarRef(root.realm_globals()[0].slot())
+    }));
+    assert!(opcodes(root).iter().any(|(opcode, operands)| {
+        *opcode == FinalOpcode::GetVar
+            && *operands == Operands::VarRef(root.realm_globals()[0].slot())
+    }));
+}
+
+#[test]
+fn declared_var_and_unresolved_name_share_the_realm_global_slot_domain() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new("}); var declared = 1; unresolved = 2; declared + unresolved; ({"),
+    )
+    .expect("mixed declared and unresolved realm globals");
+    let root = tree.root();
+
+    assert_eq!(
+        root.realm_globals()
+            .iter()
+            .map(|global| (global.name(), global.slot(), global.policy().kind()))
+            .collect::<Vec<_>>(),
+        [
+            ("declared", 0, CompilerBindingKind::Var),
+            ("unresolved", 1, CompilerBindingKind::GlobalReference),
+        ]
+    );
+    assert_eq!(
+        tree.verified_bytecode()
+            .root()
+            .metadata()
+            .closures()
+            .iter()
+            .map(|definition| definition.binding().policy().kind())
+            .collect::<Vec<_>>(),
+        [
+            CompilerBindingKind::Var,
+            CompilerBindingKind::GlobalReference,
+        ]
+    );
+}
+
+#[test]
+fn program_var_redeclarations_share_one_realm_global() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new("}); var realmVar; var realmVar = 1; var realmVar; ({"),
+    )
+    .expect("Program var redeclarations");
+    let root = tree.root();
+
+    assert_eq!(root.realm_globals().len(), 1);
+    assert_eq!(
+        opcodes(root)
+            .iter()
+            .filter(|(opcode, _)| *opcode == FinalOpcode::PutVar)
+            .count(),
+        1,
+        "only the one source initializer writes the shared property"
+    );
+}
+
+#[test]
+fn child_reference_to_program_var_forwards_the_declared_realm_global() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new("}); var shared = 1; (function read(){ return shared; }); ({"),
+    )
+    .expect("child reference to Program var");
+    let root = tree.root();
+    let wrapper = &tree.functions()[1];
+    let child = &tree.functions()[2];
+
+    assert_eq!(tree.functions().len(), 3);
+    assert_eq!(root.realm_globals().len(), 1);
+    assert!(wrapper.realm_globals().is_empty());
+    assert_eq!(child.realm_globals().len(), 1);
+    assert_eq!(child.realm_globals()[0].id(), root.realm_globals()[0].id());
+    assert_eq!(
+        child.realm_globals()[0].source(),
+        CompiledRealmGlobalSource::ParentClosure(root.realm_globals()[0].slot())
+    );
+    assert!(root.closure_variables().is_empty());
+    assert!(child.closure_variables().is_empty());
+    assert!(matches!(
+        tree.verified_bytecode().root().metadata().closures()[0].binding(),
+        CompilerClosureBinding::RealmGlobal(policy)
+            if policy.kind() == CompilerBindingKind::Var
+    ));
+    assert!(opcodes(child).iter().any(|(opcode, operands)| {
+        *opcode == FinalOpcode::GetVar
+            && *operands == Operands::VarRef(child.realm_globals()[0].slot())
+    }));
+}
+
+#[test]
+fn program_lexicals_are_evaluation_local_and_keep_tdz_metadata() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new("}); let lexical = 1; const fixed = 2; lexical; fixed; ({"),
+    )
+    .expect("Program lexical declarations");
+    let root = tree.root();
+    let metadata = tree.verified_bytecode().root().metadata();
+    let lexical_policies = metadata
+        .variables()
+        .iter()
+        .map(quickjs_bytecode::VariableDefinition::policy)
+        .filter(|policy| {
+            matches!(
+                policy.kind(),
+                CompilerBindingKind::Let | CompilerBindingKind::Const
+            )
+        })
+        .collect::<Vec<_>>();
+    let root_opcodes = opcodes(root);
+
+    assert!(root.realm_globals().is_empty());
+    assert_eq!(lexical_policies.len(), 2);
+    assert!(lexical_policies.iter().all(|policy| {
+        policy.initialization() == CompilerInitializationPolicy::AtDeclaration
+            && policy.has_temporal_dead_zone()
+    }));
+    assert_eq!(
+        root_opcodes
+            .iter()
+            .filter(|(opcode, _)| *opcode == FinalOpcode::SetLocUninitialized)
+            .count(),
+        2
+    );
+    assert_eq!(
+        root_opcodes
+            .iter()
+            .filter(|(opcode, _)| *opcode == FinalOpcode::GetLocCheck)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn child_reference_to_program_lexical_captures_the_evaluation_cell() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new(
+            "}); let sharedLet = 1; const sharedConst = 2; \
+             (function read(){ return sharedLet + sharedConst; }); ({",
+        ),
+    )
+    .expect("child capture of Program lexical");
+    let root = tree.root();
+    let child = &tree.functions()[2];
+
+    assert!(
+        tree.functions()
+            .iter()
+            .all(|function| function.realm_globals().is_empty())
+    );
+    assert_eq!(root.locals().len(), 2);
+    assert_eq!(child.closure_variables().len(), 2);
+    let child_metadata = tree
+        .verified_bytecode()
+        .function(FunctionTemplateId::new(2))
+        .expect("verified child")
+        .metadata();
+    assert_eq!(
+        child_metadata
+            .closures()
+            .iter()
+            .map(|definition| definition.binding().policy().kind())
+            .collect::<Vec<_>>(),
+        [CompilerBindingKind::Let, CompilerBindingKind::Const]
+    );
+    assert!(
+        child_metadata
+            .closures()
+            .iter()
+            .all(|definition| definition.binding().policy().has_temporal_dead_zone())
+    );
+    assert_eq!(
+        opcodes(child)
+            .iter()
+            .filter(|(opcode, _)| *opcode == FinalOpcode::GetVarRefCheck)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn program_function_declaration_is_hoisted_before_user_statements() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new("}); declared; function declared(){ return declared; } ({"),
+    )
+    .expect("hoisted Program function declaration");
+    let root = tree.root();
+    let root_opcodes = opcodes(root);
+    let definition = &tree.verified_bytecode().root().metadata().closures()[0];
+    let initializer = definition
+        .function_initializer()
+        .expect("root function initializer constant");
+
+    assert_eq!(root.realm_globals().len(), 1);
+    assert!(matches!(
+        definition.binding(),
+        CompilerClosureBinding::RealmGlobal(policy)
+            if policy.kind() == CompilerBindingKind::Function
+                && policy.initialization()
+                    == CompilerInitializationPolicy::FunctionAtInstantiation
+    ));
+    assert!(matches!(
+        root_opcodes[0],
+        (FinalOpcode::FClosure8, Operands::Const8(index))
+            if u32::from(index) == initializer
+    ));
+    assert_eq!(
+        root_opcodes[1],
+        (
+            FinalOpcode::PutVar,
+            Operands::VarRef(root.realm_globals()[0].slot())
+        )
+    );
+    assert!(
+        root_opcodes[2..]
+            .iter()
+            .any(|(opcode, _)| *opcode == FinalOpcode::GetVar),
+        "the source read executes after declaration instantiation"
+    );
+    let child_definition = &tree
+        .verified_bytecode()
+        .function(FunctionTemplateId::new(2))
+        .expect("verified declared child")
+        .metadata()
+        .closures()[0];
+    assert!(matches!(
+        child_definition.binding(),
+        CompilerClosureBinding::RealmGlobal(policy)
+            if policy.kind() == CompilerBindingKind::Function
+    ));
+    assert_eq!(
+        child_definition.function_initializer(),
+        None,
+        "descendants forward the realm binding without reinitializing it"
+    );
+}
+
+#[test]
+fn duplicate_program_functions_initialize_from_the_last_declaration() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new(
+            "}); function declared(){ return 1; } \
+             function declared(){ return 2; } ({",
+        ),
+    )
+    .expect("duplicate Program function declarations");
+    let root = tree.root();
+    let definition = &tree.verified_bytecode().root().metadata().closures()[0];
+    let initializer = definition
+        .function_initializer()
+        .expect("last declaration initializer") as usize;
+    let initialized_child = root.constants()[initializer]
+        .function()
+        .expect("initializer is a function template")
+        .executable();
+
+    assert_eq!(tree.functions().len(), 4);
+    assert_eq!(initialized_child, tree.functions()[3].executable());
+    assert_ne!(initialized_child, tree.functions()[2].executable());
+    assert_eq!(
+        opcodes(root)
+            .iter()
+            .filter(|(opcode, _)| {
+                matches!(opcode, FinalOpcode::FClosure | FinalOpcode::FClosure8)
+            })
+            .count(),
+        2,
+        "one hoisted initializer plus the synthetic wrapper expression execute"
+    );
+}
+
+#[test]
+fn program_function_initializers_form_an_absolute_prefix_before_lexical_setup() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new(
+            "}); let captured = 1; \
+             function first(){ return captured; } \
+             function second(){ return captured; } ({",
+        ),
+    )
+    .expect("multiple Program function declarations");
+    let root = tree.root();
+    let root_opcodes = opcodes(root);
+    let definitions = tree.verified_bytecode().root().metadata().closures();
+
+    assert_eq!(root.realm_globals().len(), 2);
+    for (index, global) in root.realm_globals().iter().enumerate() {
+        let initializer = definitions[index]
+            .function_initializer()
+            .expect("root function initializer");
+        assert!(matches!(
+            root_opcodes[index * 2],
+            (FinalOpcode::FClosure8, Operands::Const8(constant))
+                if u32::from(constant) == initializer
+        ));
+        assert_eq!(
+            root_opcodes[index * 2 + 1],
+            (FinalOpcode::PutVar, Operands::VarRef(global.slot()))
+        );
+    }
+    assert_eq!(
+        root_opcodes[4],
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        "all certified function pairs precede Program lexical TDZ setup"
+    );
+}
+
+#[test]
+fn hoisted_program_function_can_capture_a_program_lexical_cell() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new("}); let captured = 1; function declared(){ return captured; } ({"),
+    )
+    .expect("Program function captures Program lexical");
+    let root = tree.root();
+    let child = &tree.functions()[2];
+    let root_opcodes = opcodes(root);
+
+    assert_eq!(
+        root_opcodes[..3],
+        [
+            (FinalOpcode::FClosure8, Operands::Const8(1)),
+            (
+                FinalOpcode::PutVar,
+                Operands::VarRef(root.realm_globals()[0].slot())
+            ),
+            (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        ],
+        "the global function captures the cell before lexical TDZ setup updates it"
+    );
+    assert_eq!(child.closure_variables().len(), 1);
+    assert!(matches!(
+        tree.verified_bytecode()
+            .function(FunctionTemplateId::new(2))
+            .expect("verified declared child")
+            .metadata()
+            .closures()[0]
+            .binding(),
+        CompilerClosureBinding::Captured(policy)
+            if policy.kind() == CompilerBindingKind::Let
+                && policy.has_temporal_dead_zone()
+    ));
+}
+
+#[test]
+fn var_initializer_runs_after_merged_function_instantiation() {
+    let tree = compile_dynamic_function(
+        &[],
+        SourceFragment::new("}); var declared = 7; function declared(){ return 1; } declared; ({"),
+    )
+    .expect("merged var and function declaration");
+    let root = tree.root();
+    let root_opcodes = opcodes(root);
+    let slot = root.realm_globals()[0].slot();
+    let writes = root_opcodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (opcode, operands))| {
+            (*opcode == FinalOpcode::PutVar && *operands == Operands::VarRef(slot)).then_some(index)
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        root.realm_globals()[0].policy().kind(),
+        CompilerBindingKind::Function
+    );
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes[0], 1, "function instantiation is the root prologue");
+    assert!(
+        writes[1] > writes[0] + 1,
+        "the source-order var initializer overwrites the hoisted function later"
+    );
 }

@@ -95,6 +95,22 @@ impl ObjectRecord {
         true
     }
 
+    pub(crate) fn replace_existing_data_layout(
+        &mut self,
+        key: &PropertyKey,
+        layout: PropertyLayout,
+    ) -> Option<PropertyLayout> {
+        debug_assert_eq!(layout.kind(), PropertyLayoutKind::Data);
+        let index = self
+            .shape
+            .iter()
+            .position(|property| property.key == *key)?;
+        let shape = Arc::get_mut(&mut self.shape)
+            .expect("object shape Arc is private and uniquely owned before shape interning");
+        debug_assert_eq!(shape[index].layout.kind(), PropertyLayoutKind::Data);
+        Some(std::mem::replace(&mut shape[index].layout, layout))
+    }
+
     pub(crate) fn append_data(
         &mut self,
         key: PropertyKey,
@@ -140,4 +156,38 @@ impl ObjectRecord {
 pub(crate) struct HeapObject {
     pub(crate) record: ObjectRecord,
     pub(crate) public_roots: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ObjectRecord;
+    use crate::{ArrayIndex, PropertyKey, PropertyLayout, value::StoredValue};
+
+    #[test]
+    fn replacing_a_data_layout_preserves_value_and_can_be_rolled_back() {
+        let key = PropertyKey::from_index(ArrayIndex::new(7).expect("array index"));
+        let original = PropertyLayout::data(false, false, true);
+        let replacement = PropertyLayout::data(true, true, true);
+        let mut record = ObjectRecord::empty(None);
+        record
+            .append_data(key.clone(), original, StoredValue::Boolean(true))
+            .expect("property");
+
+        assert_eq!(
+            record.replace_existing_data_layout(&key, replacement),
+            Some(original)
+        );
+        let (layout, value) = record.own_data_property(&key).expect("updated property");
+        assert_eq!(layout, replacement);
+        assert!(matches!(value, StoredValue::Boolean(true)));
+
+        assert_eq!(
+            record.replace_existing_data_layout(&key, original),
+            Some(replacement)
+        );
+        assert_eq!(
+            record.own_data_property(&key).expect("restored property").0,
+            original
+        );
+    }
 }
