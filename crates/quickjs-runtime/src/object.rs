@@ -61,6 +61,13 @@ impl ObjectRecord {
         self.prototype
     }
 
+    pub(crate) fn replace_prototype(
+        &mut self,
+        prototype: Option<HeapReference>,
+    ) -> Option<HeapReference> {
+        std::mem::replace(&mut self.prototype, prototype)
+    }
+
     pub(crate) const fn is_extensible(&self) -> bool {
         self.extensible
     }

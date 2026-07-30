@@ -6,7 +6,7 @@ use oxc_ast::{
         AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement, CallExpression,
         ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForStatement,
         ForStatementInit, Function, FunctionBody, FunctionType, IdentifierReference, IfStatement,
-        LogicalExpression, ObjectExpression, ObjectPropertyKind, Program,
+        LogicalExpression, NewExpression, ObjectExpression, ObjectPropertyKind, Program,
         PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement, SequenceExpression,
         SimpleAssignmentTarget, Statement, StaticMemberExpression, ThrowStatement, UnaryExpression,
         UpdateExpression, VariableDeclaration, VariableDeclarationKind, WhileStatement,
@@ -2788,6 +2788,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         Expression::CallExpression(call) => {
                             Self::plan_call_expression(call, constants, &mut work)?;
                         }
+                        Expression::NewExpression(constructor) => {
+                            Self::plan_new_expression(constructor, &mut work)?;
+                        }
                         Expression::FunctionExpression(function) => {
                             flow.emit(self.plan_function_closure(
                                 function,
@@ -2913,6 +2916,53 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         } else {
             work.push(ExpressionWork::Visit(&call.callee));
         }
+        Ok(())
+    }
+
+    fn plan_new_expression<'expression>(
+        constructor: &'expression NewExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if constructor.type_arguments.is_some() {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                constructor.span,
+            );
+        }
+        if let Some(spread) = constructor
+            .arguments
+            .iter()
+            .find(|argument| argument.is_spread())
+        {
+            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, spread.span());
+        }
+
+        let argument_count = u16::try_from(constructor.arguments.len()).map_err(|_| {
+            LeafCompilationError::CapacityExceeded {
+                domain: "constructor arguments",
+            }
+        })?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::CallConstructor,
+            Operands::NPop { argument_count },
+            constructor.span,
+        )));
+        for argument in constructor.arguments.iter().rev() {
+            let expression =
+                argument
+                    .as_expression()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "non-spread constructor argument is an expression",
+                        span: Some(argument.span()),
+                    })?;
+            work.push(ExpressionWork::Visit(expression));
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            constructor.callee.span(),
+        )));
+        work.push(ExpressionWork::Visit(&constructor.callee));
         Ok(())
     }
 

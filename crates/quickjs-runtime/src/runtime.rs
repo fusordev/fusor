@@ -36,8 +36,9 @@ use quickjs_bytecode::{
 
 use crate::{
     Atom, AtomLimits, AtomTable, AtomUsage, DynamicFunctionScriptError, ExecutionLimits, Function,
-    HandleError, HandleKind, InstallError, JsNumber, JsString, JsValue, PropertyKey,
-    PropertyLayout, RuntimeError, RuntimeResource,
+    HandleError, HandleKind, InstallError, JsNumber, JsString, JsValue,
+    OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey, PropertyLayout, RuntimeError,
+    RuntimeResource,
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     object::{HeapObject, ObjectRecord},
@@ -300,7 +301,17 @@ impl RuntimeUsage {
 struct RealmState {
     object_prototype: ObjectId,
     global_object: ObjectId,
+    intrinsics: RealmIntrinsics,
     global_bindings: HashMap<Atom, RealmGlobalBindingId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RealmIntrinsics {
+    Initializing,
+    Ready {
+        function_prototype: FunctionId,
+        function_constructor: FunctionId,
+    },
 }
 
 struct RealmHandle {
@@ -358,12 +369,51 @@ pub(crate) struct InstalledCode {
     pub(crate) live_functions: u64,
 }
 
-pub(crate) struct HeapFunction {
+pub(crate) struct BytecodeFunction {
     pub(crate) code: InstalledCodeId,
     pub(crate) template: FunctionTemplateId,
     pub(crate) environment: Vec<EnvironmentBinding>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeFunctionKind {
+    FunctionPrototype,
+    OrdinaryFunctionConstructor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NativeFunction {
+    pub(crate) realm: RealmId,
+    pub(crate) kind: NativeFunctionKind,
+}
+
+pub(crate) enum FunctionImplementation {
+    Bytecode(BytecodeFunction),
+    Native(NativeFunction),
+}
+
+pub(crate) struct HeapFunction {
+    pub(crate) implementation: FunctionImplementation,
     pub(crate) object: ObjectRecord,
     pub(crate) public_roots: u32,
+}
+
+impl HeapFunction {
+    pub(crate) fn bytecode(&self) -> Result<&BytecodeFunction, crate::EngineFault> {
+        match &self.implementation {
+            FunctionImplementation::Bytecode(function) => Ok(function),
+            FunctionImplementation::Native(_) => Err(crate::EngineFault::RuntimeInvariant {
+                message: "native function reached the bytecode execution path",
+            }),
+        }
+    }
+
+    pub(crate) const fn native(&self) -> Option<&NativeFunction> {
+        match &self.implementation {
+            FunctionImplementation::Bytecode(_) => None,
+            FunctionImplementation::Native(function) => Some(function),
+        }
+    }
 }
 
 pub(crate) struct BindingCell {
@@ -529,13 +579,13 @@ fn rejected_global_declaration(
     })
 }
 
-fn global_declaration_exception(
+pub(crate) fn global_declaration_error(
     authority: &VerifiedBytecode,
     name: &JsString,
     function: FunctionTemplateId,
     pc: quickjs_bytecode::BytecodePc,
     source_span: quickjs_bytecode::SourceByteSpan,
-) -> Result<crate::JsException, crate::ExecutionError> {
+) -> Result<(JsString, crate::JsStackFrame), crate::ExecutionError> {
     let source = authority
         .function(function)
         .ok_or(crate::EngineFault::InvalidClosureEnvironment { function })?
@@ -544,8 +594,7 @@ fn global_declaration_exception(
     let message = JsString::from_utf8("cannot define variable '")?
         .concat(name)?
         .concat(&JsString::from_utf8("'")?)?;
-    Ok(crate::JsException::engine_error(
-        crate::ExceptionKind::TypeError,
+    Ok((
         message,
         crate::JsStackFrame::new(
             function,
@@ -554,7 +603,6 @@ fn global_declaration_exception(
             source.text_arc(),
             source_span,
         ),
-        Vec::new(),
     ))
 }
 
@@ -584,7 +632,7 @@ pub struct Runtime {
     installed_templates: u64,
     installed_atoms: u64,
     installed_constants: u64,
-    object_properties: u64,
+    pub(crate) object_properties: u64,
     public_roots: u64,
     pub(crate) collection_pending: bool,
 }
@@ -630,7 +678,9 @@ impl Runtime {
     /// Returns a limit or recoverable allocation failure.
     #[allow(
         clippy::arc_with_non_send_sync,
-        reason = "public handles use Arc headers but remain runtime-local through their mailbox"
+        clippy::missing_panics_doc,
+        clippy::too_many_lines,
+        reason = "post-insertion expects are unreachable invariant checks inside the audited transaction"
     )]
     pub fn create_realm(&mut self) -> Result<Realm, RuntimeError> {
         self.drain_releases();
@@ -644,6 +694,16 @@ impl Runtime {
             self.limits.max_heap_objects,
             usize_to_u64(self.objects.len()).saturating_add(2),
         )?;
+        check_limit(
+            RuntimeResource::HeapFunctions,
+            self.limits.max_heap_functions,
+            usize_to_u64(self.functions.len()).saturating_add(2),
+        )?;
+        check_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties.saturating_add(7),
+        )?;
         self.realms
             .try_reserve(1)
             .map_err(|_| RuntimeError::AllocationFailed {
@@ -656,6 +716,48 @@ impl Runtime {
                 resource: RuntimeResource::HeapObjects,
                 additional: 2,
             })?;
+        self.functions
+            .try_reserve(2)
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: 2,
+            })?;
+
+        let function_key =
+            PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Function));
+        let prototype_key =
+            PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Prototype));
+        let constructor_key =
+            PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Constructor));
+        let length_key =
+            PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Length));
+        let name_key =
+            PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Name));
+        let function_name = predefined_string(&self.atoms, PredefinedAtom::Function);
+        let empty_name = predefined_string(&self.atoms, PredefinedAtom::EmptyString);
+
+        let mut global_record = ObjectRecord::empty(None);
+        global_record
+            .try_reserve_data(1)
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        let mut function_prototype_record = ObjectRecord::empty(None);
+        function_prototype_record.try_reserve_data(3).map_err(|_| {
+            RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 3,
+            }
+        })?;
+        let mut function_constructor_record = ObjectRecord::empty(None);
+        function_constructor_record
+            .try_reserve_data(3)
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 3,
+            })?;
+
         let object_prototype = self
             .objects
             .try_insert(HeapObject {
@@ -666,8 +768,9 @@ impl Runtime {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
             })?;
+        global_record.replace_prototype(Some(HeapReference::Object(object_prototype)));
         let Ok(global_object) = self.objects.try_insert(HeapObject {
-            record: ObjectRecord::empty(Some(HeapReference::Object(object_prototype))),
+            record: global_record,
             public_roots: 0,
         }) else {
             let removed = self.objects.remove(object_prototype);
@@ -680,6 +783,7 @@ impl Runtime {
         let Ok(id) = self.realms.try_insert(RealmState {
             object_prototype,
             global_object,
+            intrinsics: RealmIntrinsics::Initializing,
             global_bindings: HashMap::new(),
         }) else {
             let removed = self.objects.remove(global_object);
@@ -691,6 +795,128 @@ impl Runtime {
                 additional: 1,
             });
         };
+
+        function_prototype_record.replace_prototype(Some(HeapReference::Object(object_prototype)));
+        let Ok(function_prototype) = self.functions.try_insert(HeapFunction {
+            implementation: FunctionImplementation::Native(NativeFunction {
+                realm: id,
+                kind: NativeFunctionKind::FunctionPrototype,
+            }),
+            object: function_prototype_record,
+            public_roots: 0,
+        }) else {
+            let removed = self.realms.remove(id);
+            debug_assert!(removed.is_some());
+            let removed = self.objects.remove(global_object);
+            debug_assert!(removed.is_some());
+            let removed = self.objects.remove(object_prototype);
+            debug_assert!(removed.is_some());
+            return Err(RuntimeError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: 1,
+            });
+        };
+
+        function_constructor_record
+            .replace_prototype(Some(HeapReference::Function(function_prototype)));
+        let Ok(function_constructor) = self.functions.try_insert(HeapFunction {
+            implementation: FunctionImplementation::Native(NativeFunction {
+                realm: id,
+                kind: NativeFunctionKind::OrdinaryFunctionConstructor,
+            }),
+            object: function_constructor_record,
+            public_roots: 0,
+        }) else {
+            let removed = self.functions.remove(function_prototype);
+            debug_assert!(removed.is_some());
+            let removed = self.realms.remove(id);
+            debug_assert!(removed.is_some());
+            let removed = self.objects.remove(global_object);
+            debug_assert!(removed.is_some());
+            let removed = self.objects.remove(object_prototype);
+            debug_assert!(removed.is_some());
+            return Err(RuntimeError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: 1,
+            });
+        };
+
+        let property_result = (|| {
+            let function_prototype_node = self
+                .functions
+                .get_mut(function_prototype)
+                .expect("new Function.prototype remains live");
+            function_prototype_node.object.append_data(
+                constructor_key,
+                PropertyLayout::data(true, false, true),
+                StoredValue::Function(function_constructor),
+            )?;
+            function_prototype_node.object.append_data(
+                length_key.clone(),
+                PropertyLayout::data(false, false, true),
+                StoredValue::Number(JsNumber::from_i32(0)),
+            )?;
+            function_prototype_node.object.append_data(
+                name_key.clone(),
+                PropertyLayout::data(false, false, true),
+                StoredValue::String(empty_name),
+            )?;
+
+            let function_constructor_node = self
+                .functions
+                .get_mut(function_constructor)
+                .expect("new Function constructor remains live");
+            function_constructor_node.object.append_data(
+                prototype_key,
+                PropertyLayout::data(false, false, false),
+                StoredValue::Function(function_prototype),
+            )?;
+            function_constructor_node.object.append_data(
+                length_key,
+                PropertyLayout::data(false, false, true),
+                StoredValue::Number(JsNumber::from_i32(1)),
+            )?;
+            function_constructor_node.object.append_data(
+                name_key,
+                PropertyLayout::data(false, false, true),
+                StoredValue::String(function_name),
+            )?;
+
+            self.objects
+                .get_mut(global_object)
+                .expect("new global object remains live")
+                .record
+                .append_data(
+                    function_key,
+                    PropertyLayout::data(true, false, true),
+                    StoredValue::Function(function_constructor),
+                )
+        })();
+        if property_result.is_err() {
+            let removed = self.functions.remove(function_constructor);
+            debug_assert!(removed.is_some());
+            let removed = self.functions.remove(function_prototype);
+            debug_assert!(removed.is_some());
+            let removed = self.realms.remove(id);
+            debug_assert!(removed.is_some());
+            let removed = self.objects.remove(global_object);
+            debug_assert!(removed.is_some());
+            let removed = self.objects.remove(object_prototype);
+            debug_assert!(removed.is_some());
+            return Err(RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            });
+        }
+
+        self.realms
+            .get_mut(id)
+            .expect("new realm remains live")
+            .intrinsics = RealmIntrinsics::Ready {
+            function_prototype,
+            function_constructor,
+        };
+        self.object_properties += 7;
         Ok(Realm(Arc::new(RealmHandle {
             owner: Arc::downgrade(&self.mailbox),
             id,
@@ -838,17 +1064,38 @@ impl Runtime {
                 &mut marked_objects,
                 &mut work,
             );
+            if let RealmIntrinsics::Ready {
+                function_prototype,
+                function_constructor,
+            } = realm.intrinsics
+            {
+                mark_heap_reference(
+                    HeapReference::Function(function_prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(function_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+            }
         }
 
         while let Some(node) = work.pop() {
             match node {
                 GraphNode::Function(id) => {
                     if let Some(function) = self.functions.get(id) {
-                        for binding in function.environment.iter().copied() {
-                            if let EnvironmentBinding::Captured(cell) = binding
-                                && marked_cells.insert(cell)
-                            {
-                                work.push(GraphNode::Cell(cell));
+                        if let FunctionImplementation::Bytecode(bytecode) = &function.implementation
+                        {
+                            for binding in bytecode.environment.iter().copied() {
+                                if let EnvironmentBinding::Captured(cell) = binding
+                                    && marked_cells.insert(cell)
+                                {
+                                    work.push(GraphNode::Cell(cell));
+                                }
                             }
                         }
                         mark_object_record(
@@ -943,11 +1190,13 @@ impl Runtime {
                 self.object_properties = self
                     .object_properties
                     .saturating_sub(usize_to_u64(function.object.property_count()));
-                if let Some(code) = self.code.get_mut(function.code) {
+                if let FunctionImplementation::Bytecode(bytecode) = function.implementation
+                    && let Some(code) = self.code.get_mut(bytecode.code)
+                {
                     debug_assert!(code.live_functions > 0);
                     code.live_functions = code.live_functions.saturating_sub(1);
                     if code.live_functions == 0 {
-                        maybe_dead_code.push(function.code);
+                        maybe_dead_code.push(bytecode.code);
                     }
                 }
             }
@@ -1048,6 +1297,106 @@ impl Runtime {
             })
     }
 
+    pub(crate) fn predefined_property_key(&self, atom: PredefinedAtom) -> PropertyKey {
+        PropertyKey::from_validated_atom(self.atoms.predefined(atom))
+    }
+
+    pub(crate) fn realm_function_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<FunctionId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        match state.intrinsics {
+            RealmIntrinsics::Initializing => Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm Function intrinsics are not initialized",
+            }),
+            RealmIntrinsics::Ready {
+                function_prototype, ..
+            } => {
+                let function = self.functions.get(function_prototype).ok_or(
+                    crate::EngineFault::StaleHeapEdge {
+                        edge: "Function.prototype intrinsic",
+                        index: function_prototype.index(),
+                        generation: function_prototype.generation(),
+                    },
+                )?;
+                let Some(native) = function.native() else {
+                    return Err(crate::EngineFault::RuntimeInvariant {
+                        message: "Function.prototype intrinsic is not native",
+                    });
+                };
+                if native.realm != realm || native.kind != NativeFunctionKind::FunctionPrototype {
+                    return Err(crate::EngineFault::RuntimeInvariant {
+                        message: "Function.prototype intrinsic has the wrong native identity",
+                    });
+                }
+                Ok(function_prototype)
+            }
+        }
+    }
+
+    pub(crate) fn function_realm(
+        &self,
+        function: FunctionId,
+    ) -> Result<RealmId, crate::EngineFault> {
+        let function = self
+            .functions
+            .get(function)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "function",
+                index: function.index(),
+                generation: function.generation(),
+            })?;
+        match &function.implementation {
+            FunctionImplementation::Bytecode(bytecode) => {
+                self.code.get(bytecode.code).map(|code| code.realm).ok_or(
+                    crate::EngineFault::StaleHeapEdge {
+                        edge: "installed code",
+                        index: bytecode.code.index(),
+                        generation: bytecode.code.generation(),
+                    },
+                )
+            }
+            FunctionImplementation::Native(native) => Ok(native.realm),
+        }
+    }
+
+    pub(crate) fn replace_prototype_checked(
+        &mut self,
+        target: HeapReference,
+        prototype: Option<HeapReference>,
+    ) -> Result<bool, crate::EngineFault> {
+        self.object_record(target)?;
+        let mut current = prototype;
+        let mut remaining = self
+            .functions
+            .len()
+            .saturating_add(self.objects.len())
+            .saturating_add(1);
+        while let Some(reference) = current {
+            if reference == target {
+                return Ok(false);
+            }
+            if remaining == 0 {
+                return Err(crate::EngineFault::RuntimeInvariant {
+                    message: "ordinary prototype chain contains a cycle",
+                });
+            }
+            remaining -= 1;
+            current = self.object_record(reference)?.prototype();
+        }
+        self.object_record_mut(target)?.replace_prototype(prototype);
+        self.collection_pending = true;
+        Ok(true)
+    }
+
     pub(crate) fn object_record(
         &self,
         reference: HeapReference,
@@ -1088,8 +1437,15 @@ impl Runtime {
         &mut self,
         prototype: ObjectId,
     ) -> Result<ObjectId, crate::ExecutionError> {
-        if !self.objects.contains(prototype) {
-            return Err(stale_heap_reference(HeapReference::Object(prototype)).into());
+        self.allocate_ordinary_object_with_prototype(HeapReference::Object(prototype))
+    }
+
+    pub(crate) fn allocate_ordinary_object_with_prototype(
+        &mut self,
+        prototype: HeapReference,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.heap_reference_is_live(prototype) {
+            return Err(stale_heap_reference(prototype).into());
         }
         check_execution_limit(
             RuntimeResource::HeapObjects,
@@ -1105,7 +1461,7 @@ impl Runtime {
         let object = self
             .objects
             .try_insert(HeapObject {
-                record: ObjectRecord::empty(Some(HeapReference::Object(prototype))),
+                record: ObjectRecord::empty(Some(prototype)),
                 public_roots: 0,
             })
             .map_err(|_| crate::ExecutionError::AllocationFailed {
@@ -1240,7 +1596,7 @@ impl Runtime {
         Ok(JsValue::rooted_heap(&self.mailbox, reference))
     }
 
-    fn retire_internal_root(
+    pub(crate) fn retire_internal_root(
         &mut self,
         root: FunctionId,
         expected_code: InstalledCodeId,
@@ -1253,7 +1609,8 @@ impl Runtime {
                 index: root.index(),
                 generation: root.generation(),
             })?;
-        if function.code != expected_code {
+        let bytecode = function.bytecode()?;
+        if bytecode.code != expected_code {
             return Err(crate::EngineFault::RuntimeInvariant {
                 message: "internal Script root changed installed-code ownership",
             });
@@ -1307,6 +1664,16 @@ impl Runtime {
         }
         self.collection_pending = true;
         Ok(())
+    }
+
+    pub(crate) fn retire_dynamic_root(
+        &mut self,
+        mut root: InstalledRoot,
+    ) -> Result<(), crate::EngineFault> {
+        if let Some(pending) = root.pending_environment.take() {
+            self.rollback_root_environment(pending.realm, &pending.environment);
+        }
+        self.retire_internal_root(root.function, root.code)
     }
 
     fn remove_installed_code(&mut self, id: InstalledCodeId) -> bool {
@@ -1797,6 +2164,8 @@ impl Runtime {
                             },
                             crate::ExecutionError::String(_)
                             | crate::ExecutionError::Handle(_)
+                            | crate::ExecutionError::DynamicFunctionCompilation(_)
+                            | crate::ExecutionError::DynamicFunctionInstallation(_)
                             | crate::ExecutionError::Exception(_)
                             | crate::ExecutionError::InstructionLimitExceeded { .. }
                             | crate::ExecutionError::EngineFault(_) => {
@@ -1959,9 +2328,26 @@ impl RootPublication {
     }
 }
 
-struct InstalledRoot {
-    function: FunctionId,
-    code: InstalledCodeId,
+pub(crate) struct InstalledRoot {
+    pub(crate) function: FunctionId,
+    pub(crate) code: InstalledCodeId,
+    pending_environment: Option<PendingRootEnvironment>,
+}
+
+struct PendingRootEnvironment {
+    realm: RealmId,
+    environment: RootEnvironment,
+}
+
+impl InstalledRoot {
+    pub(crate) fn commit_environment(&mut self) -> Result<(), crate::EngineFault> {
+        self.pending_environment
+            .take()
+            .map(|_| ())
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "dynamic Script root environment was already committed",
+            })
+    }
 }
 
 struct RootEnvironment {
@@ -2027,7 +2413,7 @@ impl Context<'_> {
         authority: Arc<VerifiedBytecode>,
     ) -> Result<Function, InstallError> {
         require_root_kind(&authority, CompilerExecutableKind::OrdinaryFunction)?;
-        let installed = self.install_root(authority, RootPublication::Public)?;
+        let installed = self.install_root(authority, RootPublication::Public, true)?;
         Ok(Function::from_root(JsValue::rooted_heap(
             &self.runtime.mailbox,
             HeapReference::Function(installed.function),
@@ -2053,13 +2439,47 @@ impl Context<'_> {
         authority: Arc<VerifiedBytecode>,
         limits: ExecutionLimits,
     ) -> Result<JsValue, DynamicFunctionScriptError> {
+        self.execute_dynamic_function_script_with_optional_compiler(authority, limits, None)
+    }
+
+    /// Installs and executes one complete verified dynamic-Function Script
+    /// while allowing nested calls to the realm's `%Function%` intrinsic.
+    ///
+    /// The immutable compiler service receives only owned source strings and
+    /// returns only a complete verified authority. It cannot observe this
+    /// context or the Script's lexical environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::execute_dynamic_function_script`],
+    /// plus a typed nested dynamic-compilation failure or JavaScript
+    /// `SyntaxError`.
+    pub fn execute_dynamic_function_script_with_dynamic_function_compiler(
+        &mut self,
+        authority: Arc<VerifiedBytecode>,
+        limits: ExecutionLimits,
+        compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
+    ) -> Result<JsValue, DynamicFunctionScriptError> {
+        self.execute_dynamic_function_script_with_optional_compiler(
+            authority,
+            limits,
+            Some(compiler),
+        )
+    }
+
+    fn execute_dynamic_function_script_with_optional_compiler(
+        &mut self,
+        authority: Arc<VerifiedBytecode>,
+        limits: ExecutionLimits,
+        compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    ) -> Result<JsValue, DynamicFunctionScriptError> {
         require_root_kind(&authority, CompilerExecutableKind::DynamicFunctionScript)?;
         let global_object = self
             .runtime
             .realm_global_object(self.realm)
             .map_err(crate::ExecutionError::from)?;
         let exception_authority = Arc::clone(&authority);
-        let installed = match self.install_root(authority, RootPublication::Internal) {
+        let mut installed = match self.install_root(authority, RootPublication::Internal, true) {
             Ok(installed) => installed,
             Err(InstallError::GlobalDeclarationRejected {
                 name,
@@ -2067,7 +2487,7 @@ impl Context<'_> {
                 pc,
                 source_span,
             }) => {
-                let exception = global_declaration_exception(
+                let (message, origin) = global_declaration_error(
                     &exception_authority,
                     &name,
                     function,
@@ -2075,22 +2495,33 @@ impl Context<'_> {
                     source_span,
                 )
                 .map_err(DynamicFunctionScriptError::Execution)?;
+                let exception = crate::JsException::engine_error(
+                    crate::ExceptionKind::TypeError,
+                    message,
+                    origin,
+                    Vec::new(),
+                );
                 return Err(DynamicFunctionScriptError::Execution(
                     crate::ExecutionError::Exception(exception),
                 ));
             }
             Err(error) => return Err(error.into()),
         };
-        let result = self
-            .execute_internal_root(
-                installed.function,
+        let result = match compiler {
+            Some(compiler) => self.execute_internal_root_with_dynamic_function_compiler(
+                &mut installed,
                 StoredValue::Object(global_object),
                 limits,
-            )
-            .and_then(|completion| self.runtime.public_value(completion));
-        let retirement = self
-            .runtime
-            .retire_internal_root(installed.function, installed.code);
+                compiler,
+            ),
+            None => self.execute_internal_root(
+                &mut installed,
+                StoredValue::Object(global_object),
+                limits,
+            ),
+        }
+        .and_then(|completion| self.runtime.public_value(completion));
+        let retirement = self.runtime.retire_dynamic_root(installed);
         match retirement {
             Ok(()) => result.map_err(DynamicFunctionScriptError::Execution),
             Err(fault) => Err(DynamicFunctionScriptError::Execution(fault.into())),
@@ -2105,9 +2536,18 @@ impl Context<'_> {
         &mut self,
         authority: Arc<VerifiedBytecode>,
         publication: RootPublication,
+        prepare_safe_point: bool,
     ) -> Result<InstalledRoot, InstallError> {
         preflight_opcodes(&authority)?;
-        self.runtime.prepare_installation_safe_point()?;
+        if prepare_safe_point {
+            self.runtime.prepare_installation_safe_point()?;
+        }
+        let function_prototype =
+            self.runtime
+                .realm_function_prototype(self.realm)
+                .map_err(|_| InstallError::AuthorityInvariant {
+                    message: "constructor realm has no Function.prototype intrinsic",
+                })?;
 
         let graph_usage = authority.compiler_graph().usage();
         let functions = graph_usage.functions();
@@ -2225,10 +2665,12 @@ impl Context<'_> {
         };
         let root_bindings = std::mem::take(&mut root_environment.bindings);
         let Ok(root) = self.runtime.functions.try_insert(HeapFunction {
-            code,
-            template: root_template,
-            environment: root_bindings,
-            object: ObjectRecord::empty(None),
+            implementation: FunctionImplementation::Bytecode(BytecodeFunction {
+                code,
+                template: root_template,
+                environment: root_bindings,
+            }),
+            object: ObjectRecord::empty(Some(HeapReference::Function(function_prototype))),
             public_roots: u32::from(publication.is_public()),
         }) else {
             let removed = self.runtime.code.remove(code);
@@ -2251,10 +2693,30 @@ impl Context<'_> {
         if publication.is_public() {
             self.runtime.public_roots += 1;
         }
+        let pending_environment = (!publication.is_public()).then_some(PendingRootEnvironment {
+            realm: self.realm,
+            environment: root_environment,
+        });
         Ok(InstalledRoot {
             function: root,
             code,
+            pending_environment,
         })
+    }
+
+    /// Installs a verified dynamic-Function Script while bytecode frames are
+    /// active.
+    ///
+    /// The ordinary installation safe point is deliberately skipped because
+    /// active VM frames are not public GC roots. Every capability, resource,
+    /// reservation, and rollback check performed by normal installation still
+    /// applies.
+    pub(crate) fn install_dynamic_function_script_during_execution(
+        &mut self,
+        authority: Arc<VerifiedBytecode>,
+    ) -> Result<InstalledRoot, InstallError> {
+        require_root_kind(&authority, CompilerExecutableKind::DynamicFunctionScript)?;
+        self.install_root(authority, RootPublication::Internal, false)
     }
 }
 
@@ -2266,6 +2728,14 @@ fn runtime_string(
     } else {
         JsString::from_code_units(value.code_units())
     }
+}
+
+fn predefined_string(atoms: &AtomTable, atom: PredefinedAtom) -> JsString {
+    atoms
+        .predefined(atom)
+        .description()
+        .expect("string predefined atom has a description")
+        .clone()
 }
 
 fn require_root_kind(
@@ -2339,6 +2809,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Insert2
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
+            | FinalOpcode::CallConstructor
             | FinalOpcode::Throw
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
@@ -2503,8 +2974,194 @@ pub(crate) fn usize_to_u64(value: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{dynamic_function_declaration_property_layout, global_function_replacement_layout};
-    use crate::PropertyLayout;
+    use super::{
+        FunctionImplementation, NativeFunctionKind, RealmIntrinsics, Runtime, RuntimeLimits,
+        RuntimeUsage, dynamic_function_declaration_property_layout,
+        global_function_replacement_layout,
+    };
+    use crate::{
+        JsNumber, JsString, PredefinedAtom, PropertyKey, PropertyLayout, RuntimeError,
+        RuntimeResource,
+        value::{HeapReference, StoredValue},
+    };
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test audits the complete intrinsic graph and all exact descriptors"
+    )]
+    fn realm_installs_the_exact_function_intrinsic_graph() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let state = runtime.realms.get(realm_id).expect("realm state");
+        let RealmIntrinsics::Ready {
+            function_prototype,
+            function_constructor,
+        } = state.intrinsics
+        else {
+            panic!("realm intrinsics remained uninitialized");
+        };
+
+        assert_eq!(runtime.usage().realms(), 1);
+        assert_eq!(runtime.usage().heap_objects(), 2);
+        assert_eq!(runtime.usage().heap_functions(), 2);
+        assert_eq!(runtime.usage().object_properties(), 7);
+        assert_eq!(runtime.usage().installed_code(), 0);
+
+        let prototype = runtime
+            .functions
+            .get(function_prototype)
+            .expect("Function.prototype");
+        assert_eq!(
+            prototype.object.prototype(),
+            Some(HeapReference::Object(state.object_prototype))
+        );
+        assert!(matches!(
+            prototype.implementation,
+            FunctionImplementation::Native(ref native)
+                if native.realm == realm_id
+                    && native.kind == NativeFunctionKind::FunctionPrototype
+        ));
+
+        let constructor = runtime
+            .functions
+            .get(function_constructor)
+            .expect("Function");
+        assert_eq!(
+            constructor.object.prototype(),
+            Some(HeapReference::Function(function_prototype))
+        );
+        assert!(matches!(
+            constructor.implementation,
+            FunctionImplementation::Native(ref native)
+                if native.realm == realm_id
+                    && native.kind == NativeFunctionKind::OrdinaryFunctionConstructor
+        ));
+
+        assert_data_property(
+            &prototype.object,
+            &runtime,
+            PredefinedAtom::Constructor,
+            PropertyLayout::data(true, false, true),
+            |value| matches!(value, StoredValue::Function(id) if id == function_constructor),
+        );
+        assert_data_property(
+            &prototype.object,
+            &runtime,
+            PredefinedAtom::Length,
+            PropertyLayout::data(false, false, true),
+            |value| matches!(value, StoredValue::Number(number) if number.strict_equals(JsNumber::from_i32(0))),
+        );
+        assert_data_property(
+            &prototype.object,
+            &runtime,
+            PredefinedAtom::Name,
+            PropertyLayout::data(false, false, true),
+            |value| matches!(value, StoredValue::String(name) if name == JsString::empty()),
+        );
+
+        assert_data_property(
+            &constructor.object,
+            &runtime,
+            PredefinedAtom::Prototype,
+            PropertyLayout::data(false, false, false),
+            |value| matches!(value, StoredValue::Function(id) if id == function_prototype),
+        );
+        assert_data_property(
+            &constructor.object,
+            &runtime,
+            PredefinedAtom::Length,
+            PropertyLayout::data(false, false, true),
+            |value| matches!(value, StoredValue::Number(number) if number.strict_equals(JsNumber::from_i32(1))),
+        );
+        assert_data_property(
+            &constructor.object,
+            &runtime,
+            PredefinedAtom::Name,
+            PropertyLayout::data(false, false, true),
+            |value| matches!(value, StoredValue::String(name) if name == JsString::from_utf8("Function").expect("name")),
+        );
+
+        let global = runtime
+            .objects
+            .get(state.global_object)
+            .expect("global object");
+        assert_eq!(
+            global.record.prototype(),
+            Some(HeapReference::Object(state.object_prototype))
+        );
+        assert_data_property(
+            &global.record,
+            &runtime,
+            PredefinedAtom::Function,
+            PropertyLayout::data(true, false, true),
+            |value| matches!(value, StoredValue::Function(id) if id == function_constructor),
+        );
+    }
+
+    #[test]
+    fn function_intrinsic_creation_is_failure_atomic_at_each_limit() {
+        for (limits, expected_resource, limit, observed) in [
+            (
+                RuntimeLimits::default().with_max_heap_objects(1),
+                RuntimeResource::HeapObjects,
+                1,
+                2,
+            ),
+            (
+                RuntimeLimits::default().with_max_heap_functions(1),
+                RuntimeResource::HeapFunctions,
+                1,
+                2,
+            ),
+            (
+                RuntimeLimits::default().with_max_object_properties(6),
+                RuntimeResource::ObjectProperties,
+                6,
+                7,
+            ),
+        ] {
+            let mut runtime = Runtime::try_new(limits).expect("runtime");
+            assert!(matches!(
+                runtime.create_realm(),
+                Err(RuntimeError::LimitExceeded {
+                    resource,
+                    limit: actual_limit,
+                    observed: actual_observed,
+                }) if resource == expected_resource
+                    && actual_limit == limit
+                    && actual_observed == observed
+            ));
+            assert_eq!(runtime.usage(), RuntimeUsage::default());
+        }
+    }
+
+    #[test]
+    fn realm_function_intrinsics_remain_roots_during_collection() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let expected_intrinsics = runtime
+            .realms
+            .get(realm_id)
+            .expect("realm state")
+            .intrinsics;
+
+        let report = runtime.collect_cycles().expect("collection");
+
+        assert_eq!(report.functions(), 0);
+        assert_eq!(runtime.usage().heap_functions(), 2);
+        assert_eq!(runtime.usage().installed_code(), 0);
+        assert_eq!(
+            runtime
+                .realms
+                .get(realm_id)
+                .expect("realm state")
+                .intrinsics,
+            expected_intrinsics
+        );
+    }
 
     #[test]
     fn dynamic_function_declaration_properties_are_deletable_eval_properties() {
@@ -2534,5 +3191,18 @@ mod tests {
             global_function_replacement_layout(PropertyLayout::data(true, false, false)),
             None
         );
+    }
+
+    fn assert_data_property(
+        record: &crate::object::ObjectRecord,
+        runtime: &Runtime,
+        atom: PredefinedAtom,
+        expected_layout: PropertyLayout,
+        expected_value: impl FnOnce(StoredValue) -> bool,
+    ) {
+        let key = PropertyKey::from_validated_atom(runtime.atoms.predefined(atom));
+        let (layout, value) = record.own_data_property(&key).expect("data property");
+        assert_eq!(layout, expected_layout);
+        assert!(expected_value(value));
     }
 }

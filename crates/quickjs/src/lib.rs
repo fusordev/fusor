@@ -10,13 +10,19 @@ use std::{error::Error, fmt, sync::Arc};
 
 use quickjs_bytecode::{
     BytecodeGraphVerificationLimits, FunctionGraphVerificationLimits, VerificationLimits,
+    VerifiedBytecode,
 };
 use quickjs_compiler::{CompilationContext, CompilerError, LeafCompilationError};
 use quickjs_frontend::{
-    DynamicFunctionError, DynamicFunctionKind, DynamicFunctionSource, FrontendLimits,
-    PreparedDynamicFunctionSource, with_dynamic_function_source_and_prepared,
+    DiagnosticStage, DynamicFunctionError, DynamicFunctionKind, DynamicFunctionSource,
+    FrontendLimits, PreparedDynamicFunctionSource, SourceFragment,
+    with_dynamic_function_source_and_prepared,
 };
-use quickjs_runtime::{Context, DynamicFunctionScriptError, ExecutionLimits, JsValue};
+use quickjs_runtime::{
+    Context, DynamicFunctionCompileFailure, DynamicFunctionScriptError, ExecutionError,
+    ExecutionLimits, Function, JsString, JsValue, OrdinaryDynamicFunctionCompiler,
+    OrdinaryDynamicFunctionSource,
+};
 
 /// Resource limits applied across every ordinary dynamic-Function stage.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -92,6 +98,140 @@ impl DynamicFunctionLimits {
     #[must_use]
     pub const fn execution(self) -> ExecutionLimits {
         self.execution
+    }
+}
+
+/// Oxc-backed compiler service for runtime-created ordinary `Function` values.
+///
+/// The service is immutable and carries only explicit resource limits. Each
+/// request is parsed in the isolated frontend, compiled as the exact dynamic
+/// Function Script wrapper, and returns only complete verified bytecode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OxcDynamicFunctionCompiler {
+    limits: DynamicFunctionLimits,
+}
+
+impl OxcDynamicFunctionCompiler {
+    /// Creates an ordinary dynamic-Function compiler with explicit limits.
+    #[must_use]
+    pub const fn new(limits: DynamicFunctionLimits) -> Self {
+        Self { limits }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DynamicFunctionEngineStage {
+    SourceConversion,
+    SyntaxMessageConversion,
+    Frontend(DiagnosticStage),
+    CompilerPlanning,
+    CompilerLowering,
+    UnsupportedKind,
+    UnexpectedRuntime,
+}
+
+impl fmt::Display for DynamicFunctionEngineStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SourceConversion => formatter.write_str("source-conversion"),
+            Self::SyntaxMessageConversion => formatter.write_str("syntax-message-conversion"),
+            Self::Frontend(stage) => write!(formatter, "frontend-{stage}"),
+            Self::CompilerPlanning => formatter.write_str("compiler-planning"),
+            Self::CompilerLowering => formatter.write_str("compiler-lowering"),
+            Self::UnsupportedKind => formatter.write_str("dynamic-function-kind"),
+            Self::UnexpectedRuntime => formatter.write_str("unexpected-runtime"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct OxcDynamicFunctionEngineError {
+    stage: DynamicFunctionEngineStage,
+    detail: Arc<str>,
+    source: Option<Arc<dyn Error + Send + Sync>>,
+}
+
+impl fmt::Display for OxcDynamicFunctionEngineError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.stage, self.detail)
+    }
+}
+
+impl Error for OxcDynamicFunctionEngineError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|source| source.as_ref() as &(dyn Error + 'static))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeSourceFragment {
+    Parameter(usize),
+    Body,
+}
+
+impl fmt::Display for RuntimeSourceFragment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parameter(index) => write!(formatter, "parameter fragment {index}"),
+            Self::Body => formatter.write_str("body fragment"),
+        }
+    }
+}
+
+impl OrdinaryDynamicFunctionCompiler for OxcDynamicFunctionCompiler {
+    fn compile(
+        &self,
+        source: OrdinaryDynamicFunctionSource,
+    ) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
+        let mut parameter_texts = Vec::new();
+        parameter_texts
+            .try_reserve_exact(source.parameters().len())
+            .map_err(|error| {
+                engine_failure_with_source(
+                    DynamicFunctionEngineStage::SourceConversion,
+                    format!(
+                        "could not reserve {} converted parameter fragments",
+                        source.parameters().len()
+                    ),
+                    error,
+                )
+            })?;
+        for (index, parameter) in source.parameters().iter().enumerate() {
+            parameter_texts.push(js_string_to_utf8(
+                parameter,
+                RuntimeSourceFragment::Parameter(index),
+            )?);
+        }
+        let body_text = js_string_to_utf8(source.body(), RuntimeSourceFragment::Body)?;
+
+        let mut parameters = Vec::new();
+        parameters
+            .try_reserve_exact(parameter_texts.len())
+            .map_err(|error| {
+                engine_failure_with_source(
+                    DynamicFunctionEngineStage::SourceConversion,
+                    format!(
+                        "could not reserve {} frontend parameter fragments",
+                        parameter_texts.len()
+                    ),
+                    error,
+                )
+            })?;
+        parameters.extend(
+            parameter_texts
+                .iter()
+                .map(|text| SourceFragment::new(text.as_str())),
+        );
+        let source = DynamicFunctionSource::new(
+            DynamicFunctionKind::Function,
+            &parameters,
+            SourceFragment::new(&body_text),
+        );
+        compile_dynamic_function_source(source, self.limits)
+            .map(|compiled| compiled.authority)
+            .map_err(map_service_compilation_error)
     }
 }
 
@@ -221,6 +361,11 @@ impl DynamicFunctionCompletion {
     }
 }
 
+struct CompiledDynamicFunctionSource {
+    authority: Arc<VerifiedBytecode>,
+    prepared: PreparedDynamicFunctionSource,
+}
+
 /// Constructs and executes one ordinary dynamic `Function` wrapper.
 ///
 /// Inputs are already coerced UTF-8 source fragments. The complete exact
@@ -246,6 +391,62 @@ pub fn construct_dynamic_function(
     source: DynamicFunctionSource<'_>,
     limits: DynamicFunctionLimits,
 ) -> Result<DynamicFunctionCompletion, DynamicFunctionConstructionError> {
+    let compiled = compile_dynamic_function_source(source, limits)?;
+    let CompiledDynamicFunctionSource {
+        authority,
+        prepared,
+    } = compiled;
+    let dynamic_service: Arc<dyn OrdinaryDynamicFunctionCompiler> =
+        Arc::new(OxcDynamicFunctionCompiler::new(limits));
+    let value = match context.execute_dynamic_function_script_with_dynamic_function_compiler(
+        authority,
+        limits.execution,
+        &dynamic_service,
+    ) {
+        Ok(value) => value,
+        Err(source) => {
+            return Err(DynamicFunctionConstructionError::Runtime { source, prepared });
+        }
+    };
+
+    Ok(DynamicFunctionCompletion { value, prepared })
+}
+
+/// Calls a runtime function with the published Oxc dynamic-Function compiler
+/// available to every nested `%Function%` invocation.
+///
+/// One immutable [`Arc`] service is shared for the complete iterative
+/// interpreter session. Generated functions compile in the native
+/// constructor's home realm and never receive the caller's lexical frame.
+///
+/// # Errors
+///
+/// Returns ordinary execution failures plus catchable dynamic-source
+/// `SyntaxError`s and typed fail-closed compiler or resource failures.
+pub fn call_with_dynamic_function_support(
+    context: &mut Context<'_>,
+    function: &Function,
+    arguments: &[JsValue],
+    limits: DynamicFunctionLimits,
+) -> Result<JsValue, ExecutionError> {
+    let dynamic_service: Arc<dyn OrdinaryDynamicFunctionCompiler> =
+        Arc::new(OxcDynamicFunctionCompiler::new(limits));
+    context.call_with_dynamic_function_compiler(
+        function,
+        arguments,
+        limits.execution,
+        &dynamic_service,
+    )
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "post-preparation failures intentionally retain the exact generated wrapper and map"
+)]
+fn compile_dynamic_function_source(
+    source: DynamicFunctionSource<'_>,
+    limits: DynamicFunctionLimits,
+) -> Result<CompiledDynamicFunctionSource, DynamicFunctionConstructionError> {
     if source.kind() != DynamicFunctionKind::Function {
         return Err(DynamicFunctionConstructionError::UnsupportedKind {
             kind: source.kind(),
@@ -278,12 +479,172 @@ pub fn construct_dynamic_function(
         }
     };
     let authority = Arc::new(tree.verified_bytecode().clone());
-    let value = match context.execute_dynamic_function_script(authority, limits.execution) {
-        Ok(value) => value,
-        Err(source) => {
-            return Err(DynamicFunctionConstructionError::Runtime { source, prepared });
-        }
-    };
+    Ok(CompiledDynamicFunctionSource {
+        authority,
+        prepared,
+    })
+}
 
-    Ok(DynamicFunctionCompletion { value, prepared })
+fn map_service_compilation_error(
+    error: DynamicFunctionConstructionError,
+) -> DynamicFunctionCompileFailure {
+    match error {
+        DynamicFunctionConstructionError::UnsupportedKind { kind } => engine_failure(
+            DynamicFunctionEngineStage::UnsupportedKind,
+            format!("ordinary compiler received unsupported {kind} source"),
+        ),
+        DynamicFunctionConstructionError::Frontend(source)
+            if matches!(
+                source.stage(),
+                DiagnosticStage::Parser | DiagnosticStage::Profile | DiagnosticStage::Semantic
+            ) =>
+        {
+            let Some(message) = source
+                .diagnostics()
+                .first()
+                .map(|diagnostic| diagnostic.message.as_str())
+            else {
+                return engine_failure_with_source(
+                    DynamicFunctionEngineStage::Frontend(source.stage()),
+                    "front end rejected dynamic source without a normalized diagnostic",
+                    source,
+                );
+            };
+            match JsString::from_utf8(message) {
+                Ok(message) => DynamicFunctionCompileFailure::Syntax { message },
+                Err(error) => engine_failure_with_source(
+                    DynamicFunctionEngineStage::SyntaxMessageConversion,
+                    "could not retain the normalized syntax diagnostic as a JavaScript string",
+                    error,
+                ),
+            }
+        }
+        DynamicFunctionConstructionError::Frontend(source) => {
+            let stage = DynamicFunctionEngineStage::Frontend(source.stage());
+            let detail = source.diagnostics().first().map_or_else(
+                || source.to_string(),
+                |diagnostic| diagnostic.message.clone(),
+            );
+            engine_failure_with_source(stage, detail, source)
+        }
+        DynamicFunctionConstructionError::Compiler {
+            source,
+            prepared: _,
+        } => {
+            let stage = match &source {
+                DynamicFunctionCompilerError::Planning(_) => {
+                    DynamicFunctionEngineStage::CompilerPlanning
+                }
+                DynamicFunctionCompilerError::Lowering(_) => {
+                    DynamicFunctionEngineStage::CompilerLowering
+                }
+            };
+            engine_failure_with_source(stage, source.to_string(), source)
+        }
+        DynamicFunctionConstructionError::Runtime {
+            source,
+            prepared: _,
+        } => engine_failure(
+            DynamicFunctionEngineStage::UnexpectedRuntime,
+            format!("compile-only path reached runtime failure: {source}"),
+        ),
+    }
+}
+
+fn js_string_to_utf8(
+    source: &JsString,
+    fragment: RuntimeSourceFragment,
+) -> Result<String, DynamicFunctionCompileFailure> {
+    let code_unit_count = usize::try_from(source.len()).map_err(|error| {
+        engine_failure_with_source(
+            DynamicFunctionEngineStage::SourceConversion,
+            format!("{fragment} length does not fit the host address space"),
+            error,
+        )
+    })?;
+    let capacity = code_unit_count.checked_mul(3).ok_or_else(|| {
+        engine_failure(
+            DynamicFunctionEngineStage::SourceConversion,
+            format!("{fragment} UTF-8 capacity overflowed"),
+        )
+    })?;
+    let mut text = String::new();
+    text.try_reserve_exact(capacity).map_err(|error| {
+        engine_failure_with_source(
+            DynamicFunctionEngineStage::SourceConversion,
+            format!("could not reserve {capacity} UTF-8 bytes for {fragment}"),
+            error,
+        )
+    })?;
+
+    let mut offset = 0_u32;
+    let mut units = source.code_units().peekable();
+    while let Some(unit) = units.next() {
+        let (scalar, width) = if (0xd800..=0xdbff).contains(&unit) {
+            let Some(&low) = units.peek() else {
+                return Err(lone_surrogate(fragment, offset, unit));
+            };
+            if !(0xdc00..=0xdfff).contains(&low) {
+                return Err(lone_surrogate(fragment, offset, unit));
+            }
+            let _ = units.next();
+            (
+                0x1_0000 + ((u32::from(unit) - 0xd800) << 10) + (u32::from(low) - 0xdc00),
+                2,
+            )
+        } else if (0xdc00..=0xdfff).contains(&unit) {
+            return Err(lone_surrogate(fragment, offset, unit));
+        } else {
+            (u32::from(unit), 1)
+        };
+        let Some(character) = char::from_u32(scalar) else {
+            return Err(engine_failure(
+                DynamicFunctionEngineStage::SourceConversion,
+                format!("{fragment} produced invalid Unicode scalar U+{scalar:04X}"),
+            ));
+        };
+        text.push(character);
+        offset += width;
+    }
+    Ok(text)
+}
+
+fn lone_surrogate(
+    fragment: RuntimeSourceFragment,
+    offset: u32,
+    surrogate: u16,
+) -> DynamicFunctionCompileFailure {
+    engine_failure(
+        DynamicFunctionEngineStage::SourceConversion,
+        format!(
+            "{fragment} contains lone UTF-16 surrogate U+{surrogate:04X} at code unit {offset}"
+        ),
+    )
+}
+
+fn engine_failure(
+    stage: DynamicFunctionEngineStage,
+    detail: impl Into<Arc<str>>,
+) -> DynamicFunctionCompileFailure {
+    DynamicFunctionCompileFailure::Engine {
+        source: Arc::new(OxcDynamicFunctionEngineError {
+            stage,
+            detail: detail.into(),
+            source: None,
+        }),
+    }
+}
+
+fn engine_failure_with_source(
+    stage: DynamicFunctionEngineStage,
+    detail: impl Into<Arc<str>>,
+    source: impl Error + Send + Sync + 'static,
+) -> DynamicFunctionCompileFailure {
+    DynamicFunctionCompileFailure::Engine {
+        source: Arc::new(OxcDynamicFunctionEngineError {
+            stage,
+            detail: detail.into(),
+            source: Some(Arc::new(source)),
+        }),
+    }
 }

@@ -427,6 +427,10 @@ follows:
   `metadata_pops + encoded_argc` using checked `usize`; short `call0..call3`
   add their opcode-implied count. This is the calculation performed by
   upstream stack analysis (`quickjs.c:35681-35709`).
+- Compiler-produced `call_constructor` uses the verified encoded argument
+  count, requires both callee and `newTarget` stack entries, and contributes
+  the `Calls` execution requirement. The runtime admits it only after the
+  complete graph passes ordinary opcode capability preflight.
 - `for_of_next(k)` requires at least `3 + k` slots and an iterator tuple at
   the referenced relative position; upstream computes its iterator offset as
   `-3-k` (`quickjs.c:19003-19011`).

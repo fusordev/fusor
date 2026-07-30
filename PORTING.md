@@ -321,11 +321,18 @@ A milestone is complete only when all of its checked items pass in CI.
           preflight/rollback, and sourced declaration `TypeError`s; `let` and
           `const` are evaluation-local TDZ cells capturable by escaping
           functions.
+    - [x] Add the realm-owned global `Function` and callable
+          `Function.prototype` graph, Arc-hosted Oxc compiler service,
+          JavaScript call/new dispatch, exact wrapper completion and
+          `newTarget.prototype` adjustment, ordinary generated-function
+          descriptors and construction, pre-start environment rollback, and
+          per-session compilation/source limits. Primitive
+          undefined/null/Boolean/Number/String source coercions are ordered;
+          syntax-profile failures are catchable `SyntaxError`s.
     - [ ] Add configurable-accessor replacement and persistent global lexical
-          collision checks when those object/environment forms exist. Then add
-          ordered JavaScript `ToString` argument conversion, the global
-          `Function` call/construct object, and `new_target.prototype`
-          post-processing.
+          collision checks when those object/environment forms exist. Complete
+          observable object/function `ToPrimitive` argument conversion and
+          the remaining `Function.prototype` methods.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
       stack traces, iterators, and generators.
   - [x] First escaping exception path: local/captured TDZ access returns a

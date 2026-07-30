@@ -214,14 +214,93 @@ fn supported_parenthesized_and_conditional_callees_remain_expressions() {
 }
 
 #[test]
-fn optional_spread_and_constructor_calls_remain_fail_closed() {
+fn constructor_calls_duplicate_the_callee_as_new_target_before_arguments() {
+    let source = "function construct(Ctor,first,second){return new Ctor(first(),second);}";
+    let compiled = compile(source, "construct");
+    let instructions = decoded(&compiled);
+
+    assert_eq!(
+        instructions
+            .iter()
+            .map(|(_, opcode, operands)| (*opcode, *operands))
+            .collect::<Vec<_>>(),
+        [
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::Dup, Operands::None),
+            (FinalOpcode::GetArg1, Operands::NoneArg),
+            (FinalOpcode::Call0, Operands::NPopX),
+            (FinalOpcode::GetArg2, Operands::NoneArg),
+            (
+                FinalOpcode::CallConstructor,
+                Operands::NPop { argument_count: 2 },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 4);
+
+    let constructor = instructions
+        .iter()
+        .find(|(_, opcode, _)| *opcode == FinalOpcode::CallConstructor)
+        .expect("constructor call");
+    assert_eq!(
+        source_slice_at(&compiled, source, constructor.0),
+        "new Ctor(first(),second)"
+    );
+}
+
+#[test]
+fn constructor_calls_support_empty_arguments_and_static_member_callees() {
+    let source = "function construct(holder,value){new holder.Ctor;return new holder.Ctor(value);}";
+    let compiled = compile(source, "construct");
+    let instructions = decoded(&compiled);
+
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|(_, opcode, _)| *opcode == FinalOpcode::CallConstructor)
+            .map(|(_, opcode, operands)| (*opcode, *operands))
+            .collect::<Vec<_>>(),
+        [
+            (
+                FinalOpcode::CallConstructor,
+                Operands::NPop { argument_count: 0 },
+            ),
+            (
+                FinalOpcode::CallConstructor,
+                Operands::NPop { argument_count: 1 },
+            ),
+        ]
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 3);
+
+    let constructor_sources = instructions
+        .iter()
+        .filter(|(_, opcode, _)| *opcode == FinalOpcode::CallConstructor)
+        .map(|(pc, _, _)| source_slice_at(&compiled, source, *pc))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        constructor_sources,
+        ["new holder.Ctor", "new holder.Ctor(value)"]
+    );
+}
+
+#[test]
+fn optional_and_spread_calls_and_constructors_remain_fail_closed() {
     let cases = [
         ("function invoke(fn){return fn?.();}", "fn?.()"),
         (
             "function invoke(fn,values){return fn(...values);}",
             "...values",
         ),
-        ("function invoke(fn){return new fn();}", "new fn()"),
+        (
+            "function invoke(fn,values){return new fn(...values);}",
+            "...values",
+        ),
+        (
+            "function invoke(holder){return new (holder?.Ctor)();}",
+            "holder?.Ctor",
+        ),
     ];
 
     for (source, expected_source) in cases {

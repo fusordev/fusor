@@ -3421,6 +3421,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Drop
             | FinalOpcode::Dup
             | FinalOpcode::Insert2
+            | FinalOpcode::CallConstructor
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
             | FinalOpcode::Return
@@ -4410,7 +4411,8 @@ fn collect_requirements(
     }
     for instruction in function.control_flow().instructions() {
         match instruction.decoded().instruction().opcode() {
-            FinalOpcode::Call
+            FinalOpcode::CallConstructor
+            | FinalOpcode::Call
             | FinalOpcode::Call0
             | FinalOpcode::Call1
             | FinalOpcode::Call2

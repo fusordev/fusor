@@ -18,6 +18,7 @@ mod arena;
 mod array_index;
 mod atom;
 mod error;
+mod host;
 mod ids;
 mod number;
 mod object;
@@ -35,9 +36,11 @@ pub use atom::{
     PREDEFINED_INTERNER_SLOTS, PropertyKey,
 };
 pub use error::{
-    DynamicFunctionScriptError, EngineFault, ExceptionKind, ExecutionError, HandleError,
-    HandleKind, InstallError, JsException, JsStackFrame, RuntimeError, RuntimeResource, ValueKind,
+    DynamicFunctionCompileFailure, DynamicFunctionScriptError, EngineFault, ExceptionKind,
+    ExecutionError, HandleError, HandleKind, InstallError, JsException, JsStackFrame, RuntimeError,
+    RuntimeResource, ValueKind,
 };
+pub use host::{OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource};
 pub use number::JsNumber;
 pub use predefined_atoms::PredefinedAtom;
 pub use property::{

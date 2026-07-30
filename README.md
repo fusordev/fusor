@@ -23,14 +23,16 @@ public roots, and the iterative collector traces their properties, prototypes,
 closures, and binding cells. Nested calls, recursion, and abrupt unwinding use
 an explicit frame vector with cumulative frame/value ceilings and shared fuel.
 Installation scans every instruction in every template before mutation.
-Computed/accessor/exotic object operations, constructors, optional/spread/apply
-calls, BigInt, coercive numeric operations, dynamic operators, serialized
-bytecode, every form of eval, and catch/finally typed-stack semantics remain
-deferred and fail closed. The `quickjs` facade now exposes a first internal
-ordinary dynamic-Function pipeline for already-coerced source fragments: it
-retains the exact wrapper/map, compiles the complete generated Script, executes
-only whole-graph `VerifiedBytecode` with a constructor-realm global receiver,
-and returns the exact Script completion. Unresolved names use typed
+Computed/accessor/exotic object operations, optional/spread/apply calls,
+BigInt, general coercive operations, dynamic operators, serialized bytecode,
+every form of eval, and catch/finally typed-stack semantics remain deferred
+and fail closed. Ordinary `new` calls now execute constructor-capable bytecode
+functions and materialize their `name`, `length`, and
+`prototype.constructor` graph. The `quickjs` facade supplies one immutable
+`Arc` Oxc compiler service to the global `Function` call/constructor path: it
+retains the exact wrapper/map, compiles the complete generated Script,
+executes only whole-graph `VerifiedBytecode` with a constructor-realm global
+receiver, and returns the exact Script completion. Unresolved names use typed
 constructor-realm lookup/write slots, and sloppy dynamic functions normalize
 `this` lazily against their installed constructor realm. Escaped Program
 `var` and function declarations now create configurable constructor-realm data
@@ -38,9 +40,13 @@ properties, with correct existing-property handling, function hoisting,
 duplicate-last-wins initialization, and failure-atomic descriptor preflight.
 Escaped `let` and `const` remain
 evaluation-local TDZ cells and can survive only through escaping closures.
-Configurable accessor replacement, JavaScript argument-to-source coercion, the
-global `Function` object, and `new.target` prototype adjustment remain pending
-and fail closed. No dynamic-Function path uses eval or captures a caller
+The intrinsic descriptors, call/new realm selection, wrapper escape,
+`newTarget.prototype` adjustment, SyntaxError boundary, and primitive
+undefined/null/Boolean/Number/String source coercions are implemented.
+Object/function `ToPrimitive`, configurable accessor replacement, persistent
+global lexical collisions, and the rest of `Function.prototype` remain
+fail-closed. Per-session compilation-count and generated-source limits bound
+nested construction. No dynamic-Function path uses eval or captures a caller
 lexical frame.
 
 ## Contract

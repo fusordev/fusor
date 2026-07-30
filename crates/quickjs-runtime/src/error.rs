@@ -145,6 +145,10 @@ pub enum RuntimeResource {
     FrameValues,
     /// Active interpreter frames.
     Frames,
+    /// Ordinary dynamic-Function compilations in one interpreter session.
+    DynamicCompilations,
+    /// Generated dynamic-Function source code units in one interpreter session.
+    DynamicSourceCodeUnits,
     /// Caller locations retained for one escaping JavaScript exception.
     ExceptionFrames,
     /// A runtime-owned collection allocation.
@@ -169,6 +173,8 @@ impl fmt::Display for RuntimeResource {
             Self::PublicRoots => "public roots",
             Self::FrameValues => "active frame values",
             Self::Frames => "active frames",
+            Self::DynamicCompilations => "dynamic Function compilations",
+            Self::DynamicSourceCodeUnits => "dynamic Function source code units",
             Self::ExceptionFrames => "exception stack frames",
             Self::Collection => "runtime collection",
             Self::ReleaseMailbox => "release mailbox",
@@ -366,6 +372,8 @@ impl From<AtomError> for InstallError {
 pub enum ExceptionKind {
     /// A lexical binding was read or written before initialization.
     ReferenceError,
+    /// Source supplied to a dynamic JavaScript compiler was not valid.
+    SyntaxError,
     /// A value was used in an operation requiring another JavaScript type.
     TypeError,
 }
@@ -561,6 +569,7 @@ impl fmt::Display for JsException {
             ExceptionPayload::EngineError { kind, message } => {
                 let name = match kind {
                     ExceptionKind::ReferenceError => "ReferenceError",
+                    ExceptionKind::SyntaxError => "SyntaxError",
                     ExceptionKind::TypeError => "TypeError",
                 };
                 write!(
@@ -711,6 +720,69 @@ impl fmt::Display for EngineFault {
 
 impl Error for EngineFault {}
 
+/// Failure of the host-provided ordinary dynamic-Function compiler.
+#[derive(Clone, Debug)]
+pub enum DynamicFunctionCompileFailure {
+    /// Exact JavaScript syntax rejection suitable for a `SyntaxError`.
+    Syntax {
+        /// Exact exception message without the `SyntaxError` name prefix.
+        message: JsString,
+    },
+    /// Parser, compiler, verifier, or host infrastructure failed internally.
+    Engine {
+        /// Immutable shared source error retained for host diagnostics.
+        source: Arc<dyn Error + Send + Sync>,
+    },
+}
+
+impl DynamicFunctionCompileFailure {
+    /// Returns the exact JavaScript syntax message, when this is a syntax
+    /// rejection.
+    #[must_use]
+    pub const fn syntax_message(&self) -> Option<&JsString> {
+        match self {
+            Self::Syntax { message } => Some(message),
+            Self::Engine { .. } => None,
+        }
+    }
+
+    /// Returns the underlying shared engine error, when compilation failed
+    /// outside JavaScript syntax validation.
+    #[must_use]
+    pub fn engine_source(&self) -> Option<&(dyn Error + Send + Sync + 'static)> {
+        match self {
+            Self::Syntax { .. } => None,
+            Self::Engine { source } => Some(source.as_ref()),
+        }
+    }
+}
+
+impl fmt::Display for DynamicFunctionCompileFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Syntax { message } => write!(
+                formatter,
+                "dynamic Function syntax error: {}",
+                message
+                    .to_utf8_lossy()
+                    .unwrap_or_else(|_| "<message allocation failed>".to_owned())
+            ),
+            Self::Engine { source } => {
+                write!(formatter, "dynamic Function compilation failed: {source}")
+            }
+        }
+    }
+}
+
+impl Error for DynamicFunctionCompileFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Syntax { .. } => None,
+            Self::Engine { source } => Some(source.as_ref()),
+        }
+    }
+}
+
 /// Failure while invoking one runtime function.
 #[derive(Debug)]
 pub enum ExecutionError {
@@ -718,6 +790,11 @@ pub enum ExecutionError {
     Handle(HandleError),
     /// A JavaScript exception escaped the current function.
     Exception(JsException),
+    /// The host compiler could not produce verified dynamic-Function bytecode.
+    DynamicFunctionCompilation(DynamicFunctionCompileFailure),
+    /// Verified dynamic-Function bytecode could not be installed while the
+    /// current interpreter session remained active.
+    DynamicFunctionInstallation(InstallError),
     /// Per-call instruction fuel was exhausted.
     InstructionLimitExceeded {
         /// Inclusive configured fuel.
@@ -752,6 +829,8 @@ impl fmt::Display for ExecutionError {
         match self {
             Self::Handle(source) => source.fmt(formatter),
             Self::Exception(exception) => exception.fmt(formatter),
+            Self::DynamicFunctionCompilation(source) => source.fmt(formatter),
+            Self::DynamicFunctionInstallation(source) => source.fmt(formatter),
             Self::InstructionLimitExceeded { limit, executed } => write!(
                 formatter,
                 "instruction limit {limit} exhausted after {executed} instructions"
@@ -781,6 +860,8 @@ impl Error for ExecutionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Handle(source) => Some(source),
+            Self::DynamicFunctionCompilation(source) => Some(source),
+            Self::DynamicFunctionInstallation(source) => Some(source),
             Self::String(source) => Some(source),
             Self::EngineFault(source) => Some(source),
             Self::Exception(_)
@@ -800,6 +881,18 @@ impl From<HandleError> for ExecutionError {
 impl From<JsStringError> for ExecutionError {
     fn from(source: JsStringError) -> Self {
         Self::String(source)
+    }
+}
+
+impl From<DynamicFunctionCompileFailure> for ExecutionError {
+    fn from(source: DynamicFunctionCompileFailure) -> Self {
+        Self::DynamicFunctionCompilation(source)
+    }
+}
+
+impl From<InstallError> for ExecutionError {
+    fn from(source: InstallError) -> Self {
+        Self::DynamicFunctionInstallation(source)
     }
 }
 
@@ -845,5 +938,110 @@ impl From<InstallError> for DynamicFunctionScriptError {
 impl From<ExecutionError> for DynamicFunctionScriptError {
     fn from(source: ExecutionError) -> Self {
         Self::Execution(source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{error::Error, fmt, sync::Arc};
+
+    use quickjs_bytecode::{BytecodePc, FunctionTemplateId, SourceByteSpan};
+
+    use super::{
+        DynamicFunctionCompileFailure, ExceptionKind, ExecutionError, JsException, JsStackFrame,
+    };
+    use crate::JsString;
+
+    #[derive(Debug)]
+    struct CompilerFailure;
+
+    impl fmt::Display for CompilerFailure {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("compiler rejected the verified graph")
+        }
+    }
+
+    impl Error for CompilerFailure {}
+
+    fn string(value: &str) -> JsString {
+        JsString::from_utf8(value).expect("test string")
+    }
+
+    #[test]
+    fn syntax_compile_failure_retains_the_exact_message() {
+        let message = string("unexpected token");
+        let failure = DynamicFunctionCompileFailure::Syntax {
+            message: message.clone(),
+        };
+
+        assert_eq!(failure.syntax_message(), Some(&message));
+        assert!(failure.engine_source().is_none());
+        assert_eq!(
+            failure.to_string(),
+            "dynamic Function syntax error: unexpected token"
+        );
+        assert!(Error::source(&failure).is_none());
+    }
+
+    #[test]
+    fn engine_compile_failure_preserves_its_shared_source() {
+        let source: Arc<dyn Error + Send + Sync> = Arc::new(CompilerFailure);
+        let failure = DynamicFunctionCompileFailure::Engine {
+            source: Arc::clone(&source),
+        };
+
+        assert!(failure.syntax_message().is_none());
+        assert_eq!(
+            failure.engine_source().expect("engine source").to_string(),
+            source.to_string()
+        );
+        assert_eq!(
+            failure.to_string(),
+            "dynamic Function compilation failed: compiler rejected the verified graph"
+        );
+        assert_eq!(
+            Error::source(&failure).expect("error source").to_string(),
+            source.to_string()
+        );
+    }
+
+    #[test]
+    fn execution_error_wraps_dynamic_compilation_failures() {
+        let error = ExecutionError::from(DynamicFunctionCompileFailure::Engine {
+            source: Arc::new(CompilerFailure),
+        });
+
+        assert!(matches!(
+            &error,
+            ExecutionError::DynamicFunctionCompilation(
+                DynamicFunctionCompileFailure::Engine { .. }
+            )
+        ));
+        assert_eq!(
+            error.to_string(),
+            "dynamic Function compilation failed: compiler rejected the verified graph"
+        );
+        assert_eq!(
+            Error::source(&error).expect("compile failure").to_string(),
+            "dynamic Function compilation failed: compiler rejected the verified graph"
+        );
+    }
+
+    #[test]
+    fn syntax_exceptions_render_the_javascript_error_name() {
+        let exception = JsException::engine_error(
+            ExceptionKind::SyntaxError,
+            string("unexpected token"),
+            JsStackFrame::new(
+                FunctionTemplateId::new(0),
+                BytecodePc::ZERO,
+                Arc::from("<caller>"),
+                Arc::from("Function(\"}\")"),
+                SourceByteSpan::new(0, 13),
+            ),
+            Vec::new(),
+        );
+
+        assert_eq!(exception.to_string(), "SyntaxError: unexpected token");
     }
 }

@@ -25,21 +25,25 @@
 
 //! Iterative execution of runtime-installed verified bytecode.
 
+use std::{error::Error, fmt, sync::Arc};
+
 use quickjs_bytecode::{
     BytecodePc, CompilerBindingKind, CompilerClosureBinding, CompilerClosureSource,
     CompilerExecutableKind, FinalOpcode, FunctionTemplateId, InstructionIndex, Operands,
-    VerifiedBytecodeFunction, VerifiedSuccessorKind,
+    SourceByteSpan, VerifiedBytecodeFunction, VerifiedSuccessorKind,
 };
 
 use crate::{
-    Context, EngineFault, ExceptionKind, ExecutionError, Function, HandleError, HandleKind,
-    JsException, JsNumber, JsStackFrame, JsString, JsValue, PredefinedAtom, PropertyKey,
+    Context, DynamicFunctionCompileFailure, EngineFault, ExceptionKind, ExecutionError, Function,
+    HandleError, HandleKind, JsException, JsNumber, JsStackFrame, JsString, JsValue,
+    OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey,
     PropertyLayout, Runtime, RuntimeResource,
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId},
     runtime::{
-        BindingCell, EnvironmentBinding, FrameBindingAddress, HeapFunction, InstalledCode,
-        InstalledConstant, InstalledTemplate, RealmGlobalBindingState, check_execution_limit,
-        usize_to_u64,
+        BindingCell, BytecodeFunction, EnvironmentBinding, FrameBindingAddress,
+        FunctionImplementation, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
+        InstalledTemplate, NativeFunction, NativeFunctionKind, RealmGlobalBindingState,
+        check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -48,6 +52,8 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecutionLimits {
     instruction_fuel: u64,
+    dynamic_compilations: u64,
+    dynamic_source_code_units: u64,
 }
 
 impl ExecutionLimits {
@@ -57,13 +63,73 @@ impl ExecutionLimits {
         self.instruction_fuel = instruction_fuel;
         self
     }
+
+    /// Replaces the maximum ordinary dynamic-Function compilations in one
+    /// interpreter session.
+    #[must_use]
+    pub const fn with_dynamic_compilations(mut self, maximum: u64) -> Self {
+        self.dynamic_compilations = maximum;
+        self
+    }
+
+    /// Replaces the maximum aggregate generated dynamic-Function UTF-16 code
+    /// units in one interpreter session.
+    #[must_use]
+    pub const fn with_dynamic_source_code_units(mut self, maximum: u64) -> Self {
+        self.dynamic_source_code_units = maximum;
+        self
+    }
 }
 
 impl Default for ExecutionLimits {
     fn default() -> Self {
         Self {
             instruction_fuel: 10_000_000,
+            dynamic_compilations: 1_024,
+            dynamic_source_code_units: 16_777_216,
         }
+    }
+}
+
+struct DynamicCompilationBudget {
+    compilation_limit: u64,
+    source_code_unit_limit: u64,
+    compilations: u64,
+    source_code_units: u64,
+}
+
+impl DynamicCompilationBudget {
+    const fn new(limits: ExecutionLimits) -> Self {
+        Self {
+            compilation_limit: limits.dynamic_compilations,
+            source_code_unit_limit: limits.dynamic_source_code_units,
+            compilations: 0,
+            source_code_units: 0,
+        }
+    }
+
+    fn charge(&mut self, source: &OrdinaryDynamicFunctionSource) -> Result<(), ExecutionError> {
+        let compilations = self.compilations.saturating_add(1);
+        if compilations > self.compilation_limit {
+            return Err(ExecutionError::LimitExceeded {
+                resource: RuntimeResource::DynamicCompilations,
+                limit: self.compilation_limit,
+                observed: compilations,
+            });
+        }
+        let source_code_units = self
+            .source_code_units
+            .saturating_add(dynamic_function_source_code_units(source));
+        if source_code_units > self.source_code_unit_limit {
+            return Err(ExecutionError::LimitExceeded {
+                resource: RuntimeResource::DynamicSourceCodeUnits,
+                limit: self.source_code_unit_limit,
+                observed: source_code_units,
+            });
+        }
+        self.compilations = compilations;
+        self.source_code_units = source_code_units;
+        Ok(())
     }
 }
 
@@ -81,6 +147,8 @@ struct Frame {
     receiver: StoredValue,
     instruction: InstructionIndex,
     return_to: Option<InstructionIndex>,
+    dynamic_return: Option<DynamicFunctionReturn>,
+    ordinary_constructor: bool,
     reserved_values: u64,
     arguments: Vec<FrameBinding>,
     locals: Vec<FrameBinding>,
@@ -88,6 +156,12 @@ struct Frame {
     own_cell_bindings: Vec<FrameBindingAddress>,
     environment: Vec<EnvironmentBinding>,
     stack: Vec<StoredValue>,
+}
+
+struct DynamicFunctionReturn {
+    root: InstalledRoot,
+    construction: Option<FunctionId>,
+    origin: Option<JsStackFrame>,
 }
 
 #[derive(Clone, Copy)]
@@ -164,6 +238,7 @@ fn normalize_receiver(
 enum CallKind {
     Direct,
     Method,
+    Constructor,
 }
 
 enum Step {
@@ -173,6 +248,7 @@ enum Step {
         argument_count: usize,
         return_to: InstructionIndex,
         kind: CallKind,
+        source_pc: BytecodePc,
     },
     Abrupt(PendingException),
     Return(StoredValue),
@@ -235,6 +311,42 @@ impl Context<'_> {
         arguments: &[JsValue],
         limits: ExecutionLimits,
     ) -> Result<JsValue, ExecutionError> {
+        self.call_with_optional_dynamic_function_compiler(function, arguments, limits, None)
+    }
+
+    /// Invokes a runtime function with an immutable ordinary dynamic-Function
+    /// compiler available to nested `%Function%` calls.
+    ///
+    /// The compiler receives only owned source strings and returns only a
+    /// complete [`quickjs_bytecode::VerifiedBytecode`] authority. It never
+    /// receives this context, the runtime, or a caller lexical environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same execution failures as [`Self::call`], plus a typed
+    /// dynamic-compilation failure or JavaScript `SyntaxError`.
+    pub fn call_with_dynamic_function_compiler(
+        &mut self,
+        function: &Function,
+        arguments: &[JsValue],
+        limits: ExecutionLimits,
+        compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
+    ) -> Result<JsValue, ExecutionError> {
+        self.call_with_optional_dynamic_function_compiler(
+            function,
+            arguments,
+            limits,
+            Some(compiler),
+        )
+    }
+
+    fn call_with_optional_dynamic_function_compiler(
+        &mut self,
+        function: &Function,
+        arguments: &[JsValue],
+        limits: ExecutionLimits,
+        compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    ) -> Result<JsValue, ExecutionError> {
         self.runtime.prepare_execution_safe_point()?;
         let owner = function.owner()?;
         self.runtime.validate_owner(&owner, HandleKind::Function)?;
@@ -267,6 +379,28 @@ impl Context<'_> {
             }
         }
 
+        if let Some(native) = self
+            .runtime
+            .functions
+            .get(function_id)
+            .and_then(HeapFunction::native)
+            .copied()
+        {
+            let mut owned_arguments = Vec::new();
+            owned_arguments
+                .try_reserve_exact(arguments.len())
+                .map_err(|_| ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::FrameValues,
+                    additional: arguments.len(),
+                })?;
+            for argument in arguments {
+                owned_arguments.push(argument.stored()?.duplicate());
+            }
+            let value =
+                execute_native_entry(self.runtime, native, owned_arguments, limits, compiler)?;
+            return self.runtime.public_value(value);
+        }
+
         let plan = plan_frame(self.runtime, function_id, 0, 0)?;
         let frame = create_frame(
             self.runtime,
@@ -274,26 +408,55 @@ impl Context<'_> {
             StoredValue::Undefined,
             FrameArguments::Public(arguments),
             None,
+            None,
         )?;
-        let value = execute_frames(self.runtime, frame, limits)?;
+        let value = execute_frames(self.runtime, frame, limits, compiler, None)?;
         self.runtime.public_value(value)
     }
 
     pub(crate) fn execute_internal_root(
         &mut self,
-        function: FunctionId,
+        root: &mut InstalledRoot,
         receiver: StoredValue,
         limits: ExecutionLimits,
     ) -> Result<StoredValue, ExecutionError> {
-        let plan = plan_frame(self.runtime, function, 0, 0)?;
+        self.execute_internal_root_with_optional_dynamic_function_compiler(
+            root, receiver, limits, None,
+        )
+    }
+
+    pub(crate) fn execute_internal_root_with_dynamic_function_compiler(
+        &mut self,
+        root: &mut InstalledRoot,
+        receiver: StoredValue,
+        limits: ExecutionLimits,
+        compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
+    ) -> Result<StoredValue, ExecutionError> {
+        self.execute_internal_root_with_optional_dynamic_function_compiler(
+            root,
+            receiver,
+            limits,
+            Some(compiler),
+        )
+    }
+
+    fn execute_internal_root_with_optional_dynamic_function_compiler(
+        &mut self,
+        root: &mut InstalledRoot,
+        receiver: StoredValue,
+        limits: ExecutionLimits,
+        compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    ) -> Result<StoredValue, ExecutionError> {
+        let plan = plan_frame(self.runtime, root.function, 0, 0)?;
         let frame = create_frame(
             self.runtime,
             plan,
             receiver,
             FrameArguments::Owned(Vec::new()),
             None,
+            None,
         )?;
-        execute_frames(self.runtime, frame, limits)
+        execute_frames(self.runtime, frame, limits, compiler, Some(root))
     }
 }
 
@@ -301,6 +464,27 @@ fn execute_frames(
     runtime: &mut Runtime,
     initial: Frame,
     limits: ExecutionLimits,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    unstarted_dynamic_root: Option<&mut InstalledRoot>,
+) -> Result<StoredValue, ExecutionError> {
+    let mut dynamic_budget = DynamicCompilationBudget::new(limits);
+    execute_frames_with_dynamic_budget(
+        runtime,
+        initial,
+        limits,
+        compiler,
+        unstarted_dynamic_root,
+        &mut dynamic_budget,
+    )
+}
+
+fn execute_frames_with_dynamic_budget(
+    runtime: &mut Runtime,
+    initial: Frame,
+    limits: ExecutionLimits,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    unstarted_dynamic_root: Option<&mut InstalledRoot>,
+    dynamic_budget: &mut DynamicCompilationBudget,
 ) -> Result<StoredValue, ExecutionError> {
     let mut active_frame_values = initial.reserved_values;
     let mut frames = Vec::new();
@@ -311,7 +495,37 @@ fn execute_frames(
             additional: 1,
         })?;
     frames.push(initial);
+    if let Some(root) = unstarted_dynamic_root {
+        root.commit_environment()?;
+    }
 
+    let result = execute_frame_loop(
+        runtime,
+        &mut frames,
+        &mut active_frame_values,
+        limits,
+        compiler,
+        dynamic_budget,
+    );
+    let cleanup = retire_active_dynamic_roots(runtime, &mut frames);
+    match cleanup {
+        Ok(()) => result,
+        Err(fault) => Err(fault.into()),
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the iterative bytecode/native transition loop remains centralized so every abrupt path shares one cleanup boundary"
+)]
+fn execute_frame_loop(
+    runtime: &mut Runtime,
+    frames: &mut Vec<Frame>,
+    active_frame_values: &mut u64,
+    limits: ExecutionLimits,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    dynamic_budget: &mut DynamicCompilationBudget,
+) -> Result<StoredValue, ExecutionError> {
     let mut executed = 0_u64;
     loop {
         if executed == limits.instruction_fuel {
@@ -333,15 +547,97 @@ fn execute_frames(
                 argument_count,
                 return_to,
                 kind,
+                source_pc,
             } => {
-                let plan = plan_frame(runtime, function, frames.len(), active_frame_values)?;
+                let native = runtime
+                    .functions
+                    .get(function)
+                    .ok_or(EngineFault::StaleHeapEdge {
+                        edge: "function",
+                        index: function.index(),
+                        generation: function.generation(),
+                    })?
+                    .native()
+                    .copied();
+                let origin = instruction_location(
+                    runtime,
+                    frames.last().ok_or(EngineFault::MissingInstruction {
+                        function: FunctionTemplateId::new(0),
+                        instruction: 0,
+                    })?,
+                    source_pc,
+                )?;
+                if let Some(native) = native {
+                    frames
+                        .try_reserve(1)
+                        .map_err(|_| ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::Frames,
+                            additional: 1,
+                        })?;
+                    let inputs = take_call_inputs(
+                        frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?,
+                        function,
+                        argument_count,
+                        kind,
+                    )?;
+                    match dispatch_native_call(
+                        runtime,
+                        native,
+                        inputs,
+                        Some(return_to),
+                        Some(origin),
+                        frames.len(),
+                        *active_frame_values,
+                        compiler,
+                        dynamic_budget,
+                    ) {
+                        Ok(NativeDispatch::Immediate(value)) => {
+                            let parent =
+                                frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                                    function: FunctionTemplateId::new(0),
+                                    instruction: 0,
+                                })?;
+                            push_call_result(parent, value, return_to)?;
+                        }
+                        Ok(NativeDispatch::Frame(child)) => {
+                            *active_frame_values =
+                                active_frame_values.saturating_add(child.reserved_values);
+                            frames.push(child);
+                        }
+                        Err(NativeFailure::Abrupt(pending)) => {
+                            let caller_frames = exception_caller_frames(runtime, frames)?;
+                            let exception = finish_exception(runtime, pending, caller_frames)?;
+                            return Err(ExecutionError::Exception(exception));
+                        }
+                        Err(NativeFailure::Execution(error)) => return Err(error),
+                    }
+                    continue;
+                }
+                if matches!(kind, CallKind::Constructor)
+                    && !bytecode_function_is_constructor(runtime, function)?
+                {
+                    let pending = PendingException {
+                        payload: PendingExceptionPayload::EngineError {
+                            kind: ExceptionKind::TypeError,
+                            message: JsString::from_utf8("not a constructor")?,
+                        },
+                        origin,
+                    };
+                    let caller_frames = exception_caller_frames(runtime, frames)?;
+                    let exception = finish_exception(runtime, pending, caller_frames)?;
+                    return Err(ExecutionError::Exception(exception));
+                }
+                let plan = plan_frame(runtime, function, frames.len(), *active_frame_values)?;
                 frames
                     .try_reserve(1)
                     .map_err(|_| ExecutionError::AllocationFailed {
                         resource: RuntimeResource::Frames,
                         additional: 1,
                     })?;
-                let (receiver, arguments) = take_call_inputs(
+                let inputs = take_call_inputs(
                     frames.last_mut().ok_or(EngineFault::MissingInstruction {
                         function: FunctionTemplateId::new(0),
                         instruction: 0,
@@ -350,14 +646,26 @@ fn execute_frames(
                     argument_count,
                     kind,
                 )?;
-                let child = create_frame(
+                let construction = inputs.new_target;
+                let mut child = create_frame(
                     runtime,
                     plan,
-                    receiver,
-                    FrameArguments::Owned(arguments),
+                    if construction.is_some() {
+                        StoredValue::Undefined
+                    } else {
+                        inputs.receiver
+                    },
+                    FrameArguments::Owned(inputs.arguments),
                     Some(return_to),
+                    None,
                 )?;
-                active_frame_values = active_frame_values.saturating_add(child.reserved_values);
+                if let Some(new_target) = construction {
+                    child.receiver = StoredValue::Object(create_ordinary_constructor_receiver(
+                        runtime, new_target,
+                    )?);
+                    child.ordinary_constructor = true;
+                }
+                *active_frame_values = active_frame_values.saturating_add(child.reserved_values);
                 frames.push(child);
             }
             Step::Abrupt(pending) => {
@@ -366,7 +674,7 @@ fn execute_frames(
                 // Allocate provenance, then immediately publish the escaping
                 // root; no collection safe point may be inserted between
                 // these operations.
-                let caller_frames = exception_caller_frames(runtime, &frames)?;
+                let caller_frames = exception_caller_frames(runtime, frames)?;
                 let exception = finish_exception(runtime, pending, caller_frames)?;
                 return Err(ExecutionError::Exception(exception));
             }
@@ -375,22 +683,30 @@ fn execute_frames(
                     function: FunctionTemplateId::new(0),
                     instruction: 0,
                 })?;
-                active_frame_values = active_frame_values.saturating_sub(finished.reserved_values);
+                *active_frame_values = active_frame_values.saturating_sub(finished.reserved_values);
+                let return_to = finished.return_to;
+                let value = if let Some(dynamic) = finished.dynamic_return {
+                    finish_dynamic_function_return(runtime, frames, dynamic, value)?
+                } else if finished.ordinary_constructor {
+                    match value {
+                        value @ (StoredValue::Function(_) | StoredValue::Object(_)) => value,
+                        StoredValue::Undefined
+                        | StoredValue::Null
+                        | StoredValue::Boolean(_)
+                        | StoredValue::Number(_)
+                        | StoredValue::String(_) => finished.receiver,
+                    }
+                } else {
+                    value
+                };
                 if let Some(parent) = frames.last_mut() {
-                    let return_to = finished.return_to.ok_or(EngineFault::RuntimeInvariant {
+                    let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
                         message: "nested frame has no caller continuation",
                     })?;
-                    if parent.stack.len() == parent.stack.capacity() {
-                        return Err(EngineFault::RuntimeInvariant {
-                            message: "verified call result exceeds frame stack capacity",
-                        }
-                        .into());
-                    }
-                    parent.stack.push(value);
-                    parent.instruction = return_to;
+                    push_call_result(parent, value, return_to)?;
                     continue;
                 }
-                if finished.return_to.is_some() {
+                if return_to.is_some() {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "host frame has a caller continuation",
                     }
@@ -400,6 +716,528 @@ fn execute_frames(
             }
         }
     }
+}
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing a Frame would introduce an unaccounted infallible allocation in the interpreter path"
+)]
+enum NativeDispatch {
+    Immediate(StoredValue),
+    Frame(Frame),
+}
+
+enum NativeFailure {
+    Abrupt(PendingException),
+    Execution(ExecutionError),
+}
+
+impl From<ExecutionError> for NativeFailure {
+    fn from(error: ExecutionError) -> Self {
+        Self::Execution(error)
+    }
+}
+
+impl From<crate::JsStringError> for NativeFailure {
+    fn from(error: crate::JsStringError) -> Self {
+        Self::Execution(error.into())
+    }
+}
+
+impl From<EngineFault> for NativeFailure {
+    fn from(error: EngineFault) -> Self {
+        Self::Execution(error.into())
+    }
+}
+
+#[derive(Debug)]
+struct DynamicFunctionServiceUnavailable;
+
+impl fmt::Display for DynamicFunctionServiceUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("no ordinary dynamic-Function compiler was supplied for this execution")
+    }
+}
+
+impl Error for DynamicFunctionServiceUnavailable {}
+
+#[derive(Debug)]
+struct UnsupportedDynamicFunctionSource {
+    kind: crate::ValueKind,
+}
+
+impl fmt::Display for UnsupportedDynamicFunctionSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "dynamic Function source coercion for {} values is not implemented",
+            self.kind
+        )
+    }
+}
+
+impl Error for UnsupportedDynamicFunctionSource {}
+
+fn execute_native_entry(
+    runtime: &mut Runtime,
+    native: NativeFunction,
+    arguments: Vec<StoredValue>,
+    limits: ExecutionLimits,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+) -> Result<StoredValue, ExecutionError> {
+    let mut dynamic_budget = DynamicCompilationBudget::new(limits);
+    let inputs = CallInputs {
+        receiver: StoredValue::Undefined,
+        arguments,
+        new_target: None,
+    };
+    match dispatch_native_call(
+        runtime,
+        native,
+        inputs,
+        None,
+        None,
+        0,
+        0,
+        compiler,
+        &mut dynamic_budget,
+    ) {
+        Ok(NativeDispatch::Immediate(value)) => Ok(value),
+        Ok(NativeDispatch::Frame(frame)) => execute_frames_with_dynamic_budget(
+            runtime,
+            frame,
+            limits,
+            compiler,
+            None,
+            &mut dynamic_budget,
+        ),
+        Err(NativeFailure::Execution(error)) => Err(error),
+        Err(NativeFailure::Abrupt(_)) => Err(EngineFault::RuntimeInvariant {
+            message: "host-native entry produced a JavaScript exception without a verified call site",
+        }
+        .into()),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "native invocation, compilation, installation, and rollback remain one explicit audited boundary"
+)]
+fn dispatch_native_call(
+    runtime: &mut Runtime,
+    native: NativeFunction,
+    inputs: CallInputs,
+    return_to: Option<InstructionIndex>,
+    origin: Option<JsStackFrame>,
+    active_frames: usize,
+    active_frame_values: u64,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    dynamic_budget: &mut DynamicCompilationBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match native.kind {
+        NativeFunctionKind::FunctionPrototype => {
+            if inputs.new_target.is_some() {
+                let Some(origin) = origin else {
+                    return Err(NativeFailure::Execution(
+                        EngineFault::RuntimeInvariant {
+                            message: "host construction of Function.prototype is not implemented",
+                        }
+                        .into(),
+                    ));
+                };
+                return Err(NativeFailure::Abrupt(PendingException {
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("not a constructor")?,
+                    },
+                    origin,
+                }));
+            }
+            Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+        }
+        NativeFunctionKind::OrdinaryFunctionConstructor => {
+            let Some(compiler) = compiler else {
+                return Err(NativeFailure::Execution(
+                    DynamicFunctionCompileFailure::Engine {
+                        source: Arc::new(DynamicFunctionServiceUnavailable),
+                    }
+                    .into(),
+                ));
+            };
+            let source = ordinary_dynamic_function_source(inputs.arguments)?;
+            dynamic_budget.charge(&source)?;
+            let authority = match compiler.compile(source) {
+                Ok(authority) => authority,
+                Err(DynamicFunctionCompileFailure::Syntax { message }) => {
+                    let Some(origin) = origin else {
+                        return Err(NativeFailure::Execution(ExecutionError::Exception(
+                            JsException::engine_error(
+                                ExceptionKind::SyntaxError,
+                                message,
+                                native_function_host_origin(),
+                                Vec::new(),
+                            ),
+                        )));
+                    };
+                    return Err(NativeFailure::Abrupt(PendingException {
+                        payload: PendingExceptionPayload::EngineError {
+                            kind: ExceptionKind::SyntaxError,
+                            message,
+                        },
+                        origin,
+                    }));
+                }
+                Err(error @ DynamicFunctionCompileFailure::Engine { .. }) => {
+                    return Err(NativeFailure::Execution(error.into()));
+                }
+            };
+
+            let exception_authority = Arc::clone(&authority);
+            let installation = {
+                let mut context = Context {
+                    runtime,
+                    realm: native.realm,
+                };
+                context.install_dynamic_function_script_during_execution(authority)
+            };
+            let mut installed = match installation {
+                Ok(installed) => installed,
+                Err(crate::InstallError::GlobalDeclarationRejected {
+                    name,
+                    function,
+                    pc,
+                    source_span,
+                }) => {
+                    let (message, declaration_origin) = global_declaration_error(
+                        &exception_authority,
+                        &name,
+                        function,
+                        pc,
+                        source_span,
+                    )
+                    .map_err(NativeFailure::Execution)?;
+                    return Err(NativeFailure::Abrupt(PendingException {
+                        payload: PendingExceptionPayload::EngineError {
+                            kind: ExceptionKind::TypeError,
+                            message,
+                        },
+                        origin: declaration_origin,
+                    }));
+                }
+                Err(error) => {
+                    return Err(NativeFailure::Execution(ExecutionError::from(error)));
+                }
+            };
+            let plan = match plan_frame(
+                runtime,
+                installed.function,
+                active_frames,
+                active_frame_values,
+            ) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    retire_failed_dynamic_root(runtime, installed)?;
+                    return Err(NativeFailure::Execution(error));
+                }
+            };
+            let global = match runtime.realm_global_object(native.realm) {
+                Ok(global) => global,
+                Err(fault) => {
+                    retire_failed_dynamic_root(runtime, installed)?;
+                    return Err(NativeFailure::Execution(fault.into()));
+                }
+            };
+            let construction = inputs.new_target;
+            let frame = match create_frame(
+                runtime,
+                plan,
+                StoredValue::Object(global),
+                FrameArguments::Owned(Vec::new()),
+                return_to,
+                None,
+            ) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    retire_failed_dynamic_root(runtime, installed)?;
+                    return Err(NativeFailure::Execution(error));
+                }
+            };
+            if let Err(error) = installed.commit_environment() {
+                retire_failed_dynamic_root(runtime, installed)?;
+                return Err(NativeFailure::Execution(error.into()));
+            }
+            let mut frame = frame;
+            frame.dynamic_return = Some(DynamicFunctionReturn {
+                root: installed,
+                construction,
+                origin,
+            });
+            Ok(NativeDispatch::Frame(frame))
+        }
+    }
+}
+
+fn native_function_host_origin() -> JsStackFrame {
+    JsStackFrame::new(
+        FunctionTemplateId::new(0),
+        BytecodePc::ZERO,
+        Arc::from("<native Function>"),
+        Arc::from("Function"),
+        SourceByteSpan::new(0, 8),
+    )
+}
+
+fn retire_failed_dynamic_root(
+    runtime: &mut Runtime,
+    installed: InstalledRoot,
+) -> Result<(), NativeFailure> {
+    runtime
+        .retire_dynamic_root(installed)
+        .map_err(|fault| NativeFailure::Execution(fault.into()))
+}
+
+fn ordinary_dynamic_function_source(
+    arguments: Vec<StoredValue>,
+) -> Result<OrdinaryDynamicFunctionSource, NativeFailure> {
+    if arguments.is_empty() {
+        return Ok(OrdinaryDynamicFunctionSource::new(
+            Arc::from([]),
+            JsString::empty(),
+        ));
+    }
+    let mut converted = Vec::new();
+    converted
+        .try_reserve_exact(arguments.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: arguments.len(),
+        })?;
+    for argument in arguments {
+        converted.push(dynamic_source_to_string(argument)?);
+    }
+    let body = converted.pop().ok_or(EngineFault::RuntimeInvariant {
+        message: "nonempty dynamic Function arguments lost their body",
+    })?;
+    Ok(OrdinaryDynamicFunctionSource::new(
+        Arc::from(converted),
+        body,
+    ))
+}
+
+fn dynamic_function_source_code_units(source: &OrdinaryDynamicFunctionSource) -> u64 {
+    const FIXED_WRAPPER_CODE_UNITS: u64 = 28;
+    let parameter_units = source.parameters().iter().fold(0_u64, |total, parameter| {
+        total.saturating_add(u64::from(parameter.len()))
+    });
+    let separator_units = usize_to_u64(source.parameters().len().saturating_sub(1));
+    FIXED_WRAPPER_CODE_UNITS
+        .saturating_add(parameter_units)
+        .saturating_add(separator_units)
+        .saturating_add(u64::from(source.body().len()))
+}
+
+fn dynamic_source_to_string(value: StoredValue) -> Result<JsString, NativeFailure> {
+    match value {
+        StoredValue::Undefined => Ok(JsString::from_utf8("undefined")?),
+        StoredValue::Null => Ok(JsString::from_utf8("null")?),
+        StoredValue::Boolean(false) => Ok(JsString::from_utf8("false")?),
+        StoredValue::Boolean(true) => Ok(JsString::from_utf8("true")?),
+        StoredValue::Number(value) => Ok(JsString::from_utf8(&value.to_javascript_string())?),
+        StoredValue::String(value) => Ok(value),
+        value @ (StoredValue::Function(_) | StoredValue::Object(_)) => {
+            Err(NativeFailure::Execution(
+                DynamicFunctionCompileFailure::Engine {
+                    source: Arc::new(UnsupportedDynamicFunctionSource { kind: value.kind() }),
+                }
+                .into(),
+            ))
+        }
+    }
+}
+
+fn finish_dynamic_function_return(
+    runtime: &mut Runtime,
+    caller_frames: &[Frame],
+    dynamic: DynamicFunctionReturn,
+    value: StoredValue,
+) -> Result<StoredValue, ExecutionError> {
+    let completion = if let Some(new_target) = dynamic.construction {
+        apply_dynamic_constructor_prototype(runtime, new_target, value)
+    } else {
+        Ok(value)
+    };
+    let retirement = runtime.retire_dynamic_root(dynamic.root);
+    retirement?;
+    match completion {
+        Ok(value) => Ok(value),
+        Err(ConstructorCompletionError::Execution(error)) => Err(error),
+        Err(ConstructorCompletionError::TypeError(message)) => {
+            let Some(origin) = dynamic.origin else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "host dynamic construction has no verified exception origin",
+                }
+                .into());
+            };
+            let callers = exception_caller_frames(runtime, caller_frames)?;
+            let pending = PendingException {
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message,
+                },
+                origin,
+            };
+            let exception = finish_exception(runtime, pending, callers)?;
+            Err(ExecutionError::Exception(exception))
+        }
+    }
+}
+
+enum ConstructorCompletionError {
+    TypeError(JsString),
+    Execution(ExecutionError),
+}
+
+impl From<ExecutionError> for ConstructorCompletionError {
+    fn from(error: ExecutionError) -> Self {
+        Self::Execution(error)
+    }
+}
+
+impl From<EngineFault> for ConstructorCompletionError {
+    fn from(error: EngineFault) -> Self {
+        Self::Execution(error.into())
+    }
+}
+
+impl From<crate::JsStringError> for ConstructorCompletionError {
+    fn from(error: crate::JsStringError) -> Self {
+        Self::Execution(error.into())
+    }
+}
+
+fn apply_dynamic_constructor_prototype(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    completion: StoredValue,
+) -> Result<StoredValue, ConstructorCompletionError> {
+    let target = match &completion {
+        StoredValue::Undefined | StoredValue::Null => {
+            return Err(ConstructorCompletionError::TypeError(JsString::from_utf8(
+                "not an object",
+            )?));
+        }
+        StoredValue::Boolean(_) | StoredValue::Number(_) | StoredValue::String(_) => {
+            return Ok(completion);
+        }
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+    };
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let requested =
+        read_heap_property(runtime, HeapReference::Function(new_target), &prototype_key)?;
+    let prototype = match requested {
+        StoredValue::Function(function) => HeapReference::Function(function),
+        StoredValue::Object(object) => HeapReference::Object(object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_) => {
+            let realm = runtime.function_realm(new_target)?;
+            HeapReference::Function(runtime.realm_function_prototype(realm)?)
+        }
+    };
+    if !runtime.replace_prototype_checked(target, Some(prototype))? {
+        return Err(ConstructorCompletionError::TypeError(JsString::from_utf8(
+            "circular prototype chain",
+        )?));
+    }
+    Ok(completion)
+}
+
+fn bytecode_function_is_constructor(
+    runtime: &Runtime,
+    function: FunctionId,
+) -> Result<bool, ExecutionError> {
+    let bytecode = runtime
+        .functions
+        .get(function)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "function",
+            index: function.index(),
+            generation: function.generation(),
+        })?
+        .bytecode()?;
+    let template = code(runtime, bytecode.code)?
+        .authority
+        .function(bytecode.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: bytecode.template,
+        })?;
+    Ok(template
+        .function()
+        .control_flow()
+        .function_header()
+        .flags()
+        .has_prototype())
+}
+
+fn create_ordinary_constructor_receiver(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+) -> Result<ObjectId, ExecutionError> {
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let requested =
+        read_heap_property(runtime, HeapReference::Function(new_target), &prototype_key)?;
+    let prototype = match requested {
+        StoredValue::Function(function) => HeapReference::Function(function),
+        StoredValue::Object(object) => HeapReference::Object(object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_) => {
+            let realm = runtime.function_realm(new_target)?;
+            HeapReference::Object(runtime.realm_object_prototype(realm)?)
+        }
+    };
+    runtime.allocate_ordinary_object_with_prototype(prototype)
+}
+
+fn retire_active_dynamic_roots(
+    runtime: &mut Runtime,
+    frames: &mut [Frame],
+) -> Result<(), EngineFault> {
+    let mut first_failure = None;
+    for dynamic in frames
+        .iter_mut()
+        .rev()
+        .filter_map(|frame| frame.dynamic_return.take())
+    {
+        if let Err(fault) = runtime.retire_dynamic_root(dynamic.root)
+            && first_failure.is_none()
+        {
+            first_failure = Some(fault);
+        }
+    }
+    first_failure.map_or(Ok(()), Err)
+}
+
+fn push_call_result(
+    parent: &mut Frame,
+    value: StoredValue,
+    return_to: InstructionIndex,
+) -> Result<(), ExecutionError> {
+    if parent.stack.len() == parent.stack.capacity() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified call result exceeds frame stack capacity",
+        }
+        .into());
+    }
+    parent.stack.push(value);
+    parent.instruction = return_to;
+    Ok(())
 }
 
 #[allow(
@@ -427,8 +1265,9 @@ fn plan_frame(
             index: function_id.index(),
             generation: function_id.generation(),
         })?;
-    let code_id = function.code;
-    let template_id = function.template;
+    let bytecode = function.bytecode()?;
+    let code_id = bytecode.code;
+    let template_id = bytecode.template;
 
     let code = runtime
         .code
@@ -452,13 +1291,13 @@ fn plan_frame(
             .ok_or(EngineFault::InvalidClosureEnvironment {
                 function: template_id,
             })?;
-    if function.environment.len() != verified.metadata().closures().len() {
+    if bytecode.environment.len() != verified.metadata().closures().len() {
         return Err(EngineFault::InvalidClosureEnvironment {
             function: template_id,
         }
         .into());
     }
-    for (binding, definition) in function
+    for (binding, definition) in bytecode
         .environment
         .iter()
         .copied()
@@ -559,6 +1398,7 @@ fn create_frame(
     receiver: StoredValue,
     supplied: FrameArguments<'_>,
     return_to: Option<InstructionIndex>,
+    dynamic_return: Option<DynamicFunctionReturn>,
 ) -> Result<Frame, ExecutionError> {
     let function = runtime
         .functions
@@ -568,7 +1408,10 @@ fn create_frame(
             index: plan.function.index(),
             generation: plan.function.generation(),
         })?;
-    let environment = copy_environment(&function.environment, RuntimeResource::FrameValues)?;
+    let environment = copy_environment(
+        &function.bytecode()?.environment,
+        RuntimeResource::FrameValues,
+    )?;
     let code = runtime
         .code
         .get(plan.code)
@@ -690,6 +1533,8 @@ fn create_frame(
         receiver,
         instruction: plan.instruction,
         return_to,
+        dynamic_return,
+        ordinary_constructor: false,
         reserved_values: plan.reserved_values,
         arguments,
         locals,
@@ -889,6 +1734,7 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
                 argument_count,
                 return_to,
                 kind: CallKind::Direct,
+                source_pc,
             });
         }
         FinalOpcode::CallMethod => {
@@ -923,6 +1769,45 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
                 argument_count,
                 return_to,
                 kind: CallKind::Method,
+                source_pc,
+            });
+        }
+        FinalOpcode::CallConstructor => {
+            let Operands::NPop { argument_count } = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let argument_count = usize::from(argument_count);
+            let required = argument_count.saturating_add(2);
+            if frame.stack.len() < required {
+                return Err(EngineFault::StackDepthMismatch {
+                    function: frame.template,
+                    pc: source_pc,
+                    expected: u32::try_from(required).unwrap_or(u32::MAX),
+                    actual: frame.stack.len(),
+                }
+                .into());
+            }
+            let callee_index = frame.stack.len() - required;
+            let new_target_index = callee_index + 1;
+            let (StoredValue::Function(function), StoredValue::Function(_new_target)) =
+                (&frame.stack[callee_index], &frame.stack[new_target_index])
+            else {
+                return Ok(Step::Abrupt(not_constructor_exception(
+                    runtime, frame, source_pc,
+                )?));
+            };
+            let return_to = verified_instruction.successors().fallthrough().ok_or(
+                EngineFault::InvalidSuccessor {
+                    function: frame.template,
+                    pc: source_pc,
+                },
+            )?;
+            return Ok(Step::Call {
+                function: *function,
+                argument_count,
+                return_to,
+                kind: CallKind::Constructor,
+                source_pc,
             });
         }
         FinalOpcode::FClosure | FinalOpcode::FClosure8 => {
@@ -1794,6 +2679,7 @@ fn create_closure(
             index: frame.function.index(),
             generation: frame.function.generation(),
         })?;
+    let parent = parent.bytecode()?;
     if parent.code != frame.code
         || parent.template != frame.template
         || parent.environment.as_slice() != frame.environment.as_slice()
@@ -1803,7 +2689,7 @@ fn create_closure(
         }
         .into());
     }
-    let (sources, expected, realm) = {
+    let (sources, expected, realm, function_name, defined_argument_count, has_prototype) = {
         let code = code(runtime, frame.code)?;
         let function = code
             .authority
@@ -1818,8 +2704,40 @@ fn create_closure(
                 additional: source.len(),
             })?;
         copied.extend_from_slice(source);
-        (copied, function.metadata().closures().len(), code.realm)
+        let installed_index = usize::try_from(child.get())
+            .map_err(|_| EngineFault::InvalidClosureEnvironment { function: child })?;
+        let installed = code
+            .templates
+            .get(installed_index)
+            .ok_or(EngineFault::InvalidClosureEnvironment { function: child })?;
+        let function_name = function.metadata().function_name().map_or_else(
+            || Ok(JsString::empty()),
+            |index| {
+                installed
+                    .atoms
+                    .get(index.get() as usize)
+                    .and_then(AtomDescription::description)
+                    .cloned()
+                    .ok_or(EngineFault::MissingPoolEntry {
+                        pool: "function name atom",
+                        index: index.get(),
+                    })
+            },
+        )?;
+        let header = function.function().control_flow().function_header();
+        (
+            copied,
+            function.metadata().closures().len(),
+            code.realm,
+            function_name,
+            header.defined_argument_count(),
+            header.flags().has_prototype(),
+        )
     };
+    let function_prototype = runtime.realm_function_prototype(realm)?;
+    let object_prototype = has_prototype
+        .then(|| runtime.realm_object_prototype(realm))
+        .transpose()?;
     if sources.len() != expected {
         return Err(EngineFault::InvalidClosureEnvironment { function: child }.into());
     }
@@ -1948,6 +2866,21 @@ fn create_closure(
         runtime.limits.max_heap_functions,
         usize_to_u64(runtime.functions.len()).saturating_add(1),
     )?;
+    let function_property_count = 2_usize + usize::from(has_prototype);
+    let prototype_property_count = usize::from(has_prototype);
+    let new_property_count = function_property_count.saturating_add(prototype_property_count);
+    check_execution_limit(
+        RuntimeResource::HeapObjects,
+        runtime.limits.max_heap_objects,
+        usize_to_u64(runtime.objects.len()).saturating_add(usize::from(has_prototype) as u64),
+    )?;
+    check_execution_limit(
+        RuntimeResource::ObjectProperties,
+        runtime.limits.max_object_properties,
+        runtime
+            .object_properties
+            .saturating_add(usize_to_u64(new_property_count)),
+    )?;
     check_execution_limit(
         RuntimeResource::BindingCells,
         runtime.limits.max_binding_cells,
@@ -1959,6 +2892,13 @@ fn create_closure(
         .map_err(|_| ExecutionError::AllocationFailed {
             resource: RuntimeResource::HeapFunctions,
             additional: 1,
+        })?;
+    runtime
+        .objects
+        .try_reserve(usize::from(has_prototype))
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::HeapObjects,
+            additional: usize::from(has_prototype),
         })?;
     runtime
         .cells
@@ -1982,6 +2922,61 @@ fn create_closure(
             resource: RuntimeResource::BindingCells,
             additional: pending_cells.len(),
         })?;
+
+    let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
+    let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let constructor_key = runtime.predefined_property_key(PredefinedAtom::Constructor);
+    let mut function_record =
+        crate::object::ObjectRecord::empty(Some(HeapReference::Function(function_prototype)));
+    function_record
+        .try_reserve_data(function_property_count)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::ObjectProperties,
+            additional: function_property_count,
+        })?;
+    function_record
+        .append_data(
+            length_key,
+            PropertyLayout::data(false, false, true),
+            StoredValue::Number(JsNumber::from_f64(f64::from(defined_argument_count))),
+        )
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::ObjectProperties,
+            additional: 1,
+        })?;
+    function_record
+        .append_data(
+            name_key,
+            PropertyLayout::data(false, false, true),
+            StoredValue::String(function_name),
+        )
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::ObjectProperties,
+            additional: 1,
+        })?;
+    let mut prototype_record = object_prototype.map(|object_prototype| {
+        crate::object::ObjectRecord::empty(Some(HeapReference::Object(object_prototype)))
+    });
+    if let Some(record) = prototype_record.as_mut() {
+        record
+            .try_reserve_data(1)
+            .map_err(|_| ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        record
+            .append_data(
+                constructor_key.clone(),
+                PropertyLayout::data(true, false, true),
+                StoredValue::Undefined,
+            )
+            .map_err(|_| ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+    }
+
     for pending in &pending_cells {
         if let Ok(cell) = runtime.cells.try_insert(BindingCell {
             value: pending.value.duplicate(),
@@ -2029,22 +3024,82 @@ fn create_closure(
         frame.own_cells[pending.own_index] = Some(cell);
     }
 
+    let prototype_object = if let Some(record) = prototype_record {
+        let Ok(object) = runtime.objects.try_insert(crate::object::HeapObject {
+            record,
+            public_roots: 0,
+        }) else {
+            rollback_new_cells(runtime, frame, &pending_cells, &new_cells);
+            return Err(ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            });
+        };
+        if function_record
+            .append_data(
+                prototype_key,
+                PropertyLayout::data(true, false, false),
+                StoredValue::Object(object),
+            )
+            .is_err()
+        {
+            let removed = runtime.objects.remove(object);
+            debug_assert!(removed.is_some());
+            rollback_new_cells(runtime, frame, &pending_cells, &new_cells);
+            return Err(ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            });
+        }
+        Some(object)
+    } else {
+        None
+    };
+
     let Ok(function) = runtime.functions.try_insert(HeapFunction {
-        code: frame.code,
-        template: child,
-        environment,
-        object: crate::object::ObjectRecord::empty(None),
+        implementation: FunctionImplementation::Bytecode(BytecodeFunction {
+            code: frame.code,
+            template: child,
+            environment,
+        }),
+        object: function_record,
         public_roots: 0,
     }) else {
+        if let Some(object) = prototype_object {
+            let removed = runtime.objects.remove(object);
+            debug_assert!(removed.is_some());
+        }
         rollback_new_cells(runtime, frame, &pending_cells, &new_cells);
         return Err(ExecutionError::AllocationFailed {
             resource: RuntimeResource::HeapFunctions,
             additional: 1,
         });
     };
+    if let Some(object) = prototype_object {
+        let updated = runtime.objects.get_mut(object).is_some_and(|prototype| {
+            prototype
+                .record
+                .replace_existing_data(&constructor_key, StoredValue::Function(function))
+        });
+        if !updated {
+            let removed = runtime.functions.remove(function);
+            debug_assert!(removed.is_some());
+            let removed = runtime.objects.remove(object);
+            debug_assert!(removed.is_some());
+            rollback_new_cells(runtime, frame, &pending_cells, &new_cells);
+            return Err(EngineFault::RuntimeInvariant {
+                message: "new ordinary function prototype lost its constructor property",
+            }
+            .into());
+        }
+    }
     let Some(code) = runtime.code.get_mut(frame.code) else {
         let removed = runtime.functions.remove(function);
         debug_assert!(removed.is_some());
+        if let Some(object) = prototype_object {
+            let removed = runtime.objects.remove(object);
+            debug_assert!(removed.is_some());
+        }
         rollback_new_cells(runtime, frame, &pending_cells, &new_cells);
         return Err(EngineFault::StaleHeapEdge {
             edge: "installed code",
@@ -2054,6 +3109,9 @@ fn create_closure(
         .into());
     };
     code.live_functions = code.live_functions.saturating_add(1);
+    runtime.object_properties = runtime
+        .object_properties
+        .saturating_add(usize_to_u64(new_property_count));
     runtime.collection_pending = true;
     Ok(function)
 }
@@ -2399,6 +3457,20 @@ fn not_callable_exception(
     })
 }
 
+fn not_constructor_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    Ok(PendingException {
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8("not a constructor")?,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
 fn property_exception(
     runtime: &Runtime,
     frame: &Frame,
@@ -2505,6 +3577,7 @@ fn exception_caller_frames(
                 | FinalOpcode::Call2
                 | FinalOpcode::Call3
                 | FinalOpcode::CallMethod
+                | FinalOpcode::CallConstructor
         ) {
             return Err(EngineFault::RuntimeInvariant {
                 message: "exception caller is not parked at an ordinary call",
@@ -2576,15 +3649,21 @@ fn frame_local_mut(frame: &mut Frame, index: u32) -> Result<&mut FrameBinding, E
         })
 }
 
+struct CallInputs {
+    receiver: StoredValue,
+    arguments: Vec<StoredValue>,
+    new_target: Option<FunctionId>,
+}
+
 fn take_call_inputs(
     frame: &mut Frame,
     expected_function: FunctionId,
     argument_count: usize,
     kind: CallKind,
-) -> Result<(StoredValue, Vec<StoredValue>), ExecutionError> {
+) -> Result<CallInputs, ExecutionError> {
     let required = argument_count.saturating_add(match kind {
         CallKind::Direct => 1,
-        CallKind::Method => 2,
+        CallKind::Method | CallKind::Constructor => 2,
     });
     if frame.stack.len() < required {
         return Err(EngineFault::StackDepthMismatch {
@@ -2606,6 +3685,24 @@ fn take_call_inputs(
         arguments.push(pop(frame)?);
     }
     arguments.reverse();
+    let new_target = if matches!(kind, CallKind::Constructor) {
+        match pop(frame)? {
+            StoredValue::Function(function) => Some(function),
+            StoredValue::Undefined
+            | StoredValue::Null
+            | StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::String(_)
+            | StoredValue::Object(_) => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "validated constructor new target changed value kind",
+                }
+                .into());
+            }
+        }
+    } else {
+        None
+    };
     match pop(frame)? {
         StoredValue::Function(actual) if actual == expected_function => {}
         StoredValue::Function(_) => {
@@ -2627,10 +3724,14 @@ fn take_call_inputs(
         }
     }
     let receiver = match kind {
-        CallKind::Direct => StoredValue::Undefined,
         CallKind::Method => pop(frame)?,
+        CallKind::Direct | CallKind::Constructor => StoredValue::Undefined,
     };
-    Ok((receiver, arguments))
+    Ok(CallInputs {
+        receiver,
+        arguments,
+        new_target,
+    })
 }
 
 fn pop(frame: &mut Frame) -> Result<StoredValue, EngineFault> {

@@ -1,6 +1,6 @@
 use quickjs::{
     DynamicFunctionCompilerError, DynamicFunctionConstructionError, DynamicFunctionLimits,
-    construct_dynamic_function,
+    call_with_dynamic_function_support, construct_dynamic_function,
 };
 use quickjs_frontend::{DynamicFunctionKind, DynamicFunctionSource, SourceFragment};
 use quickjs_runtime::{
@@ -50,6 +50,61 @@ fn ordinary_dynamic_function_compiles_the_whole_wrapper_and_executes() {
             .expect("live value")
             .expect("number")
             .strict_equals(JsNumber::from_i32(7))
+    );
+}
+
+#[test]
+fn facade_call_supplies_the_real_oxc_compiler_to_global_function() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = construct_dynamic_function(
+        &mut context,
+        source(&[], "return new Function('return 9;')();"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("outer dynamic Function")
+    .into_value()
+    .into_function()
+    .expect("outer function");
+
+    let value = call_with_dynamic_function_support(
+        &mut context,
+        &run,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("nested global Function");
+
+    assert!(
+        value
+            .as_number()
+            .expect("live value")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(9))
+    );
+}
+
+#[test]
+fn facade_wrapper_escape_can_invoke_global_function_during_script_execution() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = construct_dynamic_function(
+        &mut context,
+        source(&[], "}), Function('return 6;')() || (function(){"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("wrapper escape with nested Function")
+    .into_value();
+
+    assert!(
+        value
+            .as_number()
+            .expect("live value")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(6))
     );
 }
 

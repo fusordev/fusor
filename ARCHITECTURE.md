@@ -312,15 +312,17 @@ failures allocate no wrapper. The compatibility release permits source to
 escape that wrapper, so the adapter deliberately does not require the Script
 AST to contain exactly one function expression.
 
-The first runtime slice of that adapter is exposed as a host/internal facade
-entry for already-coerced UTF-8 fragments. It compiles the complete Program
+The runtime exposes that adapter through an immutable
+`Arc<dyn OrdinaryDynamicFunctionCompiler>` service. Global `Function` and
+`new Function` coerce arguments left-to-right, compile the complete Program
 root and every nested template as one typed dynamic-Function Script authority,
-installs it in the selected constructor realm, executes an unexposed internal
-root with that realm's global object as receiver, retires the root, and returns
-the exact rooted Script completion. It never extracts an assumed child
-function expression, so wrapper escape remains observable. Named `anonymous`
-self bindings are metadata-initialized to the returned function, including
-when captured by a nested closure.
+install it in the native constructor's home realm, and push its unexposed root
+onto the existing iterative frame vector. The compiler receives no runtime,
+caller frame, or lexical environment. Nested construction shares instruction,
+frame/value, compilation-count, and generated-source budgets. The root is
+retired on every completion path; pre-execution failure also rolls back its
+realm-environment journal. Wrapper escape remains observable, and named
+`anonymous` self bindings are metadata-initialized to the returned function.
 
 Unresolved names are compiled as explicit closure-domain slots whose root
 source is the constructor realm rather than a caller capture. Descendants
@@ -350,14 +352,17 @@ global function may capture those cells before their certified
 `set_loc_uninitialized` setup, and the verifier proves that setup completes
 before user bytecode. Retiring the internal Script root preserves only cells,
 functions, and installed code still reachable from the realm or a public
-completion. Configurable accessor replacement and persistent global lexical
-collision checks remain fail closed until those object/environment forms
-exist. JavaScript argument `ToString`, the global `Function` call/constructor
-builtin, and the pinned post-completion `new_target.prototype` adjustment also
-remain pending. The path is not eval, never emits `eval`/`apply_eval`, and
-continues to reject direct eval anywhere in generated code. Direct and
-indirect eval remain wholly unimplemented. GeneratorFunction, AsyncFunction,
-and AsyncGeneratorFunction also remain fail closed.
+completion. The global intrinsic graph and exact data-property flags, call/new
+realm selection, primitive undefined/null/Boolean/Number/String argument
+coercions, parser/profile/semantic `SyntaxError`, generated-function
+`name`/`length`/`prototype`, legacy bytecode construction, wrapper escape, and
+the pinned post-completion `newTarget.prototype` adjustment are implemented.
+Object/function `ToPrimitive`, configurable accessor replacement, persistent
+global lexical collision checks, and the remaining `Function.prototype`
+methods stay fail closed. The path never emits `eval`/`apply_eval` and rejects
+direct eval anywhere in generated code. Direct and indirect eval remain wholly
+unimplemented. GeneratorFunction, AsyncFunction, and AsyncGeneratorFunction
+also remain fail closed.
 
 ## Bytecode
 

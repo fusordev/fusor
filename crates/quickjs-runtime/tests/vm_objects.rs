@@ -287,14 +287,14 @@ fn function_object_properties_are_traced_and_reclaimed() {
         assert_number(&result, 31);
         let live = context.runtime_usage();
         assert_eq!(live.heap_functions(), baseline.heap_functions() + 1);
-        assert_eq!(live.heap_objects(), baseline.heap_objects() + 1);
-        assert_eq!(live.object_properties(), baseline.object_properties() + 2);
+        assert_eq!(live.heap_objects(), baseline.heap_objects() + 2);
+        assert_eq!(live.object_properties(), baseline.object_properties() + 6);
         (run, baseline)
     });
 
     let report = runtime.collect_cycles().expect("collection");
     assert_eq!(report.functions(), 1);
-    assert_eq!(report.objects(), 1);
+    assert_eq!(report.objects(), 2);
     assert_eq!(runtime.usage(), baseline);
 }
 
@@ -486,8 +486,8 @@ fn object_function_and_captured_cell_cycle_is_reclaimed() {
             .into_object()
             .expect("object");
         let live = context.runtime_usage();
-        assert_eq!(live.heap_objects(), baseline.heap_objects() + 1);
-        assert_eq!(live.object_properties(), baseline.object_properties() + 1);
+        assert_eq!(live.heap_objects(), baseline.heap_objects() + 2);
+        assert_eq!(live.object_properties(), baseline.object_properties() + 5);
         assert_eq!(live.heap_functions(), baseline.heap_functions() + 1);
         assert_eq!(live.binding_cells(), baseline.binding_cells() + 1);
         drop(object);
@@ -495,7 +495,7 @@ fn object_function_and_captured_cell_cycle_is_reclaimed() {
     });
 
     let report = runtime.collect_cycles().expect("cycle collection");
-    assert_eq!(report.objects(), 1);
+    assert_eq!(report.objects(), 2);
     assert_eq!(report.functions(), 1);
     assert_eq!(report.binding_cells(), 1);
     assert_eq!(runtime.usage(), baseline);
@@ -537,7 +537,7 @@ fn rooted_closure_keeps_an_object_alive_through_its_binding_cell() {
         .collect_cycles()
         .expect("rooted reader keeps its captured object");
     assert_eq!(report.objects(), 0);
-    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 1);
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 2);
 
     with_context(&mut runtime, &realm, |context| {
         let answer = context
@@ -548,7 +548,7 @@ fn rooted_closure_keeps_an_object_alive_through_its_binding_cell() {
     drop(read);
 
     let report = runtime.collect_cycles().expect("final collection");
-    assert_eq!(report.objects(), 1);
+    assert_eq!(report.objects(), 2);
     assert_eq!(report.functions(), 1);
     assert_eq!(report.binding_cells(), 1);
     assert_eq!(runtime.usage(), baseline);
@@ -651,7 +651,7 @@ fn aggregate_object_limit_failure_is_atomic_and_runtime_is_reusable() {
 #[test]
 fn aggregate_property_limit_failure_is_atomic_and_runtime_is_reusable() {
     let authority = compile("function make(){return {value:1};}", "make");
-    let mut runtime = runtime(RuntimeLimits::default().with_max_object_properties(1));
+    let mut runtime = runtime(RuntimeLimits::default().with_max_object_properties(8));
     let realm = runtime.create_realm().expect("realm");
     let (make, first, baseline, before_failure) = with_context(&mut runtime, &realm, |context| {
         let make = context.instantiate(authority).expect("make");
@@ -667,8 +667,8 @@ fn aggregate_property_limit_failure_is_atomic_and_runtime_is_reusable() {
             context.call(&make, &[], ExecutionLimits::default()),
             Err(ExecutionError::LimitExceeded {
                 resource: RuntimeResource::ObjectProperties,
-                limit: 1,
-                observed: 2,
+                limit: 8,
+                observed: 9,
             })
         ));
         assert_eq!(
@@ -696,7 +696,10 @@ fn aggregate_property_limit_failure_is_atomic_and_runtime_is_reusable() {
             .expect("property budget is reusable after collection")
             .into_object()
             .expect("replacement object");
-        assert_eq!(context.runtime_usage().object_properties(), 1);
+        assert_eq!(
+            context.runtime_usage().object_properties(),
+            baseline.object_properties() + 1
+        );
         drop(replacement);
     });
 

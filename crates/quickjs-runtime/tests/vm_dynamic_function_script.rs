@@ -176,7 +176,11 @@ fn wrapper_escape_returns_the_exact_script_completion_and_retires_internal_root(
             baseline.heap_functions() + 1,
             "only the discarded wrapper child awaits collection"
         );
-        assert_eq!(live.heap_objects(), baseline.heap_objects() + 1);
+        assert_eq!(
+            live.heap_objects(),
+            baseline.heap_objects() + 2,
+            "escaped object plus the discarded function's prototype await collection"
+        );
         assert_eq!(live.public_roots(), baseline.public_roots() + 1);
         completion
     };
