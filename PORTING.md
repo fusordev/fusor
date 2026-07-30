@@ -274,11 +274,12 @@ A milestone is complete only when all of its checked items pass in CI.
         constants, arguments/locals/captures, nested and forwarded closures,
         TDZ checks, `close_loc` rotation, branches, returns, truthiness,
         `typeof`, strict equality, nullish tests, ordinary objects, static data
-        property operations, strict `this`, and static-property method calls
-        across compact/full encodings. Frames and all traversals use explicit
-        vectors. BigInt, coercive numeric operations, computed/accessor/exotic
-        object operations, dynamic operators, and constructor/tail-call
-        opcodes remain fail closed.
+        property operations, static accessor getter reads, strict `this`, and
+        static-property method calls across compact/full encodings. Frames and
+        all traversals use explicit vectors. BigInt, coercive numeric
+        operations, computed/exotic object operations, accessor syntax and
+        setter execution, dynamic operators, nonordinary constructor families,
+        and tail-call opcodes remain fail closed.
   - [x] Add direct ordinary JavaScript-to-JavaScript calls end to end:
         lowering evaluates the callee then arguments left-to-right and emits
         `call0`–`call3` or full `call`; final authority records the explicit
@@ -290,10 +291,10 @@ A milestone is complete only when all of its checked items pass in CI.
         and non-callable values throw exact `TypeError: not a function`.
         Escaping child exceptions retain immediate-to-outer caller PCs and
         source spans. Static-property methods now use the same frame vector and
-        preserve their raw receiver; optional/spread/apply, constructors, tail
-        calls, sloppy-`this` normalization, `arguments`, and direct eval remain
-        fail closed.
-  - [ ] Execute ordinary `Function(...)` and `new Function(...)` without eval:
+        preserve their raw receiver; optional/spread/apply, tail calls,
+        general sloppy-`this` normalization, `arguments`, and direct eval
+        remain fail closed.
+  - [x] Execute ordinary `Function(...)` and `new Function(...)` without eval:
         convert already-evaluated arguments in order, retain the exact
         QuickJS-compatible wrapper and fragment map, compile the complete
         generated Script through published Oxc plus `oxc_semantic`, verify the
@@ -335,16 +336,18 @@ A milestone is complete only when all of its checked items pass in CI.
           current object/function tags and identity, retained verified
           bytecode source, and the pinned native-source form. Primitive boxing
           and observable object-valued native names remain fail closed.
-    - [x] Complete source-argument `ToPrimitive` for the current data-property
-          model: check `Symbol.toPrimitive` with the string hint, fall back to
-          callable `toString` then `valueOf`, resume native and verified
-          bytecode methods on the iterative VM, preserve left-to-right side
-          effects and abrupt provenance, and charge suspended continuations
-          against frame/value ceilings. Parsing and compilation begin only
-          after every argument becomes a string.
-    - [ ] Add configurable-accessor replacement and persistent global lexical
-          collision checks when those object/environment forms exist. Extend
-          `ToPrimitive` lookup through those accessors and add
+    - [x] Complete source-argument `ToPrimitive`: check
+          `Symbol.toPrimitive` with the string hint, fall back to callable
+          `toString` then `valueOf`, stop property lookup at data or accessor
+          descriptors, and resume native or verified-bytecode getters and
+          methods on the iterative VM. Preserve the original receiver,
+          left-to-right side effects, abrupt provenance, and suspended
+          frame/value accounting. Parsing and compilation begin only after
+          every argument becomes a string.
+    - [x] Replace compatible configurable global accessors transactionally
+          during dynamic function declaration installation, including complete
+          descriptor rollback and getter/setter GC edges.
+    - [ ] Add persistent global lexical collision checks and
           `Function.prototype.call`/`apply`/`bind`/`Symbol.hasInstance`.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
       stack traces, iterators, and generators.
@@ -383,12 +386,16 @@ A milestone is complete only when all of its checked items pass in CI.
       finalization remain pending below.
 - [x] Add the first ordinary-object execution slice: typed object IDs and
       `Arc` public roots, one realm-owned `Object.prototype`, fallibly grown
-      data-only shapes/slots, object literals, duplicate-key replacement,
-      static reads and simple writes across objects/functions, strict
-      receiver-aware method calls, exact nullish/primitive errors, aggregate
-      object/property limits, and iterative tracing across prototype,
-      property, function, and cell edges. Computed keys, accessors, prototype
-      mutation, exotics, and transition interning remain pending.
+      typed data/accessor shapes and slots, object literals, duplicate-key
+      replacement, static reads and simple data writes across
+      objects/functions, strict receiver-aware method calls, exact
+      nullish/primitive errors, aggregate object/property limits, and
+      iterative tracing across prototype, data, getter/setter, function, and
+      cell edges. Own/inherited getter reads stop on getterless accessors,
+      preserve the original receiver and `GetField2` base, and use iterative
+      native/bytecode dispatch. Computed keys, accessor syntax, setter
+      execution, prototype mutation, exotics, and transition interning remain
+      pending.
 - [ ] ECMAScript primitive conversions, parsing/printing, and remaining numeric
       edge cases.
 - [ ] Complete property descriptors, interned shapes, mutable prototypes, and

@@ -17,17 +17,19 @@ the resulting function. The admitted profile executes primitive constants,
 arguments, locals, captured cells, nested closures, TDZ checks, cell rotation,
 branches, returns, direct ordinary JavaScript-to-JavaScript calls, truthiness,
 `typeof`, strict equality, nullish tests, ordinary object literals, static data
-property reads/writes, strict receiver-aware static method calls, and arbitrary
-explicit `throw` values. Functions and ordinary objects use typed `Arc`-backed
-public roots, and the iterative collector traces their properties, prototypes,
-closures, and binding cells. Nested calls, recursion, and abrupt unwinding use
-an explicit frame vector with cumulative frame/value ceilings and shared fuel.
-Installation scans every instruction in every template before mutation.
-Computed/accessor/exotic object operations, optional/spread/apply calls,
-BigInt, general coercive operations, dynamic operators, serialized bytecode,
-every form of eval, and catch/finally typed-stack semantics remain deferred
-and fail closed. Ordinary `new` calls now execute constructor-capable bytecode
-functions and materialize their `name`, `length`, and
+property reads/writes, own and inherited static accessor getter reads, strict
+receiver-aware static method calls, and arbitrary explicit `throw` values.
+Functions and ordinary objects use typed `Arc`-backed public roots, and the
+iterative collector traces their data properties, accessor functions,
+prototypes, closures, and binding cells. Nested calls, recursion, getter
+dispatch, and abrupt unwinding use an explicit frame vector with cumulative
+frame/value ceilings and shared fuel. Installation scans every instruction in
+every template before mutation. Computed/exotic object operations, accessor
+syntax and setter execution, optional/spread/apply calls, BigInt, general
+coercive operations, dynamic operators, serialized bytecode, every form of
+eval, and catch/finally typed-stack semantics remain deferred and fail closed.
+Ordinary `new` calls now execute constructor-capable bytecode functions and
+materialize their `name`, `length`, and
 `prototype.constructor` graph. The `quickjs` facade supplies one immutable
 `Arc` Oxc compiler service to the global `Function` call/constructor path: it
 retains the exact wrapper/map, compiles the complete generated Script,
@@ -48,9 +50,10 @@ Realm-owned `Object.prototype.toString`, `Object.prototype.valueOf`, and
 function values with exact intrinsic descriptors and retained function source.
 Function source arguments now run resumable `ToPrimitive` with the string hint:
 `Symbol.toPrimitive`, `toString`, and `valueOf` are observed in exact order,
-native or verified-bytecode methods resume on the same iterative frame vector,
-and throws stop conversion before parsing. Primitive boxing, accessor-backed
-lookup, persistent global lexical collisions, and
+data or accessor-backed lookup preserves the original receiver, native or
+verified-bytecode getters and methods resume on the same iterative frame
+vector, and throws stop conversion before parsing. Primitive boxing,
+persistent global lexical collisions, and
 `Function.prototype.call`/`apply`/`bind`/`Symbol.hasInstance` remain
 fail-closed. Per-session compilation-count and generated-source limits bound
 nested construction. No dynamic-Function path uses eval or captures a caller

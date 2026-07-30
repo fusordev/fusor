@@ -37,11 +37,11 @@ use quickjs_bytecode::{
 use crate::{
     Atom, AtomLimits, AtomTable, AtomUsage, DynamicFunctionScriptError, ExecutionLimits, Function,
     HandleError, HandleKind, InstallError, JsNumber, JsString, JsValue,
-    OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey, PropertyLayout, RuntimeError,
-    RuntimeResource,
+    OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey, PropertyLayout,
+    PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
-    object::{HeapObject, ObjectRecord},
+    object::{HeapObject, ObjectRecord, OwnProperty},
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
 
@@ -1621,6 +1621,51 @@ impl Runtime {
         Ok(())
     }
 
+    #[allow(
+        dead_code,
+        reason = "the crate-private accessor foundation is consumed by the pending VM path"
+    )]
+    pub(crate) fn append_accessor_property(
+        &mut self,
+        reference: HeapReference,
+        key: PropertyKey,
+        layout: PropertyLayout,
+        getter: Option<FunctionId>,
+        setter: Option<FunctionId>,
+    ) -> Result<(), crate::ExecutionError> {
+        if layout.kind() != PropertyLayoutKind::Accessor {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "accessor insertion received a data-property layout",
+            }
+            .into());
+        }
+        if self.object_record(reference)?.own_property(&key).is_some() {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "accessor insertion targeted an existing own property",
+            }
+            .into());
+        }
+        for function in [getter, setter].into_iter().flatten() {
+            if !self.functions.contains(function) {
+                return Err(stale_heap_reference(HeapReference::Function(function)).into());
+            }
+        }
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties.saturating_add(1),
+        )?;
+        self.object_record_mut(reference)?
+            .append_accessor(key, layout, getter, setter)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        self.object_properties += 1;
+        self.collection_pending = true;
+        Ok(())
+    }
+
     pub(crate) fn prepare_execution_safe_point(&mut self) -> Result<(), crate::ExecutionError> {
         self.collect_if_pending().map_err(|error| match error {
             RuntimeError::LimitExceeded {
@@ -2049,9 +2094,9 @@ impl Runtime {
             match request {
                 RealmGlobalRequest::Lookup => {}
                 RealmGlobalRequest::Var | RealmGlobalRequest::Function => {
-                    if let Some((layout, _)) = global_record.record.own_data_property(&key) {
+                    if let Some(property) = global_record.record.own_property(&key) {
                         if matches!(request, RealmGlobalRequest::Function)
-                            && global_function_replacement_layout(layout).is_none()
+                            && global_function_replacement_layout(property.layout()).is_none()
                         {
                             return Err(rejected_global_declaration(authority, *closure, name)?);
                         }
@@ -2223,25 +2268,32 @@ impl Runtime {
             };
             if request.declares_object_property() {
                 let key = PropertyKey::from_validated_atom(name.clone());
-                let existing_layout = self
+                let existing_property = self
                     .objects
                     .get(global_object)
-                    .and_then(|object| object.record.own_data_property(&key))
-                    .map(|(layout, _)| layout);
-                if let Some(existing_layout) = existing_layout {
+                    .and_then(|object| object.record.own_property(&key));
+                if let Some(existing_property) = existing_property {
                     if matches!(request, RealmGlobalRequest::Function) {
+                        let existing_layout = existing_property.layout();
                         let replacement = global_function_replacement_layout(existing_layout)
                             .ok_or(InstallError::AuthorityInvariant {
                                 message: "preflighted global function property became incompatible",
                             })?;
-                        if replacement != existing_layout {
-                            updated_global_properties.push((key.clone(), existing_layout));
+                        if replacement != existing_layout
+                            || matches!(&existing_property, OwnProperty::Accessor { .. })
+                        {
+                            let replacement_value = match &existing_property {
+                                OwnProperty::Data { value, .. } => value.duplicate(),
+                                OwnProperty::Accessor { .. } => StoredValue::Undefined,
+                            };
                             let replaced = self.objects.get_mut(global_object).and_then(|object| {
-                                object
-                                    .record
-                                    .replace_existing_data_layout(&key, replacement)
+                                object.record.replace_existing_with_data(
+                                    &key,
+                                    replacement,
+                                    replacement_value,
+                                )
                             });
-                            if replaced != Some(existing_layout) {
+                            let Some(previous) = replaced else {
                                 let partial = RootEnvironment {
                                     bindings,
                                     inserted_globals,
@@ -2251,9 +2303,13 @@ impl Runtime {
                                 };
                                 self.rollback_root_environment(realm, &partial);
                                 return Err(InstallError::AuthorityInvariant {
-                                    message: "preflighted global function property layout disappeared",
+                                    message: "preflighted global function property disappeared",
                                 });
+                            };
+                            if matches!(&previous, OwnProperty::Accessor { .. }) {
+                                self.collection_pending = true;
                             }
+                            updated_global_properties.push((key.clone(), previous));
                         }
                     }
                 } else {
@@ -2318,9 +2374,11 @@ impl Runtime {
 
     fn rollback_root_environment(&mut self, realm: RealmId, environment: &RootEnvironment) {
         if let Some(global_object) = self.realms.get(realm).map(|state| state.global_object) {
-            for (key, layout) in environment.updated_global_properties.iter().rev() {
+            for (key, property) in environment.updated_global_properties.iter().rev() {
                 if let Some(object) = self.objects.get_mut(global_object) {
-                    let restored = object.record.replace_existing_data_layout(key, *layout);
+                    let restored = object
+                        .record
+                        .restore_existing_property(key, property.duplicate());
                     debug_assert!(restored.is_some());
                 }
             }
@@ -2396,6 +2454,14 @@ fn mark_object_record(
     }
     for value in record.values() {
         mark_stored_value(value, marked_functions, marked_objects, work);
+    }
+    for function in record.accessor_functions() {
+        mark_heap_reference(
+            HeapReference::Function(function),
+            marked_functions,
+            marked_objects,
+            work,
+        );
     }
 }
 
@@ -2481,7 +2547,7 @@ struct RootEnvironment {
     inserted_globals: Vec<(Atom, RealmGlobalBindingId)>,
     updated_globals: Vec<(RealmGlobalBindingId, RealmGlobalBindingState)>,
     inserted_global_properties: Vec<PropertyKey>,
-    updated_global_properties: Vec<(PropertyKey, PropertyLayout)>,
+    updated_global_properties: Vec<(PropertyKey, OwnProperty)>,
 }
 
 impl Context<'_> {
@@ -3101,13 +3167,14 @@ pub(crate) fn usize_to_u64(value: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        FunctionImplementation, NativeFunctionKind, RealmIntrinsics, Runtime, RuntimeLimits,
-        RuntimeUsage, dynamic_function_declaration_property_layout,
-        global_function_replacement_layout,
+        FunctionImplementation, HeapFunction, NativeFunction, NativeFunctionKind, RealmIntrinsics,
+        RootEnvironment, Runtime, RuntimeLimits, RuntimeUsage,
+        dynamic_function_declaration_property_layout, global_function_replacement_layout,
     };
     use crate::{
         JsNumber, JsString, PredefinedAtom, PropertyKey, PropertyLayout, RuntimeError,
         RuntimeResource,
+        object::{ObjectRecord, OwnProperty},
         value::{HeapReference, StoredValue},
     };
 
@@ -3368,10 +3435,197 @@ mod tests {
             global_function_replacement_layout(PropertyLayout::data(true, false, false)),
             None
         );
+        assert_eq!(
+            global_function_replacement_layout(PropertyLayout::accessor(false, true)),
+            Some(replacement)
+        );
+        assert_eq!(
+            global_function_replacement_layout(PropertyLayout::accessor(true, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn accessor_getter_and_setter_are_traced_as_function_edges() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let global_object = runtime.realms.get(realm_id).expect("realm").global_object;
+        let getter = runtime
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: realm_id,
+                    kind: NativeFunctionKind::FunctionPrototype,
+                }),
+                object: ObjectRecord::empty(None),
+                public_roots: 0,
+            })
+            .expect("getter");
+        let setter = runtime
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: realm_id,
+                    kind: NativeFunctionKind::FunctionPrototype,
+                }),
+                object: ObjectRecord::empty(None),
+                public_roots: 0,
+            })
+            .expect("setter");
+        let orphan = runtime
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: realm_id,
+                    kind: NativeFunctionKind::FunctionPrototype,
+                }),
+                object: ObjectRecord::empty(None),
+                public_roots: 0,
+            })
+            .expect("orphan");
+        let key = PropertyKey::from_validated_atom(runtime.atoms.predefined(PredefinedAtom::Name));
+
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(global_object),
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(getter),
+                Some(setter),
+            )
+            .expect("accessor");
+        let report = runtime.collect_cycles().expect("collection");
+
+        assert_eq!(report.functions(), 1);
+        assert!(runtime.functions.get(getter).is_some());
+        assert!(runtime.functions.get(setter).is_some());
+        assert!(runtime.functions.get(orphan).is_none());
+        assert_eq!(runtime.usage().object_properties(), 17);
+    }
+
+    #[test]
+    fn duplicate_accessor_insertion_is_rejected_without_mutation_or_recharging() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let state = runtime.realms.get(realm_id).expect("realm");
+        let global_object = state.global_object;
+        let RealmIntrinsics::Ready {
+            function_constructor,
+            ..
+        } = state.intrinsics
+        else {
+            panic!("realm intrinsics remained uninitialized");
+        };
+        let key = PropertyKey::from_validated_atom(runtime.atoms.predefined(PredefinedAtom::Name));
+        let layout = PropertyLayout::accessor(false, true);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(global_object),
+                key.clone(),
+                layout,
+                Some(function_constructor),
+                None,
+            )
+            .expect("initial accessor");
+        let usage = runtime.usage();
+
+        let error = runtime
+            .append_accessor_property(
+                HeapReference::Object(global_object),
+                key.clone(),
+                PropertyLayout::accessor(true, false),
+                None,
+                Some(function_constructor),
+            )
+            .expect_err("duplicate accessor");
+
+        assert!(matches!(
+            error,
+            crate::ExecutionError::EngineFault(crate::EngineFault::RuntimeInvariant {
+                message: "accessor insertion targeted an existing own property",
+            })
+        ));
+        assert_eq!(runtime.usage(), usage);
+        assert!(matches!(
+            runtime
+                .objects
+                .get(global_object)
+                .expect("global")
+                .record
+                .own_property(&key),
+            Some(OwnProperty::Accessor {
+                layout: actual_layout,
+                getter: Some(actual_getter),
+                setter: None,
+            }) if actual_layout == layout && actual_getter == function_constructor
+        ));
+    }
+
+    #[test]
+    fn accessor_to_data_global_replacement_rolls_back_the_complete_slot() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let global_object = runtime.realms.get(realm_id).expect("realm").global_object;
+        let RealmIntrinsics::Ready {
+            function_constructor,
+            ..
+        } = runtime.realms.get(realm_id).expect("realm").intrinsics
+        else {
+            panic!("realm intrinsics remained uninitialized");
+        };
+        let key = PropertyKey::from_validated_atom(runtime.atoms.predefined(PredefinedAtom::Name));
+        let accessor_layout = PropertyLayout::accessor(false, true);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(global_object),
+                key.clone(),
+                accessor_layout,
+                Some(function_constructor),
+                None,
+            )
+            .expect("accessor");
+        let previous = runtime
+            .objects
+            .get_mut(global_object)
+            .expect("global")
+            .record
+            .replace_existing_with_data(
+                &key,
+                dynamic_function_declaration_property_layout(),
+                StoredValue::Undefined,
+            )
+            .expect("accessor replacement");
+        let environment = RootEnvironment {
+            bindings: Vec::new(),
+            inserted_globals: Vec::new(),
+            updated_globals: Vec::new(),
+            inserted_global_properties: Vec::new(),
+            updated_global_properties: vec![(key.clone(), previous)],
+        };
+
+        runtime.rollback_root_environment(realm_id, &environment);
+
+        assert_eq!(runtime.usage().object_properties(), 17);
+        assert!(matches!(
+            runtime
+                .objects
+                .get(global_object)
+                .expect("global")
+                .record
+                .own_property(&key),
+            Some(OwnProperty::Accessor {
+                layout,
+                getter: Some(actual_getter),
+                setter: None,
+            }) if layout == accessor_layout && actual_getter == function_constructor
+        ));
     }
 
     fn assert_data_property(
-        record: &crate::object::ObjectRecord,
+        record: &ObjectRecord,
         runtime: &Runtime,
         atom: PredefinedAtom,
         expected_layout: PropertyLayout,
@@ -3384,7 +3638,7 @@ mod tests {
     }
 
     fn function_property(
-        record: &crate::object::ObjectRecord,
+        record: &ObjectRecord,
         runtime: &Runtime,
         atom: PredefinedAtom,
         expected_layout: PropertyLayout,

@@ -27,6 +27,7 @@ use std::{collections::TryReserveError, sync::Arc};
 
 use crate::{
     PropertyKey, PropertyLayout, PropertyLayoutKind,
+    ids::FunctionId,
     value::{HeapReference, StoredValue},
 };
 
@@ -36,11 +37,68 @@ struct ShapeProperty {
     layout: PropertyLayout,
 }
 
+enum PropertySlot {
+    Data(StoredValue),
+    Accessor {
+        getter: Option<FunctionId>,
+        setter: Option<FunctionId>,
+    },
+}
+
+pub(crate) enum OwnProperty {
+    Data {
+        layout: PropertyLayout,
+        value: StoredValue,
+    },
+    Accessor {
+        layout: PropertyLayout,
+        getter: Option<FunctionId>,
+        setter: Option<FunctionId>,
+    },
+}
+
+impl OwnProperty {
+    pub(crate) const fn layout(&self) -> PropertyLayout {
+        match self {
+            Self::Data { layout, .. } | Self::Accessor { layout, .. } => *layout,
+        }
+    }
+
+    pub(crate) fn duplicate(&self) -> Self {
+        match self {
+            Self::Data { layout, value } => Self::Data {
+                layout: *layout,
+                value: value.duplicate(),
+            },
+            Self::Accessor {
+                layout,
+                getter,
+                setter,
+            } => Self::Accessor {
+                layout: *layout,
+                getter: *getter,
+                setter: *setter,
+            },
+        }
+    }
+
+    fn into_parts(self) -> (PropertyLayout, PropertySlot) {
+        match self {
+            Self::Data { layout, value } => (layout, PropertySlot::Data(value)),
+            Self::Accessor {
+                layout,
+                getter,
+                setter,
+            } => (layout, PropertySlot::Accessor { getter, setter }),
+        }
+    }
+}
+
 pub(crate) struct ObjectRecord {
     prototype: Option<HeapReference>,
     extensible: bool,
     shape: Arc<Vec<ShapeProperty>>,
-    slots: Vec<StoredValue>,
+    slots: Vec<PropertySlot>,
 }
 
 impl ObjectRecord {
@@ -77,31 +135,76 @@ impl ObjectRecord {
     }
 
     pub(crate) fn values(&self) -> impl Iterator<Item = &StoredValue> {
-        self.slots.iter()
+        self.slots.iter().filter_map(|slot| match slot {
+            PropertySlot::Data(value) => Some(value),
+            PropertySlot::Accessor { .. } => None,
+        })
     }
 
-    pub(crate) fn own_data_property(
-        &self,
-        key: &PropertyKey,
-    ) -> Option<(PropertyLayout, StoredValue)> {
+    pub(crate) fn accessor_functions(&self) -> impl Iterator<Item = FunctionId> + '_ {
+        self.slots.iter().flat_map(|slot| {
+            let (getter, setter) = match slot {
+                PropertySlot::Data(_) => (None, None),
+                PropertySlot::Accessor { getter, setter } => (*getter, *setter),
+            };
+            [getter, setter].into_iter().flatten()
+        })
+    }
+
+    pub(crate) fn own_property(&self, key: &PropertyKey) -> Option<OwnProperty> {
         let index = self
             .shape
             .iter()
             .position(|property| property.key == *key)?;
         let property = &self.shape[index];
-        debug_assert_eq!(property.layout.kind(), PropertyLayoutKind::Data);
-        Some((property.layout, self.slots[index].duplicate()))
+        match &self.slots[index] {
+            PropertySlot::Data(value) => {
+                debug_assert_eq!(property.layout.kind(), PropertyLayoutKind::Data);
+                Some(OwnProperty::Data {
+                    layout: property.layout,
+                    value: value.duplicate(),
+                })
+            }
+            PropertySlot::Accessor { getter, setter } => {
+                debug_assert_eq!(property.layout.kind(), PropertyLayoutKind::Accessor);
+                Some(OwnProperty::Accessor {
+                    layout: property.layout,
+                    getter: *getter,
+                    setter: *setter,
+                })
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn own_data_property(
+        &self,
+        key: &PropertyKey,
+    ) -> Option<(PropertyLayout, StoredValue)> {
+        match self.own_property(key)? {
+            OwnProperty::Data { layout, value } => Some((layout, value)),
+            OwnProperty::Accessor { .. } => None,
+        }
     }
 
     pub(crate) fn replace_existing_data(&mut self, key: &PropertyKey, value: StoredValue) -> bool {
         let Some(index) = self.shape.iter().position(|property| property.key == *key) else {
             return false;
         };
-        debug_assert_eq!(self.shape[index].layout.kind(), PropertyLayoutKind::Data);
-        self.slots[index] = value;
-        true
+        match &mut self.slots[index] {
+            PropertySlot::Data(existing) => {
+                debug_assert_eq!(self.shape[index].layout.kind(), PropertyLayoutKind::Data);
+                *existing = value;
+                true
+            }
+            PropertySlot::Accessor { .. } => false,
+        }
     }
 
+    #[allow(
+        dead_code,
+        reason = "the data-specific layout mutation remains available to later descriptor paths"
+    )]
     pub(crate) fn replace_existing_data_layout(
         &mut self,
         key: &PropertyKey,
@@ -112,10 +215,66 @@ impl ObjectRecord {
             .shape
             .iter()
             .position(|property| property.key == *key)?;
+        if !matches!(self.slots[index], PropertySlot::Data(_)) {
+            return None;
+        }
         let shape = Arc::get_mut(&mut self.shape)
             .expect("object shape Arc is private and uniquely owned before shape interning");
         debug_assert_eq!(shape[index].layout.kind(), PropertyLayoutKind::Data);
         Some(std::mem::replace(&mut shape[index].layout, layout))
+    }
+
+    pub(crate) fn replace_existing_with_data(
+        &mut self,
+        key: &PropertyKey,
+        layout: PropertyLayout,
+        value: StoredValue,
+    ) -> Option<OwnProperty> {
+        debug_assert_eq!(layout.kind(), PropertyLayoutKind::Data);
+        self.replace_existing_property(key, OwnProperty::Data { layout, value })
+    }
+
+    pub(crate) fn restore_existing_property(
+        &mut self,
+        key: &PropertyKey,
+        property: OwnProperty,
+    ) -> Option<OwnProperty> {
+        self.replace_existing_property(key, property)
+    }
+
+    fn replace_existing_property(
+        &mut self,
+        key: &PropertyKey,
+        replacement: OwnProperty,
+    ) -> Option<OwnProperty> {
+        let index = self
+            .shape
+            .iter()
+            .position(|property| property.key == *key)?;
+        let previous = match &self.slots[index] {
+            PropertySlot::Data(value) => OwnProperty::Data {
+                layout: self.shape[index].layout,
+                value: value.duplicate(),
+            },
+            PropertySlot::Accessor { getter, setter } => OwnProperty::Accessor {
+                layout: self.shape[index].layout,
+                getter: *getter,
+                setter: *setter,
+            },
+        };
+        let (layout, slot) = replacement.into_parts();
+        debug_assert_eq!(
+            layout.kind(),
+            match &slot {
+                PropertySlot::Data(_) => PropertyLayoutKind::Data,
+                PropertySlot::Accessor { .. } => PropertyLayoutKind::Accessor,
+            }
+        );
+        let shape = Arc::get_mut(&mut self.shape)
+            .expect("object shape Arc is private and uniquely owned before shape interning");
+        shape[index].layout = layout;
+        self.slots[index] = slot;
+        Some(previous)
     }
 
     pub(crate) fn append_data(
@@ -133,7 +292,31 @@ impl ObjectRecord {
         shape.try_reserve(1)?;
 
         shape.push(ShapeProperty { key, layout });
-        self.slots.push(value);
+        self.slots.push(PropertySlot::Data(value));
+        Ok(())
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the crate-private accessor foundation is consumed through the pending VM path"
+    )]
+    pub(crate) fn append_accessor(
+        &mut self,
+        key: PropertyKey,
+        layout: PropertyLayout,
+        getter: Option<FunctionId>,
+        setter: Option<FunctionId>,
+    ) -> Result<(), TryReserveError> {
+        debug_assert_eq!(layout.kind(), PropertyLayoutKind::Accessor);
+        debug_assert!(self.shape.iter().all(|property| property.key != key));
+
+        self.slots.try_reserve(1)?;
+        let shape = Arc::get_mut(&mut self.shape)
+            .expect("object shape Arc is private and uniquely owned before shape interning");
+        shape.try_reserve(1)?;
+
+        shape.push(ShapeProperty { key, layout });
+        self.slots.push(PropertySlot::Accessor { getter, setter });
         Ok(())
     }
 
@@ -152,11 +335,19 @@ impl ObjectRecord {
         {
             return None;
         }
+        if !matches!(self.slots.last(), Some(PropertySlot::Data(_))) {
+            return None;
+        }
         let shape = Arc::get_mut(&mut self.shape)
             .expect("object shape Arc is private and uniquely owned before shape interning");
         let property = shape.pop()?;
         debug_assert_eq!(property.layout.kind(), PropertyLayoutKind::Data);
-        self.slots.pop()
+        match self.slots.pop()? {
+            PropertySlot::Data(value) => Some(value),
+            PropertySlot::Accessor { .. } => {
+                unreachable!("the last slot was checked as a data slot")
+            }
+        }
     }
 }
 
@@ -167,8 +358,13 @@ pub(crate) struct HeapObject {
 
 #[cfg(test)]
 mod tests {
-    use super::ObjectRecord;
-    use crate::{ArrayIndex, PropertyKey, PropertyLayout, value::StoredValue};
+    use super::{ObjectRecord, OwnProperty};
+    use crate::{
+        ArrayIndex, PropertyKey, PropertyLayout,
+        arena::{Arena, RuntimeIdentity},
+        ids::FunctionMarker,
+        value::StoredValue,
+    };
 
     #[test]
     fn replacing_a_data_layout_preserves_value_and_can_be_rolled_back() {
@@ -196,5 +392,87 @@ mod tests {
             record.own_data_property(&key).expect("restored property").0,
             original
         );
+    }
+
+    #[test]
+    fn accessor_slots_have_typed_lookup_and_trace_both_function_edges() {
+        let mut functions = Arena::<FunctionMarker, ()>::new(RuntimeIdentity::from_address(7));
+        let getter = functions.try_insert(()).expect("getter");
+        let setter = functions.try_insert(()).expect("setter");
+        let key = PropertyKey::from_index(ArrayIndex::new(8).expect("array index"));
+        let layout = PropertyLayout::accessor(true, false);
+        let mut record = ObjectRecord::empty(None);
+
+        record
+            .append_accessor(key.clone(), layout, Some(getter), Some(setter))
+            .expect("accessor");
+
+        assert_eq!(record.property_count(), 1);
+        assert!(record.own_data_property(&key).is_none());
+        assert!(matches!(
+            record.own_property(&key),
+            Some(OwnProperty::Accessor {
+                layout: actual,
+                getter: Some(read_hook),
+                setter: Some(write_hook),
+            }) if actual == layout && read_hook == getter && write_hook == setter
+        ));
+        assert_eq!(record.values().count(), 0);
+        assert_eq!(
+            record.accessor_functions().collect::<Vec<_>>(),
+            vec![getter, setter]
+        );
+    }
+
+    #[test]
+    fn accessor_slot_can_be_replaced_with_data_and_restored_without_count_change() {
+        let mut functions = Arena::<FunctionMarker, ()>::new(RuntimeIdentity::from_address(9));
+        let getter = functions.try_insert(()).expect("getter");
+        let key = PropertyKey::from_index(ArrayIndex::new(9).expect("array index"));
+        let accessor_layout = PropertyLayout::accessor(false, true);
+        let data_layout = PropertyLayout::data(true, true, true);
+        let mut record = ObjectRecord::empty(None);
+        record
+            .append_accessor(key.clone(), accessor_layout, Some(getter), None)
+            .expect("accessor");
+
+        let previous = record
+            .replace_existing_with_data(&key, data_layout, StoredValue::Undefined)
+            .expect("existing accessor");
+        assert!(matches!(
+            previous,
+            OwnProperty::Accessor {
+                layout,
+                getter: Some(actual_getter),
+                setter: None,
+            } if layout == accessor_layout && actual_getter == getter
+        ));
+        assert!(matches!(
+            record.own_property(&key),
+            Some(OwnProperty::Data {
+                layout,
+                value: StoredValue::Undefined,
+            }) if layout == data_layout
+        ));
+
+        let replaced = record
+            .restore_existing_property(&key, previous)
+            .expect("data replacement");
+        assert!(matches!(
+            replaced,
+            OwnProperty::Data {
+                layout,
+                value: StoredValue::Undefined,
+            } if layout == data_layout
+        ));
+        assert_eq!(record.property_count(), 1);
+        assert!(matches!(
+            record.own_property(&key),
+            Some(OwnProperty::Accessor {
+                layout,
+                getter: Some(actual_getter),
+                setter: None,
+            }) if layout == accessor_layout && actual_getter == getter
+        ));
     }
 }

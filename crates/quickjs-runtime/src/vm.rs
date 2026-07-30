@@ -39,6 +39,7 @@ use crate::{
     OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey,
     PropertyLayout, Runtime, RuntimeResource,
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId},
+    object::OwnProperty,
     runtime::{
         BindingCell, BytecodeFunction, EnvironmentBinding, FrameBindingAddress,
         FunctionImplementation, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
@@ -192,9 +193,32 @@ enum FunctionSourceStage {
     Start,
     ToString,
     ValueOf,
+    AwaitExoticProperty,
+    AwaitToStringProperty,
+    AwaitValueOfProperty,
     AwaitExotic,
     AwaitToString,
     AwaitValueOf,
+}
+
+#[derive(Clone, Copy)]
+enum FunctionSourceProperty {
+    Exotic,
+    ToString,
+    ValueOf,
+}
+
+enum FunctionSourcePropertyAction {
+    Continue,
+    Call {
+        function: FunctionId,
+        arguments: Vec<StoredValue>,
+    },
+}
+
+enum FunctionSourcePropertyLookup {
+    Value(StoredValue),
+    Getter(FunctionId),
 }
 
 struct NativeCall {
@@ -283,13 +307,29 @@ enum CallKind {
     Constructor,
 }
 
+enum CallInputSource {
+    Frame {
+        argument_count: usize,
+        kind: CallKind,
+    },
+    Prepared(CallInputs),
+}
+
+impl CallInputSource {
+    const fn is_construction(&self) -> bool {
+        match self {
+            Self::Frame { kind, .. } => matches!(kind, CallKind::Constructor),
+            Self::Prepared(inputs) => inputs.new_target.is_some(),
+        }
+    }
+}
+
 enum Step {
     Continue,
     Call {
         function: FunctionId,
-        argument_count: usize,
+        inputs: CallInputSource,
         return_to: InstructionIndex,
-        kind: CallKind,
         source_pc: BytecodePc,
     },
     Abrupt(PendingException),
@@ -606,11 +646,11 @@ fn execute_frame_loop(
             Step::Continue => {}
             Step::Call {
                 function,
-                argument_count,
+                inputs,
                 return_to,
-                kind,
                 source_pc,
             } => {
+                let construction = inputs.is_construction();
                 let native = runtime
                     .functions
                     .get(function)
@@ -643,8 +683,7 @@ fn execute_frame_loop(
                             instruction: 0,
                         })?,
                         function,
-                        argument_count,
-                        kind,
+                        inputs,
                     )?;
                     let dispatch = dispatch_native_call(
                         runtime,
@@ -697,9 +736,7 @@ fn execute_frame_loop(
                     }
                     continue;
                 }
-                if matches!(kind, CallKind::Constructor)
-                    && !bytecode_function_is_constructor(runtime, function)?
-                {
+                if construction && !bytecode_function_is_constructor(runtime, function)? {
                     let pending = PendingException {
                         payload: PendingExceptionPayload::EngineError {
                             kind: ExceptionKind::TypeError,
@@ -729,8 +766,7 @@ fn execute_frame_loop(
                         instruction: 0,
                     })?,
                     function,
-                    argument_count,
-                    kind,
+                    inputs,
                 )?;
                 let construction = inputs.new_target;
                 let mut child = create_frame(
@@ -1337,13 +1373,43 @@ fn advance_function_source_conversion(
     dynamic_budget: &mut DynamicCompilationBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if let Some(value) = completion {
-        let object_result = matches!(value, StoredValue::Function(_) | StoredValue::Object(_));
         match state.stage {
-            FunctionSourceStage::AwaitToString if object_result => {
+            FunctionSourceStage::AwaitExoticProperty
+            | FunctionSourceStage::AwaitToStringProperty
+            | FunctionSourceStage::AwaitValueOfProperty => {
+                let property = match state.stage {
+                    FunctionSourceStage::AwaitExoticProperty => FunctionSourceProperty::Exotic,
+                    FunctionSourceStage::AwaitToStringProperty => FunctionSourceProperty::ToString,
+                    FunctionSourceStage::AwaitValueOfProperty => FunctionSourceProperty::ValueOf,
+                    FunctionSourceStage::Start
+                    | FunctionSourceStage::ToString
+                    | FunctionSourceStage::ValueOf
+                    | FunctionSourceStage::AwaitExotic
+                    | FunctionSourceStage::AwaitToString
+                    | FunctionSourceStage::AwaitValueOf => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "dynamic Function property stage changed while resuming",
+                        }
+                        .into());
+                    }
+                };
+                match use_function_source_property(&mut state, property, &value)? {
+                    FunctionSourcePropertyAction::Continue => {}
+                    FunctionSourcePropertyAction::Call {
+                        function,
+                        arguments,
+                    } => {
+                        return function_source_method_call(state, function, arguments, return_to);
+                    }
+                }
+            }
+            FunctionSourceStage::AwaitToString
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) =>
+            {
                 state.stage = FunctionSourceStage::ValueOf;
             }
             FunctionSourceStage::AwaitExotic | FunctionSourceStage::AwaitValueOf
-                if object_result =>
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) =>
             {
                 return Err(function_source_type_error(&state, "toPrimitive")?);
             }
@@ -1416,68 +1482,26 @@ fn advance_function_source_conversion(
             .ok_or(EngineFault::RuntimeInvariant {
                 message: "object-valued dynamic Function source has no heap reference",
             })?;
-        match state.stage {
-            FunctionSourceStage::Start => {
-                let key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToPrimitive);
-                match read_heap_property(runtime, reference, &key)? {
-                    StoredValue::Undefined | StoredValue::Null => {
-                        state.stage = FunctionSourceStage::ToString;
-                    }
-                    StoredValue::Function(function) => {
-                        state.stage = FunctionSourceStage::AwaitExotic;
-                        let mut arguments = Vec::new();
-                        arguments.try_reserve_exact(1).map_err(|_| {
-                            ExecutionError::AllocationFailed {
-                                resource: RuntimeResource::FrameValues,
-                                additional: 1,
-                            }
-                        })?;
-                        arguments.push(StoredValue::String(JsString::from_utf8("string")?));
-                        return function_source_method_call(state, function, arguments, return_to);
-                    }
-                    StoredValue::Boolean(_)
-                    | StoredValue::Number(_)
-                    | StoredValue::String(_)
-                    | StoredValue::Object(_) => {
-                        return Err(function_source_type_error(&state, "not a function")?);
-                    }
-                }
-            }
-            FunctionSourceStage::ToString => {
-                let key = runtime.predefined_property_key(PredefinedAtom::ToString);
-                match read_heap_property(runtime, reference, &key)? {
-                    StoredValue::Function(function) => {
-                        state.stage = FunctionSourceStage::AwaitToString;
-                        return function_source_method_call(state, function, Vec::new(), return_to);
-                    }
-                    StoredValue::Undefined
-                    | StoredValue::Null
-                    | StoredValue::Boolean(_)
-                    | StoredValue::Number(_)
-                    | StoredValue::String(_)
-                    | StoredValue::Object(_) => {
-                        state.stage = FunctionSourceStage::ValueOf;
-                    }
-                }
-            }
-            FunctionSourceStage::ValueOf => {
-                let key = runtime.predefined_property_key(PredefinedAtom::ValueOf);
-                match read_heap_property(runtime, reference, &key)? {
-                    StoredValue::Function(function) => {
-                        state.stage = FunctionSourceStage::AwaitValueOf;
-                        return function_source_method_call(state, function, Vec::new(), return_to);
-                    }
-                    StoredValue::Undefined
-                    | StoredValue::Null
-                    | StoredValue::Boolean(_)
-                    | StoredValue::Number(_)
-                    | StoredValue::String(_)
-                    | StoredValue::Object(_) => {
-                        return Err(function_source_type_error(&state, "toPrimitive")?);
-                    }
-                }
-            }
-            FunctionSourceStage::AwaitExotic
+        let (property, key, awaiting_property) = match state.stage {
+            FunctionSourceStage::Start => (
+                FunctionSourceProperty::Exotic,
+                runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToPrimitive),
+                FunctionSourceStage::AwaitExoticProperty,
+            ),
+            FunctionSourceStage::ToString => (
+                FunctionSourceProperty::ToString,
+                runtime.predefined_property_key(PredefinedAtom::ToString),
+                FunctionSourceStage::AwaitToStringProperty,
+            ),
+            FunctionSourceStage::ValueOf => (
+                FunctionSourceProperty::ValueOf,
+                runtime.predefined_property_key(PredefinedAtom::ValueOf),
+                FunctionSourceStage::AwaitValueOfProperty,
+            ),
+            FunctionSourceStage::AwaitExoticProperty
+            | FunctionSourceStage::AwaitToStringProperty
+            | FunctionSourceStage::AwaitValueOfProperty
+            | FunctionSourceStage::AwaitExotic
             | FunctionSourceStage::AwaitToString
             | FunctionSourceStage::AwaitValueOf => {
                 return Err(EngineFault::RuntimeInvariant {
@@ -1485,7 +1509,109 @@ fn advance_function_source_conversion(
                 }
                 .into());
             }
+        };
+        match lookup_function_source_property(runtime, reference, &key)? {
+            FunctionSourcePropertyLookup::Getter(function) => {
+                state.stage = awaiting_property;
+                return function_source_method_call(state, function, Vec::new(), return_to);
+            }
+            FunctionSourcePropertyLookup::Value(value) => {
+                match use_function_source_property(&mut state, property, &value)? {
+                    FunctionSourcePropertyAction::Continue => {}
+                    FunctionSourcePropertyAction::Call {
+                        function,
+                        arguments,
+                    } => {
+                        return function_source_method_call(state, function, arguments, return_to);
+                    }
+                }
+            }
         }
+    }
+}
+
+fn lookup_function_source_property(
+    runtime: &Runtime,
+    reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<FunctionSourcePropertyLookup, NativeFailure> {
+    Ok(match lookup_heap_property(runtime, Some(reference), key)? {
+        None => FunctionSourcePropertyLookup::Value(StoredValue::Undefined),
+        Some(OwnProperty::Data { value, .. }) => FunctionSourcePropertyLookup::Value(value),
+        Some(OwnProperty::Accessor {
+            getter: Some(function),
+            ..
+        }) => FunctionSourcePropertyLookup::Getter(function),
+        Some(OwnProperty::Accessor { getter: None, .. }) => {
+            FunctionSourcePropertyLookup::Value(StoredValue::Undefined)
+        }
+    })
+}
+
+fn use_function_source_property(
+    state: &mut FunctionSourceContinuation,
+    property: FunctionSourceProperty,
+    value: &StoredValue,
+) -> Result<FunctionSourcePropertyAction, NativeFailure> {
+    match property {
+        FunctionSourceProperty::Exotic => match value {
+            StoredValue::Undefined | StoredValue::Null => {
+                state.stage = FunctionSourceStage::ToString;
+                Ok(FunctionSourcePropertyAction::Continue)
+            }
+            StoredValue::Function(function) => {
+                state.stage = FunctionSourceStage::AwaitExotic;
+                let mut arguments = Vec::new();
+                arguments
+                    .try_reserve_exact(1)
+                    .map_err(|_| ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::FrameValues,
+                        additional: 1,
+                    })?;
+                arguments.push(StoredValue::String(JsString::from_utf8("string")?));
+                Ok(FunctionSourcePropertyAction::Call {
+                    function: *function,
+                    arguments,
+                })
+            }
+            StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::String(_)
+            | StoredValue::Object(_) => Err(function_source_type_error(state, "not a function")?),
+        },
+        FunctionSourceProperty::ToString => match value {
+            StoredValue::Function(function) => {
+                state.stage = FunctionSourceStage::AwaitToString;
+                Ok(FunctionSourcePropertyAction::Call {
+                    function: *function,
+                    arguments: Vec::new(),
+                })
+            }
+            StoredValue::Undefined
+            | StoredValue::Null
+            | StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::String(_)
+            | StoredValue::Object(_) => {
+                state.stage = FunctionSourceStage::ValueOf;
+                Ok(FunctionSourcePropertyAction::Continue)
+            }
+        },
+        FunctionSourceProperty::ValueOf => match value {
+            StoredValue::Function(function) => {
+                state.stage = FunctionSourceStage::AwaitValueOf;
+                Ok(FunctionSourcePropertyAction::Call {
+                    function: *function,
+                    arguments: Vec::new(),
+                })
+            }
+            StoredValue::Undefined
+            | StoredValue::Null
+            | StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::String(_)
+            | StoredValue::Object(_) => Err(function_source_type_error(state, "toPrimitive")?),
+        },
     }
 }
 
@@ -2485,9 +2611,11 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             )?;
             return Ok(Step::Call {
                 function: *function,
-                argument_count,
+                inputs: CallInputSource::Frame {
+                    argument_count,
+                    kind: CallKind::Direct,
+                },
                 return_to,
-                kind: CallKind::Direct,
                 source_pc,
             });
         }
@@ -2520,9 +2648,11 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             )?;
             return Ok(Step::Call {
                 function: *function,
-                argument_count,
+                inputs: CallInputSource::Frame {
+                    argument_count,
+                    kind: CallKind::Method,
+                },
                 return_to,
-                kind: CallKind::Method,
                 source_pc,
             });
         }
@@ -2558,9 +2688,11 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             )?;
             return Ok(Step::Call {
                 function: *function,
-                argument_count,
+                inputs: CallInputSource::Frame {
+                    argument_count,
+                    kind: CallKind::Constructor,
+                },
                 return_to,
-                kind: CallKind::Constructor,
                 source_pc,
             });
         }
@@ -2582,6 +2714,24 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             };
             match read_static_property(runtime, &base, &property.key)? {
                 PropertyReadOutcome::Value(value) => frame.stack.push(value),
+                PropertyReadOutcome::Getter { function, receiver } => {
+                    let return_to = verified_instruction.successors().fallthrough().ok_or(
+                        EngineFault::InvalidSuccessor {
+                            function: frame.template,
+                            pc: source_pc,
+                        },
+                    )?;
+                    return Ok(Step::Call {
+                        function,
+                        inputs: CallInputSource::Prepared(CallInputs {
+                            receiver,
+                            arguments: Vec::new(),
+                            new_target: None,
+                        }),
+                        return_to,
+                        source_pc,
+                    });
+                }
                 PropertyReadOutcome::Failed(failure) => {
                     return Ok(Step::Abrupt(property_exception(
                         runtime,
@@ -2933,6 +3083,10 @@ struct GlobalReferenceOperand {
 
 enum PropertyReadOutcome {
     Value(StoredValue),
+    Getter {
+        function: FunctionId,
+        receiver: StoredValue,
+    },
     Failed(PropertyFailure),
 }
 
@@ -3143,16 +3297,37 @@ fn read_static_property(
                 PropertyReadOutcome::Value(StoredValue::Undefined)
             }
         }
-        StoredValue::Function(function) => PropertyReadOutcome::Value(read_heap_property(
+        StoredValue::Function(function) => read_heap_property_for_receiver(
             runtime,
             HeapReference::Function(*function),
+            base.duplicate(),
             key,
-        )?),
-        StoredValue::Object(object) => PropertyReadOutcome::Value(read_heap_property(
+        )?,
+        StoredValue::Object(object) => read_heap_property_for_receiver(
             runtime,
             HeapReference::Object(*object),
+            base.duplicate(),
             key,
-        )?),
+        )?,
+    })
+}
+
+fn read_heap_property_for_receiver(
+    runtime: &Runtime,
+    reference: HeapReference,
+    receiver: StoredValue,
+    key: &PropertyKey,
+) -> Result<PropertyReadOutcome, ExecutionError> {
+    Ok(match lookup_heap_property(runtime, Some(reference), key)? {
+        None => PropertyReadOutcome::Value(StoredValue::Undefined),
+        Some(OwnProperty::Data { value, .. }) => PropertyReadOutcome::Value(value),
+        Some(OwnProperty::Accessor {
+            getter: Some(function),
+            ..
+        }) => PropertyReadOutcome::Getter { function, receiver },
+        Some(OwnProperty::Accessor { getter: None, .. }) => {
+            PropertyReadOutcome::Value(StoredValue::Undefined)
+        }
     })
 }
 
@@ -3169,7 +3344,21 @@ fn read_heap_property_if_present(
     reference: HeapReference,
     key: &PropertyKey,
 ) -> Result<Option<StoredValue>, ExecutionError> {
-    let mut current = Some(reference);
+    match lookup_heap_property(runtime, Some(reference), key)? {
+        None => Ok(None),
+        Some(OwnProperty::Data { value, .. }) => Ok(Some(value)),
+        Some(OwnProperty::Accessor { .. }) => Err(EngineFault::UnsupportedAccessorRead {
+            operation: "synchronous property read",
+        }
+        .into()),
+    }
+}
+
+fn lookup_heap_property(
+    runtime: &Runtime,
+    mut current: Option<HeapReference>,
+    key: &PropertyKey,
+) -> Result<Option<OwnProperty>, ExecutionError> {
     let mut remaining = runtime
         .functions
         .len()
@@ -3184,39 +3373,20 @@ fn read_heap_property_if_present(
         }
         remaining -= 1;
         let record = runtime.object_record(reference)?;
-        if let Some((_, value)) = record.own_data_property(key) {
-            return Ok(Some(value));
+        if let Some(property) = record.own_property(key) {
+            return Ok(Some(property));
         }
         current = record.prototype();
     }
     Ok(None)
 }
 
-fn inherited_data_layout(
+fn inherited_property(
     runtime: &Runtime,
-    mut current: Option<HeapReference>,
+    current: Option<HeapReference>,
     key: &PropertyKey,
-) -> Result<Option<PropertyLayout>, ExecutionError> {
-    let mut remaining = runtime
-        .functions
-        .len()
-        .saturating_add(runtime.objects.len())
-        .saturating_add(1);
-    while let Some(reference) = current {
-        if remaining == 0 {
-            return Err(EngineFault::RuntimeInvariant {
-                message: "ordinary prototype chain contains a cycle",
-            }
-            .into());
-        }
-        remaining -= 1;
-        let record = runtime.object_record(reference)?;
-        if let Some((layout, _)) = record.own_data_property(key) {
-            return Ok(Some(layout));
-        }
-        current = record.prototype();
-    }
-    Ok(None)
+) -> Result<Option<OwnProperty>, ExecutionError> {
+    lookup_heap_property(runtime, current, key)
 }
 
 fn write_static_property(
@@ -3249,39 +3419,58 @@ fn write_static_property(
     let (own, prototype, extensible) = {
         let record = runtime.object_record(reference)?;
         (
-            record.own_data_property(&key).map(|(layout, _)| layout),
+            record.own_property(&key),
             record.prototype(),
             record.is_extensible(),
         )
     };
-    if let Some(layout) = own {
-        if layout.writable() == Some(true) {
-            let replaced = runtime
-                .object_record_mut(reference)?
-                .replace_existing_data(&key, value);
-            if !replaced {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "located own data property disappeared before its update",
+    if let Some(own) = own {
+        match own {
+            OwnProperty::Data { layout, .. } => {
+                if layout.writable() == Some(true) {
+                    let replaced = runtime
+                        .object_record_mut(reference)?
+                        .replace_existing_data(&key, value);
+                    if !replaced {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "located own data property disappeared before its update",
+                        }
+                        .into());
+                    }
+                    runtime.collection_pending = true;
+                    return Ok(PropertyWriteOutcome::Complete);
+                }
+                return Ok(if strict {
+                    PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+                } else {
+                    PropertyWriteOutcome::Complete
+                });
+            }
+            OwnProperty::Accessor { .. } => {
+                return Err(EngineFault::UnsupportedAccessorWrite {
+                    operation: "static property write",
                 }
                 .into());
             }
-            runtime.collection_pending = true;
-            return Ok(PropertyWriteOutcome::Complete);
         }
-        return Ok(if strict {
-            PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
-        } else {
-            PropertyWriteOutcome::Complete
-        });
     }
-    if let Some(layout) = inherited_data_layout(runtime, prototype, &key)?
-        && layout.writable() != Some(true)
-    {
-        return Ok(if strict {
-            PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
-        } else {
-            PropertyWriteOutcome::Complete
-        });
+    if let Some(inherited) = inherited_property(runtime, prototype, &key)? {
+        match inherited {
+            OwnProperty::Data { layout, .. } if layout.writable() != Some(true) => {
+                return Ok(if strict {
+                    PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+                } else {
+                    PropertyWriteOutcome::Complete
+                });
+            }
+            OwnProperty::Data { .. } => {}
+            OwnProperty::Accessor { .. } => {
+                return Err(EngineFault::UnsupportedAccessorWrite {
+                    operation: "inherited static property write",
+                }
+                .into());
+            }
+        }
     }
     if !extensible {
         return Ok(if strict {
@@ -3318,23 +3507,30 @@ fn define_static_property(
     };
     let (exists, extensible) = {
         let record = runtime.object_record(reference)?;
-        (
-            record.own_data_property(&key).is_some(),
-            record.is_extensible(),
-        )
+        (record.own_property(&key), record.is_extensible())
     };
-    if exists {
-        let replaced = runtime
-            .object_record_mut(reference)?
-            .replace_existing_data(&key, value);
-        if !replaced {
-            return Err(EngineFault::RuntimeInvariant {
-                message: "located own data property disappeared before its definition",
+    if let Some(existing) = exists {
+        match existing {
+            OwnProperty::Data { .. } => {
+                let replaced = runtime
+                    .object_record_mut(reference)?
+                    .replace_existing_data(&key, value);
+                if !replaced {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "located own data property disappeared before its definition",
+                    }
+                    .into());
+                }
+                runtime.collection_pending = true;
+                return Ok(PropertyWriteOutcome::Complete);
             }
-            .into());
+            OwnProperty::Accessor { .. } => {
+                return Err(EngineFault::UnsupportedAccessorWrite {
+                    operation: "static property definition",
+                }
+                .into());
+            }
         }
-        runtime.collection_pending = true;
-        return Ok(PropertyWriteOutcome::Complete);
     }
     if !extensible {
         return Ok(PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible));
@@ -4332,9 +4528,11 @@ fn exception_caller_frames(
                 | FinalOpcode::Call3
                 | FinalOpcode::CallMethod
                 | FinalOpcode::CallConstructor
+                | FinalOpcode::GetField
+                | FinalOpcode::GetField2
         ) {
             return Err(EngineFault::RuntimeInvariant {
-                message: "exception caller is not parked at an ordinary call",
+                message: "exception caller is not parked at an ordinary call or accessor read",
             }
             .into());
         }
@@ -4412,9 +4610,15 @@ struct CallInputs {
 fn take_call_inputs(
     frame: &mut Frame,
     expected_function: FunctionId,
-    argument_count: usize,
-    kind: CallKind,
+    source: CallInputSource,
 ) -> Result<CallInputs, ExecutionError> {
+    let (argument_count, kind) = match source {
+        CallInputSource::Frame {
+            argument_count,
+            kind,
+        } => (argument_count, kind),
+        CallInputSource::Prepared(inputs) => return Ok(inputs),
+    };
     let required = argument_count.saturating_add(match kind {
         CallKind::Direct => 1,
         CallKind::Method | CallKind::Constructor => 2,
@@ -4677,8 +4881,16 @@ fn unsupported_dispatch<T>(opcode: FinalOpcode) -> Result<T, ExecutionError> {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use super::*;
     use crate::{RuntimeLimits, value::StoredValue};
+    use quickjs_compiler::CompilationContext;
+    use quickjs_frontend::{
+        CompilationGoal, DynamicFunctionKind, DynamicFunctionSource, FrontendLimits,
+        FrontendOptions, GlobalScriptGoal, SourceFragment, with_dynamic_function_source,
+        with_parsed_program,
+    };
 
     struct NeverCompiler;
 
@@ -4689,6 +4901,59 @@ mod tests {
         ) -> Result<Arc<quickjs_bytecode::VerifiedBytecode>, DynamicFunctionCompileFailure>
         {
             panic!("the coercion regression must fail or suspend before compilation")
+        }
+    }
+
+    struct OxcDynamicCompiler;
+
+    impl OrdinaryDynamicFunctionCompiler for OxcDynamicCompiler {
+        fn compile(
+            &self,
+            source: OrdinaryDynamicFunctionSource,
+        ) -> Result<Arc<quickjs_bytecode::VerifiedBytecode>, DynamicFunctionCompileFailure>
+        {
+            let parameter_text = source
+                .parameters()
+                .iter()
+                .map(JsString::to_utf8_lossy)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(test_engine_failure)?;
+            let body_text = source.body().to_utf8_lossy().map_err(test_engine_failure)?;
+            let parameters = parameter_text
+                .iter()
+                .map(|parameter| SourceFragment::new(parameter.as_str()))
+                .collect::<Vec<_>>();
+            let dynamic_source = DynamicFunctionSource::new(
+                DynamicFunctionKind::Function,
+                &parameters,
+                SourceFragment::new(&body_text),
+            );
+            with_dynamic_function_source(
+                dynamic_source,
+                FrontendLimits::default(),
+                |unit, _prepared| {
+                    let context = CompilationContext::new_with_source_name(
+                        unit,
+                        Arc::from("<vm accessor Function>"),
+                    )
+                    .map_err(test_engine_failure)?;
+                    context
+                        .compile_dynamic_function_script(
+                            quickjs_bytecode::VerificationLimits::default(),
+                        )
+                        .map(|tree| Arc::new(tree.verified_bytecode().clone()))
+                        .map_err(test_engine_failure)
+                },
+            )
+            .map_err(test_engine_failure)?
+        }
+    }
+
+    fn test_engine_failure(
+        error: impl Error + Send + Sync + 'static,
+    ) -> DynamicFunctionCompileFailure {
+        DynamicFunctionCompileFailure::Engine {
+            source: Arc::new(error),
         }
     }
 
@@ -4833,6 +5098,557 @@ mod tests {
         });
 
         assert_eq!(continuation.retained_values(), 2);
+    }
+
+    #[test]
+    fn synchronous_internal_read_rejects_an_accessor_instead_of_skipping_it() {
+        let (mut runtime, realm, constructor, _native) = runtime_with_function_constructor();
+        let object = source_object(&mut runtime, realm);
+        let key = runtime.predefined_property_key(PredefinedAtom::ToString);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(object),
+                key.clone(),
+                PropertyLayout::accessor(false, true),
+                Some(constructor),
+                None,
+            )
+            .expect("accessor");
+
+        let error = read_heap_property(&runtime, HeapReference::Object(object), &key)
+            .expect_err("synchronous accessor read must fail closed");
+
+        assert!(matches!(error, ExecutionError::EngineFault(_)));
+    }
+
+    #[test]
+    fn get_field_executes_an_own_bytecode_getter() {
+        let reader_authority =
+            compile_test_function("function read(object){return object.toString;}", "read");
+        let getter_authority = compile_test_function("function getter(){return 23;}", "getter");
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let (reader, getter) = {
+            let mut context = runtime.context(&realm).expect("context");
+            (
+                context.instantiate(reader_authority).expect("reader"),
+                context.instantiate(getter_authority).expect("getter"),
+            )
+        };
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let object = source_object(&mut runtime, realm_id);
+        let key = runtime.predefined_property_key(PredefinedAtom::ToString);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(object),
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(getter.id().expect("getter id")),
+                None,
+            )
+            .expect("accessor");
+        let object = runtime
+            .public_value(StoredValue::Object(object))
+            .expect("object root");
+
+        let result = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&reader, &[object], ExecutionLimits::default())
+            .expect("getter read");
+        let number = result
+            .as_number()
+            .expect("live result")
+            .expect("number result");
+
+        assert!(number.strict_equals(JsNumber::from_i32(23)));
+    }
+
+    #[test]
+    fn inherited_getter_receives_the_original_object() {
+        let reader_authority =
+            compile_test_function("function read(object){return object.toString;}", "read");
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let reader = runtime
+            .context(&realm)
+            .expect("context")
+            .instantiate(reader_authority)
+            .expect("reader");
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let object_prototype = runtime
+            .realm_object_prototype(realm_id)
+            .expect("Object.prototype");
+        let StoredValue::Function(getter) = read_heap_property(
+            &runtime,
+            HeapReference::Object(object_prototype),
+            &runtime.predefined_property_key(PredefinedAtom::ValueOf),
+        )
+        .expect("Object.prototype.valueOf") else {
+            panic!("Object.prototype.valueOf must be callable");
+        };
+        let prototype = source_object(&mut runtime, realm_id);
+        let object = runtime
+            .allocate_ordinary_object(prototype)
+            .expect("child object");
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(prototype),
+                runtime.predefined_property_key(PredefinedAtom::ToString),
+                PropertyLayout::accessor(false, true),
+                Some(getter),
+                None,
+            )
+            .expect("inherited accessor");
+        let public_object = runtime
+            .public_value(StoredValue::Object(object))
+            .expect("object root");
+
+        let result = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&reader, &[public_object], ExecutionLimits::default())
+            .expect("inherited getter");
+
+        assert_eq!(result.object_id().expect("object result"), object);
+    }
+
+    #[test]
+    fn missing_getter_returns_undefined_and_shadows_the_prototype() {
+        let reader_authority =
+            compile_test_function("function read(object){return object.toString;}", "read");
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let reader = runtime
+            .context(&realm)
+            .expect("context")
+            .instantiate(reader_authority)
+            .expect("reader");
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let prototype = source_object(&mut runtime, realm_id);
+        let object = runtime
+            .allocate_ordinary_object(prototype)
+            .expect("child object");
+        let key = runtime.predefined_property_key(PredefinedAtom::ToString);
+        runtime
+            .append_data_property(
+                HeapReference::Object(prototype),
+                key.clone(),
+                PropertyLayout::data(true, true, true),
+                StoredValue::Number(JsNumber::from_i32(44)),
+            )
+            .expect("prototype value");
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(object),
+                key,
+                PropertyLayout::accessor(false, true),
+                None,
+                None,
+            )
+            .expect("getterless accessor");
+        let object = runtime
+            .public_value(StoredValue::Object(object))
+            .expect("object root");
+
+        let result = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&reader, &[object], ExecutionLimits::default())
+            .expect("getterless read");
+
+        assert_eq!(
+            result.kind().expect("live result"),
+            crate::ValueKind::Undefined
+        );
+    }
+
+    #[test]
+    fn get_field2_keeps_the_original_base_for_the_returned_method() {
+        let invoke_authority = compile_test_function(
+            "function invoke(object){return object.toString();}",
+            "invoke",
+        );
+        let maker_authority = compile_test_function(
+            "function make(method){\
+                 return function getter(){return method;};\
+             }",
+            "make",
+        );
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let object_prototype = runtime
+            .realm_object_prototype(realm_id)
+            .expect("Object.prototype");
+        let StoredValue::Function(value_of) = read_heap_property(
+            &runtime,
+            HeapReference::Object(object_prototype),
+            &runtime.predefined_property_key(PredefinedAtom::ValueOf),
+        )
+        .expect("Object.prototype.valueOf") else {
+            panic!("Object.prototype.valueOf must be callable");
+        };
+        let value_of = runtime
+            .public_value(StoredValue::Function(value_of))
+            .expect("valueOf root")
+            .into_function()
+            .expect("valueOf function");
+        let (invoke, getter) = {
+            let mut context = runtime.context(&realm).expect("context");
+            let invoke = context.instantiate(invoke_authority).expect("invoke");
+            let maker = context.instantiate(maker_authority).expect("maker");
+            let getter = context
+                .call(&maker, &[value_of.as_value()], ExecutionLimits::default())
+                .expect("getter closure")
+                .into_function()
+                .expect("getter");
+            (invoke, getter)
+        };
+        let object = source_object(&mut runtime, realm_id);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(object),
+                runtime.predefined_property_key(PredefinedAtom::ToString),
+                PropertyLayout::accessor(false, true),
+                Some(getter.id().expect("getter id")),
+                None,
+            )
+            .expect("accessor");
+        let public_object = runtime
+            .public_value(StoredValue::Object(object))
+            .expect("object root");
+
+        let result = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&invoke, &[public_object], ExecutionLimits::default())
+            .expect("accessor method call");
+
+        assert_eq!(result.object_id().expect("object result"), object);
+    }
+
+    #[test]
+    fn throwing_getter_preserves_getter_origin_and_property_caller() {
+        let reader_authority =
+            compile_test_function("function read(object){return object.toString;}", "read");
+        let getter_authority = compile_test_function("function getter(){throw 37;}", "getter");
+        let constant_authority =
+            compile_test_function("function constant(){return 1;}", "constant");
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let (reader, getter, constant) = {
+            let mut context = runtime.context(&realm).expect("context");
+            (
+                context.instantiate(reader_authority).expect("reader"),
+                context.instantiate(getter_authority).expect("getter"),
+                context.instantiate(constant_authority).expect("constant"),
+            )
+        };
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let object = source_object(&mut runtime, realm_id);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(object),
+                runtime.predefined_property_key(PredefinedAtom::ToString),
+                PropertyLayout::accessor(false, true),
+                Some(getter.id().expect("getter id")),
+                None,
+            )
+            .expect("accessor");
+        let object = runtime
+            .public_value(StoredValue::Object(object))
+            .expect("object root");
+
+        let error = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&reader, &[object], ExecutionLimits::default())
+            .expect_err("getter throw");
+        let ExecutionError::Exception(exception) = error else {
+            panic!("getter throw must remain a JavaScript exception");
+        };
+        let thrown = exception
+            .thrown_value()
+            .expect("explicit throw")
+            .as_number()
+            .expect("live throw")
+            .expect("number throw");
+
+        assert!(thrown.strict_equals(JsNumber::from_i32(37)));
+        assert_eq!(exception.caller_frames().len(), 1);
+        assert!(
+            exception.caller_frames()[0]
+                .source_text()
+                .contains("object.toString")
+        );
+        runtime
+            .context(&realm)
+            .expect("context")
+            .call(&constant, &[], ExecutionLimits::default())
+            .expect("runtime remains reusable");
+    }
+
+    #[test]
+    fn bytecode_getter_obeys_the_active_frame_limit() {
+        let reader_authority =
+            compile_test_function("function read(object){return object.toString;}", "read");
+        let getter_authority = compile_test_function("function getter(){return 1;}", "getter");
+        let mut runtime =
+            Runtime::try_new(RuntimeLimits::default().with_max_active_frames(1)).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let (reader, getter) = {
+            let mut context = runtime.context(&realm).expect("context");
+            (
+                context.instantiate(reader_authority).expect("reader"),
+                context.instantiate(getter_authority).expect("getter"),
+            )
+        };
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let object = source_object(&mut runtime, realm_id);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(object),
+                runtime.predefined_property_key(PredefinedAtom::ToString),
+                PropertyLayout::accessor(false, true),
+                Some(getter.id().expect("getter id")),
+                None,
+            )
+            .expect("accessor");
+        let object = runtime
+            .public_value(StoredValue::Object(object))
+            .expect("object root");
+        let baseline = runtime.usage();
+
+        for _ in 0..2 {
+            let error = runtime
+                .context(&realm)
+                .expect("context")
+                .call(
+                    &reader,
+                    std::slice::from_ref(&object),
+                    ExecutionLimits::default(),
+                )
+                .expect_err("getter frame exceeds limit");
+            assert!(matches!(
+                error,
+                ExecutionError::LimitExceeded {
+                    resource: RuntimeResource::Frames,
+                    limit: 1,
+                    observed: 2,
+                }
+            ));
+            assert_eq!(runtime.usage(), baseline);
+        }
+    }
+
+    #[test]
+    fn dynamic_function_calls_an_accessor_before_using_its_to_string_value() {
+        let (mut runtime, realm, constructor, native) = runtime_with_function_constructor();
+        let object = source_object(&mut runtime, realm);
+        let key = runtime.predefined_property_key(PredefinedAtom::ToString);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(object),
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(constructor),
+                None,
+            )
+            .expect("accessor");
+        let compiler: Arc<dyn OrdinaryDynamicFunctionCompiler> = Arc::new(NeverCompiler);
+        let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+
+        let Ok(dispatch) = begin_function_source_conversion(
+            &mut runtime,
+            native,
+            vec![StoredValue::Object(object)],
+            None,
+            None,
+            native_function_host_origin(),
+            0,
+            0,
+            &compiler,
+            &mut budget,
+        ) else {
+            panic!("conversion must suspend at the accessor getter");
+        };
+        let NativeDispatch::Call(call) = dispatch else {
+            panic!("accessor getter must be called");
+        };
+
+        assert_eq!(call.function, constructor);
+        assert!(call.arguments.is_empty());
+        assert!(matches!(call.receiver, StoredValue::Object(id) if id == object));
+    }
+
+    #[test]
+    fn global_function_executes_an_accessor_getter_and_its_bytecode_conversion_method() {
+        let method_authority = compile_test_function(
+            "function sourceString(){return 'return 29;';}",
+            "sourceString",
+        );
+        let maker_authority = compile_test_function(
+            "function makeGetter(method){\
+                 return function sourceGetter(){return method;};\
+             }",
+            "makeGetter",
+        );
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let getter = {
+            let mut context = runtime.context(&realm).expect("context");
+            let method = context
+                .instantiate(method_authority)
+                .expect("conversion method");
+            let maker = context.instantiate(maker_authority).expect("getter maker");
+            context
+                .call(&maker, &[method.as_value()], ExecutionLimits::default())
+                .expect("getter closure")
+                .into_function()
+                .expect("getter function")
+        };
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let source = source_object(&mut runtime, realm_id);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(source),
+                runtime.predefined_property_key(PredefinedAtom::ToString),
+                PropertyLayout::accessor(false, true),
+                Some(getter.id().expect("getter id")),
+                None,
+            )
+            .expect("source accessor");
+        let source = runtime
+            .public_value(StoredValue::Object(source))
+            .expect("source root");
+        let global = runtime
+            .realm_global_object(realm_id)
+            .expect("global object");
+        let StoredValue::Function(constructor) = read_heap_property(
+            &runtime,
+            HeapReference::Object(global),
+            &runtime.predefined_property_key(PredefinedAtom::Function),
+        )
+        .expect("global Function") else {
+            panic!("global Function must be callable");
+        };
+        let constructor = runtime
+            .public_value(StoredValue::Function(constructor))
+            .expect("Function root")
+            .into_function()
+            .expect("Function value");
+        let compiler: Arc<dyn OrdinaryDynamicFunctionCompiler> = Arc::new(OxcDynamicCompiler);
+        let generated = runtime
+            .context(&realm)
+            .expect("context")
+            .call_with_dynamic_function_compiler(
+                &constructor,
+                &[source],
+                ExecutionLimits::default(),
+                &compiler,
+            )
+            .expect("accessor-backed Function source")
+            .into_function()
+            .expect("generated function");
+        let result = runtime
+            .context(&realm)
+            .expect("context")
+            .call(&generated, &[], ExecutionLimits::default())
+            .expect("generated function result");
+        let number = result
+            .as_number()
+            .expect("live result")
+            .expect("number result");
+
+        assert!(number.strict_equals(JsNumber::from_i32(29)));
+    }
+
+    #[test]
+    fn global_function_accessor_throw_prevents_dynamic_compilation() {
+        let getter_authority =
+            compile_test_function("function sourceGetter(){throw 53;}", "sourceGetter");
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let getter = runtime
+            .context(&realm)
+            .expect("context")
+            .instantiate(getter_authority)
+            .expect("throwing getter");
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let source = source_object(&mut runtime, realm_id);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(source),
+                runtime.predefined_property_key(PredefinedAtom::ToString),
+                PropertyLayout::accessor(false, true),
+                Some(getter.id().expect("getter id")),
+                None,
+            )
+            .expect("source accessor");
+        let source = runtime
+            .public_value(StoredValue::Object(source))
+            .expect("source root");
+        let global = runtime
+            .realm_global_object(realm_id)
+            .expect("global object");
+        let StoredValue::Function(constructor) = read_heap_property(
+            &runtime,
+            HeapReference::Object(global),
+            &runtime.predefined_property_key(PredefinedAtom::Function),
+        )
+        .expect("global Function") else {
+            panic!("global Function must be callable");
+        };
+        let constructor = runtime
+            .public_value(StoredValue::Function(constructor))
+            .expect("Function root")
+            .into_function()
+            .expect("Function value");
+        let compiler: Arc<dyn OrdinaryDynamicFunctionCompiler> = Arc::new(NeverCompiler);
+
+        let error = runtime
+            .context(&realm)
+            .expect("context")
+            .call_with_dynamic_function_compiler(
+                &constructor,
+                &[source],
+                ExecutionLimits::default(),
+                &compiler,
+            )
+            .expect_err("getter throw must escape before compilation");
+        let ExecutionError::Exception(exception) = error else {
+            panic!("getter throw must remain a JavaScript exception");
+        };
+        let thrown = exception
+            .thrown_value()
+            .expect("explicit throw")
+            .as_number()
+            .expect("live throw")
+            .expect("number throw");
+
+        assert!(thrown.strict_equals(JsNumber::from_i32(53)));
+    }
+
+    fn compile_test_function(source: &str, name: &str) -> Arc<quickjs_bytecode::VerifiedBytecode> {
+        with_parsed_program(
+            source,
+            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+            |unit| {
+                let context =
+                    CompilationContext::new_with_source_name(unit, Arc::from("<vm accessor test>"))
+                        .expect("storage plan");
+                let root = context
+                    .executables()
+                    .find(|executable| executable.metadata().name() == Some(name))
+                    .expect("named function");
+                let tree = context
+                    .compile_tree(&root, quickjs_bytecode::VerificationLimits::default())
+                    .expect("verified function tree");
+                Arc::new(tree.verified_bytecode().clone())
+            },
+        )
+        .expect("frontend")
     }
 
     fn runtime_with_function_constructor()

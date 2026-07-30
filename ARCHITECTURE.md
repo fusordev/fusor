@@ -363,9 +363,11 @@ exact data-property flags; bytecode function stringification returns retained
 verified source. Object/function source arguments use an executor-owned
 continuation with one retained slot per input. It performs
 `Symbol.toPrimitive("string")`, then ordinary `toString`/`valueOf`, suspends
-across native or verified-bytecode calls, counts suspended state against
-frame/value ceilings, and resumes without Rust recursion. Primitive boxing,
-accessor-backed lookup, persistent global lexical collision checks, and
+across native or verified-bytecode accessor and method calls, counts suspended
+state against frame/value ceilings, and resumes without Rust recursion.
+Accessor lookup stops at the first descriptor, invokes inherited getters with
+the original source object, and treats a missing getter as `undefined`.
+Primitive boxing, persistent global lexical collision checks, and
 `Function.prototype.call`/`apply`/`bind`/`Symbol.hasInstance` stay fail closed.
 The path never emits `eval`/`apply_eval` and rejects direct eval anywhere in
 generated code. Direct and indirect eval remain wholly unimplemented.
@@ -447,12 +449,17 @@ share aggregate frame limits and instruction fuel. An
 escaping throw carries its exact JavaScript value through the same frame
 vector, allocates caller provenance before publishing any heap root, and
 preserves caller order from immediate to outermost. Computed properties,
-accessors, object-method syntax, prototype mutation, proxies and exotics,
-constructors, optional/spread/apply/tail calls, general sloppy-`this` primitive
-boxing, BigInt, coercive numeric operations, dynamic operators, serialized input,
-non-string atom namespaces, raw function slots, catch handlers, finally
-return addresses, iterator markers, and packed exceptional stack values
-remain fail closed.
+accessor syntax and setter execution, object-method syntax, prototype mutation,
+proxies and exotics, derived/class and nonordinary constructor forms,
+optional/spread/apply/tail calls, general sloppy-`this` primitive boxing,
+BigInt, coercive numeric operations, dynamic operators, serialized input,
+non-string atom namespaces, raw function slots, catch handlers, finally return
+addresses, iterator markers, and packed exceptional stack values remain fail
+closed. Internally installed ordinary accessors are typed slots: `GetField`
+and `GetField2` stop at the first own or inherited accessor, execute native or
+verified-bytecode getters through the same frame vector, preserve the original
+receiver and `GetField2` base, and retain exact abrupt provenance. Getterless
+accessors return `undefined`.
 
 The symbolic assembler chooses the componentwise shortest valid final branch
 layout. This can differ from a conservative QuickJS peephole boundary while
@@ -531,9 +538,10 @@ future exotic-object edge set, and collection while active frames are live
 remain M3 work. Until that work lands, a single host call can temporarily
 retain discarded heap nodes until the next safe boundary.
 
-No getter, proxy trap, host function, loader, interrupt callback, promise
-tracker, or finalizer may run while an arena/node borrow is live. Finalizers
-will not be admitted until zombie-state and resurrection rules are complete.
+Getter dispatch is prepared only after every arena/node borrow has ended. No
+proxy trap, host callback, loader, interrupt callback, promise tracker, or
+finalizer may run while such a borrow is live. Finalizers will not be admitted
+until zombie-state and resurrection rules are complete.
 
 ## Values and objects
 
@@ -564,23 +572,26 @@ will not be admitted until zombie-state and resurrection rules are complete.
   are validated function-local pool indices; serialized units carry bounded
   atom contents and namespace metadata, and loading reinterns or creates each
   pool entry exactly once in the destination runtime.
-- The current data-only object slice keeps each shape in a private
-  `Arc<Vec<_>>`. Property growth reserves the unique vector and value slots
-  fallibly before mutating either logical sequence; transition interning is not
-  implemented yet. Deletion, flag changes, accessors, and prototype mutation
-  remain fail closed.
+- The current ordinary-object slice keeps each shape in a private
+  `Arc<Vec<_>>` and each aligned slot typed as data or accessor. Property
+  growth reserves the unique vectors fallibly before mutating either logical
+  sequence; transition interning is not implemented yet. Deletion, flag
+  changes, accessor syntax, setter execution, and prototype mutation remain
+  fail closed.
 - Object literals inherit their realm's internal `Object.prototype`, which
   currently owns exact `toString` and `valueOf` native data properties.
   `Function.prototype` likewise owns exact `toString`; all three method
   functions belong to the realm, inherit `Function.prototype`, and participate
-  in the iterative heap trace. Ordinary objects and function objects share own
-  data-property storage. `DefineField` creates configurable, writable,
-  enumerable properties; duplicate literal keys replace one slot without
-  double charging.
+  in the iterative heap trace. Ordinary objects and function objects share
+  typed data/accessor property storage, and both getter and setter function
+  edges are traced. `DefineField` creates configurable, writable, enumerable
+  data properties; duplicate literal keys replace one slot without double
+  charging.
 - Ordinary data/accessor layouts have an opaque value-independent
-  representation; accessor layouts cannot carry a writable flag. Future
-  property slots are typed as data, accessor, binding cell, or lazy value.
-  Slot count, shape entries, flags, and property variants must agree.
+  representation; accessor layouts cannot carry a writable flag. Current
+  ordinary property slots are typed as data or accessor; binding-cell and lazy
+  variants remain future work. Slot count, shape entries, flags, and property
+  variants must agree.
 - Ordinary locals remain frame slots. Captured, module, mapped-arguments, and
   eval-visible bindings use heap binding cells.
 - Suspended generators and async functions own their arguments, locals,
