@@ -167,6 +167,11 @@ enum FrameBinding {
     Captured(BindingCellId),
 }
 
+enum OperandStackEntry {
+    JavaScript(StoredValue),
+    Catch { handler: InstructionIndex },
+}
+
 struct Frame {
     function: FunctionId,
     code: InstalledCodeId,
@@ -185,11 +190,12 @@ struct Frame {
     own_cells: Vec<Option<BindingCellId>>,
     own_cell_bindings: Vec<FrameBindingAddress>,
     environment: Vec<EnvironmentBinding>,
-    stack: Vec<StoredValue>,
+    stack: Vec<OperandStackEntry>,
 }
 
 struct DynamicFunctionReturn {
     root: InstalledRoot,
+    realm: RealmId,
     construction: Option<FunctionId>,
     origin: Option<JsStackFrame>,
 }
@@ -259,6 +265,7 @@ impl IntrinsicGetContinuation {
 #[derive(Clone, Copy)]
 enum ObjectPrototypeTag {
     Boolean,
+    Error,
     Function,
     Number,
     Object,
@@ -269,6 +276,7 @@ impl ObjectPrototypeTag {
     const fn name(self) -> &'static str {
         match self {
             Self::Boolean => "Boolean",
+            Self::Error => "Error",
             Self::Function => "Function",
             Self::Number => "Number",
             Self::Object => "Object",
@@ -321,6 +329,7 @@ enum PrimitiveConversionPropertyLookup {
 
 struct PropertyKeyContinuation {
     receiver: StoredValue,
+    realm: RealmId,
     stage: PrimitiveConversionStage,
     target: PropertyKeyTarget,
     origin: JsStackFrame,
@@ -349,6 +358,7 @@ enum PropertyKeyTarget {
         function: StoredValue,
         kind: DefineMethodKind,
         enumerable: bool,
+        realm: RealmId,
     },
 }
 
@@ -476,6 +486,7 @@ impl OperatorPrimitiveTarget {
 
 struct OperatorPrimitiveContinuation {
     receiver: StoredValue,
+    realm: RealmId,
     hint: OperatorPrimitiveHint,
     stage: OperatorPrimitiveStage,
     target: OperatorPrimitiveTarget,
@@ -675,8 +686,10 @@ fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRoot)) {
             mark(CollectionRoot::BindingCell(*cell));
         }
     }
-    for value in &frame.stack {
-        trace_stored_value_root(value, mark);
+    for entry in &frame.stack {
+        if let OperandStackEntry::JavaScript(value) = entry {
+            trace_stored_value_root(value, mark);
+        }
     }
     for continuation in &frame.native_returns {
         trace_native_continuation_roots(continuation, mark);
@@ -697,6 +710,11 @@ fn collect_cycles_with_execution_roots(
     continuations: &[NativeContinuation],
     values: &[StoredValue],
 ) -> Result<(), ExecutionError> {
+    let has_ephemeral_heap_roots = !frames.is_empty()
+        || !continuations.is_empty()
+        || values
+            .iter()
+            .any(|value| matches!(value, StoredValue::Function(_) | StoredValue::Object(_)));
     runtime
         .collect_cycles_with_roots(|mark| {
             for frame in frames {
@@ -709,8 +727,16 @@ fn collect_cycles_with_execution_roots(
                 trace_stored_value_root(value, mark);
             }
         })
-        .map(|_| ())
-        .map_err(runtime_collection_execution_error)
+        .map_err(runtime_collection_execution_error)?;
+
+    // Active VM roots are ephemeral: a later pop, catch unwind, or frame
+    // return can make an object unreachable without mutating the heap graph.
+    // Keep the collector dirty until a root-free execution safe point observes
+    // those removals.
+    if has_ephemeral_heap_roots {
+        runtime.collection_pending = true;
+    }
+    Ok(())
 }
 
 fn runtime_collection_execution_error(error: RuntimeError) -> ExecutionError {
@@ -926,6 +952,7 @@ enum PendingExceptionPayload {
 }
 
 struct PendingException {
+    realm: RealmId,
     payload: PendingExceptionPayload,
     origin: JsStackFrame,
 }
@@ -1261,15 +1288,25 @@ fn execute_frame_loop(
                     })?
                     .native()
                     .copied();
-                let origin = instruction_location(
-                    runtime,
-                    frames.last().ok_or(EngineFault::MissingInstruction {
-                        function: FunctionTemplateId::new(0),
-                        instruction: 0,
-                    })?,
-                    source_pc,
-                )?;
+                let caller = frames.last().ok_or(EngineFault::MissingInstruction {
+                    function: FunctionTemplateId::new(0),
+                    instruction: 0,
+                })?;
+                let origin = instruction_location(runtime, caller, source_pc)?;
+                let operation_realm = code(runtime, caller.code)?.realm;
                 if let Some(native) = native {
+                    if construction && !native.kind.is_constructor() {
+                        let pending = PendingException {
+                            realm: operation_realm,
+                            payload: PendingExceptionPayload::EngineError {
+                                kind: ExceptionKind::TypeError,
+                                message: function_not_constructor_message(runtime, function)?,
+                            },
+                            origin,
+                        };
+                        dispatch_pending_exception(runtime, frames, active_frame_values, pending)?;
+                        continue;
+                    }
                     let active_frames = active_execution_frames(frames);
                     frames
                         .try_reserve(1)
@@ -1336,18 +1373,24 @@ fn execute_frame_loop(
                             .into());
                         }
                         Err(NativeFailure::Abrupt(pending)) => {
-                            let caller_frames = exception_caller_frames(runtime, frames)?;
-                            let exception = finish_exception(runtime, pending, caller_frames)?;
-                            return Err(ExecutionError::Exception(exception));
+                            dispatch_pending_exception(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                pending,
+                            )?;
                         }
                         Err(NativeFailure::AbruptAfterTransient(pending)) => {
                             let frame = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
                                 message: "transient native throw has no executing frame",
                             })?;
                             frame.transient_cleanup_pending = true;
-                            let caller_frames = exception_caller_frames(runtime, frames)?;
-                            let exception = finish_exception(runtime, pending, caller_frames)?;
-                            return Err(ExecutionError::Exception(exception));
+                            dispatch_pending_exception(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                pending,
+                            )?;
                         }
                         Err(NativeFailure::Execution(error)) => return Err(error),
                     }
@@ -1355,15 +1398,15 @@ fn execute_frame_loop(
                 }
                 if construction && !bytecode_function_is_constructor(runtime, function)? {
                     let pending = PendingException {
+                        realm: operation_realm,
                         payload: PendingExceptionPayload::EngineError {
                             kind: ExceptionKind::TypeError,
                             message: function_not_constructor_message(runtime, function)?,
                         },
                         origin,
                     };
-                    let caller_frames = exception_caller_frames(runtime, frames)?;
-                    let exception = finish_exception(runtime, pending, caller_frames)?;
-                    return Err(ExecutionError::Exception(exception));
+                    dispatch_pending_exception(runtime, frames, active_frame_values, pending)?;
+                    continue;
                 }
                 let plan = plan_frame(
                     runtime,
@@ -1460,18 +1503,14 @@ fn execute_frame_loop(
                         .into());
                     }
                     Err(NativeFailure::Abrupt(pending)) => {
-                        let caller_frames = exception_caller_frames(runtime, frames)?;
-                        let exception = finish_exception(runtime, pending, caller_frames)?;
-                        return Err(ExecutionError::Exception(exception));
+                        dispatch_pending_exception(runtime, frames, active_frame_values, pending)?;
                     }
                     Err(NativeFailure::AbruptAfterTransient(pending)) => {
                         let frame = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
                             message: "transient native throw has no executing frame",
                         })?;
                         frame.transient_cleanup_pending = true;
-                        let caller_frames = exception_caller_frames(runtime, frames)?;
-                        let exception = finish_exception(runtime, pending, caller_frames)?;
-                        return Err(ExecutionError::Exception(exception));
+                        dispatch_pending_exception(runtime, frames, active_frame_values, pending)?;
                     }
                     Err(NativeFailure::Execution(error)) => return Err(error),
                 }
@@ -1482,9 +1521,7 @@ fn execute_frame_loop(
                 // Allocate provenance, then immediately publish the escaping
                 // root; no collection safe point may be inserted between
                 // these operations.
-                let caller_frames = exception_caller_frames(runtime, frames)?;
-                let exception = finish_exception(runtime, pending, caller_frames)?;
-                return Err(ExecutionError::Exception(exception));
+                dispatch_pending_exception(runtime, frames, active_frame_values, pending)?;
             }
             Step::Return(value) => {
                 let mut finished = frames.pop().ok_or(EngineFault::MissingInstruction {
@@ -1494,7 +1531,18 @@ fn execute_frame_loop(
                 *active_frame_values = active_frame_values.saturating_sub(finished.reserved_values);
                 let return_to = finished.return_to;
                 let mut value = if let Some(dynamic) = finished.dynamic_return.take() {
-                    finish_dynamic_function_return(runtime, frames, dynamic, value)?
+                    match finish_dynamic_function_return(runtime, dynamic, value)? {
+                        DynamicFunctionCompletion::Value(value) => value,
+                        DynamicFunctionCompletion::Abrupt(pending) => {
+                            dispatch_pending_exception(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                pending,
+                            )?;
+                            continue;
+                        }
+                    }
                 } else if finished.ordinary_constructor {
                     match value {
                         value @ (StoredValue::Function(_) | StoredValue::Object(_)) => value,
@@ -1573,18 +1621,26 @@ fn execute_frame_loop(
                             .into());
                         }
                         Err(NativeFailure::Abrupt(pending)) => {
-                            let caller_frames = exception_caller_frames(runtime, frames)?;
-                            let exception = finish_exception(runtime, pending, caller_frames)?;
-                            return Err(ExecutionError::Exception(exception));
+                            dispatch_pending_exception(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                pending,
+                            )?;
+                            continue;
                         }
                         Err(NativeFailure::AbruptAfterTransient(pending)) => {
                             let frame = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
                                 message: "transient native throw has no executing frame",
                             })?;
                             frame.transient_cleanup_pending = true;
-                            let caller_frames = exception_caller_frames(runtime, frames)?;
-                            let exception = finish_exception(runtime, pending, caller_frames)?;
-                            return Err(ExecutionError::Exception(exception));
+                            dispatch_pending_exception(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                pending,
+                            )?;
+                            continue;
                         }
                         Err(NativeFailure::Execution(error)) => return Err(error),
                     }
@@ -2059,6 +2115,7 @@ fn dispatch_native_call(
             ));
         };
         return Err(NativeFailure::Abrupt(PendingException {
+            realm: native.realm,
             payload: PendingExceptionPayload::EngineError {
                 kind: ExceptionKind::TypeError,
                 message: function_not_constructor_message(runtime, function)?,
@@ -2084,6 +2141,7 @@ fn dispatch_native_call(
             let origin = origin.unwrap_or_else(native_function_host_origin);
             let StoredValue::Function(function) = inputs.receiver else {
                 return Err(NativeFailure::Abrupt(PendingException {
+                    realm: native.realm,
                     payload: PendingExceptionPayload::EngineError {
                         kind: ExceptionKind::TypeError,
                         message: JsString::from_utf8("not a function")?,
@@ -2166,6 +2224,7 @@ fn dispatch_native_call(
                     ));
                 };
                 Err(NativeFailure::Abrupt(PendingException {
+                    realm: native.realm,
                     payload: PendingExceptionPayload::EngineError {
                         kind: ExceptionKind::TypeError,
                         message: JsString::from_utf8("cannot convert to object")?,
@@ -2189,13 +2248,15 @@ fn dispatch_native_call(
             begin_boolean_constructor_wrapper(runtime, new_target, value, return_to, origin)
         }
         NativeFunctionKind::BooleanPrototypeToString => {
-            let value = boolean_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
+            let value =
+                boolean_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
             Ok(NativeDispatch::Immediate(StoredValue::String(
                 JsString::from_utf8(if value { "true" } else { "false" })?,
             )))
         }
         NativeFunctionKind::BooleanPrototypeValueOf => {
-            let value = boolean_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
+            let value =
+                boolean_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(value)))
         }
         NativeFunctionKind::NumberConstructor => {
@@ -2218,13 +2279,15 @@ fn dispatch_native_call(
                 OperatorPrimitiveTarget::NumberIntrinsic {
                     new_target: inputs.new_target,
                 },
+                native.realm,
                 return_to,
                 origin.unwrap_or_else(native_function_host_origin),
                 execution_budget,
             )
         }
         NativeFunctionKind::NumberPrototypeToString => {
-            let number = number_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
+            let number =
+                number_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
             let mut arguments = inputs.arguments;
             match arguments.take_first() {
                 None | Some(StoredValue::Undefined) => Ok(NativeDispatch::Immediate(
@@ -2235,6 +2298,7 @@ fn dispatch_native_call(
                     radix,
                     OperatorPrimitiveHint::Number,
                     OperatorPrimitiveTarget::NumberToString { number },
+                    native.realm,
                     return_to,
                     origin.unwrap_or_else(native_function_host_origin),
                     execution_budget,
@@ -2242,7 +2306,8 @@ fn dispatch_native_call(
             }
         }
         NativeFunctionKind::NumberPrototypeValueOf => {
-            let value = number_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
+            let value =
+                number_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
             Ok(NativeDispatch::Immediate(StoredValue::Number(value)))
         }
         NativeFunctionKind::StringConstructor => {
@@ -2269,6 +2334,7 @@ fn dispatch_native_call(
                 OperatorPrimitiveTarget::StringIntrinsic {
                     new_target: inputs.new_target,
                 },
+                native.realm,
                 return_to,
                 origin.unwrap_or_else(native_function_host_origin),
                 execution_budget,
@@ -2276,7 +2342,8 @@ fn dispatch_native_call(
         }
         NativeFunctionKind::StringPrototypeToString
         | NativeFunctionKind::StringPrototypeValueOf => {
-            let value = string_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
+            let value =
+                string_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
             Ok(NativeDispatch::Immediate(StoredValue::String(value)))
         }
         NativeFunctionKind::FunctionPrototypeToString => {
@@ -2290,6 +2357,7 @@ fn dispatch_native_call(
                     ));
                 };
                 return Err(NativeFailure::Abrupt(PendingException {
+                    realm: native.realm,
                     payload: PendingExceptionPayload::EngineError {
                         kind: ExceptionKind::TypeError,
                         message: JsString::from_utf8("not a function")?,
@@ -2298,7 +2366,7 @@ fn dispatch_native_call(
                 }));
             };
             Ok(NativeDispatch::Immediate(StoredValue::String(
-                function_to_string(runtime, function, origin.as_ref())?,
+                function_to_string(runtime, function, native.realm, origin.as_ref())?,
             )))
         }
     }
@@ -2322,6 +2390,7 @@ fn begin_function_apply(
 ) -> Result<NativeDispatch, NativeFailure> {
     let StoredValue::Function(target) = inputs.receiver else {
         return Err(function_apply_exception(
+            realm,
             ExceptionKind::TypeError,
             "not a function",
             origin,
@@ -2338,6 +2407,7 @@ fn begin_function_apply(
         StoredValue::Function(_) | StoredValue::Object(_)
     ) {
         return Err(function_apply_exception(
+            realm,
             ExceptionKind::TypeError,
             "not a object",
             origin,
@@ -2434,11 +2504,13 @@ fn begin_function_apply_length_conversion(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let origin = state.origin.clone();
+    let realm = state.realm;
     begin_operator_primitive_conversion(
         runtime,
         value,
         OperatorPrimitiveHint::Number,
         OperatorPrimitiveTarget::FunctionApplyLength(state),
+        realm,
         return_to,
         origin,
         execution_budget,
@@ -2457,7 +2529,7 @@ fn finish_function_apply_length(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let number = operator_to_number(value, &state.origin)?.as_f64();
+    let number = operator_to_number(value, state.realm, &state.origin)?.as_f64();
     let integer = if number.is_nan() || number <= 0.0 {
         0.0
     } else if number.is_infinite() {
@@ -2467,6 +2539,7 @@ fn finish_function_apply_length(
     };
     if integer > f64::from(MAX_FUNCTION_APPLY_ARGUMENTS) {
         return Err(function_apply_exception(
+            state.realm,
             ExceptionKind::RangeError,
             "too many arguments in function call (only 65534 allowed)",
             state.origin,
@@ -2620,11 +2693,13 @@ fn function_apply_target_call(
 }
 
 fn function_apply_exception(
+    realm: RealmId,
     kind: ExceptionKind,
     message: &str,
     origin: JsStackFrame,
 ) -> Result<NativeFailure, JsStringError> {
     Ok(NativeFailure::Abrupt(PendingException {
+        realm,
         payload: PendingExceptionPayload::EngineError {
             kind,
             message: JsString::from_utf8(message)?,
@@ -2645,6 +2720,7 @@ fn symbol_descriptive_string(symbol: &crate::Atom) -> Result<JsString, NativeFai
 
 fn boolean_receiver_value(
     runtime: &Runtime,
+    realm: RealmId,
     receiver: &StoredValue,
     origin: Option<&JsStackFrame>,
 ) -> Result<bool, NativeFailure> {
@@ -2663,6 +2739,7 @@ fn boolean_receiver_value(
     }
     let origin = origin.cloned().unwrap_or_else(native_function_host_origin);
     Err(NativeFailure::Abrupt(PendingException {
+        realm,
         payload: PendingExceptionPayload::EngineError {
             kind: ExceptionKind::TypeError,
             message: JsString::from_utf8("not a boolean")?,
@@ -2673,6 +2750,7 @@ fn boolean_receiver_value(
 
 fn number_receiver_value(
     runtime: &Runtime,
+    realm: RealmId,
     receiver: &StoredValue,
     origin: Option<&JsStackFrame>,
 ) -> Result<JsNumber, NativeFailure> {
@@ -2691,6 +2769,7 @@ fn number_receiver_value(
     }
     let origin = origin.cloned().unwrap_or_else(native_function_host_origin);
     Err(NativeFailure::Abrupt(PendingException {
+        realm,
         payload: PendingExceptionPayload::EngineError {
             kind: ExceptionKind::TypeError,
             message: JsString::from_utf8("not a number")?,
@@ -2701,6 +2780,7 @@ fn number_receiver_value(
 
 fn string_receiver_value(
     runtime: &Runtime,
+    realm: RealmId,
     receiver: &StoredValue,
     origin: Option<&JsStackFrame>,
 ) -> Result<JsString, NativeFailure> {
@@ -2719,6 +2799,7 @@ fn string_receiver_value(
     }
     let origin = origin.cloned().unwrap_or_else(native_function_host_origin);
     Err(NativeFailure::Abrupt(PendingException {
+        realm,
         payload: PendingExceptionPayload::EngineError {
             kind: ExceptionKind::TypeError,
             message: JsString::from_utf8("not a string")?,
@@ -3077,6 +3158,7 @@ fn advance_function_source_conversion(
                     &mut state.stage,
                     property,
                     &value,
+                    state.native.realm,
                     &state.origin,
                 )? {
                     PrimitiveConversionPropertyAction::Continue => {}
@@ -3097,6 +3179,7 @@ fn advance_function_source_conversion(
                 if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) =>
             {
                 return Err(primitive_conversion_type_error(
+                    state.native.realm,
                     &state.origin,
                     "toPrimitive",
                 )?);
@@ -3104,7 +3187,8 @@ fn advance_function_source_conversion(
             PrimitiveConversionStage::AwaitExotic
             | PrimitiveConversionStage::AwaitToString
             | PrimitiveConversionStage::AwaitValueOf => {
-                let converted = dynamic_source_primitive_to_string(value, &state.origin)?;
+                let converted =
+                    dynamic_source_primitive_to_string(value, state.native.realm, &state.origin)?;
                 let argument =
                     state
                         .arguments
@@ -3151,7 +3235,11 @@ fn advance_function_source_conversion(
                 message: "dynamic Function source conversion index escaped its arguments",
             })?;
         if !matches!(current, StoredValue::Function(_) | StoredValue::Object(_)) {
-            let converted = dynamic_source_primitive_to_string(current.duplicate(), &state.origin)?;
+            let converted = dynamic_source_primitive_to_string(
+                current.duplicate(),
+                state.native.realm,
+                &state.origin,
+            )?;
             let current =
                 state
                     .arguments
@@ -3208,6 +3296,7 @@ fn advance_function_source_conversion(
                     &mut state.stage,
                     property,
                     &value,
+                    state.native.realm,
                     &state.origin,
                 )? {
                     PrimitiveConversionPropertyAction::Continue => {}
@@ -3245,6 +3334,7 @@ fn use_primitive_conversion_property(
     stage: &mut PrimitiveConversionStage,
     property: PrimitiveConversionProperty,
     value: &StoredValue,
+    realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<PrimitiveConversionPropertyAction, NativeFailure> {
     match property {
@@ -3272,9 +3362,11 @@ fn use_primitive_conversion_property(
             | StoredValue::Number(_)
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
-            | StoredValue::Object(_) => {
-                Err(primitive_conversion_type_error(origin, "not a function")?)
-            }
+            | StoredValue::Object(_) => Err(primitive_conversion_type_error(
+                realm,
+                origin,
+                "not a function",
+            )?),
         },
         PrimitiveConversionProperty::ToString => match value {
             StoredValue::Function(function) => {
@@ -3309,9 +3401,11 @@ fn use_primitive_conversion_property(
             | StoredValue::Number(_)
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
-            | StoredValue::Object(_) => {
-                Err(primitive_conversion_type_error(origin, "toPrimitive")?)
-            }
+            | StoredValue::Object(_) => Err(primitive_conversion_type_error(
+                realm,
+                origin,
+                "toPrimitive",
+            )?),
         },
     }
 }
@@ -3352,6 +3446,7 @@ fn begin_property_key_conversion(
     runtime: &mut Runtime,
     value: StoredValue,
     target: PropertyKeyTarget,
+    realm: RealmId,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
@@ -3360,6 +3455,7 @@ fn begin_property_key_conversion(
             runtime,
             PropertyKeyContinuation {
                 receiver: value,
+                realm,
                 stage: PrimitiveConversionStage::Start,
                 target,
                 origin,
@@ -3412,6 +3508,7 @@ fn advance_property_key_conversion(
                     &mut state.stage,
                     property,
                     &value,
+                    state.realm,
                     &state.origin,
                 )? {
                     PrimitiveConversionPropertyAction::Continue => {}
@@ -3432,6 +3529,7 @@ fn advance_property_key_conversion(
                 if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) =>
             {
                 return Err(primitive_conversion_type_error(
+                    state.realm,
                     &state.origin,
                     "toPrimitive",
                 )?);
@@ -3503,6 +3601,7 @@ fn advance_property_key_conversion(
                     &mut state.stage,
                     property,
                     &value,
+                    state.realm,
                     &state.origin,
                 )? {
                     PrimitiveConversionPropertyAction::Continue => {}
@@ -3544,11 +3643,16 @@ fn property_key_method_call(
     }))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the resumable conversion owns distinct verified call, realm, source, and fuel capabilities"
+)]
 fn begin_operator_primitive_conversion(
     runtime: &mut Runtime,
     value: StoredValue,
     hint: OperatorPrimitiveHint,
     target: OperatorPrimitiveTarget,
+    realm: RealmId,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
@@ -3558,6 +3662,7 @@ fn begin_operator_primitive_conversion(
             runtime,
             OperatorPrimitiveContinuation {
                 receiver: value,
+                realm,
                 hint,
                 stage: OperatorPrimitiveStage::Start,
                 target,
@@ -3568,7 +3673,15 @@ fn begin_operator_primitive_conversion(
             execution_budget,
         );
     }
-    finish_operator_primitive_target(runtime, value, target, return_to, &origin, execution_budget)
+    finish_operator_primitive_target(
+        runtime,
+        value,
+        target,
+        realm,
+        return_to,
+        &origin,
+        execution_budget,
+    )
 }
 
 #[allow(
@@ -3620,6 +3733,7 @@ fn advance_operator_primitive_conversion(
             {
                 if matches!(state.hint, OperatorPrimitiveHint::String) {
                     return Err(primitive_conversion_type_error(
+                        state.realm,
                         &state.origin,
                         "toPrimitive",
                     )?);
@@ -3633,6 +3747,7 @@ fn advance_operator_primitive_conversion(
                     state.stage = OperatorPrimitiveStage::ValueOf;
                 } else {
                     return Err(primitive_conversion_type_error(
+                        state.realm,
                         &state.origin,
                         "toPrimitive",
                     )?);
@@ -3642,6 +3757,7 @@ fn advance_operator_primitive_conversion(
                 if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) =>
             {
                 return Err(primitive_conversion_type_error(
+                    state.realm,
                     &state.origin,
                     "toPrimitive",
                 )?);
@@ -3653,6 +3769,7 @@ fn advance_operator_primitive_conversion(
                     runtime,
                     value,
                     state.target,
+                    state.realm,
                     return_to,
                     &state.origin,
                     execution_budget,
@@ -3748,6 +3865,7 @@ fn use_operator_primitive_property(
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
             | StoredValue::Object(_) => Err(primitive_conversion_type_error(
+                state.realm,
                 &state.origin,
                 "not a function",
             )?),
@@ -3766,6 +3884,7 @@ fn use_operator_primitive_property(
             | StoredValue::Object(_) => {
                 if matches!(state.hint, OperatorPrimitiveHint::String) {
                     return Err(primitive_conversion_type_error(
+                        state.realm,
                         &state.origin,
                         "toPrimitive",
                     )?);
@@ -3791,6 +3910,7 @@ fn use_operator_primitive_property(
                     Ok(None)
                 } else {
                     Err(primitive_conversion_type_error(
+                        state.realm,
                         &state.origin,
                         "toPrimitive",
                     )?)
@@ -3830,19 +3950,22 @@ fn finish_operator_primitive_target(
     runtime: &mut Runtime,
     value: StoredValue,
     target: OperatorPrimitiveTarget,
+    realm: RealmId,
     return_to: Option<CallReturn>,
     origin: &JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match target {
-        OperatorPrimitiveTarget::Unary { opcode } => apply_unary_operator(opcode, value, origin),
+        OperatorPrimitiveTarget::Unary { opcode } => {
+            apply_unary_operator(opcode, value, realm, origin)
+        }
         OperatorPrimitiveTarget::BinaryRight {
             opcode,
             right,
             hint,
         } => {
             let left = if binary_operator_converts_left_to_number_first(opcode) {
-                StoredValue::Number(operator_to_number(value, origin)?)
+                StoredValue::Number(operator_to_number(value, realm, origin)?)
             } else {
                 value
             };
@@ -3851,25 +3974,27 @@ fn finish_operator_primitive_target(
                 right,
                 hint,
                 OperatorPrimitiveTarget::BinaryFinish { opcode, left },
+                realm,
                 return_to,
                 origin.clone(),
                 execution_budget,
             )
         }
         OperatorPrimitiveTarget::BinaryFinish { opcode, left } => {
-            apply_binary_operator(opcode, left, value, origin)
+            apply_binary_operator(opcode, left, value, realm, origin)
         }
         OperatorPrimitiveTarget::EqualityFinish { opcode, other } => begin_abstract_equality(
             runtime,
             value,
             other,
             opcode,
+            realm,
             return_to,
             origin.clone(),
             execution_budget,
         ),
         OperatorPrimitiveTarget::NumberIntrinsic { new_target } => {
-            let value = operator_to_number(value, origin)?;
+            let value = operator_to_number(value, realm, origin)?;
             new_target.map_or_else(
                 || Ok(NativeDispatch::Immediate(StoredValue::Number(value))),
                 |new_target| {
@@ -3884,11 +4009,11 @@ fn finish_operator_primitive_target(
             )
         }
         OperatorPrimitiveTarget::NumberToString { number } => {
-            let radix = operator_to_number(value, origin)?;
-            finish_number_to_string_radix(number, radix, origin)
+            let radix = operator_to_number(value, realm, origin)?;
+            finish_number_to_string_radix(number, radix, realm, origin)
         }
         OperatorPrimitiveTarget::StringIntrinsic { new_target } => {
-            let value = operator_primitive_to_string(value, origin)?;
+            let value = operator_primitive_to_string(value, realm, origin)?;
             if let Some(new_target) = new_target {
                 begin_string_constructor_wrapper(
                     runtime,
@@ -3910,6 +4035,7 @@ fn finish_operator_primitive_target(
 fn finish_number_to_string_radix(
     number: JsNumber,
     radix: JsNumber,
+    realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
     let radix = saturated_i32_from_number(radix);
@@ -3918,6 +4044,7 @@ fn finish_number_to_string_radix(
         .filter(|radix| (2..=36).contains(radix))
     else {
         return Err(NativeFailure::Abrupt(PendingException {
+            realm,
             payload: PendingExceptionPayload::EngineError {
                 kind: ExceptionKind::RangeError,
                 message: JsString::from_utf8("radix must be between 2 and 36")?,
@@ -3958,9 +4085,10 @@ const fn binary_operator_converts_left_to_number_first(opcode: FinalOpcode) -> b
 fn apply_unary_operator(
     opcode: FinalOpcode,
     value: StoredValue,
+    realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let number = operator_to_number(value, origin)?;
+    let number = operator_to_number(value, realm, origin)?;
     let dispatch = match opcode {
         FinalOpcode::Plus => NativeDispatch::Immediate(StoredValue::Number(number)),
         FinalOpcode::Neg => {
@@ -3997,23 +4125,24 @@ fn apply_binary_operator(
     opcode: FinalOpcode,
     left: StoredValue,
     right: StoredValue,
+    realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
     match opcode {
-        FinalOpcode::Add => apply_addition(left, right, origin),
+        FinalOpcode::Add => apply_addition(left, right, realm, origin),
         FinalOpcode::Mul
         | FinalOpcode::Div
         | FinalOpcode::Mod
         | FinalOpcode::Sub
-        | FinalOpcode::Pow => apply_numeric_arithmetic(opcode, left, right, origin),
+        | FinalOpcode::Pow => apply_numeric_arithmetic(opcode, left, right, realm, origin),
         FinalOpcode::Shl
         | FinalOpcode::Sar
         | FinalOpcode::Shr
         | FinalOpcode::And
         | FinalOpcode::Xor
-        | FinalOpcode::Or => apply_numeric_bitwise(opcode, left, right, origin),
+        | FinalOpcode::Or => apply_numeric_bitwise(opcode, left, right, realm, origin),
         FinalOpcode::Lt | FinalOpcode::Lte | FinalOpcode::Gt | FinalOpcode::Gte => {
-            apply_relational(opcode, left, right, origin)
+            apply_relational(opcode, left, right, realm, origin)
         }
         _ => Err(EngineFault::RuntimeInvariant {
             message: "unsupported opcode reached binary dynamic-operator execution",
@@ -4025,15 +4154,17 @@ fn apply_binary_operator(
 fn apply_addition(
     left: StoredValue,
     right: StoredValue,
+    realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
     if matches!(left, StoredValue::String(_)) || matches!(right, StoredValue::String(_)) {
-        let left = operator_primitive_to_string(left, origin)?;
-        let right = operator_primitive_to_string(right, origin)?;
+        let left = operator_primitive_to_string(left, realm, origin)?;
+        let right = operator_primitive_to_string(right, realm, origin)?;
         let value = match left.concat(&right) {
             Ok(value) => value,
             Err(JsStringError::TooLong { .. }) => {
                 return Err(NativeFailure::Abrupt(PendingException {
+                    realm,
                     payload: PendingExceptionPayload::EngineError {
                         kind: ExceptionKind::InternalError,
                         message: JsString::from_utf8("string too long")?,
@@ -4045,8 +4176,8 @@ fn apply_addition(
         };
         return Ok(NativeDispatch::Immediate(StoredValue::String(value)));
     }
-    let left = operator_to_number(left, origin)?;
-    let right = operator_to_number(right, origin)?;
+    let left = operator_to_number(left, realm, origin)?;
+    let right = operator_to_number(right, realm, origin)?;
     Ok(NativeDispatch::Immediate(StoredValue::Number(
         left.add_numeric(right),
     )))
@@ -4056,10 +4187,11 @@ fn apply_numeric_arithmetic(
     opcode: FinalOpcode,
     left: StoredValue,
     right: StoredValue,
+    realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let left = operator_to_number(left, origin)?.as_f64();
-    let right = operator_to_number(right, origin)?.as_f64();
+    let left = operator_to_number(left, realm, origin)?.as_f64();
+    let right = operator_to_number(right, realm, origin)?.as_f64();
     let result = match opcode {
         FinalOpcode::Mul => left * right,
         FinalOpcode::Div => left / right,
@@ -4085,10 +4217,11 @@ fn apply_numeric_bitwise(
     opcode: FinalOpcode,
     left: StoredValue,
     right: StoredValue,
+    realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let left = operator_to_number(left, origin)?;
-    let right = operator_to_number(right, origin)?;
+    let left = operator_to_number(left, realm, origin)?;
+    let right = operator_to_number(right, realm, origin)?;
     let shift = number_to_uint32(right) & 0x1f;
     let result = match opcode {
         FinalOpcode::Shl => StoredValue::Number(JsNumber::from_i32(
@@ -4121,6 +4254,7 @@ fn apply_relational(
     opcode: FinalOpcode,
     left: StoredValue,
     right: StoredValue,
+    realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
     let result = match (left, right) {
@@ -4137,8 +4271,8 @@ fn apply_relational(
             }
         },
         (left, right) => {
-            let left = operator_to_number(left, origin)?.as_f64();
-            let right = operator_to_number(right, origin)?.as_f64();
+            let left = operator_to_number(left, realm, origin)?.as_f64();
+            let right = operator_to_number(right, realm, origin)?.as_f64();
             match opcode {
                 FinalOpcode::Lt => left < right,
                 FinalOpcode::Lte => left <= right,
@@ -4156,11 +4290,16 @@ fn apply_relational(
     Ok(NativeDispatch::Immediate(StoredValue::Boolean(result)))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the resumable equality operation owns distinct verified call, realm, source, and fuel capabilities"
+)]
 fn begin_abstract_equality(
     runtime: &mut Runtime,
     mut left: StoredValue,
     mut right: StoredValue,
     opcode: FinalOpcode,
+    realm: RealmId,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
@@ -4192,11 +4331,11 @@ fn begin_abstract_equality(
 
         match (&left, &right) {
             (StoredValue::String(_), StoredValue::Number(_)) => {
-                left = StoredValue::Number(operator_to_number(left, &origin)?);
+                left = StoredValue::Number(operator_to_number(left, realm, &origin)?);
                 continue;
             }
             (StoredValue::Number(_), StoredValue::String(_)) => {
-                right = StoredValue::Number(operator_to_number(right, &origin)?);
+                right = StoredValue::Number(operator_to_number(right, realm, &origin)?);
                 continue;
             }
             (StoredValue::Boolean(value), _) => {
@@ -4219,6 +4358,7 @@ fn begin_abstract_equality(
                     opcode,
                     other: right,
                 },
+                realm,
                 return_to,
                 origin,
                 execution_budget,
@@ -4233,6 +4373,7 @@ fn begin_abstract_equality(
                     opcode,
                     other: left,
                 },
+                realm,
                 return_to,
                 origin,
                 execution_budget,
@@ -4256,6 +4397,7 @@ const fn is_equality_conversion_primitive(value: &StoredValue) -> bool {
 
 fn operator_to_number(
     value: StoredValue,
+    realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<JsNumber, NativeFailure> {
     match value {
@@ -4265,6 +4407,7 @@ fn operator_to_number(
         StoredValue::Number(value) => Ok(value),
         StoredValue::String(value) => Ok(string_to_number(&value)?),
         StoredValue::Symbol(_) => Err(primitive_conversion_type_error(
+            realm,
             origin,
             "cannot convert symbol to number",
         )?),
@@ -4277,6 +4420,7 @@ fn operator_to_number(
 
 fn operator_primitive_to_string(
     value: StoredValue,
+    realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<JsString, NativeFailure> {
     match value {
@@ -4287,6 +4431,7 @@ fn operator_primitive_to_string(
         StoredValue::Number(value) => Ok(value.to_javascript_string()?),
         StoredValue::String(value) => Ok(value),
         StoredValue::Symbol(_) => Err(primitive_conversion_type_error(
+            realm,
             origin,
             "cannot convert symbol to string",
         )?),
@@ -4328,7 +4473,7 @@ fn finish_property_key_target(
                     }))
                 }
                 PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
-                    property_exception_at(origin.clone(), Some(&property.name), failure)?,
+                    property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
                 )),
             }
         }
@@ -4362,7 +4507,7 @@ fn finish_property_key_target(
                 }))
             }
             PropertyWriteOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
-                property_exception_at(origin.clone(), Some(&property.name), failure)?,
+                property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
             )),
         },
         PropertyKeyTarget::DefineMethod {
@@ -4370,9 +4515,11 @@ fn finish_property_key_target(
             function,
             kind,
             enumerable,
+            realm,
         } => {
             let StoredValue::Function(function) = function else {
                 return Err(NativeFailure::Abrupt(PendingException {
+                    realm,
                     payload: PendingExceptionPayload::EngineError {
                         kind: ExceptionKind::TypeError,
                         message: JsString::from_utf8("not a function")?,
@@ -4394,7 +4541,7 @@ fn finish_property_key_target(
                     Ok(NativeDispatch::Immediate(StoredValue::Undefined))
                 }
                 PropertyDefinitionOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
-                    property_exception_at(origin.clone(), Some(&property.name), failure)?,
+                    property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
                 )),
             }
         }
@@ -4467,10 +4614,12 @@ fn computed_method_name(value: &StoredValue) -> Result<JsString, NativeFailure> 
 }
 
 fn primitive_conversion_type_error(
+    realm: RealmId,
     origin: &JsStackFrame,
     message: &str,
 ) -> Result<NativeFailure, JsStringError> {
     Ok(NativeFailure::Abrupt(PendingException {
+        realm,
         payload: PendingExceptionPayload::EngineError {
             kind: ExceptionKind::TypeError,
             message: JsString::from_utf8(message)?,
@@ -4535,6 +4684,7 @@ fn finish_ordinary_function_constructor(
         Ok(authority) => authority,
         Err(DynamicFunctionCompileFailure::Syntax { message }) => {
             return Err(NativeFailure::Abrupt(PendingException {
+                realm: native.realm,
                 payload: PendingExceptionPayload::EngineError {
                     kind: ExceptionKind::SyntaxError,
                     message,
@@ -4567,6 +4717,7 @@ fn finish_ordinary_function_constructor(
                 global_declaration_error(&exception_authority, &name, function, pc, source_span)
                     .map_err(NativeFailure::Execution)?;
             return Err(NativeFailure::Abrupt(PendingException {
+                realm: native.realm,
                 payload: PendingExceptionPayload::EngineError {
                     kind: ExceptionKind::TypeError,
                     message,
@@ -4620,6 +4771,7 @@ fn finish_ordinary_function_constructor(
     frame.reserved_values = frame.reserved_values.saturating_add(dynamic_return_values);
     frame.dynamic_return = Some(DynamicFunctionReturn {
         root: installed,
+        realm: native.realm,
         construction,
         origin: Some(origin),
     });
@@ -4673,6 +4825,17 @@ fn begin_object_prototype_to_string(
                 ObjectPrototypeTag::Number
             } else if runtime.boxed_string(*object)?.is_some() {
                 ObjectPrototypeTag::String
+            } else if runtime
+                .objects
+                .get(*object)
+                .ok_or(EngineFault::StaleHeapEdge {
+                    edge: "object",
+                    index: object.index(),
+                    generation: object.generation(),
+                })?
+                .is_error()
+            {
+                ObjectPrototypeTag::Error
             } else {
                 ObjectPrototypeTag::Object
             },
@@ -4901,6 +5064,7 @@ fn format_object_prototype_to_string(tag: &JsString) -> Result<NativeDispatch, N
 fn function_to_string(
     runtime: &Runtime,
     function: FunctionId,
+    realm: RealmId,
     origin: Option<&JsStackFrame>,
 ) -> Result<JsString, NativeFailure> {
     let node = runtime
@@ -4926,6 +5090,7 @@ fn function_to_string(
     let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
     let name = native_function_name_to_string(
         read_heap_property(runtime, HeapReference::Function(function), &name_key)?,
+        realm,
         origin,
     )?;
     Ok(JsString::from_utf8("function ")?
@@ -4935,6 +5100,7 @@ fn function_to_string(
 
 fn native_function_name_to_string(
     value: StoredValue,
+    realm: RealmId,
     origin: Option<&JsStackFrame>,
 ) -> Result<JsString, NativeFailure> {
     match value {
@@ -4954,6 +5120,7 @@ fn native_function_name_to_string(
                 ));
             };
             Err(NativeFailure::Abrupt(PendingException {
+                realm,
                 payload: PendingExceptionPayload::EngineError {
                     kind: ExceptionKind::TypeError,
                     message: JsString::from_utf8("cannot convert symbol to string")?,
@@ -5003,6 +5170,7 @@ fn dynamic_function_source_code_units(source: &OrdinaryDynamicFunctionSource) ->
 
 fn dynamic_source_primitive_to_string(
     value: StoredValue,
+    realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<JsString, NativeFailure> {
     match value {
@@ -5013,6 +5181,7 @@ fn dynamic_source_primitive_to_string(
         StoredValue::Number(value) => Ok(value.to_javascript_string()?),
         StoredValue::String(value) => Ok(value),
         StoredValue::Symbol(_) => Err(NativeFailure::Abrupt(PendingException {
+            realm,
             payload: PendingExceptionPayload::EngineError {
                 kind: ExceptionKind::TypeError,
                 message: JsString::from_utf8("cannot convert symbol to string")?,
@@ -5028,10 +5197,9 @@ fn dynamic_source_primitive_to_string(
 
 fn finish_dynamic_function_return(
     runtime: &mut Runtime,
-    caller_frames: &[Frame],
     dynamic: DynamicFunctionReturn,
     value: StoredValue,
-) -> Result<StoredValue, ExecutionError> {
+) -> Result<DynamicFunctionCompletion, ExecutionError> {
     let completion = if let Some(new_target) = dynamic.construction {
         apply_dynamic_constructor_prototype(runtime, new_target, value)
     } else {
@@ -5040,7 +5208,7 @@ fn finish_dynamic_function_return(
     let retirement = runtime.retire_dynamic_root(dynamic.root);
     retirement?;
     match completion {
-        Ok(value) => Ok(value),
+        Ok(value) => Ok(DynamicFunctionCompletion::Value(value)),
         Err(ConstructorCompletionError::Execution(error)) => Err(error),
         Err(ConstructorCompletionError::TypeError(message)) => {
             let Some(origin) = dynamic.origin else {
@@ -5049,18 +5217,21 @@ fn finish_dynamic_function_return(
                 }
                 .into());
             };
-            let callers = exception_caller_frames(runtime, caller_frames)?;
-            let pending = PendingException {
+            Ok(DynamicFunctionCompletion::Abrupt(PendingException {
+                realm: dynamic.realm,
                 payload: PendingExceptionPayload::EngineError {
                     kind: ExceptionKind::TypeError,
                     message,
                 },
                 origin,
-            };
-            let exception = finish_exception(runtime, pending, callers)?;
-            Err(ExecutionError::Exception(exception))
+            }))
         }
     }
+}
+
+enum DynamicFunctionCompletion {
+    Value(StoredValue),
+    Abrupt(PendingException),
 }
 
 enum ConstructorCompletionError {
@@ -5211,7 +5382,7 @@ fn push_call_result(
             }
             .into());
         }
-        parent.stack.push(value);
+        push(parent, value);
     }
     parent.instruction = return_to.instruction;
     Ok(())
@@ -5235,8 +5406,8 @@ fn push_operator_pair(
         }
         .into());
     }
-    parent.stack.push(original);
-    parent.stack.push(updated);
+    push(parent, original);
+    push(parent, updated);
     parent.instruction = return_to.instruction;
     Ok(())
 }
@@ -5603,7 +5774,7 @@ fn execute_one(
             let Operands::I32(value) = operands else {
                 return unsupported_dispatch(opcode);
             };
-            frame.stack.push(StoredValue::Number(value.into()));
+            push(frame, StoredValue::Number(value.into()));
         }
         FinalOpcode::PushMinus1
         | FinalOpcode::Push0
@@ -5616,35 +5787,29 @@ fn execute_one(
         | FinalOpcode::Push7 => {
             let value =
                 implied_integer(opcode).ok_or(EngineFault::UnsupportedDispatch { opcode })?;
-            frame.stack.push(StoredValue::Number(value.into()));
+            push(frame, StoredValue::Number(value.into()));
         }
         FinalOpcode::PushI8 => {
             let Operands::I8(value) = operands else {
                 return unsupported_dispatch(opcode);
             };
-            frame
-                .stack
-                .push(StoredValue::Number(i32::from(value).into()));
+            push(frame, StoredValue::Number(i32::from(value).into()));
         }
         FinalOpcode::PushI16 => {
             let Operands::I16(value) = operands else {
                 return unsupported_dispatch(opcode);
             };
-            frame
-                .stack
-                .push(StoredValue::Number(i32::from(value).into()));
+            push(frame, StoredValue::Number(i32::from(value).into()));
         }
         FinalOpcode::PushConst | FinalOpcode::PushConst8 => {
             let index = constant_index(operands).ok_or(EngineFault::MissingPoolEntry {
                 pool: "constant",
                 index: u32::MAX,
             })?;
-            frame.stack.push(materialize_constant(
-                runtime,
-                frame.code,
-                frame.template,
-                index,
-            )?);
+            push(
+                frame,
+                materialize_constant(runtime, frame.code, frame.template, index)?,
+            );
         }
         FinalOpcode::PushAtomValue => {
             let Operands::Atom(index) = operands else {
@@ -5662,74 +5827,79 @@ fn execute_one(
                         index: index.get(),
                     })?
             };
-            frame.stack.push(StoredValue::String(string));
+            push(frame, StoredValue::String(string));
         }
         FinalOpcode::PushEmptyString => {
-            frame.stack.push(StoredValue::String(JsString::empty()));
+            push(frame, StoredValue::String(JsString::empty()));
         }
-        FinalOpcode::Undefined => frame.stack.push(StoredValue::Undefined),
-        FinalOpcode::Null => frame.stack.push(StoredValue::Null),
+        FinalOpcode::Undefined => push(frame, StoredValue::Undefined),
+        FinalOpcode::Null => push(frame, StoredValue::Null),
         FinalOpcode::PushThis => {
-            frame.stack.push(frame.receiver.duplicate());
+            push(frame, frame.receiver.duplicate());
         }
-        FinalOpcode::PushFalse => frame.stack.push(StoredValue::Boolean(false)),
-        FinalOpcode::PushTrue => frame.stack.push(StoredValue::Boolean(true)),
+        FinalOpcode::PushFalse => push(frame, StoredValue::Boolean(false)),
+        FinalOpcode::PushTrue => push(frame, StoredValue::Boolean(true)),
         FinalOpcode::Object => {
             let realm = code(runtime, frame.code)?.realm;
             let prototype = runtime.realm_object_prototype(realm)?;
             let object = runtime.allocate_ordinary_object(prototype)?;
-            frame.stack.push(StoredValue::Object(object));
+            push(frame, StoredValue::Object(object));
+        }
+        FinalOpcode::Catch => {
+            let handler = branch_successor(verified_instruction, true, frame)?;
+            frame.stack.push(OperandStackEntry::Catch { handler });
         }
         FinalOpcode::Drop => {
-            pop(frame)?;
+            drop_stack_entry(frame)?;
         }
         FinalOpcode::Nip => {
             let top = pop(frame)?;
-            pop(frame)?;
-            frame.stack.push(top);
+            drop_stack_entry(frame)?;
+            push(frame, top);
+        }
+        FinalOpcode::NipCatch => {
+            let top = pop(frame)?;
+            if !matches!(frame.stack.pop(), Some(OperandStackEntry::Catch { .. })) {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified nip_catch operand is not a catch marker",
+                }
+                .into());
+            }
+            push(frame, top);
         }
         FinalOpcode::Dup => {
-            let value = frame
-                .stack
-                .last()
-                .ok_or(EngineFault::StackDepthMismatch {
-                    function: frame.template,
-                    pc: source_pc,
-                    expected: 1,
-                    actual: 0,
-                })?
-                .duplicate();
-            frame.stack.push(value);
+            let value = peek(frame)?.duplicate();
+            push(frame, value);
         }
         FinalOpcode::Insert2 => {
             let right = pop(frame)?;
             let left = pop(frame)?;
-            frame.stack.push(right.duplicate());
-            frame.stack.push(left);
-            frame.stack.push(right);
+            push(frame, right.duplicate());
+            push(frame, left);
+            push(frame, right);
         }
         FinalOpcode::Insert3 => {
             let third = pop(frame)?;
             let second = pop(frame)?;
             let first = pop(frame)?;
-            frame.stack.push(third.duplicate());
-            frame.stack.push(first);
-            frame.stack.push(second);
-            frame.stack.push(third);
+            push(frame, third.duplicate());
+            push(frame, first);
+            push(frame, second);
+            push(frame, third);
         }
         FinalOpcode::Swap => {
             let right = pop(frame)?;
             let left = pop(frame)?;
-            frame.stack.push(right);
-            frame.stack.push(left);
+            push(frame, right);
+            push(frame, left);
         }
         FinalOpcode::Rot3l => {
             let third = pop(frame)?;
             let second = pop(frame)?;
             let first = pop(frame)?;
-            frame.stack.push(second);
-            frame.stack.push(third);
-            frame.stack.push(first);
+            push(frame, second);
+            push(frame, third);
+            push(frame, first);
         }
         FinalOpcode::Call
         | FinalOpcode::Call0
@@ -5748,7 +5918,7 @@ fn execute_one(
                 .into());
             }
             let callee_index = frame.stack.len() - required;
-            let StoredValue::Function(function) = &frame.stack[callee_index] else {
+            let StoredValue::Function(function) = stack_value_at(frame, callee_index)? else {
                 return Ok(Step::Abrupt(not_callable_exception(
                     runtime, frame, source_pc,
                 )?));
@@ -5786,7 +5956,7 @@ fn execute_one(
                 .into());
             }
             let callee_index = frame.stack.len() - argument_count - 1;
-            let StoredValue::Function(function) = &frame.stack[callee_index] else {
+            let StoredValue::Function(function) = stack_value_at(frame, callee_index)? else {
                 return Ok(Step::Abrupt(not_callable_exception(
                     runtime, frame, source_pc,
                 )?));
@@ -5825,9 +5995,10 @@ fn execute_one(
             }
             let callee_index = frame.stack.len() - required;
             let new_target_index = callee_index + 1;
-            let (StoredValue::Function(function), StoredValue::Function(_new_target)) =
-                (&frame.stack[callee_index], &frame.stack[new_target_index])
-            else {
+            let (StoredValue::Function(function), StoredValue::Function(_new_target)) = (
+                stack_value_at(frame, callee_index)?,
+                stack_value_at(frame, new_target_index)?,
+            ) else {
                 return Ok(Step::Abrupt(not_constructor_exception(
                     runtime, frame, source_pc,
                 )?));
@@ -5856,7 +6027,7 @@ fn execute_one(
             })?;
             let child = function_constant(runtime, frame.code, frame.template, index)?;
             let function = create_closure(runtime, frame, child)?;
-            frame.stack.push(StoredValue::Function(function));
+            push(frame, StoredValue::Function(function));
         }
         FinalOpcode::GetArrayEl | FinalOpcode::GetArrayEl2 => {
             let realm = code(runtime, frame.code)?.realm;
@@ -5878,7 +6049,9 @@ fn execute_one(
                 | StoredValue::Object(_) => None,
             };
             if let Some(failure) = nullish_failure {
-                return Ok(Step::Abrupt(property_exception_at(origin, None, failure)?));
+                return Ok(Step::Abrupt(property_exception_at(
+                    realm, origin, None, failure,
+                )?));
             }
             let return_to =
                 CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
@@ -5892,6 +6065,7 @@ fn execute_one(
                     runtime,
                     key,
                     PropertyKeyTarget::Read { base, realm },
+                    realm,
                     Some(return_to),
                     origin,
                 ),
@@ -5921,6 +6095,7 @@ fn execute_one(
                         strict: frame.strict,
                         realm,
                     },
+                    realm,
                     Some(return_to),
                     origin,
                 ),
@@ -5928,6 +6103,7 @@ fn execute_one(
             );
         }
         FinalOpcode::ToPropKey => {
+            let realm = code(runtime, frame.code)?.realm;
             let value = pop(frame)?;
             let return_to =
                 CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
@@ -5942,6 +6118,7 @@ fn execute_one(
                     runtime,
                     value,
                     PropertyKeyTarget::ToKey,
+                    realm,
                     Some(return_to),
                     origin,
                 ),
@@ -5949,6 +6126,7 @@ fn execute_one(
             );
         }
         FinalOpcode::DefineArrayEl => {
+            let realm = code(runtime, frame.code)?.realm;
             let value = pop(frame)?;
             let key_value = pop(frame)?;
             let base = peek(frame)?.duplicate();
@@ -5957,14 +6135,16 @@ fn execute_one(
                 define_static_property(runtime, &base, property.key, value)?
             {
                 return Ok(Step::Abrupt(property_exception_at(
+                    realm,
                     instruction_location(runtime, frame, source_pc)?,
                     Some(&property.name),
                     failure,
                 )?));
             }
-            frame.stack.push(key_value);
+            push(frame, key_value);
         }
         FinalOpcode::DefineMethodComputed => {
+            let realm = code(runtime, frame.code)?.realm;
             let method = define_method_computed_operand(operands)?;
             let function = pop(frame)?;
             let key = pop(frame)?;
@@ -5986,7 +6166,9 @@ fn execute_one(
                         function,
                         kind: method.kind,
                         enumerable: method.enumerable,
+                        realm,
                     },
+                    realm,
                     Some(return_to),
                     origin,
                 ),
@@ -6002,7 +6184,7 @@ fn execute_one(
                 peek(frame)?.duplicate()
             };
             match read_static_property(runtime, realm, &base, &property.key)? {
-                PropertyReadOutcome::Value(value) => frame.stack.push(value),
+                PropertyReadOutcome::Value(value) => push(frame, value),
                 PropertyReadOutcome::Getter { function, receiver } => {
                     let return_to =
                         CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
@@ -6136,7 +6318,7 @@ fn execute_one(
         | FinalOpcode::GetArg3 => {
             let index = argument_index(opcode, operands)?;
             let value = duplicate_binding(runtime, frame_argument(frame, index)?, false, frame)?;
-            frame.stack.push(value);
+            push(frame, value);
         }
         FinalOpcode::PutArg
         | FinalOpcode::PutArg0
@@ -6160,9 +6342,9 @@ fn execute_one(
             let index = closure_index(opcode, operands)?;
             let global = global_reference_operand(runtime, frame, index)?;
             match read_realm_global(runtime, &global)? {
-                RealmGlobalReadOutcome::Value(value) => frame.stack.push(value),
+                RealmGlobalReadOutcome::Value(value) => push(frame, value),
                 RealmGlobalReadOutcome::Missing if opcode == FinalOpcode::GetVarUndef => {
-                    frame.stack.push(StoredValue::Undefined);
+                    push(frame, StoredValue::Undefined);
                 }
                 RealmGlobalReadOutcome::Missing => {
                     return Ok(Step::Abrupt(global_not_defined_exception(
@@ -6201,7 +6383,7 @@ fn execute_one(
         | FinalOpcode::GetLoc3 => {
             let index = local_index(opcode, operands)?;
             let value = duplicate_binding(runtime, frame_local(frame, index)?, false, frame)?;
-            frame.stack.push(value);
+            push(frame, value);
         }
         FinalOpcode::PutLoc
         | FinalOpcode::PutLoc8
@@ -6229,9 +6411,8 @@ fn execute_one(
         | FinalOpcode::GetVarRef2
         | FinalOpcode::GetVarRef3 => {
             let index = closure_index(opcode, operands)?;
-            frame
-                .stack
-                .push(duplicate_environment(runtime, frame, index, false)?);
+            let value = duplicate_environment(runtime, frame, index, false)?;
+            push(frame, value);
         }
         FinalOpcode::PutVarRef
         | FinalOpcode::PutVarRef0
@@ -6269,7 +6450,7 @@ fn execute_one(
                 }
                 Err(BindingAccessError::Fault(fault)) => return Err(fault.into()),
             };
-            frame.stack.push(value);
+            push(frame, value);
         }
         FinalOpcode::PutLocCheck => {
             let index = local_index(opcode, operands)?;
@@ -6311,7 +6492,7 @@ fn execute_one(
                 }
                 Err(BindingAccessError::Fault(fault)) => return Err(fault.into()),
             };
-            frame.stack.push(value);
+            push(frame, value);
         }
         FinalOpcode::PutVarRefCheck => {
             let index = closure_index(opcode, operands)?;
@@ -6337,22 +6518,27 @@ fn execute_one(
             let realm = code(runtime, frame.code)?.realm;
             let (iterator, actual_work) = runtime.allocate_for_in_iterator(realm, value)?;
             debug_assert!(actual_work <= work);
-            frame.stack.push(StoredValue::Object(iterator));
+            push(frame, StoredValue::Object(iterator));
         }
         FinalOpcode::ForInNext => {
             let iterator = match frame.stack.last() {
-                Some(StoredValue::Object(object)) if runtime.is_for_in_iterator(*object)? => {
+                Some(OperandStackEntry::JavaScript(StoredValue::Object(object)))
+                    if runtime.is_for_in_iterator(*object)? =>
+                {
                     *object
                 }
                 Some(
-                    StoredValue::Undefined
-                    | StoredValue::Null
-                    | StoredValue::Boolean(_)
-                    | StoredValue::Number(_)
-                    | StoredValue::String(_)
-                    | StoredValue::Symbol(_)
-                    | StoredValue::Function(_)
-                    | StoredValue::Object(_),
+                    OperandStackEntry::JavaScript(
+                        StoredValue::Undefined
+                        | StoredValue::Null
+                        | StoredValue::Boolean(_)
+                        | StoredValue::Number(_)
+                        | StoredValue::String(_)
+                        | StoredValue::Symbol(_)
+                        | StoredValue::Function(_)
+                        | StoredValue::Object(_),
+                    )
+                    | OperandStackEntry::Catch { .. },
                 ) => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "verified for_in_next cursor is not a for-in iterator",
@@ -6377,13 +6563,13 @@ fn execute_one(
                 match advance {
                     ForInAdvance::Continue { .. } => {}
                     ForInAdvance::Yield { key, .. } => {
-                        frame.stack.push(for_in_key_value(&key)?);
-                        frame.stack.push(StoredValue::Boolean(false));
+                        push(frame, for_in_key_value(&key)?);
+                        push(frame, StoredValue::Boolean(false));
                         break;
                     }
                     ForInAdvance::Done { .. } => {
-                        frame.stack.push(StoredValue::Undefined);
-                        frame.stack.push(StoredValue::Boolean(true));
+                        push(frame, StoredValue::Undefined);
+                        push(frame, StoredValue::Boolean(true));
                         break;
                     }
                 }
@@ -6417,6 +6603,7 @@ fn execute_one(
         | FinalOpcode::PostDec
         | FinalOpcode::PostInc
         | FinalOpcode::Not => {
+            let realm = code(runtime, frame.code)?.realm;
             let value = pop(frame)?;
             let return_to =
                 CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
@@ -6432,6 +6619,7 @@ fn execute_one(
                     value,
                     OperatorPrimitiveHint::Number,
                     OperatorPrimitiveTarget::Unary { opcode },
+                    realm,
                     Some(return_to),
                     origin,
                     execution_budget,
@@ -6457,6 +6645,7 @@ fn execute_one(
         | FinalOpcode::And
         | FinalOpcode::Xor
         | FinalOpcode::Or => {
+            let realm = code(runtime, frame.code)?.realm;
             let right = pop(frame)?;
             let left = pop(frame)?;
             let return_to =
@@ -6473,6 +6662,7 @@ fn execute_one(
                     left,
                     right,
                     opcode,
+                    realm,
                     Some(return_to),
                     origin,
                     execution_budget,
@@ -6492,6 +6682,7 @@ fn execute_one(
                         right,
                         hint,
                     },
+                    realm,
                     Some(return_to),
                     origin,
                     execution_budget,
@@ -6501,7 +6692,7 @@ fn execute_one(
         }
         FinalOpcode::Lnot => {
             let value = pop(frame)?;
-            frame.stack.push(StoredValue::Boolean(!value.is_truthy()));
+            push(frame, StoredValue::Boolean(!value.is_truthy()));
         }
         FinalOpcode::Typeof => {
             let value = pop(frame)?;
@@ -6514,33 +6705,34 @@ fn execute_one(
                 StoredValue::Symbol(_) => "symbol",
                 StoredValue::Function(_) => "function",
             };
-            frame
-                .stack
-                .push(StoredValue::String(JsString::from_utf8(name)?));
+            push(frame, StoredValue::String(JsString::from_utf8(name)?));
         }
         FinalOpcode::StrictEq | FinalOpcode::StrictNeq => {
             let right = pop(frame)?;
             let left = pop(frame)?;
             let equal = left.strict_equals(&right);
-            frame
-                .stack
-                .push(StoredValue::Boolean(if opcode == FinalOpcode::StrictEq {
+            push(
+                frame,
+                StoredValue::Boolean(if opcode == FinalOpcode::StrictEq {
                     equal
                 } else {
                     !equal
-                }));
+                }),
+            );
         }
         FinalOpcode::IsUndefinedOrNull => {
             let value = pop(frame)?;
-            frame.stack.push(StoredValue::Boolean(matches!(
-                value,
-                StoredValue::Undefined | StoredValue::Null
-            )));
+            push(
+                frame,
+                StoredValue::Boolean(matches!(value, StoredValue::Undefined | StoredValue::Null)),
+            );
         }
         FinalOpcode::Throw => {
+            let realm = code(runtime, frame.code)?.realm;
             let origin = instruction_location(runtime, frame, source_pc)?;
             let value = pop(frame)?;
             return Ok(Step::Abrupt(PendingException {
+                realm,
                 payload: PendingExceptionPayload::ThrownValue(value),
                 origin,
             }));
@@ -8418,6 +8610,7 @@ fn tdz_exception(
         JsString::from_utf8("lexical variable is not initialized")?
     };
     Ok(PendingException {
+        realm: code.realm,
         payload: PendingExceptionPayload::EngineError {
             kind: ExceptionKind::ReferenceError,
             message,
@@ -8432,7 +8625,9 @@ fn global_not_defined_exception(
     name: &JsString,
     pc: BytecodePc,
 ) -> Result<PendingException, ExecutionError> {
+    let realm = code(runtime, frame.code)?.realm;
     Ok(PendingException {
+        realm,
         payload: PendingExceptionPayload::EngineError {
             kind: ExceptionKind::ReferenceError,
             message: named_property_message("'", name, "' is not defined")?,
@@ -8446,7 +8641,9 @@ fn not_callable_exception(
     frame: &Frame,
     pc: BytecodePc,
 ) -> Result<PendingException, ExecutionError> {
+    let realm = code(runtime, frame.code)?.realm;
     Ok(PendingException {
+        realm,
         payload: PendingExceptionPayload::EngineError {
             kind: ExceptionKind::TypeError,
             message: JsString::from_utf8("not a function")?,
@@ -8460,7 +8657,9 @@ fn not_constructor_exception(
     frame: &Frame,
     pc: BytecodePc,
 ) -> Result<PendingException, ExecutionError> {
+    let realm = code(runtime, frame.code)?.realm;
     Ok(PendingException {
+        realm,
         payload: PendingExceptionPayload::EngineError {
             kind: ExceptionKind::TypeError,
             message: JsString::from_utf8("not a constructor")?,
@@ -8497,7 +8696,9 @@ fn property_exception(
     name: &JsString,
     failure: PropertyFailure,
 ) -> Result<PendingException, ExecutionError> {
+    let realm = code(runtime, frame.code)?.realm;
     property_exception_at(
+        realm,
         instruction_location(runtime, frame, pc)?,
         Some(name),
         failure,
@@ -8505,6 +8706,7 @@ fn property_exception(
 }
 
 fn property_exception_at(
+    realm: RealmId,
     origin: JsStackFrame,
     name: Option<&JsString>,
     failure: PropertyFailure,
@@ -8537,6 +8739,7 @@ fn property_exception_at(
         PropertyFailure::NonExtensible => JsString::from_utf8("object is not extensible")?,
     };
     Ok(PendingException {
+        realm,
         payload: PendingExceptionPayload::EngineError {
             kind: ExceptionKind::TypeError,
             message,
@@ -8673,12 +8876,92 @@ fn exception_caller_frames(
     Ok(caller_frames)
 }
 
+fn dispatch_pending_exception(
+    runtime: &mut Runtime,
+    frames: &mut Vec<Frame>,
+    active_frame_values: &mut u64,
+    pending: PendingException,
+) -> Result<(), ExecutionError> {
+    let handler_frame = frames.iter().rposition(|frame| {
+        frame
+            .stack
+            .iter()
+            .any(|entry| matches!(entry, OperandStackEntry::Catch { .. }))
+    });
+    let Some(handler_frame) = handler_frame else {
+        let caller_frames = exception_caller_frames(runtime, frames)?;
+        let exception = finish_exception(runtime, pending, caller_frames)?;
+        return Err(ExecutionError::Exception(exception));
+    };
+
+    let cleanup_temporary_receivers = frames_have_temporary_receiver(&frames[handler_frame..]);
+    let PendingException {
+        realm,
+        payload,
+        origin: _,
+    } = pending;
+    let caught = match payload {
+        PendingExceptionPayload::ThrownValue(value) => value,
+        PendingExceptionPayload::EngineError { kind, message } => {
+            StoredValue::Object(runtime.materialize_error_object(realm, kind, message)?)
+        }
+    };
+
+    while frames.len() > handler_frame.saturating_add(1) {
+        let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
+            message: "exception unwinder lost a frame above its catch handler",
+        })?;
+        *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
+        if let Some(dynamic) = frame.dynamic_return.take() {
+            runtime.retire_dynamic_root(dynamic.root)?;
+        }
+    }
+
+    let frame = frames
+        .get_mut(handler_frame)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "exception unwinder lost its catch handler frame",
+        })?;
+    let marker = frame
+        .stack
+        .iter()
+        .rposition(|entry| matches!(entry, OperandStackEntry::Catch { .. }))
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "exception unwinder lost its verified catch marker",
+        })?;
+    let handler = match frame.stack.get(marker) {
+        Some(OperandStackEntry::Catch { handler }) => *handler,
+        Some(OperandStackEntry::JavaScript(_)) | None => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "exception unwinder selected a non-catch operand entry",
+            }
+            .into());
+        }
+    };
+    frame.stack.truncate(marker);
+    push(frame, caught);
+    frame.instruction = handler;
+
+    if cleanup_temporary_receivers && runtime.collection_pending {
+        collect_cycles_with_execution_roots(runtime, frames, &[], &[])?;
+        for frame in frames {
+            frame.transient_cleanup_pending = false;
+        }
+    }
+
+    Ok(())
+}
+
 fn finish_exception(
     runtime: &mut Runtime,
     pending: PendingException,
     caller_frames: Vec<JsStackFrame>,
 ) -> Result<JsException, ExecutionError> {
-    let PendingException { payload, origin } = pending;
+    let PendingException {
+        realm: _,
+        payload,
+        origin,
+    } = pending;
     Ok(match payload {
         PendingExceptionPayload::EngineError { kind, message } => {
             JsException::engine_error(kind, message, origin, caller_frames)
@@ -8822,22 +9105,66 @@ fn take_call_inputs(
     })
 }
 
+fn push(frame: &mut Frame, value: StoredValue) {
+    frame.stack.push(OperandStackEntry::JavaScript(value));
+}
+
 fn pop(frame: &mut Frame) -> Result<StoredValue, EngineFault> {
-    frame.stack.pop().ok_or(EngineFault::StackDepthMismatch {
-        function: frame.template,
-        pc: BytecodePc::ZERO,
-        expected: 1,
-        actual: 0,
-    })
+    match frame.stack.pop() {
+        Some(OperandStackEntry::JavaScript(value)) => Ok(value),
+        Some(OperandStackEntry::Catch { .. }) => Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation consumed an internal catch marker",
+        }),
+        None => Err(EngineFault::StackDepthMismatch {
+            function: frame.template,
+            pc: BytecodePc::ZERO,
+            expected: 1,
+            actual: 0,
+        }),
+    }
 }
 
 fn peek(frame: &Frame) -> Result<&StoredValue, EngineFault> {
-    frame.stack.last().ok_or(EngineFault::StackDepthMismatch {
-        function: frame.template,
-        pc: BytecodePc::ZERO,
-        expected: 1,
-        actual: 0,
-    })
+    match frame.stack.last() {
+        Some(OperandStackEntry::JavaScript(value)) => Ok(value),
+        Some(OperandStackEntry::Catch { .. }) => Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation inspected an internal catch marker",
+        }),
+        None => Err(EngineFault::StackDepthMismatch {
+            function: frame.template,
+            pc: BytecodePc::ZERO,
+            expected: 1,
+            actual: 0,
+        }),
+    }
+}
+
+fn stack_value_at(frame: &Frame, index: usize) -> Result<&StoredValue, EngineFault> {
+    match frame.stack.get(index) {
+        Some(OperandStackEntry::JavaScript(value)) => Ok(value),
+        Some(OperandStackEntry::Catch { .. }) => Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation indexed an internal catch marker",
+        }),
+        None => Err(EngineFault::StackDepthMismatch {
+            function: frame.template,
+            pc: BytecodePc::ZERO,
+            expected: u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX),
+            actual: frame.stack.len(),
+        }),
+    }
+}
+
+fn drop_stack_entry(frame: &mut Frame) -> Result<(), EngineFault> {
+    frame
+        .stack
+        .pop()
+        .map(|_| ())
+        .ok_or(EngineFault::StackDepthMismatch {
+            function: frame.template,
+            pc: BytecodePc::ZERO,
+            expected: 1,
+            actual: 0,
+        })
 }
 
 fn branch_successor(

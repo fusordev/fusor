@@ -81,6 +81,19 @@ const fn decimal_digits(mut value: usize) -> usize {
 }
 
 const REQUIRED_COVERAGE: &[&str] = &[
+    "catch-binding",
+    "catch-captured-abrupt-cell",
+    "catch-captured-binding",
+    "catch-control-cleanup",
+    "catch-cross-frame",
+    "catch-dynamic-function-syntax",
+    "catch-engine-error",
+    "catch-engine-error-brand",
+    "catch-for-in-cleanup",
+    "catch-getter-abrupt",
+    "catch-normal-completion",
+    "catch-optional-binding",
+    "catch-rethrow",
     "captures",
     "chained-labels",
     "for-in-getter-free",

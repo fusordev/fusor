@@ -131,7 +131,7 @@ fn for_in_next_rejects_a_non_iterator_cursor_after_verified_admission() {
     )
     .expect("frame");
     frame.instruction = for_in_next;
-    frame.stack.push(StoredValue::Undefined);
+    push(&mut frame, StoredValue::Undefined);
 
     let mut budget = execution_budget_with_consumed(u64::MAX, 1);
     let Err(error) = execute_one(&mut runtime, &mut frame, &mut budget) else {
@@ -198,7 +198,7 @@ fn for_in_next_fuel_exhaustion_preserves_the_unvisited_candidate_for_retry() {
         .allocate_for_in_iterator(realm_id, StoredValue::Object(source))
         .expect("iterator");
     assert_eq!(runtime.usage().for_in_entries(), 1);
-    frame.stack.push(StoredValue::Object(iterator));
+    push(&mut frame, StoredValue::Object(iterator));
 
     let mut budget = execution_budget_with_consumed(1, 1);
     let Err(error) = execute_one(&mut runtime, &mut frame, &mut budget) else {
@@ -217,7 +217,7 @@ fn for_in_next_fuel_exhaustion_preserves_the_unvisited_candidate_for_retry() {
     assert_eq!(runtime.usage().for_in_entries(), 1);
     assert!(matches!(
         frame.stack.as_slice(),
-        [StoredValue::Object(actual)] if *actual == iterator
+        [OperandStackEntry::JavaScript(StoredValue::Object(actual))] if *actual == iterator
     ));
 
     let mut budget = execution_budget_with_consumed(u64::MAX, 1);
@@ -227,9 +227,9 @@ fn for_in_next_fuel_exhaustion_preserves_the_unvisited_candidate_for_retry() {
     assert!(matches!(
         frame.stack.as_slice(),
         [
-            StoredValue::Object(actual),
-            StoredValue::String(name),
-            StoredValue::Boolean(false),
+            OperandStackEntry::JavaScript(StoredValue::Object(actual)),
+            OperandStackEntry::JavaScript(StoredValue::String(name)),
+            OperandStackEntry::JavaScript(StoredValue::Boolean(false)),
         ] if *actual == iterator && name.to_utf8_lossy().expect("UTF-8") == "name"
     ));
 }
@@ -296,9 +296,10 @@ fn for_in_next_precharges_snapshot_release_before_prototype_transition() {
     )
     .expect("frame");
     prototype_frame.instruction = for_in_next;
-    prototype_frame
-        .stack
-        .push(StoredValue::Object(prototype_iterator));
+    push(
+        &mut prototype_frame,
+        StoredValue::Object(prototype_iterator),
+    );
 
     let mut budget = execution_budget_with_consumed(7, 1);
     let Err(error) = execute_one(&mut runtime, &mut prototype_frame, &mut budget) else {
@@ -333,9 +334,9 @@ fn for_in_next_precharges_snapshot_release_before_prototype_transition() {
     assert!(matches!(
         prototype_frame.stack.as_slice(),
         [
-            StoredValue::Object(actual),
-            StoredValue::String(name),
-            StoredValue::Boolean(false),
+            OperandStackEntry::JavaScript(StoredValue::Object(actual)),
+            OperandStackEntry::JavaScript(StoredValue::String(name)),
+            OperandStackEntry::JavaScript(StoredValue::Boolean(false)),
         ] if *actual == prototype_iterator
             && name.to_utf8_lossy().expect("UTF-8") == "length"
     ));
@@ -396,9 +397,7 @@ fn for_in_next_precharges_snapshot_release_before_terminal_transition() {
     )
     .expect("frame");
     terminal_frame.instruction = for_in_next;
-    terminal_frame
-        .stack
-        .push(StoredValue::Object(terminal_iterator));
+    push(&mut terminal_frame, StoredValue::Object(terminal_iterator));
 
     let mut budget = execution_budget_with_consumed(2, 1);
     let Err(error) = execute_one(&mut runtime, &mut terminal_frame, &mut budget) else {
@@ -439,9 +438,9 @@ fn for_in_next_precharges_snapshot_release_before_terminal_transition() {
     assert!(matches!(
         terminal_frame.stack.as_slice(),
         [
-            StoredValue::Object(actual),
-            StoredValue::Undefined,
-            StoredValue::Boolean(true),
+            OperandStackEntry::JavaScript(StoredValue::Object(actual)),
+            OperandStackEntry::JavaScript(StoredValue::Undefined),
+            OperandStackEntry::JavaScript(StoredValue::Boolean(true)),
         ] if *actual == terminal_iterator
     ));
 }
@@ -589,6 +588,7 @@ fn null_symbol_to_primitive_falls_back_to_the_ordinary_string_hint_order() {
         &mut runtime,
         StoredValue::Object(object),
         PropertyKeyTarget::ToKey,
+        realm,
         None,
         native_function_host_origin(),
     ) else {
@@ -1370,6 +1370,62 @@ fn object_prototype_to_string_reclaims_unescaped_boolean_receivers_within_one_ex
 }
 
 #[test]
+fn execution_root_collection_stays_dirty_through_catch_and_frame_return() {
+    let (mut runtime, realm, run, _getter, to_string) = runtime_with_boolean_tag_getter_and_invoker(
+        RuntimeLimits::default(),
+        "function getter(){throw 1;}",
+        "function run(target){\
+                 if(typeof target===\"undefined\")return 7;\
+                 let survivor={};\
+                 survivor.self=survivor;\
+                 try{\
+                     target.call(true);\
+                 }catch(error){\
+                     return error;\
+                 }\
+             }",
+        "run",
+    );
+    let baseline = runtime.usage();
+
+    let result = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &run,
+            std::slice::from_ref(&to_string),
+            ExecutionLimits::default(),
+        )
+        .expect("caught throw after in-execution collection");
+    let result = result
+        .as_number()
+        .expect("live result")
+        .expect("Number result");
+    assert!(result.strict_equals(JsNumber::from_i32(1)));
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 1);
+    assert!(
+        runtime.collection_pending,
+        "dropping frame-only roots after an in-execution collection must leave the collector dirty"
+    );
+
+    let result = runtime
+        .context(&realm)
+        .expect("context")
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("next execution safe point");
+    let result = result
+        .as_number()
+        .expect("live result")
+        .expect("Number result");
+    assert!(result.strict_equals(JsNumber::from_i32(7)));
+    assert_eq!(
+        runtime.usage(),
+        baseline,
+        "the next root-free safe point must reclaim the frame-only cycle"
+    );
+}
+
+#[test]
 fn object_prototype_to_string_resumes_native_symbol_tag_getters_without_leaking() {
     let repeat_authority = compile_test_function(
         "function repeat(target){\
@@ -1912,6 +1968,7 @@ fn property_key_continuations_charge_every_suspended_javascript_value() {
     let continuation = |target| {
         NativeContinuation::PropertyKey(PropertyKeyContinuation {
             receiver: StoredValue::Object(object),
+            realm,
             stage: PrimitiveConversionStage::Start,
             target,
             origin: origin.clone(),
@@ -1943,6 +2000,7 @@ fn property_key_continuations_charge_every_suspended_javascript_value() {
             function: StoredValue::Undefined,
             kind: DefineMethodKind::Method,
             enumerable: true,
+            realm,
         })
         .retained_values(),
         3
@@ -1957,6 +2015,7 @@ fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
     let continuation = |target| {
         NativeContinuation::OperatorPrimitive(OperatorPrimitiveContinuation {
             receiver: StoredValue::Object(object),
+            realm,
             hint: OperatorPrimitiveHint::Number,
             stage: OperatorPrimitiveStage::Start,
             target,
@@ -3149,7 +3208,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         "make",
     );
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(58)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(70)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
         .context(&realm)
@@ -3170,8 +3229,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 58,
-            observed: 59,
+            limit: 70,
+            observed: 71,
         }
     ));
     let failed = runtime.usage();
@@ -4305,6 +4364,87 @@ fn function_prototype_apply_calls_a_dynamic_function_across_realms() {
     assert!(result.strict_equals(JsNumber::from_i32(46)));
 }
 
+#[test]
+fn foreign_nonconstructor_type_errors_use_the_constructing_frame_realm() {
+    let invoke_authority = compile_test_function(
+        "function invoke(candidate){\
+             try{new candidate();}catch(error){return error;}\
+         }",
+        "invoke",
+    );
+    let maker_authority =
+        compile_test_function("function make(){return ({method(){}}).method;}", "make");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let target_realm = runtime.create_realm().expect("target realm");
+    let caller_realm = runtime.create_realm().expect("caller realm");
+    let target_realm_id = runtime
+        .context(&target_realm)
+        .expect("target context")
+        .realm;
+    let caller_realm_id = runtime
+        .context(&caller_realm)
+        .expect("caller context")
+        .realm;
+    let maker = runtime
+        .context(&target_realm)
+        .expect("target context")
+        .instantiate(maker_authority)
+        .expect("method maker");
+    let bytecode_candidate = runtime
+        .context(&target_realm)
+        .expect("target context")
+        .call(&maker, &[], ExecutionLimits::default())
+        .expect("foreign method")
+        .into_function()
+        .expect("method function");
+    let function_prototype = runtime
+        .realm_function_prototype(target_realm_id)
+        .expect("foreign Function.prototype");
+    let native_candidate = runtime
+        .public_value(StoredValue::Function(function_prototype))
+        .expect("Function.prototype root")
+        .into_function()
+        .expect("Function.prototype");
+    let invoke = runtime
+        .context(&caller_realm)
+        .expect("caller context")
+        .instantiate(invoke_authority)
+        .expect("constructor invoker");
+    let caller_type_error = runtime
+        .realm_error_prototype(caller_realm_id, ExceptionKind::TypeError)
+        .expect("caller TypeError.prototype");
+    let target_type_error = runtime
+        .realm_error_prototype(target_realm_id, ExceptionKind::TypeError)
+        .expect("target TypeError.prototype");
+
+    for (kind, candidate) in [
+        ("bytecode", bytecode_candidate),
+        ("native", native_candidate),
+    ] {
+        let error = runtime
+            .context(&caller_realm)
+            .expect("caller context")
+            .call(&invoke, &[candidate.as_value()], ExecutionLimits::default())
+            .expect("caught nonconstructor TypeError");
+        let error = error.object_id().expect("materialized TypeError object");
+        let prototype = runtime
+            .object_record(HeapReference::Object(error))
+            .expect("TypeError object")
+            .prototype();
+
+        assert_eq!(
+            prototype,
+            Some(HeapReference::Object(caller_type_error)),
+            "{kind} nonconstructor error must belong to the constructing frame realm"
+        );
+        assert_ne!(
+            prototype,
+            Some(HeapReference::Object(target_type_error)),
+            "{kind} target realm must not own the operation error"
+        );
+    }
+}
+
 fn runtime_with_apply_invoker() -> (Runtime, crate::Realm, Function, Function) {
     let invoke_authority = compile_test_function(
         "function invoke(apply,target,receiver,list){\
@@ -4494,7 +4634,8 @@ fn assert_method_function_shape(
 }
 
 fn assert_method_function_source(runtime: &Runtime, function: FunctionId, expected_source: &str) {
-    let Ok(source) = function_to_string(runtime, function, None) else {
+    let realm = runtime.function_realm(function).expect("function realm");
+    let Ok(source) = function_to_string(runtime, function, realm, None) else {
         panic!("method source must remain readable");
     };
     assert_eq!(

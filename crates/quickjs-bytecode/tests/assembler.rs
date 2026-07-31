@@ -141,6 +141,37 @@ fn symbolic_forward_branches_relax_to_exact_quickjs_short_forms() {
 }
 
 #[test]
+fn symbolic_catch_uses_the_fixed_long_encoding_and_pc_plus_one_base() {
+    let mut assembler = BytecodeAssembler::new();
+    let handler = assembler.new_label().expect("handler label");
+
+    assembler
+        .branch(BranchKind::Catch, &handler)
+        .expect("catch branch");
+    assembler
+        .push(FinalOpcode::ReturnUndef, Operands::None)
+        .expect("normal completion");
+    assembler.bind(&handler).expect("handler target");
+    assembler
+        .push(FinalOpcode::ReturnUndef, Operands::None)
+        .expect("handler completion");
+
+    let output = assembler.finish().expect("assembly");
+    assert_eq!(
+        decoded(output.bytecode()),
+        [
+            (BytecodePc::new(0), FinalOpcode::Catch, Operands::Label(5),),
+            (BytecodePc::new(5), FinalOpcode::ReturnUndef, Operands::None,),
+            (BytecodePc::new(6), FinalOpcode::ReturnUndef, Operands::None,),
+        ]
+    );
+    assert_eq!(
+        output.instruction_pcs(),
+        [BytecodePc::new(0), BytecodePc::new(5), BytecodePc::new(6),]
+    );
+}
+
+#[test]
 fn compiler_verification_still_rejects_unequal_reachable_join_depths() {
     let mut builder = BytecodeAssembler::new();
     let join = builder.new_label().expect("join label");

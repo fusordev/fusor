@@ -628,6 +628,7 @@ impl BoxedPrimitive {
 
 pub(crate) enum HeapObjectKind {
     Ordinary,
+    Error,
     BoxedPrimitive(BoxedPrimitive),
     ForInIterator(ForInIterator),
 }
@@ -636,7 +637,7 @@ impl HeapObjectKind {
     #[must_use]
     pub(crate) const fn boxed_primitive(&self) -> Option<&BoxedPrimitive> {
         match self {
-            Self::Ordinary | Self::ForInIterator(_) => None,
+            Self::Ordinary | Self::Error | Self::ForInIterator(_) => None,
             Self::BoxedPrimitive(value) => Some(value),
         }
     }
@@ -644,14 +645,14 @@ impl HeapObjectKind {
     pub(crate) const fn for_in_iterator(&self) -> Option<&ForInIterator> {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
-            Self::Ordinary | Self::BoxedPrimitive(_) => None,
+            Self::Ordinary | Self::Error | Self::BoxedPrimitive(_) => None,
         }
     }
 
     pub(crate) const fn for_in_iterator_mut(&mut self) -> Option<&mut ForInIterator> {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
-            Self::Ordinary | Self::BoxedPrimitive(_) => None,
+            Self::Ordinary | Self::Error | Self::BoxedPrimitive(_) => None,
         }
     }
 }
@@ -667,6 +668,15 @@ impl HeapObject {
     pub(crate) const fn ordinary(record: ObjectRecord) -> Self {
         Self {
             kind: HeapObjectKind::Ordinary,
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn error(record: ObjectRecord) -> Self {
+        Self {
+            kind: HeapObjectKind::Error,
             record,
             public_roots: 0,
         }
@@ -697,6 +707,11 @@ impl HeapObject {
     )]
     pub(crate) const fn kind(&self) -> &HeapObjectKind {
         &self.kind
+    }
+
+    #[must_use]
+    pub(crate) const fn is_error(&self) -> bool {
+        matches!(self.kind, HeapObjectKind::Error)
     }
 
     #[must_use]
@@ -976,7 +991,19 @@ mod tests {
         let object = HeapObject::ordinary(ObjectRecord::empty(None));
 
         assert!(matches!(object.kind(), HeapObjectKind::Ordinary));
+        assert!(!object.is_error());
         assert!(object.boxed_primitive().is_none());
+        assert_eq!(object.public_roots, 0);
+    }
+
+    #[test]
+    fn error_heap_object_preserves_its_internal_brand() {
+        let object = HeapObject::error(ObjectRecord::empty(None));
+
+        assert!(matches!(object.kind(), HeapObjectKind::Error));
+        assert!(object.is_error());
+        assert!(object.boxed_primitive().is_none());
+        assert!(object.for_in_state().is_none());
         assert_eq!(object.public_roots, 0);
     }
 

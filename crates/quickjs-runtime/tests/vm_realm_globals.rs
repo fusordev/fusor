@@ -596,7 +596,7 @@ fn global_var_property_limit_failure_is_atomic() {
         ],
     );
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(56)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(68)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let baseline = runtime.usage();
     let mut context = runtime.context(&realm).expect("context");
@@ -608,8 +608,8 @@ fn global_var_property_limit_failure_is_atomic() {
         error,
         DynamicFunctionScriptError::Install(quickjs_runtime::InstallError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 56,
-            observed: 57,
+            limit: 68,
+            observed: 69,
         })
     ));
     assert_eq!(context.runtime_usage(), baseline);

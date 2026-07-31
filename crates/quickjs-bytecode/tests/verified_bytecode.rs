@@ -144,6 +144,15 @@ fn var_policy() -> CompilerBindingPolicy {
     )
 }
 
+fn catch_policy() -> CompilerBindingPolicy {
+    CompilerBindingPolicy::new(
+        CompilerBindingKind::Catch,
+        CompilerInitializationPolicy::Catch,
+        CompilerWritePolicy::Mutable,
+        false,
+    )
+}
+
 fn function_name_policy() -> CompilerBindingPolicy {
     CompilerBindingPolicy::new(
         CompilerBindingKind::FunctionName,
@@ -1560,6 +1569,573 @@ fn typed_stack_input_with_captures(
             source,
         )]),
     )
+}
+
+#[test]
+fn catch_binding_requires_the_exact_handler_value_initialization() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        catch_policy(),
+        true,
+        None,
+    );
+    let valid = [
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&valid, &[atom("error")], std::slice::from_ref(&definition)),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("the exceptional handler value initializes its exact catch local");
+
+    let optional_binding_shape = [
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(
+            &optional_binding_shape,
+            &[atom("error")],
+            std::slice::from_ref(&definition),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("catch metadata cannot omit its handler-value initialization");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: BindingSlot::Local(0),
+            reason: BindingPolicyViolationReason::MissingLexicalScopeInitialization,
+            ..
+        }
+    ));
+
+    let unrelated_value = [
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(
+            &unrelated_value,
+            &[atom("error")],
+            std::slice::from_ref(&definition),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("an ordinary handler value cannot initialize catch metadata");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::BindingPolicyViolation {
+                slot: BindingSlot::Local(0),
+                reason: BindingPolicyViolationReason::MissingLexicalScopeInitialization,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn catch_handler_value_cannot_initialize_a_non_catch_local() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        var_policy(),
+        false,
+        None,
+    );
+    let instructions = [
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[atom("value")], &[definition]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("handler-value initialization authority belongs only to Catch metadata");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: BindingSlot::Local(0),
+            reason: BindingPolicyViolationReason::InvalidLexicalInitialization,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn catch_handler_value_must_be_consumed_before_block_scope_initialization() {
+    let variables = [
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(0)),
+            ScopeLink::End,
+            catch_policy(),
+            true,
+            None,
+        ),
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(1)),
+            ScopeLink::Local(0),
+            let_policy(),
+            true,
+            None,
+        ),
+    ];
+    let instructions = [
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(1)),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[atom("error"), atom("lexical")], &variables),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("the catch parameter must consume the handler value before block-scope entry");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::BindingPolicyViolation {
+                slot: BindingSlot::Local(0),
+                reason: BindingPolicyViolationReason::MissingLexicalScopeInitialization,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn catch_marker_certificate_accepts_normal_throw_and_nested_for_in_cleanup() {
+    let normal = [
+        (FinalOpcode::Catch, Operands::Label(7)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let verified = verify_compiler_bytecode_graph(
+        typed_stack_input(&normal, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("nip_catch preserves the normal completion and removes the exact catch marker");
+    assert!(
+        verified
+            .requirements()
+            .contains(&ExecutionRequirement::AbruptCompletions)
+    );
+
+    let explicit_throw = [
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&explicit_throw, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("throw consumes the protected value and transfers through the catch marker");
+
+    let catch_outside_for_in = [
+        (FinalOpcode::Catch, Operands::Label(10)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Nip, Operands::None),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&catch_outside_for_in, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("for-in and catch markers are removed inside-out by their distinct cleanup opcodes");
+
+    let for_in_outside_catch = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::Catch, Operands::Label(8)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Nip, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&for_in_outside_catch, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a handler inside a for-in region retains only the enclosing iterator marker");
+}
+
+#[test]
+fn catch_marker_certificate_rejects_ordinary_values_stranded_by_throw() {
+    let instructions = [
+        (FinalOpcode::Catch, Operands::Label(7)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("throw may retain active catch markers but no ordinary operand values");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::CatchMarkerStackMismatch {
+                opcode: FinalOpcode::Throw,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn catch_marker_certificate_rejects_forged_copied_stored_or_crossed_markers() {
+    let local = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        var_policy(),
+        false,
+        None,
+    );
+    let cases = [
+        (
+            vec![
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (FinalOpcode::Push2, Operands::NoneInt),
+                (FinalOpcode::NipCatch, Operands::None),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            Vec::new(),
+            Vec::new(),
+            FinalOpcode::NipCatch,
+        ),
+        (
+            vec![
+                (FinalOpcode::Catch, Operands::Label(8)),
+                (FinalOpcode::Dup, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            Vec::new(),
+            Vec::new(),
+            FinalOpcode::Dup,
+        ),
+        (
+            vec![
+                (FinalOpcode::Catch, Operands::Label(6)),
+                (FinalOpcode::PutLoc0, Operands::NoneLoc),
+                (FinalOpcode::ReturnUndef, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            vec![atom("stored")],
+            vec![local],
+            FinalOpcode::PutLoc0,
+        ),
+        (
+            vec![
+                (FinalOpcode::Catch, Operands::Label(11)),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForInStart, Operands::None),
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (FinalOpcode::NipCatch, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            Vec::new(),
+            Vec::new(),
+            FinalOpcode::NipCatch,
+        ),
+    ];
+
+    for (instructions, atoms, variables, opcode) in cases {
+        let error = verify_compiler_bytecode_graph(
+            typed_stack_input(&instructions, &atoms, &variables),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("catch markers cannot be forged, copied, stored, or crossed");
+        assert!(
+            matches!(
+                error.kind(),
+                BytecodeVerificationErrorKind::CatchMarkerStackMismatch {
+                    opcode: actual,
+                    ..
+                } if *actual == opcode
+            ),
+            "{opcode}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn catch_handler_entry_rejects_an_ordinary_control_flow_join() {
+    let instructions = [
+        (FinalOpcode::Catch, Operands::Label(8)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Goto8, Operands::Label8(1)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("ordinary values cannot enter an exceptional handler target");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::CatchMarkerJoinMismatch { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn unreachable_ordinary_component_cannot_enter_a_certified_catch_handler() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        catch_policy(),
+        true,
+        None,
+    );
+    let instructions = [
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Goto8, Operands::Label8(-4)),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[atom("error")], &[definition]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("an unreachable ordinary edge cannot bypass the typed handler join");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::CatchMarkerJoinMismatch { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn compiler_shaped_caught_throw_keeps_dead_for_in_rotation_outside_the_handler_join() {
+    let variables = [
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(1)),
+            ScopeLink::End,
+            let_policy(),
+            true,
+            None,
+        ),
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(2)),
+            ScopeLink::End,
+            catch_policy(),
+            true,
+            None,
+        ),
+    ];
+    let instructions = [
+        (FinalOpcode::Catch, Operands::Label(35)),
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (
+            FinalOpcode::DefineField,
+            Operands::Atom(AtomPoolIndex::new(0)),
+        ),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(11)),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::GetLocCheck, Operands::Loc(0)),
+        (FinalOpcode::Nip, Operands::None),
+        (FinalOpcode::Throw, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(1)),
+        (FinalOpcode::Goto8, Operands::Label8(-15)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(4)),
+        (FinalOpcode::PutLoc1, Operands::NoneLoc),
+        (FinalOpcode::GetLoc1, Operands::NoneLoc),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(
+            &instructions,
+            &[atom("a"), atom("key"), atom("error")],
+            &variables,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect(
+        "dead normal-completion rotation after throw may reenter the for-in head, not the Catch handler",
+    );
+}
+
+#[test]
+fn catch_marker_certificate_checks_unreachable_components_and_terminal_markers() {
+    let forged = [
+        (FinalOpcode::Goto8, Operands::Label8(5)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&forged, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("an unreachable component cannot forge a catch marker");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::CatchMarkerStackMismatch {
+            opcode: FinalOpcode::NipCatch,
+            ..
+        }
+    ));
+
+    let marker_exit = [
+        (FinalOpcode::Goto8, Operands::Label8(9)),
+        (FinalOpcode::Catch, Operands::Label(5)),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&marker_exit, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("an unreachable terminal cannot retain a catch marker");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::CatchMarkerAtExit { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn disconnected_catch_component_cannot_hide_a_marker_in_an_earlier_component() {
+    let instructions = [
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Catch, Operands::Label(7)),
+        (FinalOpcode::Goto8, Operands::Label8(-7)),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a cross-component edge cannot hide a live catch marker");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::CatchMarkerJoinMismatch { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn catch_marker_certificate_charges_exact_state_and_transfer_budgets() {
+    let instructions = [
+        (FinalOpcode::Catch, Operands::Label(7)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let input = typed_stack_input(&instructions, &[], &[]);
+    let usage =
+        verify_compiler_bytecode_graph(input.clone(), BytecodeGraphVerificationLimits::default())
+            .expect("baseline catch marker certificate")
+            .usage();
+    assert!(usage.frame_state_entries() > 0);
+    assert!(usage.policy_transfers() > 0);
+
+    assert_limit(
+        &input,
+        BytecodeGraphVerificationLimits::default()
+            .with_max_frame_state_entries(usage.frame_state_entries()),
+        BytecodeGraphVerificationLimits::default()
+            .with_max_frame_state_entries(usage.frame_state_entries() - 1),
+        BytecodeGraphResource::FrameStateEntries,
+        usage.frame_state_entries() - 1,
+        usage.frame_state_entries(),
+    );
+    assert_limit(
+        &input,
+        BytecodeGraphVerificationLimits::default()
+            .with_max_policy_transfers(usage.policy_transfers()),
+        BytecodeGraphVerificationLimits::default()
+            .with_max_policy_transfers(usage.policy_transfers() - 1),
+        BytecodeGraphResource::PolicyTransfers,
+        usage.policy_transfers() - 1,
+        usage.policy_transfers(),
+    );
 }
 
 #[test]

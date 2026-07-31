@@ -55,13 +55,15 @@ JavaScript-value stack heights. The six suspension opcodes are accepted only
 for their compatible function-kind families, while ordinary and tail returns
 are limited to normal functions. Compiler bodies may attach a constant-kind
 layout that conditionally admits ordinary value loads and nested closure
-creation; serialized bodies still reject every constant opcode. The slice
-rejects opcodes whose correct verification needs actual constant values,
-verified child bodies, raw function slots, handler or `for-of`/async iterator
-markers, finally return addresses, or packed stack offsets. Compiler-private
-synchronous `for-in` receives its cursor-identity proof only in the final
-whole-graph pass. The staged certificate has no execution API and cannot cross
-the VM trust boundary.
+creation; serialized bodies still reject every constant opcode. It admits the
+structural branch and height effects of `catch` and `nip_catch`, while their
+non-forgeable marker identity is proved only in the final compiler-profile
+pass. The slice rejects opcodes whose correct verification needs actual
+constant values, verified child bodies, raw function slots, `for-of`/async
+iterator markers, finally return addresses, or packed stack offsets.
+Compiler-private catch and synchronous `for-in` state receive their
+identity proofs only in the final whole-graph pass. The staged certificate has
+no execution API and cannot cross the VM trust boundary.
 
 The next compiler-only slice returns
 `VerifiedCompilerFunctionGraph`. It takes a flat `Arc`-backed graph, requires
@@ -172,30 +174,38 @@ requires a realm in the same runtime and an empty external environment for the
 selected root; nested closures receive only verifier-certified parent
 captures. Direct eval remains deferred and fail closed.
 The current compiler profile admits `throw` only as a verified terminal that
-consumes exactly one ordinary value. Its runtime transports that value through
-the explicit frame vector and roots it only if it escapes to the host.
-Serialized bytecode and the full exceptional typed-stack proof, including
-catch handlers, finally return addresses, and iterator markers, are not
-implemented. The complete typed-stack rules below remain the target for that
-wider boundary.
+consumes exactly one ordinary value. Catch-only `try` supports an optional or
+simple identifier binding. Its runtime transports the completion through the
+explicit frame vector, enters only the nearest certified handler, and roots
+the value only if it escapes to the host. Destructuring catch bindings,
+`finally`, and serialized exceptional state remain fail closed.
 
-Compiler-generated synchronous `for-in` has a narrower private typed-stack
-certificate. `for_in_start` replaces one ordinary value with a cursor tagged
-by its origin PC; `for_in_next` temporarily produces matching key and done
-values. Only the matching `if_false` iteration edge promotes that key to a
-one-instruction head value, and only an immediately consuming unchecked local
-store receives a certificate. Intervening operations erase that provenance.
-Exact joins reject mixed or mismatched cursor identities, ordinary operations
-cannot copy, reorder, store, call, or return a cursor, and every terminal must
-have removed it with compiler-shaped `drop`/`nip` cleanup. The analysis also
-audits disconnected instructions without allowing an unreachable component to
-contaminate the entry component. Its state cells and transfers are charged to
-the existing aggregate budgets. The ephemeral store certificate feeds the
-correlated binding-state proof. Declarative authority requires every static
-unchecked store for that TDZ local to be certified to one cursor site, so an
-unrelated initialized `const` cannot borrow a key certificate. A repeated
-`let`/`const` head write is valid only from an uninitialized state or an
-initialized state whose captured cell is closed.
+Compiler-generated catch and synchronous `for-in` share a narrower private
+typed operand-stack certificate. `catch` pushes a marker tagged by its origin
+and exact handler; its exceptional edge substitutes one handler value, and
+`nip_catch` may remove only the matching innermost marker while preserving one
+ordinary completion. A catch binding store is authorized only when it
+immediately consumes that exact handler value and targets a local with the
+catch initialization policy. Ordinary edges cannot enter a handler, markers
+cannot be copied, reordered, stored, called, returned, or retained at a
+terminal, and cross-component edges cannot hide internal state.
+
+For synchronous `for-in`, `for_in_start` replaces one ordinary value with a
+cursor tagged by its origin PC; `for_in_next` temporarily produces matching
+key and done values. Only the matching `if_false` iteration edge promotes that
+key to a one-instruction head value, and only an immediately consuming
+unchecked local store receives a certificate. Intervening operations erase
+that provenance. Exact joins reject mixed or mismatched marker/cursor
+identities, ordinary operations cannot expose a cursor, and every terminal
+must have removed internal state with compiler-shaped `drop`/`nip` cleanup.
+The analysis audits disconnected instructions without letting a dead ordinary
+scaffold contaminate reachable state. Its state cells and transfers are
+charged to the existing aggregate budgets. The ephemeral store certificate
+feeds the correlated binding-state proof. Declarative authority requires every
+static unchecked store for that TDZ local to be certified to one cursor site,
+so an unrelated initialized `const` cannot borrow a key certificate. A
+repeated `let`/`const` head write is valid only from an uninitialized state or
+an initialized state whose captured cell is closed.
 
 Current source verification is structural: it proves UTF-8 boundaries,
 containment, exact instruction-PC correspondence, and metadata consistency. It

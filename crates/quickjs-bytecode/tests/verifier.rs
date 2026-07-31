@@ -854,39 +854,80 @@ fn each_missing_semantic_capability_fails_closed_with_a_typed_reason() {
 }
 
 #[test]
-fn missing_handler_and_finally_capabilities_fail_closed_with_typed_reasons() {
-    let catch_error = reject(
-        encode(&[
-            (FinalOpcode::Catch, Operands::Label(4)),
-            (FinalOpcode::ReturnUndef, Operands::None),
-        ]),
-        0,
-        FunctionIndexDomains::default(),
+fn catch_and_nip_catch_have_typed_structural_successors_and_stack_depths() {
+    let bytecode = encode(&[
+        (FinalOpcode::Catch, Operands::Label(7)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ]);
+    let verified = verify(bytecode.clone(), 2, FunctionIndexDomains::default());
+
+    assert_eq!(
+        verified
+            .instructions()
+            .iter()
+            .map(|instruction| instruction.entry_stack_depth())
+            .collect::<Vec<_>>(),
+        [Some(0), Some(1), Some(2), Some(1), Some(1), Some(0)]
     );
     assert_eq!(
-        catch_error.kind(),
-        &VerificationErrorKind::UnsupportedOpcodeSemantics {
-            feature: UnsupportedVerifierFeature::CatchMarkers,
-        }
-    );
-
-    let nip_catch_error = reject(
-        encode(&[
-            (FinalOpcode::Undefined, Operands::None),
-            (FinalOpcode::Undefined, Operands::None),
-            (FinalOpcode::NipCatch, Operands::None),
-            (FinalOpcode::Return, Operands::None),
-        ]),
-        2,
-        FunctionIndexDomains::default(),
+        verified.instructions()[0].successors().kind(),
+        VerifiedSuccessorKind::Branch
     );
     assert_eq!(
-        nip_catch_error.kind(),
-        &VerificationErrorKind::UnsupportedOpcodeSemantics {
-            feature: UnsupportedVerifierFeature::CatchMarkers,
-        }
+        verified.instructions()[0]
+            .successors()
+            .fallthrough()
+            .expect("normal catch edge")
+            .get(),
+        1
+    );
+    assert_eq!(
+        verified.instructions()[0]
+            .successors()
+            .branch_target()
+            .expect("exceptional catch edge")
+            .get(),
+        4
     );
 
+    verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode,
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect("normal and exceptional catch completions both empty the compiler stack");
+}
+
+#[test]
+fn compiler_throw_may_leave_only_a_structural_catch_marker_for_final_verification() {
+    let bytecode = encode(&[
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ]);
+
+    verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode,
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect("the whole-bytecode typed stack pass owns catch-marker exit validation");
+}
+
+#[test]
+fn finally_return_address_capabilities_remain_fail_closed_with_typed_reasons() {
     let gosub_error = reject(
         encode(&[
             (FinalOpcode::Gosub, Operands::Label(4)),

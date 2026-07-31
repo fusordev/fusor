@@ -23,7 +23,12 @@ source-ordered static identifier, quoted String, Number, and BigInt
 literal-named data properties and synchronous methods/getters/setters, static
 data property reads/writes, own and inherited static accessor getter/setter
 dispatch, strict receiver-aware static method calls, and arbitrary explicit
-`throw` values. Computed property reads, writes, calls, data definitions, and
+`throw` values. Catch-only `try` statements support optional and simple
+identifier bindings, captured catch bindings, nested rethrow, and abrupt
+cleanup across calls, loops, and `for-in` iterator state. Engine-thrown
+InternalError, RangeError, ReferenceError, SyntaxError, and TypeError values
+materialize as branded objects in the throwing realm with inherited `name` and
+an exact own `message`. Computed property reads, writes, calls, data definitions, and
 synchronous methods/accessors perform resumable `ToPropertyKey`, including
 exact well-known Symbol identity. Non-BigInt unary, update, arithmetic, shift,
 bitwise, relational, loose-equality, and strict-equality operators execute with
@@ -70,8 +75,9 @@ data-initializer semantics, anonymous data-function inferred names,
 async/generator methods, `super`/home-object semantics, realm-global accessor
 writes, optional/spread/apply calls, the remaining Number built-ins,
 the remaining String built-ins, Symbol wrapper coercions, serialized bytecode,
-every form of eval, and catch/finally typed-stack semantics remain deferred and
-fail closed.
+every form of eval, Error constructors and `Error.prototype.toString`, and
+`finally`/destructuring-catch typed-stack semantics remain deferred and fail
+closed.
 Ordinary `new` calls now execute constructor-capable bytecode functions and
 materialize their `name`, `length`, and
 `prototype.constructor` graph. The `quickjs` facade supplies one immutable

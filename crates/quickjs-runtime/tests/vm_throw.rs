@@ -531,20 +531,14 @@ fn thrown_function_root_limit_failure_is_atomic_and_runtime_is_reusable() {
 }
 
 #[test]
-fn catch_and_finally_handler_control_flow_remains_fail_closed() {
-    let cases = [
-        "function f(){try{throw 1;}catch(error){return error;}}",
-        "function f(){try{return 1;}finally{return 2;}}",
-    ];
-
-    for source in cases {
-        let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "f") else {
-            panic!("handler control flow must remain unsupported: {source}");
-        };
-        assert_eq!(feature, UnsupportedLeafFeature::UnsupportedBody);
-        assert!(
-            source[span.start as usize..span.end as usize].starts_with("try"),
-            "{source}"
-        );
-    }
+fn finally_handler_control_flow_remains_fail_closed() {
+    let source = "function f(){try{return 1;}finally{return 2;}}";
+    let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "f") else {
+        panic!("finally control flow must remain unsupported");
+    };
+    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedBody);
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        "{return 2;}"
+    );
 }

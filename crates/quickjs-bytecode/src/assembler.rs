@@ -44,6 +44,8 @@ pub enum BranchKind {
     IfTrue,
     /// Unconditionally branch.
     Goto,
+    /// Install an exception handler at the symbolic target.
+    Catch,
 }
 
 impl BranchKind {
@@ -52,6 +54,7 @@ impl BranchKind {
             Self::IfFalse => FinalOpcode::IfFalse,
             Self::IfTrue => FinalOpcode::IfTrue,
             Self::Goto => FinalOpcode::Goto,
+            Self::Catch => FinalOpcode::Catch,
         }
     }
 
@@ -59,6 +62,14 @@ impl BranchKind {
         match self {
             Self::IfFalse | Self::IfTrue => matches!(instruction_size, 2 | 5),
             Self::Goto => matches!(instruction_size, 2 | 3 | 5),
+            Self::Catch => instruction_size == 5,
+        }
+    }
+
+    const fn minimum_size(self) -> u8 {
+        match self {
+            Self::IfFalse | Self::IfTrue | Self::Goto => 2,
+            Self::Catch => 5,
         }
     }
 }
@@ -73,7 +84,7 @@ impl AssemblyItem {
     fn minimum_size(self) -> u8 {
         match self {
             Self::Instruction(instruction) => instruction.encoded_size(),
-            Self::Branch { .. } => 2,
+            Self::Branch { kind, .. } => kind.minimum_size(),
         }
     }
 }
@@ -525,7 +536,7 @@ impl BytecodeAssembler {
         Ok(instruction_index)
     }
 
-    /// Appends a symbolic conditional or unconditional branch.
+    /// Appends a symbolic conditional, unconditional, or exception-handler branch.
     ///
     /// # Errors
     ///
@@ -928,6 +939,12 @@ fn branch_instruction(
             ),
             (BranchKind::Goto, 5) => (
                 FinalOpcode::Goto,
+                Operands::Label(i32::try_from(displacement).map_err(|_| {
+                    displacement_error(instruction_index, label_index, displacement)
+                })?),
+            ),
+            (BranchKind::Catch, 5) => (
+                FinalOpcode::Catch,
                 Operands::Label(i32::try_from(displacement).map_err(|_| {
                     displacement_error(instruction_index, label_index, displacement)
                 })?),

@@ -272,9 +272,11 @@ Oxc compiler profile. It remains runtime-independent and immutable, so one
 without a lock. `Context::instantiate` binds one installation to a validated
 same-runtime realm; the selected root must have an empty external closure
 environment. Child environments are subsequently derived only from verified
-parent capture metadata. Serialized bytecode, catch/finally typed-stack state,
-handlers/iterators, direct eval, and the remaining compiler profiles still
-fail closed.
+parent capture metadata. The ordinary compiler profile owns a bounded typed
+catch-marker certificate and supports catch-only `try` statements with an
+optional or simple identifier binding. Serialized bytecode, finally return
+addresses, destructuring catch bindings, direct eval, and the remaining
+compiler profiles still fail closed.
 
 `BytecodeAssembler` keeps symbolic label handles provenance-bound to one
 assembler through immutable `Arc` identity. Labels never enter final operands.
@@ -562,9 +564,9 @@ dispatch, prototype mutation, proxies and other exotics, derived/class and
 nonordinary constructor forms, optional/spread/apply/tail calls, the remaining
 Number built-ins, the remaining String built-ins, Symbol sloppy-`this` boxing
 and wrapper/prototype conversions, `for-in` Symbol boxing and destructuring
-heads, serialized input, raw function slots, catch handlers, finally return
-addresses, `for-of`/async iterator markers, and packed exceptional stack values
-remain fail closed. Ordinary
+heads, serialized input, raw function slots, finally return addresses,
+destructuring catch bindings, `for-of`/async iterator markers, and packed
+exceptional stack values remain fail closed. Ordinary
 accessors are typed slots: `GetField`
 and `GetField2` stop at the first own or inherited accessor, execute native or
 verified-bytecode getters through the same frame vector, preserve the original
@@ -775,15 +777,21 @@ The current implementation keeps distinct domains:
 The VM carries engine-created errors and arbitrary thrown `StoredValue`s in one
 private typed abrupt-completion transport. After `throw` pops its value, that
 transport exclusively owns the value while active frames retain the remaining
-edges. Caller provenance is fallibly allocated and the escaping value is
-immediately published as one public `JsValue` root; collection is forbidden
-between those operations. Cloning the exception shares that `Arc` root header,
-and dropping its last clone schedules the normal deferred release.
-`StoredValue` crosses the public-handle boundary through an exhaustive
-primitive-versus-`HeapReference` split covering both functions and ordinary
-objects, and the release mailbox carries the typed heap reference. Catch/finally,
-JavaScript Error objects, and catchable engine-created errors remain pending;
-ordinary host/resource/engine failures are not mislabeled as JavaScript
+edges. A caught completion unwinds the explicit frame vector to the nearest
+verified marker, retires crossed dynamic roots, materializes engine-created
+errors in the throwing realm, and enters the certified handler with exactly
+one JavaScript value. Caller provenance is fallibly allocated for an escaping
+completion, and the escaping value is immediately published as one public
+`JsValue` root; collection is forbidden between those operations. Cloning the
+exception shares that `Arc` root header, and dropping its last clone schedules
+the normal deferred release. `StoredValue` crosses the public-handle boundary
+through an exhaustive primitive-versus-`HeapReference` split covering both
+functions and ordinary objects, and the release mailbox carries the typed heap
+reference. Realm-owned branded Error objects cover InternalError, RangeError,
+ReferenceError, SyntaxError, and TypeError with inherited `name` and an own
+`message`; public Error constructors, `Error.prototype.toString`, and stack
+materialization remain pending. Finally completions remain fail closed.
+Ordinary host/resource/engine failures are not mislabeled as JavaScript
 throws. Synthetic native-frame provenance, including one visible frame for
 each nested `Function.prototype.call`, remains part of the pending JavaScript
 Error/stack model. Miette remains presentation, not semantic truth.
@@ -878,8 +886,10 @@ and static data properties, identifier/String/Number/BigInt literal-named
 synchronous object methods/getters/setters, strict receiver-aware calls,
 iterative accessor dispatch, and safe-point collection of transient/cyclic
 function, cell, and object graphs. General descriptor mutation, computed
-properties, `super`/home-object semantics, coercive `+`, catch/finally, and
-JavaScript Error objects remain later slices.
+properties, `super`/home-object semantics, coercive `+`, finally, public Error
+constructors, and `Error.prototype.toString` remain later slices. Catch-only
+`try` statements and internal branded engine Error objects are part of the
+current slice.
 
 The planned asynchronous slice creates a host timer Promise. A Tokio wakeup
 must be observed on the runtime owner, the FIFO job queue must drain

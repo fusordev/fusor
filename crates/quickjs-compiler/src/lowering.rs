@@ -4,14 +4,14 @@ use oxc_ast::{
     AstKind,
     ast::{
         AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement, CallExpression,
-        ComputedMemberExpression, ConditionalExpression, DoWhileStatement, Expression,
+        CatchClause, ComputedMemberExpression, ConditionalExpression, DoWhileStatement, Expression,
         ExpressionStatement, ForInStatement, ForStatement, ForStatementInit, ForStatementLeft,
         Function, FunctionBody, FunctionType, IdentifierReference, IfStatement, LabelIdentifier,
         LabeledStatement, LogicalExpression, NewExpression, ObjectExpression, ObjectProperty,
         ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement,
         SequenceExpression, SimpleAssignmentTarget, Statement, StaticMemberExpression,
-        SwitchStatement, ThrowStatement, UnaryExpression, UpdateExpression, VariableDeclaration,
-        VariableDeclarationKind, WhileStatement,
+        SwitchStatement, ThrowStatement, TryStatement, UnaryExpression, UpdateExpression,
+        VariableDeclaration, VariableDeclarationKind, WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
@@ -1479,13 +1479,17 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             ],
             active_scopes: Vec::new(),
             controls: StatementControlStack::default(),
+            abrupt_markers: Vec::new(),
             completion: StatementCompletion::Discard,
         };
 
         while let Some(task) = state.work.pop() {
             self.process_statement_work(task, body.span, planning, flow, &mut state)?;
         }
-        if !state.active_scopes.is_empty() || !state.controls.is_empty() {
+        if !state.active_scopes.is_empty()
+            || !state.controls.is_empty()
+            || !state.abrupt_markers.is_empty()
+        {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "statement planning closes every scope and control region",
                 span: Some(body.span),
@@ -1519,13 +1523,17 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             ],
             active_scopes: Vec::new(),
             controls: StatementControlStack::default(),
+            abrupt_markers: Vec::new(),
             completion: StatementCompletion::Script(completion),
         };
 
         while let Some(task) = state.work.pop() {
             self.process_statement_work(task, program.span, planning, flow, &mut state)?;
         }
-        if !state.active_scopes.is_empty() || !state.controls.is_empty() {
+        if !state.active_scopes.is_empty()
+            || !state.controls.is_empty()
+            || !state.abrupt_markers.is_empty()
+        {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "Program planning closes every scope and control region",
                 span: Some(program.span),
@@ -1592,8 +1600,68 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             StatementWork::PopStatementStackBase { span } => {
                 flow.pop_statement_stack_base(span)?;
             }
-            StatementWork::PushControl(control) => state.controls.push(control, body_span)?,
-            StatementWork::PopControl => state.controls.pop(body_span)?,
+            StatementWork::PushControl(mut control) => {
+                let owns_for_in_marker = control.owns_for_in_marker;
+                if owns_for_in_marker {
+                    state.abrupt_markers.try_reserve(1).map_err(|_| {
+                        LeafCompilationError::CapacityExceeded {
+                            domain: "statement abrupt-marker stack",
+                        }
+                    })?;
+                }
+                let abrupt_marker_depth = state
+                    .abrupt_markers
+                    .len()
+                    .checked_add(usize::from(owns_for_in_marker))
+                    .ok_or(LeafCompilationError::CapacityExceeded {
+                        domain: "statement abrupt-marker depth",
+                    })?;
+                control.abrupt_marker_depth = Some(abrupt_marker_depth);
+                state.controls.push(control, body_span)?;
+                if owns_for_in_marker {
+                    state.abrupt_markers.push(AbruptMarker::ForIn);
+                }
+            }
+            StatementWork::PopControl => {
+                let control = state.controls.pop(body_span)?;
+                let expected_depth =
+                    control
+                        .abrupt_marker_depth
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "active statement control has an abrupt-marker depth",
+                            span: Some(body_span),
+                        })?;
+                if state.abrupt_markers.len() != expected_depth {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "statement control exits at its abrupt-marker depth",
+                        span: Some(body_span),
+                    });
+                }
+                if control.owns_for_in_marker
+                    && state.abrupt_markers.pop() != Some(AbruptMarker::ForIn)
+                {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "for-in control owns the innermost abrupt marker",
+                        span: Some(body_span),
+                    });
+                }
+            }
+            StatementWork::PushAbruptMarker(marker) => {
+                state.abrupt_markers.try_reserve(1).map_err(|_| {
+                    LeafCompilationError::CapacityExceeded {
+                        domain: "statement abrupt-marker stack",
+                    }
+                })?;
+                state.abrupt_markers.push(marker);
+            }
+            StatementWork::PopAbruptMarker(expected) => {
+                if state.abrupt_markers.pop() != Some(expected) {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "statement abrupt markers exit in last-in-first-out order",
+                        span: Some(body_span),
+                    });
+                }
+            }
             StatementWork::ForInHead(left) => self.plan_for_in_head(
                 left,
                 planning.layout,
@@ -1653,6 +1721,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 flow,
                 state,
             )?,
+            StatementWork::VisitBlock(block) => {
+                self.schedule_block_statement(block, state)?;
+            }
         }
         Ok(())
     }
@@ -1699,17 +1770,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Statement::ReturnStatement(statement) => {
                 Self::schedule_return_statement(
                     statement,
-                    state.controls.active_for_in_markers(),
+                    &state.abrupt_markers,
                     flow,
                     &mut state.work,
                 )?;
             }
             Statement::ThrowStatement(statement) => {
-                Self::schedule_throw_statement(
-                    statement,
-                    state.controls.active_for_in_markers(),
-                    &mut state.work,
-                )?;
+                Self::schedule_throw_statement(statement, &state.abrupt_markers, &mut state.work)?;
             }
             Statement::IfStatement(statement) => {
                 Self::reset_script_completion(state.completion, statement.span, flow)?;
@@ -1769,6 +1836,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Statement::SwitchStatement(statement) => {
                 Self::reset_script_completion(state.completion, statement.span, flow)?;
                 self.plan_switch_statement(statement, Vec::new(), flow, state)?;
+            }
+            Statement::TryStatement(statement) => {
+                Self::reset_script_completion(state.completion, statement.span, flow)?;
+                self.plan_try_statement(statement, layout, flow, state)?;
             }
             _ => {
                 return unsupported(UnsupportedLeafFeature::UnsupportedBody, statement.span());
@@ -1832,12 +1903,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     fn schedule_return_statement<'statement>(
         statement: &'statement ReturnStatement<'arena>,
-        active_for_in_markers: usize,
+        abrupt_markers: &[AbruptMarker],
         flow: &mut PlannedControlFlow,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if let Some(argument) = &statement.argument {
-            work.try_reserve(active_for_in_markers.saturating_add(2))
+            work.try_reserve(abrupt_markers.len().saturating_add(2))
                 .map_err(|_| LeafCompilationError::CapacityExceeded {
                     domain: "statement work stack",
                 })?;
@@ -1846,16 +1917,19 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 Operands::None,
                 statement.span,
             )));
-            for _ in 0..active_for_in_markers {
+            for marker in abrupt_markers {
                 work.push(StatementWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::Nip,
+                    match marker {
+                        AbruptMarker::Catch => FinalOpcode::NipCatch,
+                        AbruptMarker::ForIn => FinalOpcode::Nip,
+                    },
                     Operands::None,
                     statement.span,
                 )));
             }
             work.push(StatementWork::Expression(argument));
         } else {
-            for _ in 0..active_for_in_markers {
+            for _ in abrupt_markers.iter().rev() {
                 flow.emit(PlannedInstruction::new(
                     FinalOpcode::Drop,
                     Operands::None,
@@ -1873,10 +1947,18 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     fn schedule_throw_statement<'statement>(
         statement: &'statement ThrowStatement<'arena>,
-        active_for_in_markers: usize,
+        abrupt_markers: &[AbruptMarker],
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
-        work.try_reserve(active_for_in_markers.saturating_add(2))
+        let removable_markers = abrupt_markers
+            .iter()
+            .rposition(|marker| *marker == AbruptMarker::Catch)
+            .map_or(abrupt_markers, |catch| &abrupt_markers[catch + 1..]);
+        let for_in_markers = removable_markers
+            .iter()
+            .filter(|marker| **marker == AbruptMarker::ForIn)
+            .count();
+        work.try_reserve(for_in_markers.saturating_add(2))
             .map_err(|_| LeafCompilationError::CapacityExceeded {
                 domain: "statement work stack",
             })?;
@@ -1885,7 +1967,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Operands::None,
             statement.span,
         )));
-        for _ in 0..active_for_in_markers {
+        for _ in 0..for_in_markers {
             work.push(StatementWork::Emit(PlannedInstruction::new(
                 FinalOpcode::Nip,
                 Operands::None,
@@ -1894,6 +1976,133 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         }
         work.push(StatementWork::Expression(&statement.argument));
         Ok(())
+    }
+
+    fn plan_try_statement<'statement>(
+        &self,
+        statement: &'statement TryStatement<'arena>,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+        state: &mut StatementPlanningState<'statement, 'arena>,
+    ) -> Result<(), LeafCompilationError> {
+        if let Some(finalizer) = &statement.finalizer {
+            return unsupported(UnsupportedLeafFeature::UnsupportedBody, finalizer.span);
+        }
+        let handler = statement
+            .handler
+            .as_ref()
+            .ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedBody,
+                span: statement.span,
+            })?;
+        let catch_scope =
+            self.created_scope(handler.scope_id.get(), handler.node_id.get(), handler.span)?;
+        let catch_body_scope = self.created_scope(
+            handler.body.scope_id.get(),
+            handler.body.node_id.get(),
+            handler.body.span,
+        )?;
+        let binding = self.plan_catch_binding(handler, catch_body_scope, layout)?;
+
+        let handler_target = flow.new_statement_label_with_offset(handler.span, 1)?;
+        let done = flow.new_statement_label(statement.span)?;
+        state
+            .work
+            .try_reserve(15)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement work stack",
+            })?;
+        state.work.push(StatementWork::Bind(done.clone()));
+        state.work.push(StatementWork::PopScope(catch_scope));
+        state.work.push(StatementWork::VisitBlock(&handler.body));
+        state.work.push(StatementWork::Emit(binding));
+        state.work.push(StatementWork::PushScope {
+            scope: catch_scope,
+            creator: handler.node_id.get(),
+            span: handler.span,
+        });
+        state.work.push(StatementWork::Bind(handler_target.clone()));
+        state.work.push(StatementWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span: statement.span,
+        });
+        state.work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            statement.span,
+        )));
+        state
+            .work
+            .push(StatementWork::PopAbruptMarker(AbruptMarker::Catch));
+        state.work.push(StatementWork::PopStatementStackBase {
+            span: statement.span,
+        });
+        state.work.push(StatementWork::VisitBlock(&statement.block));
+        state
+            .work
+            .push(StatementWork::PushAbruptMarker(AbruptMarker::Catch));
+        state.work.push(StatementWork::PushStatementStackBase {
+            span: statement.span,
+        });
+        state.work.push(StatementWork::Branch {
+            kind: BranchKind::Catch,
+            target: handler_target,
+            span: statement.span,
+        });
+        Ok(())
+    }
+
+    fn plan_catch_binding(
+        &self,
+        handler: &CatchClause<'arena>,
+        catch_body_scope: ScopeId,
+        layout: &FrameLayout,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        Ok(match &handler.param {
+            None => PlannedInstruction::new(FinalOpcode::Drop, Operands::None, handler.span),
+            Some(parameter) => {
+                let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedBinding,
+                        parameter.pattern.span(),
+                    );
+                };
+                let binding =
+                    self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+                let storage = self.planned.plan.binding(binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "catch binding has compiler storage",
+                        span: Some(identifier.span),
+                    },
+                )?;
+                if storage.executable() != layout.executable
+                    || storage.placement() != StoragePlacement::Local
+                    || storage.policy().kind() != DeclarationKind::Catch
+                    || storage.policy().initialization() != InitializationPolicy::Catch
+                    || storage.policy().writes() != WritePolicy::Mutable
+                    || storage.policy().has_temporal_dead_zone()
+                {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedBinding,
+                        identifier.span,
+                    );
+                }
+                if self.scope_for_binding(binding)? != catch_body_scope {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "catch binding belongs to the catch-body scope",
+                        span: Some(identifier.span),
+                    });
+                }
+                let slot = layout
+                    .slot(binding)
+                    .ok_or(LeafCompilationError::Unsupported {
+                        feature: UnsupportedLeafFeature::UnsupportedBinding,
+                        span: identifier.span,
+                    })?;
+                plan_put_slot(slot, identifier.span)
+            }
+        })
     }
 
     fn plan_for_statement<'statement>(
@@ -2621,7 +2830,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         layout: &FrameLayout,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        let (control_index, control) = state
+        let (_, control) = state
             .controls
             .resolve(label.map(|label| label.name.as_str()), jump)
             .ok_or(LeafCompilationError::SemanticInvariant {
@@ -2647,7 +2856,20 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         for scope in state.active_scopes[control.scope_depth..].iter().rev() {
             self.plan_scope_exit(layout.executable, *scope, layout, flow)?;
         }
-        for _ in 0..state.controls.for_in_markers_after(control_index) {
+        let abrupt_marker_depth =
+            control
+                .abrupt_marker_depth
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "active statement control has an abrupt-marker depth",
+                    span: Some(statement_span),
+                })?;
+        let crossed_markers = state.abrupt_markers.get(abrupt_marker_depth..).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "statement control abrupt-marker depth is active",
+                span: Some(statement_span),
+            },
+        )?;
+        for _ in crossed_markers.iter().rev() {
             flow.emit(PlannedInstruction::new(
                 FinalOpcode::Drop,
                 Operands::None,
@@ -5913,6 +6135,7 @@ enum ExpressionWork<'expression, 'arena> {
 
 enum StatementWork<'statement, 'arena> {
     Visit(&'statement Statement<'arena>),
+    VisitBlock(&'statement BlockStatement<'arena>),
     VisitList {
         statements: &'statement [Statement<'arena>],
         next: usize,
@@ -5932,6 +6155,8 @@ enum StatementWork<'statement, 'arena> {
     },
     PushControl(ControlRegion<'statement>),
     PopControl,
+    PushAbruptMarker(AbruptMarker),
+    PopAbruptMarker(AbruptMarker),
     ForInHead(&'statement ForStatementLeft<'arena>),
     ForInAssignment(&'statement ForStatementLeft<'arena>),
     Declaration(&'statement VariableDeclaration<'arena>),
@@ -5969,7 +6194,14 @@ struct StatementPlanningState<'statement, 'arena> {
     work: Vec<StatementWork<'statement, 'arena>>,
     active_scopes: Vec<ScopeId>,
     controls: StatementControlStack<'statement>,
+    abrupt_markers: Vec<AbruptMarker>,
     completion: StatementCompletion,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AbruptMarker {
+    Catch,
+    ForIn,
 }
 
 #[derive(Clone, Copy)]
@@ -5986,6 +6218,7 @@ struct ControlRegion<'statement> {
     accepts_unlabeled_break: bool,
     scope_depth: usize,
     owns_for_in_marker: bool,
+    abrupt_marker_depth: Option<usize>,
 }
 
 impl<'statement> ControlRegion<'statement> {
@@ -6002,6 +6235,7 @@ impl<'statement> ControlRegion<'statement> {
             accepts_unlabeled_break: true,
             scope_depth,
             owns_for_in_marker: false,
+            abrupt_marker_depth: None,
         }
     }
 
@@ -6018,6 +6252,7 @@ impl<'statement> ControlRegion<'statement> {
             accepts_unlabeled_break: true,
             scope_depth,
             owns_for_in_marker: true,
+            abrupt_marker_depth: None,
         }
     }
 
@@ -6034,6 +6269,7 @@ impl<'statement> ControlRegion<'statement> {
             accepts_unlabeled_break,
             scope_depth,
             owns_for_in_marker: false,
+            abrupt_marker_depth: None,
         }
     }
 }
@@ -6049,10 +6285,11 @@ struct StatementControlStack<'statement> {
 impl<'statement> StatementControlStack<'statement> {
     #[cfg(test)]
     fn with_control(
-        control: ControlRegion<'statement>,
+        mut control: ControlRegion<'statement>,
         span: Span,
     ) -> Result<Self, LeafCompilationError> {
         let mut controls = Self::default();
+        control.abrupt_marker_depth = Some(usize::from(control.owns_for_in_marker));
         controls.push(control, span)?;
         Ok(controls)
     }
@@ -6115,7 +6352,7 @@ impl<'statement> StatementControlStack<'statement> {
         Ok(())
     }
 
-    fn pop(&mut self, span: Span) -> Result<(), LeafCompilationError> {
+    fn pop(&mut self, span: Span) -> Result<ControlRegion<'statement>, LeafCompilationError> {
         let index =
             self.regions
                 .len()
@@ -6161,7 +6398,7 @@ impl<'statement> StatementControlStack<'statement> {
                 });
             }
         }
-        for label in control.labels {
+        for label in &control.labels {
             if self.labeled.remove(label) != Some(index) {
                 return Err(LeafCompilationError::SemanticInvariant {
                     invariant: "statement label names its active control region",
@@ -6169,7 +6406,7 @@ impl<'statement> StatementControlStack<'statement> {
                 });
             }
         }
-        Ok(())
+        Ok(control)
     }
 
     fn resolve(
@@ -6183,22 +6420,6 @@ impl<'statement> StatementControlStack<'statement> {
             (None, LoopJump::Continue) => self.iterations.last(),
         }?;
         self.regions.get(*index).map(|control| (*index, control))
-    }
-
-    fn active_for_in_markers(&self) -> usize {
-        self.regions
-            .iter()
-            .filter(|region| region.owns_for_in_marker)
-            .count()
-    }
-
-    fn for_in_markers_after(&self, index: usize) -> usize {
-        self.regions
-            .get(index.saturating_add(1)..)
-            .unwrap_or_default()
-            .iter()
-            .filter(|region| region.owns_for_in_marker)
-            .count()
     }
 
     fn is_empty(&self) -> bool {
@@ -8989,7 +9210,7 @@ mod tests {
                     .created_scope(function.scope_id.get(), function.node_id.get(), function.span)
                     .expect("function scope");
                 let layout =
-                    FrameLayout::new(context.storage_plan(), executable.id()).expect("frame layout");
+                    FrameLayout::new(context.storage_plan(), executable.id()).expect("layout");
                 let tree_layout = context.function_tree_layout().expect("function tree layout");
                 let capture_layout = context
                     .compiler_capture_layout(
@@ -9053,6 +9274,7 @@ mod tests {
         .expect("front-end acceptance");
     }
 
+    #[allow(clippy::too_many_lines)]
     fn abrupt_cleanup_fixture(
         source: &str,
     ) -> (
@@ -9116,6 +9338,7 @@ mod tests {
                     work: Vec::new(),
                     active_scopes: vec![function_scope, loop_scope, inner_scope],
                     controls,
+                    abrupt_markers: Vec::new(),
                     completion: StatementCompletion::Discard,
                 };
                 context

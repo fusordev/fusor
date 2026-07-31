@@ -186,7 +186,11 @@ impl CompilerBindingPolicy {
                     CompilerWritePolicy::Immutable | CompilerWritePolicy::ImmutableInStrictCode
                 ) && !self.temporal_dead_zone
             }
-            CompilerBindingKind::Catch => false,
+            CompilerBindingKind::Catch => {
+                matches!(self.initialization, CompilerInitializationPolicy::Catch)
+                    && matches!(self.writes, CompilerWritePolicy::Mutable)
+                    && !self.temporal_dead_zone
+            }
             CompilerBindingKind::GlobalReference => {
                 matches!(
                     self.initialization,
@@ -1418,6 +1422,27 @@ pub enum BytecodeVerificationErrorKind {
         /// Terminal bytecode position.
         pc: BytecodePc,
     },
+    /// An opcode forged, consumed, copied, stored, called, returned, or
+    /// reordered an internal catch marker.
+    CatchMarkerStackMismatch {
+        /// Final bytecode position.
+        pc: BytecodePc,
+        /// Opcode whose typed inputs were invalid.
+        opcode: FinalOpcode,
+    },
+    /// Control flow merged distinct catch identities, entered a handler
+    /// normally, or mixed a catch marker with an ordinary JavaScript value.
+    CatchMarkerJoinMismatch {
+        /// Join target.
+        target: BytecodePc,
+        /// Incoming edge that disagreed with the established typed stack.
+        incoming_from: BytecodePc,
+    },
+    /// A terminal path retained an internal catch marker.
+    CatchMarkerAtExit {
+        /// Terminal bytecode position.
+        pc: BytecodePc,
+    },
     /// `define_method` is not paired with one immediately preceding typed
     /// ordinary-method closure.
     DefineMethodTemplateMismatch {
@@ -1687,6 +1712,23 @@ impl fmt::Display for BytecodeVerificationErrorKind {
                 formatter,
                 "terminal at PC {pc} retains an internal for-in iterator marker"
             ),
+            Self::CatchMarkerStackMismatch { pc, opcode } => write!(
+                formatter,
+                "opcode {opcode:?} at PC {pc} violates the typed catch-marker stack"
+            ),
+            Self::CatchMarkerJoinMismatch {
+                target,
+                incoming_from,
+            } => write!(
+                formatter,
+                "typed catch-marker stack at PC {target} disagrees with the edge from PC {incoming_from}"
+            ),
+            Self::CatchMarkerAtExit { pc } => {
+                write!(
+                    formatter,
+                    "terminal at PC {pc} retains an internal catch marker"
+                )
+            }
             Self::DefineMethodTemplateMismatch { pc } => write!(
                 formatter,
                 "define_method at PC {pc} is not paired with one typed method closure"
@@ -1989,6 +2031,10 @@ fn try_copy_slice<T: Copy>(
     Ok(output)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "whole-function metadata validation remains one ordered admission boundary"
+)]
 fn verify_function_metadata(
     id: FunctionTemplateId,
     graph: &VerifiedCompilerFunctionGraph,
@@ -2059,23 +2105,29 @@ fn verify_function_metadata(
     )?;
     verify_source(id, flow, metadata)?;
     verify_supported_opcodes(id, flow, metadata.executable_kind, authority_kind)?;
-    let mut for_in_certificate = verify_for_in_iterator_stack(id, function, limits, usage)?;
+    let mut internal_stack = verify_internal_operand_stack(id, function, limits, usage)?;
     classify_for_in_declarative_local_puts(
         id,
         flow,
         &metadata.variables,
-        &mut for_in_certificate,
+        &mut internal_stack,
         limits,
         usage,
     )?;
-    verify_binding_opcodes(id, flow, &metadata.variables, &metadata.closures)?;
+    verify_binding_opcodes(
+        id,
+        flow,
+        &metadata.variables,
+        &metadata.closures,
+        &internal_stack,
+    )?;
     let binding_transfers = verify_binding_states(
         id,
         graph,
         function,
         &metadata.variables,
         &initializer_sites,
-        &for_in_certificate,
+        &internal_stack,
         realm_global_initializer_prefix,
         usage.policy_transfers,
         limits.max_policy_transfers,
@@ -4204,6 +4256,8 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
             | FinalOpcode::Throw
+            | FinalOpcode::Catch
+            | FinalOpcode::NipCatch
             | FinalOpcode::GetVarUndef
             | FinalOpcode::GetVar
             | FinalOpcode::PutVar
@@ -4339,17 +4393,26 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ForInStackValue {
+enum InternalStackValue {
     Ordinary,
-    Iterator(BytecodePc),
-    Key(BytecodePc),
-    Done(BytecodePc),
-    HeadKey(BytecodePc),
+    ForInIterator(BytecodePc),
+    ForInKey(BytecodePc),
+    ForInDone(BytecodePc),
+    ForInHeadKey(BytecodePc),
+    CatchMarker {
+        site: BytecodePc,
+        handler: InstructionIndex,
+    },
+    CatchException(BytecodePc),
 }
 
-impl ForInStackValue {
+impl InternalStackValue {
     const fn is_javascript_value(self) -> bool {
-        !matches!(self, Self::Iterator(_))
+        !matches!(self, Self::ForInIterator(_) | Self::CatchMarker { .. })
+    }
+
+    const fn is_catch_value(self) -> bool {
+        matches!(self, Self::CatchMarker { .. } | Self::CatchException(_))
     }
 }
 
@@ -4359,14 +4422,28 @@ struct CertifiedForInLocalPut {
     cursor_site: BytecodePc,
 }
 
-#[derive(Default)]
-struct ForInIteratorCertificate {
-    local_key_puts: Vec<Option<CertifiedForInLocalPut>>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CertifiedCatchLocalPut {
+    local: u32,
 }
 
-impl ForInIteratorCertificate {
+#[derive(Default)]
+struct InternalStackCertificate {
+    local_key_puts: Vec<Option<CertifiedForInLocalPut>>,
+    catch_local_puts: Vec<Option<CertifiedCatchLocalPut>>,
+}
+
+impl InternalStackCertificate {
     fn certifies_local_key_put(&self, instruction: usize, local: u32) -> bool {
         self.local_key_puts
+            .get(instruction)
+            .copied()
+            .flatten()
+            .is_some_and(|certificate| certificate.local == local)
+    }
+
+    fn certifies_catch_local_put(&self, instruction: usize, local: u32) -> bool {
+        self.catch_local_puts
             .get(instruction)
             .copied()
             .flatten()
@@ -4386,35 +4463,39 @@ struct ForInLocalPutSummary {
 }
 
 #[derive(Clone, Copy)]
-struct ForInStackTransfer {
+struct InternalStackTransfer {
     normal_completion: bool,
     iteration_branch_key: Option<BytecodePc>,
 }
 
 #[allow(
     clippy::too_many_lines,
-    reason = "the bounded CFG worklist and exact operand-stack transfer form one for-in iterator certificate"
+    reason = "the bounded CFG worklist and exact operand-stack transfer form one internal marker certificate"
 )]
-fn verify_for_in_iterator_stack(
+fn verify_internal_operand_stack(
     id: FunctionTemplateId,
     function: &VerifiedCompilerFunction,
     limits: BytecodeGraphVerificationLimits,
     usage: &mut BytecodeGraphUsage,
-) -> Result<ForInIteratorCertificate, BytecodeVerificationError> {
+) -> Result<InternalStackCertificate, BytecodeVerificationError> {
     let instructions = function.control_flow().instructions();
     if !instructions.iter().any(|verified| {
         matches!(
             verified.decoded().instruction().opcode(),
-            FinalOpcode::ForInStart | FinalOpcode::ForInNext | FinalOpcode::Nip
+            FinalOpcode::ForInStart
+                | FinalOpcode::ForInNext
+                | FinalOpcode::Nip
+                | FinalOpcode::Catch
+                | FinalOpcode::NipCatch
         )
     }) {
-        return Ok(ForInIteratorCertificate::default());
+        return Ok(InternalStackCertificate::default());
     }
 
     let mut entries = try_filled_vec(
         id,
         instructions.len(),
-        None::<Vec<ForInStackValue>>,
+        None::<Vec<InternalStackValue>>,
         BytecodeGraphResource::FrameStateEntries,
     )?;
     let mut queued = try_filled_vec(
@@ -4435,6 +4516,40 @@ fn verify_for_in_iterator_stack(
         None::<CertifiedForInLocalPut>,
         BytecodeGraphResource::FrameStateEntries,
     )?;
+    let mut catch_local_puts = try_filled_vec(
+        id,
+        instructions.len(),
+        None::<CertifiedCatchLocalPut>,
+        BytecodeGraphResource::FrameStateEntries,
+    )?;
+    let mut catch_handler_targets = try_filled_vec(
+        id,
+        instructions.len(),
+        false,
+        BytecodeGraphResource::FrameStateEntries,
+    )?;
+    for verified in instructions {
+        if verified.decoded().instruction().opcode() != FinalOpcode::Catch {
+            continue;
+        }
+        let handler = verified.successors().branch_target().ok_or_else(|| {
+            catch_stack_error(
+                id,
+                verified.decoded().pc(),
+                verified.decoded().instruction().opcode(),
+            )
+        })?;
+        let target = catch_handler_targets
+            .get_mut(handler.get() as usize)
+            .ok_or_else(|| {
+                catch_stack_error(
+                    id,
+                    verified.decoded().pc(),
+                    verified.decoded().instruction().opcode(),
+                )
+            })?;
+        *target = true;
+    }
     let mut work = VecDeque::new();
     work.try_reserve_exact(instructions.len()).map_err(|_| {
         BytecodeVerificationError::function(
@@ -4467,11 +4582,12 @@ fn verify_for_in_iterator_stack(
         };
         queued[index] = false;
         let decoded = instructions[index].decoded();
-        let component = components[index]
-            .ok_or_else(|| for_in_stack_error(id, decoded.pc(), decoded.instruction().opcode()))?;
-        let entry = entries[index]
-            .as_deref()
-            .ok_or_else(|| for_in_stack_error(id, decoded.pc(), decoded.instruction().opcode()))?;
+        let component = components[index].ok_or_else(|| {
+            internal_stack_error(id, decoded.pc(), decoded.instruction().opcode(), &[])
+        })?;
+        let entry = entries[index].as_deref().ok_or_else(|| {
+            internal_stack_error(id, decoded.pc(), decoded.instruction().opcode(), &[])
+        })?;
         charge_policy_transfers(
             id,
             &mut evaluations,
@@ -4480,8 +4596,15 @@ fn verify_for_in_iterator_stack(
             limits.max_policy_transfers,
         )?;
         let mut state = try_copy_slice(id, entry, BytecodeGraphResource::FrameStateEntries)?;
-        let transfer =
-            transfer_for_in_iterator_stack(id, index, decoded, &mut state, &mut local_key_puts)?;
+        let transfer = transfer_internal_operand_stack(
+            id,
+            index,
+            decoded,
+            instructions[index].successors().branch_target(),
+            &mut state,
+            &mut local_key_puts,
+            &mut catch_local_puts,
+        )?;
         if !transfer.normal_completion {
             continue;
         }
@@ -4514,23 +4637,54 @@ fn verify_for_in_iterator_stack(
                 .iteration_branch_key
                 .map(|site| {
                     let key_index = state.len().checked_sub(1).ok_or_else(|| {
-                        for_in_stack_error(id, decoded.pc(), decoded.instruction().opcode())
-                    })?;
-                    if state[key_index] != ForInStackValue::Key(site) {
-                        return Err(for_in_stack_error(
+                        internal_stack_error(
                             id,
                             decoded.pc(),
                             decoded.instruction().opcode(),
+                            &state,
+                        )
+                    })?;
+                    if state[key_index] != InternalStackValue::ForInKey(site) {
+                        return Err(internal_stack_error(
+                            id,
+                            decoded.pc(),
+                            decoded.instruction().opcode(),
+                            &state,
                         ));
                     }
                     state[key_index] = if is_branch_target {
-                        ForInStackValue::HeadKey(site)
+                        InternalStackValue::ForInHeadKey(site)
                     } else {
-                        ForInStackValue::Ordinary
+                        InternalStackValue::Ordinary
                     };
                     Ok(key_index)
                 })
                 .transpose()?;
+            let catch_exception = if decoded.instruction().opcode() == FinalOpcode::Catch
+                && is_branch_target
+            {
+                let marker_index = state.len().checked_sub(1).ok_or_else(|| {
+                    catch_stack_error(id, decoded.pc(), decoded.instruction().opcode())
+                })?;
+                let InternalStackValue::CatchMarker { site, handler } = state[marker_index] else {
+                    return Err(catch_stack_error(
+                        id,
+                        decoded.pc(),
+                        decoded.instruction().opcode(),
+                    ));
+                };
+                if handler != successor {
+                    return Err(catch_stack_error(
+                        id,
+                        decoded.pc(),
+                        decoded.instruction().opcode(),
+                    ));
+                }
+                state[marker_index] = InternalStackValue::CatchException(site);
+                Some((marker_index, site, handler))
+            } else {
+                None
+            };
             charge_policy_transfers(
                 id,
                 &mut evaluations,
@@ -4538,12 +4692,13 @@ fn verify_for_in_iterator_stack(
                 usage.policy_transfers,
                 limits.max_policy_transfers,
             )?;
-            propagate_for_in_iterator_stack(
+            propagate_internal_operand_stack(
                 id,
                 decoded.pc(),
                 successor,
                 target_pc,
                 component,
+                catch_handler_targets[successor.get() as usize],
                 &state,
                 &mut entries,
                 &mut components,
@@ -4554,18 +4709,14 @@ fn verify_for_in_iterator_stack(
             )?;
             if let (Some(key_index), Some(site)) = (branch_key_index, transfer.iteration_branch_key)
             {
-                state[key_index] = ForInStackValue::Key(site);
+                state[key_index] = InternalStackValue::ForInKey(site);
+            }
+            if let Some((marker_index, site, handler)) = catch_exception {
+                state[marker_index] = InternalStackValue::CatchMarker { site, handler };
             }
         }
-        if !has_successor
-            && state
-                .iter()
-                .any(|value| matches!(value, ForInStackValue::Iterator(_)))
-        {
-            return Err(BytecodeVerificationError::function(
-                id,
-                BytecodeVerificationErrorKind::ForInIteratorMarkerAtExit { pc: decoded.pc() },
-            ));
+        if !has_successor {
+            verify_internal_stack_exit(id, decoded, &state)?;
         }
     }
 
@@ -4575,7 +4726,10 @@ fn verify_for_in_iterator_stack(
         limits.max_policy_transfers,
         BytecodeGraphResource::PolicyTransfers,
     )?;
-    Ok(ForInIteratorCertificate { local_key_puts })
+    Ok(InternalStackCertificate {
+        local_key_puts,
+        catch_local_puts,
+    })
 }
 
 #[allow(
@@ -4586,7 +4740,7 @@ fn classify_for_in_declarative_local_puts(
     id: FunctionTemplateId,
     flow: &VerifiedControlFlow,
     variables: &[VariableDefinition],
-    certificate: &mut ForInIteratorCertificate,
+    certificate: &mut InternalStackCertificate,
     limits: BytecodeGraphVerificationLimits,
     usage: &mut BytecodeGraphUsage,
 ) -> Result<(), BytecodeVerificationError> {
@@ -4697,35 +4851,60 @@ fn classify_for_in_declarative_local_puts(
 
 #[allow(
     clippy::too_many_lines,
-    reason = "marker isolation, edge-specific key provenance, and ordinary stack transfer form one typed opcode boundary"
+    reason = "marker isolation, edge-specific handler and key provenance, and ordinary stack transfer form one typed opcode boundary"
 )]
-fn transfer_for_in_iterator_stack(
+fn transfer_internal_operand_stack(
     id: FunctionTemplateId,
     instruction_index: usize,
     decoded: crate::DecodedInstruction,
-    state: &mut Vec<ForInStackValue>,
+    catch_handler: Option<InstructionIndex>,
+    state: &mut Vec<InternalStackValue>,
     local_key_puts: &mut [Option<CertifiedForInLocalPut>],
-) -> Result<ForInStackTransfer, BytecodeVerificationError> {
+    catch_local_puts: &mut [Option<CertifiedCatchLocalPut>],
+) -> Result<InternalStackTransfer, BytecodeVerificationError> {
     let instruction = decoded.instruction();
     let opcode = instruction.opcode();
     match opcode {
+        FinalOpcode::Catch => {
+            invalidate_internal_value_provenance(state);
+            let Some(handler) = catch_handler else {
+                return Err(catch_stack_error(id, decoded.pc(), opcode));
+            };
+            state.try_reserve(1).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 1,
+                    },
+                )
+            })?;
+            state.push(InternalStackValue::CatchMarker {
+                site: decoded.pc(),
+                handler,
+            });
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_key: None,
+            });
+        }
         FinalOpcode::ForInStart => {
-            invalidate_for_in_key_provenance(state);
+            invalidate_internal_value_provenance(state);
             let Some(input) = state.last_mut() else {
                 return Err(for_in_stack_error(id, decoded.pc(), opcode));
             };
-            if *input != ForInStackValue::Ordinary {
+            if *input != InternalStackValue::Ordinary {
                 return Err(for_in_stack_error(id, decoded.pc(), opcode));
             }
-            *input = ForInStackValue::Iterator(decoded.pc());
-            return Ok(ForInStackTransfer {
+            *input = InternalStackValue::ForInIterator(decoded.pc());
+            return Ok(InternalStackTransfer {
                 normal_completion: true,
                 iteration_branch_key: None,
             });
         }
         FinalOpcode::ForInNext => {
-            invalidate_for_in_key_provenance(state);
-            let Some(ForInStackValue::Iterator(site)) = state.last().copied() else {
+            invalidate_internal_value_provenance(state);
+            let Some(InternalStackValue::ForInIterator(site)) = state.last().copied() else {
                 return Err(for_in_stack_error(id, decoded.pc(), opcode));
             };
             state.try_reserve(2).map_err(|_| {
@@ -4737,9 +4916,9 @@ fn transfer_for_in_iterator_stack(
                     },
                 )
             })?;
-            state.push(ForInStackValue::Key(site));
-            state.push(ForInStackValue::Done(site));
-            return Ok(ForInStackTransfer {
+            state.push(InternalStackValue::ForInKey(site));
+            state.push(InternalStackValue::ForInDone(site));
+            return Ok(InternalStackTransfer {
                 normal_completion: true,
                 iteration_branch_key: None,
             });
@@ -4747,25 +4926,42 @@ fn transfer_for_in_iterator_stack(
         FinalOpcode::IfFalse | FinalOpcode::IfFalse8 => {
             if let Some(base) = state.len().checked_sub(3)
                 && let (
-                    ForInStackValue::Iterator(iterator),
-                    ForInStackValue::Key(key),
-                    ForInStackValue::Done(done),
+                    InternalStackValue::ForInIterator(iterator),
+                    InternalStackValue::ForInKey(key),
+                    InternalStackValue::ForInDone(done),
                 ) = (state[base], state[base + 1], state[base + 2])
                 && iterator == key
                 && key == done
             {
                 state.pop();
-                invalidate_for_in_key_provenance(&mut state[..base]);
-                return Ok(ForInStackTransfer {
+                invalidate_internal_value_provenance(&mut state[..base]);
+                return Ok(InternalStackTransfer {
                     normal_completion: true,
                     iteration_branch_key: Some(key),
                 });
             }
         }
         opcode if is_unchecked_local_put(opcode) => {
+            if let Some(InternalStackValue::CatchException(_catch_site)) = state.last().copied() {
+                let Some(local) = local_operand(opcode, instruction.operands()) else {
+                    return Err(catch_stack_error(id, decoded.pc(), opcode));
+                };
+                let Some(certificate) = catch_local_puts.get_mut(instruction_index) else {
+                    return Err(catch_stack_error(id, decoded.pc(), opcode));
+                };
+                *certificate = Some(CertifiedCatchLocalPut { local });
+                state.pop();
+                invalidate_internal_value_provenance(state);
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_key: None,
+                });
+            }
             if let Some(marker) = state.len().checked_sub(2)
-                && let (ForInStackValue::Iterator(iterator), ForInStackValue::HeadKey(key)) =
-                    (state[marker], state[marker + 1])
+                && let (
+                    InternalStackValue::ForInIterator(iterator),
+                    InternalStackValue::ForInHeadKey(key),
+                ) = (state[marker], state[marker + 1])
                 && iterator == key
             {
                 let Some(local) = local_operand(opcode, instruction.operands()) else {
@@ -4779,8 +4975,8 @@ fn transfer_for_in_iterator_stack(
                     cursor_site: key,
                 });
                 state.pop();
-                invalidate_for_in_key_provenance(state);
-                return Ok(ForInStackTransfer {
+                invalidate_internal_value_provenance(state);
+                return Ok(InternalStackTransfer {
                     normal_completion: true,
                     iteration_branch_key: None,
                 });
@@ -4788,13 +4984,13 @@ fn transfer_for_in_iterator_stack(
         }
         FinalOpcode::Drop => {
             if state.pop().is_none() {
-                return Ok(ForInStackTransfer {
+                return Ok(InternalStackTransfer {
                     normal_completion: false,
                     iteration_branch_key: None,
                 });
             }
-            invalidate_for_in_key_provenance(state);
-            return Ok(ForInStackTransfer {
+            invalidate_internal_value_provenance(state);
+            return Ok(InternalStackTransfer {
                 normal_completion: true,
                 iteration_branch_key: None,
             });
@@ -4803,15 +4999,32 @@ fn transfer_for_in_iterator_stack(
             let marker_index = state.len().checked_sub(2);
             if !matches!(
                 marker_index.map(|index| (state[index], state[index + 1])),
-                Some((ForInStackValue::Iterator(_), value))
+                Some((InternalStackValue::ForInIterator(_), value))
                     if value.is_javascript_value()
             ) {
                 return Err(for_in_stack_error(id, decoded.pc(), opcode));
             }
             state.truncate(state.len() - 2);
-            state.push(ForInStackValue::Ordinary);
-            invalidate_for_in_key_provenance(state);
-            return Ok(ForInStackTransfer {
+            state.push(InternalStackValue::Ordinary);
+            invalidate_internal_value_provenance(state);
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_key: None,
+            });
+        }
+        FinalOpcode::NipCatch => {
+            let marker_index = state.len().checked_sub(2);
+            if !matches!(
+                marker_index.map(|index| (state[index], state[index + 1])),
+                Some((InternalStackValue::CatchMarker { .. }, value))
+                    if value.is_javascript_value()
+            ) {
+                return Err(catch_stack_error(id, decoded.pc(), opcode));
+            }
+            state.truncate(state.len() - 2);
+            state.push(InternalStackValue::Ordinary);
+            invalidate_internal_value_provenance(state);
+            return Ok(InternalStackTransfer {
                 normal_completion: true,
                 iteration_branch_key: None,
             });
@@ -4819,14 +5032,14 @@ fn transfer_for_in_iterator_stack(
         _ => {}
     }
 
-    invalidate_for_in_key_provenance(state);
+    invalidate_internal_value_provenance(state);
     let effect = instruction
         .stack_effect()
-        .map_err(|_| for_in_stack_error(id, decoded.pc(), opcode))?;
+        .map_err(|_| internal_stack_error(id, decoded.pc(), opcode, state))?;
     let pops = effect.pops() as usize;
     let pushes = effect.pushes() as usize;
     let Some(input_start) = state.len().checked_sub(pops) else {
-        return Ok(ForInStackTransfer {
+        return Ok(InternalStackTransfer {
             normal_completion: false,
             iteration_branch_key: None,
         });
@@ -4835,11 +5048,16 @@ fn transfer_for_in_iterator_stack(
         .iter()
         .any(|value| !value.is_javascript_value())
     {
-        return Err(for_in_stack_error(id, decoded.pc(), opcode));
+        return Err(internal_stack_error(
+            id,
+            decoded.pc(),
+            opcode,
+            &state[input_start..],
+        ));
     }
     let output_len = input_start
         .checked_add(pushes)
-        .ok_or_else(|| for_in_stack_error(id, decoded.pc(), opcode))?;
+        .ok_or_else(|| internal_stack_error(id, decoded.pc(), opcode, state))?;
     if output_len > state.len() {
         let additional = output_len - state.len();
         state.try_reserve(additional).map_err(|_| {
@@ -4853,33 +5071,37 @@ fn transfer_for_in_iterator_stack(
         })?;
     }
     state.truncate(input_start);
-    state.resize(output_len, ForInStackValue::Ordinary);
-    Ok(ForInStackTransfer {
+    state.resize(output_len, InternalStackValue::Ordinary);
+    Ok(InternalStackTransfer {
         normal_completion: true,
         iteration_branch_key: None,
     })
 }
 
-fn invalidate_for_in_key_provenance(state: &mut [ForInStackValue]) {
+fn invalidate_internal_value_provenance(state: &mut [InternalStackValue]) {
     for value in state {
         if matches!(
             value,
-            ForInStackValue::Key(_) | ForInStackValue::Done(_) | ForInStackValue::HeadKey(_)
+            InternalStackValue::ForInKey(_)
+                | InternalStackValue::ForInDone(_)
+                | InternalStackValue::ForInHeadKey(_)
+                | InternalStackValue::CatchException(_)
         ) {
-            *value = ForInStackValue::Ordinary;
+            *value = InternalStackValue::Ordinary;
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn propagate_for_in_iterator_stack(
+fn propagate_internal_operand_stack(
     id: FunctionTemplateId,
     source_pc: BytecodePc,
     successor: InstructionIndex,
     target_pc: BytecodePc,
     component: u32,
-    output: &[ForInStackValue],
-    entries: &mut [Option<Vec<ForInStackValue>>],
+    target_is_catch_handler: bool,
+    output: &[InternalStackValue],
+    entries: &mut [Option<Vec<InternalStackValue>>],
     components: &mut [Option<u32>],
     queued: &mut [bool],
     work: &mut VecDeque<usize>,
@@ -4889,15 +5111,29 @@ fn propagate_for_in_iterator_stack(
     let index = successor.get() as usize;
     let component_slot = components
         .get_mut(index)
-        .ok_or_else(|| for_in_join_error(id, target_pc, source_pc))?;
+        .ok_or_else(|| internal_join_error(id, target_pc, source_pc, output, &[]))?;
     match *component_slot {
-        Some(established) if established != component => return Ok(()),
+        Some(established) if established != component => {
+            let existing = entries
+                .get(index)
+                .and_then(Option::as_deref)
+                .ok_or_else(|| internal_join_error(id, target_pc, source_pc, output, &[]))?;
+            let carries_internal_value = output
+                .iter()
+                .any(|value| *value != InternalStackValue::Ordinary);
+            if existing != output && (target_is_catch_handler || carries_internal_value) {
+                return Err(internal_join_error(
+                    id, target_pc, source_pc, existing, output,
+                ));
+            }
+            return Ok(());
+        }
         Some(_) => {}
         None => *component_slot = Some(component),
     }
     let entry = entries
         .get_mut(index)
-        .ok_or_else(|| for_in_join_error(id, target_pc, source_pc))?;
+        .ok_or_else(|| internal_join_error(id, target_pc, source_pc, output, &[]))?;
     match entry {
         None => {
             charge_frame_state_entries(id, usage, output.len(), state_limit)?;
@@ -4912,11 +5148,89 @@ fn propagate_for_in_iterator_stack(
             }
         }
         Some(existing) if existing == output => {}
-        Some(_) => {
-            return Err(for_in_join_error(id, target_pc, source_pc));
+        Some(existing) => {
+            return Err(internal_join_error(
+                id, target_pc, source_pc, existing, output,
+            ));
         }
     }
     Ok(())
+}
+
+fn verify_internal_stack_exit(
+    id: FunctionTemplateId,
+    decoded: crate::DecodedInstruction,
+    state: &[InternalStackValue],
+) -> Result<(), BytecodeVerificationError> {
+    if decoded.instruction().opcode() == FinalOpcode::Throw {
+        if state
+            .iter()
+            .all(|value| matches!(value, InternalStackValue::CatchMarker { .. }))
+        {
+            return Ok(());
+        }
+        if state
+            .iter()
+            .any(|value| matches!(value, InternalStackValue::ForInIterator(_)))
+        {
+            return Err(for_in_stack_error(
+                id,
+                decoded.pc(),
+                decoded.instruction().opcode(),
+            ));
+        }
+        return Err(catch_stack_error(
+            id,
+            decoded.pc(),
+            decoded.instruction().opcode(),
+        ));
+    }
+    if state
+        .iter()
+        .any(|value| matches!(value, InternalStackValue::CatchMarker { .. }))
+    {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::CatchMarkerAtExit { pc: decoded.pc() },
+        ));
+    }
+    if state
+        .iter()
+        .any(|value| matches!(value, InternalStackValue::ForInIterator(_)))
+    {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::ForInIteratorMarkerAtExit { pc: decoded.pc() },
+        ));
+    }
+    Ok(())
+}
+
+fn internal_stack_error(
+    id: FunctionTemplateId,
+    pc: BytecodePc,
+    opcode: FinalOpcode,
+    state: &[InternalStackValue],
+) -> BytecodeVerificationError {
+    if opcode == FinalOpcode::Catch
+        || opcode == FinalOpcode::NipCatch
+        || state.iter().any(|value| value.is_catch_value())
+    {
+        catch_stack_error(id, pc, opcode)
+    } else {
+        for_in_stack_error(id, pc, opcode)
+    }
+}
+
+fn catch_stack_error(
+    id: FunctionTemplateId,
+    pc: BytecodePc,
+    opcode: FinalOpcode,
+) -> BytecodeVerificationError {
+    BytecodeVerificationError::function(
+        id,
+        BytecodeVerificationErrorKind::CatchMarkerStackMismatch { pc, opcode },
+    )
 }
 
 fn for_in_stack_error(
@@ -4930,25 +5244,41 @@ fn for_in_stack_error(
     )
 }
 
-fn for_in_join_error(
+fn internal_join_error(
     id: FunctionTemplateId,
     target: BytecodePc,
     incoming_from: BytecodePc,
+    established: &[InternalStackValue],
+    incoming: &[InternalStackValue],
 ) -> BytecodeVerificationError {
-    BytecodeVerificationError::function(
-        id,
+    let kind = if established
+        .iter()
+        .chain(incoming)
+        .any(|value| value.is_catch_value())
+    {
+        BytecodeVerificationErrorKind::CatchMarkerJoinMismatch {
+            target,
+            incoming_from,
+        }
+    } else {
         BytecodeVerificationErrorKind::ForInIteratorJoinMismatch {
             target,
             incoming_from,
-        },
-    )
+        }
+    };
+    BytecodeVerificationError::function(id, kind)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "binding opcode authority and exact initializer counts are checked in one pass"
+)]
 fn verify_binding_opcodes(
     id: FunctionTemplateId,
     flow: &VerifiedControlFlow,
     variables: &[VariableDefinition],
     closures: &[ClosureVariableDefinition],
+    internal_stack: &InternalStackCertificate,
 ) -> Result<(), BytecodeVerificationError> {
     let argument_count = flow.domains().argument_count() as usize;
     let mut scope_activations = try_filled_vec(
@@ -4957,7 +5287,13 @@ fn verify_binding_opcodes(
         0_u8,
         BytecodeGraphResource::VariableDefinitions,
     )?;
-    for verified in flow.instructions() {
+    let mut catch_initializations = try_filled_vec(
+        id,
+        variables.len() - argument_count,
+        0_u8,
+        BytecodeGraphResource::VariableDefinitions,
+    )?;
+    for (index, verified) in flow.instructions().iter().enumerate() {
         let decoded = verified.decoded();
         let instruction = decoded.instruction();
         let opcode = instruction.opcode();
@@ -4985,6 +5321,26 @@ fn verify_binding_opcodes(
         } else if let Some(local) = local_operand(opcode, instruction.operands()) {
             let definition = &variables[argument_count + local as usize];
             verify_local_opcode(id, decoded.pc(), local, opcode, definition)?;
+            if internal_stack.certifies_catch_local_put(index, local) {
+                if definition.policy.initialization != CompilerInitializationPolicy::Catch {
+                    return Err(policy_error(
+                        id,
+                        BindingSlot::Local(local),
+                        Some(decoded.pc()),
+                        BindingPolicyViolationReason::InvalidLexicalInitialization,
+                    ));
+                }
+                let count = &mut catch_initializations[local as usize];
+                *count = count.saturating_add(1);
+                if *count > 1 {
+                    return Err(policy_error(
+                        id,
+                        BindingSlot::Local(local),
+                        Some(decoded.pc()),
+                        BindingPolicyViolationReason::InvalidLexicalInitialization,
+                    ));
+                }
+            }
             if matches!(opcode, FinalOpcode::SetLocUninitialized) {
                 let count = &mut scope_activations[local as usize];
                 *count = count.saturating_add(1);
@@ -5013,15 +5369,26 @@ fn verify_binding_opcodes(
             verify_closure_opcode(id, decoded.pc(), closure, opcode, definition)?;
         }
     }
-    for (local, (definition, activations)) in variables[argument_count..]
+    for (local, ((definition, activations), catch_initializations)) in variables[argument_count..]
         .iter()
         .zip(scope_activations)
+        .zip(catch_initializations)
         .enumerate()
     {
         let requires_scope_activation = definition.policy.temporal_dead_zone
             || definition.policy.initialization
                 == CompilerInitializationPolicy::FunctionAtScopeEntry;
         if requires_scope_activation && activations != 1 {
+            return Err(policy_error(
+                id,
+                BindingSlot::Local(usize_to_u32(local)),
+                None,
+                BindingPolicyViolationReason::MissingLexicalScopeInitialization,
+            ));
+        }
+        if definition.policy.initialization == CompilerInitializationPolicy::Catch
+            && catch_initializations != 1
+        {
             return Err(policy_error(
                 id,
                 BindingSlot::Local(usize_to_u32(local)),
@@ -5183,7 +5550,7 @@ fn verify_binding_states(
     function: &VerifiedCompilerFunction,
     variables: &[VariableDefinition],
     initializers: &VerifiedFunctionInitializers,
-    for_in_certificate: &ForInIteratorCertificate,
+    internal_stack: &InternalStackCertificate,
     realm_global_initializer_prefix: usize,
     prior_transfers: u64,
     transfer_limit: u64,
@@ -5349,7 +5716,8 @@ fn verify_binding_states(
                 opcode,
                 tracked[position].1,
                 initializers.put_definitions[index] == Some(definition_index),
-                for_in_certificate.certifies_local_key_put(index, local),
+                internal_stack.certifies_local_key_put(index, local),
+                internal_stack.certifies_catch_local_put(index, local),
                 &mut state[position],
             )?;
         }
@@ -5486,6 +5854,7 @@ fn requires_binding_state(definition: &VariableDefinition) -> bool {
         || (definition.has_scope && definition.variable_reference.is_some())
         || definition.function_initializer.is_some()
         || definition.policy.initialization == CompilerInitializationPolicy::FunctionName
+        || definition.policy.initialization == CompilerInitializationPolicy::Catch
 }
 
 fn initial_binding_state(definition: &VariableDefinition) -> u8 {
@@ -5502,6 +5871,7 @@ fn initial_binding_state(definition: &VariableDefinition) -> u8 {
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "binding identity, declaration policy, initializer authority, and for-in key authority are checked together"
 )]
 fn transfer_local_state(
@@ -5512,6 +5882,7 @@ fn transfer_local_state(
     definition: &VariableDefinition,
     is_function_initializer: bool,
     is_for_in_key_put: bool,
+    is_catch_initialization: bool,
     state: &mut u8,
 ) -> Result<bool, BytecodeVerificationError> {
     let slot = BindingSlot::Local(local);
@@ -5536,7 +5907,13 @@ fn transfer_local_state(
             };
         }
         opcode if is_unchecked_local_put(opcode) => {
-            let valid = if is_function_initializer {
+            let valid = if is_catch_initialization {
+                definition.policy.initialization == CompilerInitializationPolicy::Catch
+                    && BindingState::only(
+                        *state,
+                        BindingState::INACTIVE | BindingState::INITIALIZED_CLOSED,
+                    )
+            } else if is_function_initializer {
                 match definition.policy.initialization {
                     CompilerInitializationPolicy::FunctionAtScopeEntry => {
                         BindingState::only(*state, BindingState::UNINITIALIZED)
@@ -5571,7 +5948,14 @@ fn transfer_local_state(
                     BindingPolicyViolationReason::InvalidLexicalInitialization,
                 ));
             }
-            *state = BindingState::with_initialized_value(*state);
+            *state = if is_catch_initialization
+                && definition.has_scope
+                && definition.variable_reference.is_some()
+            {
+                BindingState::INITIALIZED_ACTIVE
+            } else {
+                BindingState::with_initialized_value(*state)
+            };
         }
         FinalOpcode::GetLocCheck | FinalOpcode::PutLocCheck | FinalOpcode::SetLocCheck => {
             if *state & BindingState::INACTIVE != 0 {
@@ -5880,7 +6264,7 @@ fn collect_requirements(
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
                 push_requirement(requirements, ExecutionRequirement::DynamicPropertyKeys);
             }
-            FinalOpcode::Throw => {
+            FinalOpcode::Throw | FinalOpcode::Catch | FinalOpcode::NipCatch => {
                 push_requirement(requirements, ExecutionRequirement::AbruptCompletions);
             }
             FinalOpcode::PushBigIntI32 => {

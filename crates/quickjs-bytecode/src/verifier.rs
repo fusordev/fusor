@@ -2779,7 +2779,8 @@ const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
         FinalOpcode::IfFalse
         | FinalOpcode::IfTrue
         | FinalOpcode::IfFalse8
-        | FinalOpcode::IfTrue8 => OpcodeSemantics::Conditional,
+        | FinalOpcode::IfTrue8
+        | FinalOpcode::Catch => OpcodeSemantics::Conditional,
 
         FinalOpcode::Goto | FinalOpcode::Goto8 | FinalOpcode::Goto16 => OpcodeSemantics::Jump,
 
@@ -2820,16 +2821,6 @@ const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
             SuccessorShape::Fallthrough,
         ),
 
-        FinalOpcode::Catch => OpcodeSemantics::Unsupported(
-            UnsupportedVerifierFeature::CatchMarkers,
-            SuccessorShape::Branch,
-        ),
-
-        FinalOpcode::NipCatch => OpcodeSemantics::Unsupported(
-            UnsupportedVerifierFeature::CatchMarkers,
-            SuccessorShape::Fallthrough,
-        ),
-
         FinalOpcode::Gosub => OpcodeSemantics::Unsupported(
             UnsupportedVerifierFeature::FinallyReturnAddresses,
             SuccessorShape::Jump,
@@ -2866,7 +2857,8 @@ const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
             SuccessorShape::Fallthrough,
         ),
 
-        FinalOpcode::PushI32
+        FinalOpcode::NipCatch
+        | FinalOpcode::PushI32
         | FinalOpcode::InitialYield
         | FinalOpcode::Yield
         | FinalOpcode::YieldStar
@@ -3086,6 +3078,9 @@ fn analyze_ordinary_stack(
 
     let mut computed_max = 0_u32;
     let mut evaluations = 0_u64;
+    let has_catch_marker = instructions
+        .iter()
+        .any(|instruction| instruction.decoded.instruction().opcode() == FinalOpcode::Catch);
 
     while let Some(index) = worklist.pop_front() {
         let position = usize::try_from(index.get()).map_err(|_| {
@@ -3195,7 +3190,9 @@ fn analyze_ordinary_stack(
                 )?;
             }
             VerifiedSuccessorsRepr::Terminate => {
-                if require_empty_exits && output_depth != 0 {
+                let protected_throw = has_catch_marker
+                    && current.decoded.instruction().opcode() == FinalOpcode::Throw;
+                if require_empty_exits && output_depth != 0 && !protected_throw {
                     return Err(VerificationError::at_instruction(
                         current.decoded,
                         VerificationErrorKind::NonEmptyCompilerExitStack {
@@ -3305,8 +3302,8 @@ mod tests {
         }
 
         assert_eq!(invalid, 1);
-        assert_eq!(supported, 212);
-        assert_eq!(unsupported, 31);
+        assert_eq!(supported, 214);
+        assert_eq!(unsupported, 29);
         assert_eq!(invalid + supported + unsupported, ALL_FINAL_OPCODES.len());
         assert_eq!(
             opcode_semantics(FinalOpcode::Invalid),

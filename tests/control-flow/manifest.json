@@ -107,6 +107,90 @@
       "covers": ["for-in-inherited-shadowing", "for-in-prototype-snapshot"],
       "body": "function Base() {}\nBase.prototype.p = 1;\nBase.prototype.q = 1;\nlet object = new Base();\nobject.a = 1;\nobject.p = 2;\nlet out = \"\";\nfor (const key in object) {\n  out = out + (out ? \",\" : \"\") + key;\n  if (key === \"a\") Base.prototype.late = 1;\n}\nreturn out;",
       "expect": {"kind": "string", "value": "a,p,q,late"}
+    },
+    {
+      "id": "catch-preserves-explicit-value",
+      "covers": ["catch-binding"],
+      "body": "try {\n  throw \"boom\";\n} catch (error) {\n  return error;\n}",
+      "expect": {"kind": "string", "value": "boom"}
+    },
+    {
+      "id": "catch-normal-path-skips-optional-handler",
+      "covers": ["catch-normal-completion", "catch-optional-binding"],
+      "body": "let out = \"\";\ntry {\n  out = \"try\";\n} catch {\n  out = \"catch\";\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "try"}
+    },
+    {
+      "id": "catch-unwinds-child-call",
+      "covers": ["catch-cross-frame"],
+      "body": "function fail() {\n  throw \"child\";\n}\ntry {\n  fail();\n} catch (error) {\n  return error + \"-caught\";\n}",
+      "expect": {"kind": "string", "value": "child-caught"}
+    },
+    {
+      "id": "catch-materializes-reference-error",
+      "covers": ["catch-engine-error"],
+      "body": "try {\n  return hidden;\n  let hidden;\n} catch (error) {\n  return error.name + \":\" + error.message;\n}",
+      "expect": {"kind": "string", "value": "ReferenceError:hidden is not initialized"}
+    },
+    {
+      "id": "catch-materializes-native-type-error",
+      "covers": ["catch-engine-error"],
+      "body": "try {\n  let value = 0;\n  value();\n} catch (error) {\n  return error.name + \":\" + error.message;\n}",
+      "expect": {"kind": "string", "value": "TypeError:not a function"}
+    },
+    {
+      "id": "catch-engine-error-has-error-object-tag",
+      "covers": ["catch-engine-error-brand"],
+      "body": "try {\n  let value = 0;\n  value();\n} catch (error) {\n  return ({}).toString.call(error);\n}",
+      "expect": {"kind": "string", "value": "[object Error]"}
+    },
+    {
+      "id": "nested-catch-rethrows",
+      "covers": ["catch-rethrow"],
+      "body": "try {\n  try {\n    throw \"x\";\n  } catch (inner) {\n    throw inner + \"y\";\n  }\n} catch (outer) {\n  return outer + \"z\";\n}",
+      "expect": {"kind": "string", "value": "xyz"}
+    },
+    {
+      "id": "return-crosses-catch-marker",
+      "covers": ["catch-control-cleanup"],
+      "body": "try {\n  return \"done\";\n} catch (error) {\n  return \"wrong\";\n}",
+      "expect": {"kind": "string", "value": "done"}
+    },
+    {
+      "id": "labeled-break-crosses-catch-marker",
+      "covers": ["catch-control-cleanup"],
+      "body": "let out = \"\";\nouter: while (true) {\n  try {\n    out = \"ok\";\n    break outer;\n  } catch (error) {\n    out = \"bad\";\n  }\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "ok"}
+    },
+    {
+      "id": "catch-binding-survives-through-closure",
+      "covers": ["catch-captured-binding"],
+      "body": "let saved;\ntry {\n  throw \"held\";\n} catch (error) {\n  saved = function capture() {\n    return error;\n  };\n}\nreturn saved();",
+      "expect": {"kind": "string", "value": "held"}
+    },
+    {
+      "id": "catch-matches-captured-protected-cell-reuse",
+      "covers": ["catch-captured-abrupt-cell"],
+      "body": "let first;\nlet second;\nlet index = 0;\nwhile (index < 2) {\n  try {\n    let captured = index;\n    if (index === 0) first = function firstCapture() { return captured; };\n    else second = function secondCapture() { return captured; };\n    index++;\n    throw 0;\n  } catch (error) {}\n}\nreturn first() + \",\" + second();",
+      "expect": {"kind": "string", "value": "1,1"}
+    },
+    {
+      "id": "catch-observes-getter-throw",
+      "covers": ["catch-getter-abrupt"],
+      "body": "let object = {\n  get value() {\n    throw \"getter\";\n  }\n};\ntry {\n  return object.value;\n} catch (error) {\n  return error;\n}",
+      "expect": {"kind": "string", "value": "getter"}
+    },
+    {
+      "id": "catch-cleans-nested-for-in-marker",
+      "covers": ["catch-for-in-cleanup"],
+      "body": "try {\n  for (let key in {a: 1}) {\n    throw key;\n  }\n} catch (error) {\n  return error;\n}",
+      "expect": {"kind": "string", "value": "a"}
+    },
+    {
+      "id": "catch-materializes-dynamic-function-syntax-error",
+      "covers": ["catch-dynamic-function-syntax", "catch-engine-error"],
+      "body": "try {\n  Function(\"return )\");\n} catch (error) {\n  return error.name;\n}",
+      "expect": {"kind": "string", "value": "SyntaxError"}
     }
   ]
 }
