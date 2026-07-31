@@ -407,6 +407,11 @@ impl BoxedPrimitive {
     }
 
     #[must_use]
+    pub(crate) fn string_code_unit_at(&self, index: u32) -> Option<u16> {
+        self.as_string()?.code_unit_at(index)
+    }
+
+    #[must_use]
     pub(crate) const fn as_symbol(&self) -> Option<&Atom> {
         match self {
             Self::Symbol(value) => Some(value),
@@ -657,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn future_wrapper_payload_variants_have_typed_read_only_accessors() {
+    fn primitive_wrapper_payload_variants_have_typed_read_only_accessors() {
         let number = BoxedPrimitive::Number(JsNumber::from_f64(-0.0));
         assert_eq!(
             number.as_number().expect("number").as_f64().to_bits(),
@@ -668,6 +673,12 @@ mod tests {
         let text = JsString::from_utf8("wrapper").expect("string");
         let string = BoxedPrimitive::String(text.clone());
         assert_eq!(string.as_string(), Some(&text));
+        assert_eq!(
+            string.string_code_unit_at(0),
+            Some(u16::from(b'w')),
+            "String exotic indexing reads UTF-16 code units from the branded payload"
+        );
+        assert_eq!(string.string_code_unit_at(text.len()), None);
         assert!(string.as_symbol().is_none());
 
         let atoms = AtomTable::new(AtomLimits::default()).expect("atom table");

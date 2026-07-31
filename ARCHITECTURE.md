@@ -373,9 +373,9 @@ the call; absent strict reads and writes throw exact `ReferenceError`s,
 `typeof` uses the non-throwing form, and sloppy assignment creates a global
 object property. Sloppy ordinary-function `this` is normalized once while its
 frame is created: objects are preserved, nullish receivers use the installed
-callee realm's global object, and Boolean or Number values allocate a branded
-wrapper whose prototype comes from that realm. Strict functions retain the raw
-receiver. String/Symbol boxing remains fail closed.
+callee realm's global object, and Boolean, Number, or String values allocate a
+branded wrapper whose prototype comes from that realm. Strict functions retain
+the raw receiver. Symbol boxing remains fail closed.
 
 Program `var` and function declarations use typed constructor-realm
 global-object slots. Installation preflights the complete declaration set
@@ -413,11 +413,11 @@ across native or verified-bytecode accessor and method calls, counts suspended
 state against frame/value ceilings, and resumes without Rust recursion.
 Accessor lookup stops at the first descriptor, invokes inherited getters with
 the original source object, and treats a missing getter as `undefined`.
-Boolean and Number boxing are implemented by the typed wrapper graph described
-below. `Number.prototype.toString` reuses the Number-hint conversion
+Boolean, Number, and String boxing are implemented by the typed wrapper graph
+described below. `Number.prototype.toString` reuses the Number-hint conversion
 continuation for observable radix coercion and formats validated bases 2
-through 36 without exponent notation outside base ten. String/Symbol boxing,
-persistent global lexical collision checks, and
+through 36 without exponent notation outside base ten. The remaining String
+methods, Symbol boxing, persistent global lexical collision checks, and
 `Function.prototype.apply`/`bind`/`Symbol.hasInstance` stay fail closed.
 The path never emits `eval`/`apply_eval` and rejects direct eval anywhere in
 generated code. Direct and indirect eval remain wholly unimplemented.
@@ -521,10 +521,10 @@ lookup before arguments, and passes its base as the raw receiver; a sequence
 expression deliberately yields an unbound value. Sloppy ordinary-function
 frames normalize their receiver once against the installed callee realm before
 execution: nullish values become its global object, objects keep identity, and
-Boolean and Number values become one branded wrapper reused by every
-`PushThis`. Strict functions keep the raw receiver. String/Symbol sloppy
-receivers remain fail closed. Calls fill missing formals with `undefined` and
-share aggregate frame limits and instruction fuel.
+Boolean, Number, and String values become one branded wrapper reused by every
+`PushThis`. Strict functions keep the raw receiver. Symbol sloppy receivers
+remain fail closed. Calls fill missing formals with `undefined` and share
+aggregate frame limits and instruction fuel.
 An escaping throw carries its exact JavaScript value through the same frame
 vector, allocates caller provenance before publishing any heap root, and
 preserves caller order from immediate to outermost. Dynamic operators use a
@@ -548,10 +548,10 @@ and mixed numeric domains,
 async/generator methods, `super`/home-object semantics, realm-global setter
 dispatch, prototype mutation, proxies and other exotics, derived/class and
 nonordinary constructor forms, optional/spread/apply/tail calls, the remaining
-Number built-ins, String/Symbol sloppy-`this` boxing and wrapper/prototype
-conversions, serialized input, raw function slots, catch handlers, finally
-return addresses, iterator markers, and packed exceptional stack values remain
-fail closed. Ordinary
+Number built-ins, the remaining String built-ins, Symbol sloppy-`this` boxing
+and wrapper/prototype conversions, serialized input, raw function slots, catch
+handlers, finally return addresses, iterator markers, and packed exceptional
+stack values remain fail closed. Ordinary
 accessors are typed slots: `GetField`
 and `GetField2` stop at the first own or inherited accessor, execute native or
 verified-bytecode getters through the same frame vector, preserve the original
@@ -685,26 +685,38 @@ until zombie-state and resurrection rules are complete.
 - Object literals inherit their realm's internal `Object.prototype`, which
   owns exact `toString` and `valueOf` native data properties.
   `Function.prototype` likewise owns exact `toString` and `call`.
-  Each realm additionally owns global Boolean and Number constructors,
+  Each realm additionally owns global Boolean, Number, and String constructors;
   false-branded `Boolean.prototype`, positive-zero-branded `Number.prototype`,
-  and exact core `toString`/`valueOf` methods. These intrinsic functions inherit
-  `Function.prototype` and participate in the iterative heap trace. Boolean and
-  Number wrappers store typed internal payloads rather than inferring their
-  brands from the prototype; the same object representation reserves typed
-  String and Symbol payload variants for later intrinsic families. Both
-  constructors accept data- or accessor-valued `newTarget.prototype` and fall
-  back to the matching prototype in the new target's realm for primitives.
-  Number conversion completes before that observable Get. Accessor-backed
-  `newTarget.prototype` and `Object.prototype.toString`
+  and empty-string-branded `String.prototype`; and exact core
+  `toString`/`valueOf` methods. The String prototype has the pinned own
+  `length = 0` property. These intrinsic functions inherit
+  `Function.prototype` and participate in the iterative heap trace. Boolean,
+  Number, and String wrappers store typed internal payloads rather than
+  inferring their brands from the prototype; the object representation also
+  reserves a typed Symbol payload for the still-deferred Symbol family. All
+  three constructors accept data- or accessor-valued `newTarget.prototype` and
+  fall back to the matching prototype in the new target's realm for primitive
+  values. Number and String conversion complete before that observable Get.
+  String uses the ordinary String hint, observing `Symbol.toPrimitive`, then
+  `toString`, then `valueOf`; its call path alone accepts a Symbol and returns
+  the pinned descriptive spelling, while construction rejects Symbol values.
+  Accessor-backed `newTarget.prototype` and `Object.prototype.toString`
   `Symbol.toStringTag` reads execute through typed native `Get` continuations.
   `Number.prototype.toString` validates its receiver before radix conversion;
   nontrivial radix objects resume through the same typed conversion machinery,
   and the retained Number is charged to the suspended frame without adding a
   heap edge.
+  A String wrapper has a fixed non-writable own `length` and synthesizes
+  enumerable, non-writable, non-configurable indexed properties from individual
+  UTF-16 code units. Primitive String reads use the same UTF-16 index view
+  without allocating a wrapper; in-range indices win over the prototype, while
+  misses continue through the realm's String prototype. Strict rejected writes
+  throw, sloppy rejected writes disappear, and non-index wrapper properties
+  remain ordinary.
   Constructor continuations retain and charge the new target and allocate a
   wrapper only after the getter completes; tag continuations precompute the
-  built-in tag, box primitive Booleans or Numbers before the Get, and retain
-  the exact temporary receiver while its getter runs. Completion
+  built-in tag, box primitive Booleans, Numbers, or Strings before the Get, and
+  retain the exact temporary receiver while its getter runs. Completion
   traces realm, public, active-frame, captured-cell, and outer-continuation
   roots before reclaiming unreachable temporary graphs, so a genuinely escaped
   wrapper survives while repeated unescaped boxing remains within heap limits.

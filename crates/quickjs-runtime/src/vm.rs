@@ -188,7 +188,7 @@ impl NativeContinuation {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum IntrinsicGetContinuation {
     BooleanConstructor {
         new_target: FunctionId,
@@ -197,6 +197,10 @@ enum IntrinsicGetContinuation {
     NumberConstructor {
         new_target: FunctionId,
         value: JsNumber,
+    },
+    StringConstructor {
+        new_target: FunctionId,
+        value: JsString,
     },
     ObjectPrototypeToString {
         default_tag: ObjectPrototypeTag,
@@ -207,7 +211,9 @@ enum IntrinsicGetContinuation {
 impl IntrinsicGetContinuation {
     const fn retained_values(&self) -> u64 {
         match self {
-            Self::BooleanConstructor { .. } | Self::NumberConstructor { .. } => 1,
+            Self::BooleanConstructor { .. }
+            | Self::NumberConstructor { .. }
+            | Self::StringConstructor { .. } => 1,
             Self::ObjectPrototypeToString {
                 temporary_receiver, ..
             } => {
@@ -227,6 +233,7 @@ enum ObjectPrototypeTag {
     Function,
     Number,
     Object,
+    String,
 }
 
 impl ObjectPrototypeTag {
@@ -236,6 +243,7 @@ impl ObjectPrototypeTag {
             Self::Function => "Function",
             Self::Number => "Number",
             Self::Object => "Object",
+            Self::String => "String",
         }
     }
 }
@@ -329,6 +337,7 @@ impl PropertyKeyTarget {
 enum OperatorPrimitiveHint {
     Default,
     Number,
+    String,
 }
 
 impl OperatorPrimitiveHint {
@@ -336,6 +345,14 @@ impl OperatorPrimitiveHint {
         match self {
             Self::Default => "default",
             Self::Number => "number",
+            Self::String => "string",
+        }
+    }
+
+    const fn first_ordinary_stage(self) -> OperatorPrimitiveStage {
+        match self {
+            Self::String => OperatorPrimitiveStage::ToString,
+            Self::Default | Self::Number => OperatorPrimitiveStage::ValueOf,
         }
     }
 }
@@ -376,17 +393,25 @@ enum OperatorPrimitiveTarget {
     NumberToString {
         number: JsNumber,
     },
+    StringIntrinsic {
+        new_target: Option<FunctionId>,
+    },
 }
 
 impl OperatorPrimitiveTarget {
     const fn retained_values(&self) -> u64 {
         match self {
-            Self::Unary { .. } | Self::NumberIntrinsic { new_target: None } => 0,
+            Self::Unary { .. }
+            | Self::NumberIntrinsic { new_target: None }
+            | Self::StringIntrinsic { new_target: None } => 0,
             Self::BinaryRight { .. }
             | Self::BinaryFinish { .. }
             | Self::EqualityFinish { .. }
             | Self::NumberToString { .. }
             | Self::NumberIntrinsic {
+                new_target: Some(_),
+            }
+            | Self::StringIntrinsic {
                 new_target: Some(_),
             } => 1,
         }
@@ -512,7 +537,8 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::EqualityFinish { other, .. } => {
             trace_stored_value_root(other, mark);
         }
-        OperatorPrimitiveTarget::NumberIntrinsic { new_target } => {
+        OperatorPrimitiveTarget::NumberIntrinsic { new_target }
+        | OperatorPrimitiveTarget::StringIntrinsic { new_target } => {
             if let Some(new_target) = new_target {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }
@@ -543,7 +569,8 @@ fn trace_native_continuation_roots(
         }
         NativeContinuation::IntrinsicGet(state) => match state {
             IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
-            | IntrinsicGetContinuation::NumberConstructor { new_target, .. } => {
+            | IntrinsicGetContinuation::NumberConstructor { new_target, .. }
+            | IntrinsicGetContinuation::StringConstructor { new_target, .. } => {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }
             IntrinsicGetContinuation::ObjectPrototypeToString {
@@ -734,7 +761,10 @@ fn normalize_receiver(
         StoredValue::Number(value) => runtime
             .allocate_boxed_number(realm, value)
             .map(StoredValue::Object),
-        StoredValue::String(_) | StoredValue::Symbol(_) => Err(EngineFault::RuntimeInvariant {
+        StoredValue::String(value) => runtime
+            .allocate_boxed_string(realm, value)
+            .map(StoredValue::Object),
+        StoredValue::Symbol(_) => Err(EngineFault::RuntimeInvariant {
             message: "primitive sloppy receiver reached the pre-wrapper object profile",
         }
         .into()),
@@ -2042,6 +2072,10 @@ fn dispatch_native_call(
                 let object = runtime.allocate_boxed_number(native.realm, value)?;
                 Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
             }
+            StoredValue::String(value) => {
+                let object = runtime.allocate_boxed_string(native.realm, value)?;
+                Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+            }
             StoredValue::Undefined | StoredValue::Null => {
                 let Some(origin) = origin else {
                     return Err(NativeFailure::Execution(
@@ -2059,9 +2093,9 @@ fn dispatch_native_call(
                     origin,
                 }))
             }
-            StoredValue::String(_) | StoredValue::Symbol(_) => Err(NativeFailure::Execution(
+            StoredValue::Symbol(_) => Err(NativeFailure::Execution(
                 EngineFault::RuntimeInvariant {
-                    message: "Object.prototype.valueOf primitive boxing is not implemented",
+                    message: "Object.prototype.valueOf Symbol boxing is not implemented",
                 }
                 .into(),
             )),
@@ -2129,6 +2163,39 @@ fn dispatch_native_call(
             let value = number_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
             Ok(NativeDispatch::Immediate(StoredValue::Number(value)))
         }
+        NativeFunctionKind::StringConstructor => {
+            let mut arguments = inputs.arguments;
+            let Some(argument) = arguments.take_first() else {
+                let value = JsString::empty();
+                return if let Some(new_target) = inputs.new_target {
+                    begin_string_constructor_wrapper(runtime, new_target, value, return_to, origin)
+                } else {
+                    Ok(NativeDispatch::Immediate(StoredValue::String(value)))
+                };
+            };
+            if inputs.new_target.is_none()
+                && let StoredValue::Symbol(symbol) = &argument
+            {
+                return Ok(NativeDispatch::Immediate(StoredValue::String(
+                    symbol_descriptive_string(symbol)?,
+                )));
+            }
+            begin_operator_primitive_conversion(
+                runtime,
+                argument,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::StringIntrinsic {
+                    new_target: inputs.new_target,
+                },
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+            )
+        }
+        NativeFunctionKind::StringPrototypeToString
+        | NativeFunctionKind::StringPrototypeValueOf => {
+            let value = string_receiver_value(runtime, &inputs.receiver, origin.as_ref())?;
+            Ok(NativeDispatch::Immediate(StoredValue::String(value)))
+        }
         NativeFunctionKind::FunctionPrototypeToString => {
             let StoredValue::Function(function) = inputs.receiver else {
                 let Some(origin) = origin else {
@@ -2152,6 +2219,16 @@ fn dispatch_native_call(
             )))
         }
     }
+}
+
+fn symbol_descriptive_string(symbol: &crate::Atom) -> Result<JsString, NativeFailure> {
+    let description = symbol
+        .description()
+        .cloned()
+        .unwrap_or_else(JsString::empty);
+    Ok(JsString::from_utf8("Symbol(")?
+        .concat(&description)?
+        .concat(&JsString::from_utf8(")")?)?)
 }
 
 fn boolean_receiver_value(
@@ -2210,6 +2287,34 @@ fn number_receiver_value(
     }))
 }
 
+fn string_receiver_value(
+    runtime: &Runtime,
+    receiver: &StoredValue,
+    origin: Option<&JsStackFrame>,
+) -> Result<JsString, NativeFailure> {
+    let value = match receiver {
+        StoredValue::String(value) => Some(value.clone()),
+        StoredValue::Object(object) => runtime.boxed_string(*object)?.cloned(),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::Function(_) => None,
+    };
+    if let Some(value) = value {
+        return Ok(value);
+    }
+    let origin = origin.cloned().unwrap_or_else(native_function_host_origin);
+    Err(NativeFailure::Abrupt(PendingException {
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8("not a string")?,
+        },
+        origin,
+    }))
+}
+
 fn begin_boolean_constructor_wrapper(
     runtime: &mut Runtime,
     new_target: FunctionId,
@@ -2243,6 +2348,25 @@ fn begin_number_constructor_wrapper(
         StoredValue::Function(new_target),
         &prototype_key,
         IntrinsicGetContinuation::NumberConstructor { new_target, value },
+        return_to,
+        origin,
+    )
+}
+
+fn begin_string_constructor_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    value: JsString,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    begin_intrinsic_get(
+        runtime,
+        HeapReference::Function(new_target),
+        StoredValue::Function(new_target),
+        &prototype_key,
+        IntrinsicGetContinuation::StringConstructor { new_target, value },
         return_to,
         origin,
     )
@@ -2340,6 +2464,10 @@ fn finish_intrinsic_get(
             new_target,
             value: number_value,
         } => finish_number_constructor_wrapper(runtime, new_target, number_value, &value),
+        IntrinsicGetContinuation::StringConstructor {
+            new_target,
+            value: string_value,
+        } => finish_string_constructor_wrapper(runtime, new_target, string_value, &value),
         IntrinsicGetContinuation::ObjectPrototypeToString {
             default_tag,
             temporary_receiver,
@@ -2427,6 +2555,31 @@ fn finish_number_constructor_wrapper(
     };
     let object = runtime
         .allocate_boxed_number_with_prototype(prototype, number_value)
+        .map_err(NativeFailure::Execution)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn finish_string_constructor_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    string_value: JsString,
+    requested: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = match requested {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            let realm = runtime.function_realm(new_target)?;
+            HeapReference::Object(runtime.realm_string_prototype(realm)?)
+        }
+    };
+    let object = runtime
+        .allocate_boxed_string_with_prototype(prototype, string_value)
         .map_err(NativeFailure::Execution)?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
 }
@@ -3050,9 +3203,27 @@ fn advance_operator_primitive_conversion(
             OperatorPrimitiveStage::AwaitValueOf
                 if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) =>
             {
+                if matches!(state.hint, OperatorPrimitiveHint::String) {
+                    return Err(primitive_conversion_type_error(
+                        &state.origin,
+                        "toPrimitive",
+                    )?);
+                }
                 state.stage = OperatorPrimitiveStage::ToString;
             }
-            OperatorPrimitiveStage::AwaitExotic | OperatorPrimitiveStage::AwaitToString
+            OperatorPrimitiveStage::AwaitToString
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) =>
+            {
+                if matches!(state.hint, OperatorPrimitiveHint::String) {
+                    state.stage = OperatorPrimitiveStage::ValueOf;
+                } else {
+                    return Err(primitive_conversion_type_error(
+                        &state.origin,
+                        "toPrimitive",
+                    )?);
+                }
+            }
+            OperatorPrimitiveStage::AwaitExotic
                 if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) =>
             {
                 return Err(primitive_conversion_type_error(
@@ -3141,7 +3312,7 @@ fn use_operator_primitive_property(
     match property {
         PrimitiveConversionProperty::Exotic => match value {
             StoredValue::Undefined | StoredValue::Null => {
-                state.stage = OperatorPrimitiveStage::ValueOf;
+                state.stage = state.hint.first_ordinary_stage();
                 Ok(None)
             }
             StoredValue::Function(function) => {
@@ -3177,6 +3348,12 @@ fn use_operator_primitive_property(
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
             | StoredValue::Object(_) => {
+                if matches!(state.hint, OperatorPrimitiveHint::String) {
+                    return Err(primitive_conversion_type_error(
+                        &state.origin,
+                        "toPrimitive",
+                    )?);
+                }
                 state.stage = OperatorPrimitiveStage::ToString;
                 Ok(None)
             }
@@ -3192,10 +3369,17 @@ fn use_operator_primitive_property(
             | StoredValue::Number(_)
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
-            | StoredValue::Object(_) => Err(primitive_conversion_type_error(
-                &state.origin,
-                "toPrimitive",
-            )?),
+            | StoredValue::Object(_) => {
+                if matches!(state.hint, OperatorPrimitiveHint::String) {
+                    state.stage = OperatorPrimitiveStage::ValueOf;
+                    Ok(None)
+                } else {
+                    Err(primitive_conversion_type_error(
+                        &state.origin,
+                        "toPrimitive",
+                    )?)
+                }
+            }
         },
     }
 }
@@ -3278,6 +3462,20 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::NumberToString { number } => {
             let radix = operator_to_number(value, origin)?;
             finish_number_to_string_radix(number, radix, origin)
+        }
+        OperatorPrimitiveTarget::StringIntrinsic { new_target } => {
+            let value = operator_primitive_to_string(value, origin)?;
+            if let Some(new_target) = new_target {
+                begin_string_constructor_wrapper(
+                    runtime,
+                    new_target,
+                    value,
+                    return_to,
+                    Some(origin.clone()),
+                )
+            } else {
+                Ok(NativeDispatch::Immediate(StoredValue::String(value)))
+            }
         }
     }
 }
@@ -4024,6 +4222,15 @@ fn begin_object_prototype_to_string(
                 runtime, realm, *value, return_to, origin,
             );
         }
+        StoredValue::String(value) => {
+            return begin_boxed_string_object_prototype_to_string(
+                runtime,
+                realm,
+                value.clone(),
+                return_to,
+                origin,
+            );
+        }
         StoredValue::Function(function) => (
             HeapReference::Function(*function),
             ObjectPrototypeTag::Function,
@@ -4034,14 +4241,16 @@ fn begin_object_prototype_to_string(
                 ObjectPrototypeTag::Boolean
             } else if runtime.boxed_number(*object)?.is_some() {
                 ObjectPrototypeTag::Number
+            } else if runtime.boxed_string(*object)?.is_some() {
+                ObjectPrototypeTag::String
             } else {
                 ObjectPrototypeTag::Object
             },
         ),
-        StoredValue::String(_) | StoredValue::Symbol(_) => {
+        StoredValue::Symbol(_) => {
             return Err(NativeFailure::Execution(
                 EngineFault::RuntimeInvariant {
-                    message: "Object.prototype.toString primitive boxing is not implemented",
+                    message: "Object.prototype.toString Symbol boxing is not implemented",
                 }
                 .into(),
             ));
@@ -4168,18 +4377,70 @@ fn begin_boxed_number_object_prototype_to_string(
     }
 }
 
+fn begin_boxed_string_object_prototype_to_string(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    value: JsString,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let continuations = reserve_intrinsic_get_continuation()?;
+    let to_string_tag = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag);
+    let collection_pending = runtime.collection_pending;
+    let temporary = runtime.allocate_boxed_string(realm, value)?;
+    let receiver = StoredValue::Object(temporary);
+    let continuation = IntrinsicGetContinuation::ObjectPrototypeToString {
+        default_tag: ObjectPrototypeTag::String,
+        temporary_receiver: Some(temporary),
+    };
+    let outcome = match read_heap_property_for_receiver(
+        runtime,
+        HeapReference::Object(temporary),
+        receiver,
+        &to_string_tag,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
+            return Err(error.into());
+        }
+    };
+    match outcome {
+        PropertyReadOutcome::Value(tag) => {
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
+            finish_object_prototype_to_string(ObjectPrototypeTag::String, tag)
+        }
+        PropertyReadOutcome::Getter { function, receiver } => {
+            Ok(intrinsic_getter_call_with_reserved_continuation(
+                function,
+                receiver,
+                continuation,
+                return_to,
+                origin,
+                continuations,
+            ))
+        }
+        PropertyReadOutcome::Failed(_) => {
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
+            Err(EngineFault::RuntimeInvariant {
+                message: "String boxing intrinsic Get produced a primitive property failure",
+            }
+            .into())
+        }
+    }
+}
+
 fn remove_unobservable_temporary_wrapper(
     runtime: &mut Runtime,
     temporary: ObjectId,
     collection_pending: bool,
 ) {
     let removed = runtime.objects.remove(temporary);
-    debug_assert!(
-        removed
-            .as_ref()
-            .is_some_and(|object| object.record.property_count() == 0),
-        "unobservable primitive wrapper must remain property-free"
-    );
+    if let Some(object) = removed {
+        runtime.object_properties = runtime
+            .object_properties
+            .saturating_sub(usize_to_u64(object.record.property_count()));
+    }
     runtime.collection_pending = collection_pending;
 }
 
@@ -6187,7 +6448,12 @@ fn read_static_property(
                     value.len(),
                 ))))
             } else {
-                PropertyReadOutcome::Value(StoredValue::Undefined)
+                read_heap_property_for_receiver(
+                    runtime,
+                    HeapReference::Object(runtime.realm_string_prototype(realm)?),
+                    base.duplicate(),
+                    key,
+                )?
             }
         }
         StoredValue::Function(function) => read_heap_property_for_receiver(
@@ -6274,6 +6540,9 @@ fn lookup_heap_property(
             .into());
         }
         remaining -= 1;
+        if let Some(property) = string_exotic_index_property(runtime, reference, key)? {
+            return Ok(Some(property));
+        }
         let record = runtime.object_record(reference)?;
         if let Some(property) = record.own_property(key) {
             return Ok(Some(property));
@@ -6281,6 +6550,42 @@ fn lookup_heap_property(
         current = record.prototype();
     }
     Ok(None)
+}
+
+fn string_exotic_index_property(
+    runtime: &Runtime,
+    reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<Option<OwnProperty>, ExecutionError> {
+    let HeapReference::Object(object) = reference else {
+        return Ok(None);
+    };
+    let Some(index) = key.as_index() else {
+        return Ok(None);
+    };
+    let Some(unit) = runtime.boxed_string_code_unit_at(object, index.get())? else {
+        return Ok(None);
+    };
+    Ok(Some(OwnProperty::Data {
+        layout: PropertyLayout::data(false, true, false),
+        value: StoredValue::String(JsString::from_code_units([unit])?),
+    }))
+}
+
+fn string_exotic_index_is_present(
+    runtime: &Runtime,
+    reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<bool, ExecutionError> {
+    let HeapReference::Object(object) = reference else {
+        return Ok(false);
+    };
+    let Some(index) = key.as_index() else {
+        return Ok(false);
+    };
+    Ok(runtime
+        .boxed_string_code_unit_at(object, index.get())?
+        .is_some())
 }
 
 fn inherited_property(
@@ -6372,7 +6677,18 @@ fn write_static_property(
                 strict,
             );
         }
-        StoredValue::String(_) | StoredValue::Symbol(_) => {
+        StoredValue::String(_) => {
+            let prototype = runtime.realm_string_prototype(realm)?;
+            return write_primitive_property(
+                runtime,
+                HeapReference::Object(prototype),
+                base,
+                &key,
+                value,
+                strict,
+            );
+        }
+        StoredValue::Symbol(_) => {
             return Ok(if strict {
                 PropertyWriteOutcome::Failed(PropertyFailure::NotObject)
             } else {
@@ -6382,6 +6698,14 @@ fn write_static_property(
         StoredValue::Function(function) => HeapReference::Function(*function),
         StoredValue::Object(object) => HeapReference::Object(*object),
     };
+
+    if string_exotic_index_is_present(runtime, reference, &key)? {
+        return Ok(if strict {
+            PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+        } else {
+            PropertyWriteOutcome::Complete
+        });
+    }
 
     let (own, prototype, extensible) = {
         let record = runtime.object_record(reference)?;

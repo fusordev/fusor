@@ -313,6 +313,7 @@ enum RealmIntrinsics {
         function_constructor: FunctionId,
         boolean: BooleanIntrinsics,
         number: NumberIntrinsics,
+        string: StringIntrinsics,
     },
 }
 
@@ -324,6 +325,12 @@ struct BooleanIntrinsics {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct NumberIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StringIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
 }
@@ -403,13 +410,19 @@ pub(crate) enum NativeFunctionKind {
     NumberConstructor,
     NumberPrototypeToString,
     NumberPrototypeValueOf,
+    StringConstructor,
+    StringPrototypeToString,
+    StringPrototypeValueOf,
 }
 
 impl NativeFunctionKind {
     pub(crate) const fn is_constructor(self) -> bool {
         matches!(
             self,
-            Self::OrdinaryFunctionConstructor | Self::BooleanConstructor | Self::NumberConstructor
+            Self::OrdinaryFunctionConstructor
+                | Self::BooleanConstructor
+                | Self::NumberConstructor
+                | Self::StringConstructor
         )
     }
 }
@@ -725,17 +738,17 @@ impl Runtime {
         check_limit(
             RuntimeResource::HeapObjects,
             self.limits.max_heap_objects,
-            usize_to_u64(self.objects.len()).saturating_add(4),
+            usize_to_u64(self.objects.len()).saturating_add(5),
         )?;
         check_limit(
             RuntimeResource::HeapFunctions,
             self.limits.max_heap_functions,
-            usize_to_u64(self.functions.len()).saturating_add(12),
+            usize_to_u64(self.functions.len()).saturating_add(15),
         )?;
         check_limit(
             RuntimeResource::ObjectProperties,
             self.limits.max_object_properties,
-            self.object_properties.saturating_add(41),
+            self.object_properties.saturating_add(53),
         )?;
         self.realms
             .try_reserve(1)
@@ -744,16 +757,16 @@ impl Runtime {
                 additional: 1,
             })?;
         self.objects
-            .try_reserve(4)
+            .try_reserve(5)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
-                additional: 4,
+                additional: 5,
             })?;
         self.functions
-            .try_reserve(12)
+            .try_reserve(15)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::HeapFunctions,
-                additional: 12,
+                additional: 15,
             })?;
 
         let function_key =
@@ -762,6 +775,8 @@ impl Runtime {
             PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Boolean));
         let number_key =
             PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Number));
+        let string_key =
+            PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::String));
         let prototype_key =
             PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Prototype));
         let constructor_key =
@@ -777,6 +792,7 @@ impl Runtime {
         let function_name = predefined_string(&self.atoms, PredefinedAtom::Function);
         let boolean_name = predefined_string(&self.atoms, PredefinedAtom::Boolean);
         let number_name = predefined_string(&self.atoms, PredefinedAtom::Number);
+        let string_name = predefined_string(&self.atoms, PredefinedAtom::String);
         let empty_name = predefined_string(&self.atoms, PredefinedAtom::EmptyString);
         let to_string_name = predefined_string(&self.atoms, PredefinedAtom::ToString);
         let value_of_name = predefined_string(&self.atoms, PredefinedAtom::ValueOf);
@@ -784,10 +800,10 @@ impl Runtime {
 
         let mut global_record = ObjectRecord::empty(None);
         global_record
-            .try_reserve_data(3)
+            .try_reserve_data(4)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
-                additional: 3,
+                additional: 4,
             })?;
         let mut object_prototype_record = ObjectRecord::empty(None);
         object_prototype_record.try_reserve_data(2).map_err(|_| {
@@ -889,6 +905,34 @@ impl Runtime {
         })?;
         let mut number_value_of_record = ObjectRecord::empty(None);
         number_value_of_record
+            .try_reserve_data(2)
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 2,
+            })?;
+        let mut string_prototype_record = ObjectRecord::empty(None);
+        string_prototype_record.try_reserve_data(4).map_err(|_| {
+            RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 4,
+            }
+        })?;
+        let mut string_constructor_record = ObjectRecord::empty(None);
+        string_constructor_record.try_reserve_data(3).map_err(|_| {
+            RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 3,
+            }
+        })?;
+        let mut string_to_string_record = ObjectRecord::empty(None);
+        string_to_string_record.try_reserve_data(2).map_err(|_| {
+            RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 2,
+            }
+        })?;
+        let mut string_value_of_record = ObjectRecord::empty(None);
+        string_value_of_record
             .try_reserve_data(2)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
@@ -1145,6 +1189,53 @@ impl Runtime {
             })
             .expect("the realm transaction reserved all intrinsic function slots");
 
+        string_prototype_record.replace_prototype(Some(HeapReference::Object(object_prototype)));
+        let string_prototype = self
+            .objects
+            .try_insert(HeapObject::with_boxed_primitive(
+                string_prototype_record,
+                BoxedPrimitive::String(JsString::empty()),
+            ))
+            .expect("the realm transaction reserved all intrinsic object slots");
+        string_constructor_record
+            .replace_prototype(Some(HeapReference::Function(function_prototype)));
+        let string_constructor = self
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: id,
+                    kind: NativeFunctionKind::StringConstructor,
+                }),
+                object: string_constructor_record,
+                public_roots: 0,
+            })
+            .expect("the realm transaction reserved all intrinsic function slots");
+        string_to_string_record
+            .replace_prototype(Some(HeapReference::Function(function_prototype)));
+        let string_to_string = self
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: id,
+                    kind: NativeFunctionKind::StringPrototypeToString,
+                }),
+                object: string_to_string_record,
+                public_roots: 0,
+            })
+            .expect("the realm transaction reserved all intrinsic function slots");
+        string_value_of_record.replace_prototype(Some(HeapReference::Function(function_prototype)));
+        let string_value_of = self
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: id,
+                    kind: NativeFunctionKind::StringPrototypeValueOf,
+                }),
+                object: string_value_of_record,
+                public_roots: 0,
+            })
+            .expect("the realm transaction reserved all intrinsic function slots");
+
         let property_result = (|| {
             let object_prototype_node = self
                 .objects
@@ -1298,7 +1389,7 @@ impl Runtime {
                 .get_mut(number_prototype)
                 .expect("new Number.prototype remains live");
             number_prototype_node.record.append_data(
-                constructor_key,
+                constructor_key.clone(),
                 PropertyLayout::data(true, false, true),
                 StoredValue::Function(number_constructor),
             )?;
@@ -1308,7 +1399,7 @@ impl Runtime {
                 StoredValue::Function(number_to_string),
             )?;
             number_prototype_node.record.append_data(
-                value_of_key,
+                value_of_key.clone(),
                 PropertyLayout::data(true, false, true),
                 StoredValue::Function(number_value_of),
             )?;
@@ -1318,7 +1409,7 @@ impl Runtime {
                 .get_mut(number_constructor)
                 .expect("new Number constructor remains live");
             number_constructor_node.object.append_data(
-                prototype_key,
+                prototype_key.clone(),
                 PropertyLayout::data(false, false, false),
                 StoredValue::Object(number_prototype),
             )?;
@@ -1334,8 +1425,8 @@ impl Runtime {
             )?;
 
             for (function, name, length) in [
-                (number_to_string, to_string_name, 1),
-                (number_value_of, value_of_name, 0),
+                (number_to_string, to_string_name.clone(), 1),
+                (number_value_of, value_of_name.clone(), 0),
             ] {
                 let method = self
                     .functions
@@ -1345,6 +1436,71 @@ impl Runtime {
                     length_key.clone(),
                     PropertyLayout::data(false, false, true),
                     StoredValue::Number(JsNumber::from_i32(length)),
+                )?;
+                method.object.append_data(
+                    name_key.clone(),
+                    PropertyLayout::data(false, false, true),
+                    StoredValue::String(name),
+                )?;
+            }
+
+            let string_prototype_node = self
+                .objects
+                .get_mut(string_prototype)
+                .expect("new String.prototype remains live");
+            string_prototype_node.record.append_data(
+                length_key.clone(),
+                PropertyLayout::data(false, false, true),
+                StoredValue::Number(JsNumber::from_i32(0)),
+            )?;
+            string_prototype_node.record.append_data(
+                constructor_key,
+                PropertyLayout::data(true, false, true),
+                StoredValue::Function(string_constructor),
+            )?;
+            string_prototype_node.record.append_data(
+                to_string_key.clone(),
+                PropertyLayout::data(true, false, true),
+                StoredValue::Function(string_to_string),
+            )?;
+            string_prototype_node.record.append_data(
+                value_of_key,
+                PropertyLayout::data(true, false, true),
+                StoredValue::Function(string_value_of),
+            )?;
+
+            let string_constructor_node = self
+                .functions
+                .get_mut(string_constructor)
+                .expect("new String constructor remains live");
+            string_constructor_node.object.append_data(
+                prototype_key,
+                PropertyLayout::data(false, false, false),
+                StoredValue::Object(string_prototype),
+            )?;
+            string_constructor_node.object.append_data(
+                length_key.clone(),
+                PropertyLayout::data(false, false, true),
+                StoredValue::Number(JsNumber::from_i32(1)),
+            )?;
+            string_constructor_node.object.append_data(
+                name_key.clone(),
+                PropertyLayout::data(false, false, true),
+                StoredValue::String(string_name),
+            )?;
+
+            for (function, name) in [
+                (string_to_string, to_string_name),
+                (string_value_of, value_of_name),
+            ] {
+                let method = self
+                    .functions
+                    .get_mut(function)
+                    .expect("new String intrinsic method remains live");
+                method.object.append_data(
+                    length_key.clone(),
+                    PropertyLayout::data(false, false, true),
+                    StoredValue::Number(JsNumber::from_i32(0)),
                 )?;
                 method.object.append_data(
                     name_key.clone(),
@@ -1379,9 +1535,26 @@ impl Runtime {
                     number_key,
                     PropertyLayout::data(true, false, true),
                     StoredValue::Function(number_constructor),
+                )?;
+            self.objects
+                .get_mut(global_object)
+                .expect("new global object remains live")
+                .record
+                .append_data(
+                    string_key,
+                    PropertyLayout::data(true, false, true),
+                    StoredValue::Function(string_constructor),
                 )
         })();
         if property_result.is_err() {
+            let removed = self.functions.remove(string_value_of);
+            debug_assert!(removed.is_some());
+            let removed = self.functions.remove(string_to_string);
+            debug_assert!(removed.is_some());
+            let removed = self.functions.remove(string_constructor);
+            debug_assert!(removed.is_some());
+            let removed = self.objects.remove(string_prototype);
+            debug_assert!(removed.is_some());
             let removed = self.functions.remove(number_value_of);
             debug_assert!(removed.is_some());
             let removed = self.functions.remove(number_to_string);
@@ -1437,8 +1610,12 @@ impl Runtime {
                 prototype: number_prototype,
                 constructor: number_constructor,
             },
+            string: StringIntrinsics {
+                prototype: string_prototype,
+                constructor: string_constructor,
+            },
         };
-        self.object_properties += 41;
+        self.object_properties += 53;
         Ok(Realm(Arc::new(RealmHandle {
             owner: Arc::downgrade(&self.mailbox),
             id,
@@ -1602,6 +1779,7 @@ impl Runtime {
                 function_constructor,
                 boolean,
                 number,
+                string,
             } = realm.intrinsics
             {
                 mark_heap_reference(
@@ -1636,6 +1814,18 @@ impl Runtime {
                 );
                 mark_heap_reference(
                     HeapReference::Function(number.constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Object(string.prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(string.constructor),
                     &mut marked_functions,
                     &mut marked_objects,
                     &mut work,
@@ -2014,6 +2204,44 @@ impl Runtime {
         }
     }
 
+    pub(crate) fn realm_string_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        match state.intrinsics {
+            RealmIntrinsics::Initializing => Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm String intrinsics are not initialized",
+            }),
+            RealmIntrinsics::Ready { string, .. } => {
+                let prototype = self.objects.get(string.prototype).ok_or(
+                    crate::EngineFault::StaleHeapEdge {
+                        edge: "String.prototype intrinsic",
+                        index: string.prototype.index(),
+                        generation: string.prototype.generation(),
+                    },
+                )?;
+                if prototype
+                    .boxed_primitive()
+                    .and_then(BoxedPrimitive::as_string)
+                    .is_none_or(|value| !value.is_empty())
+                {
+                    return Err(crate::EngineFault::RuntimeInvariant {
+                        message: "String.prototype intrinsic has the wrong boxed value",
+                    });
+                }
+                Ok(string.prototype)
+            }
+        }
+    }
+
     pub(crate) fn function_realm(
         &self,
         function: FunctionId,
@@ -2255,6 +2483,107 @@ impl Runtime {
                 generation: object.generation(),
             })
             .map(|object| object.boxed_primitive().and_then(BoxedPrimitive::as_number))
+    }
+
+    pub(crate) fn allocate_boxed_string_with_prototype(
+        &mut self,
+        prototype: HeapReference,
+        value: JsString,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.heap_reference_is_live(prototype) {
+            return Err(stale_heap_reference(prototype).into());
+        }
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties.saturating_add(1),
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let mut record = ObjectRecord::empty(Some(prototype));
+        record
+            .try_reserve_data(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::Length),
+                PropertyLayout::data(false, false, false),
+                StoredValue::Number(JsNumber::from_i32(
+                    i32::try_from(value.len())
+                        .expect("QuickJS String length always fits in a signed 32-bit integer"),
+                )),
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        let object = self
+            .objects
+            .try_insert(HeapObject::with_boxed_primitive(
+                record,
+                BoxedPrimitive::String(value),
+            ))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.object_properties += 1;
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    pub(crate) fn allocate_boxed_string(
+        &mut self,
+        realm: RealmId,
+        value: JsString,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let prototype = self.realm_string_prototype(realm)?;
+        self.allocate_boxed_string_with_prototype(HeapReference::Object(prototype), value)
+    }
+
+    pub(crate) fn boxed_string(
+        &self,
+        object: ObjectId,
+    ) -> Result<Option<&JsString>, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+            .map(|object| object.boxed_primitive().and_then(BoxedPrimitive::as_string))
+    }
+
+    pub(crate) fn boxed_string_code_unit_at(
+        &self,
+        object: ObjectId,
+        index: u32,
+    ) -> Result<Option<u16>, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+            .map(|object| {
+                object
+                    .boxed_primitive()
+                    .and_then(|value| value.string_code_unit_at(index))
+            })
     }
 
     pub(crate) fn append_data_property(
@@ -3959,15 +4288,16 @@ mod tests {
             function_constructor,
             boolean,
             number,
+            string,
         } = state.intrinsics
         else {
             panic!("realm intrinsics remained uninitialized");
         };
 
         assert_eq!(runtime.usage().realms(), 1);
-        assert_eq!(runtime.usage().heap_objects(), 4);
-        assert_eq!(runtime.usage().heap_functions(), 12);
-        assert_eq!(runtime.usage().object_properties(), 41);
+        assert_eq!(runtime.usage().heap_objects(), 5);
+        assert_eq!(runtime.usage().heap_functions(), 15);
+        assert_eq!(runtime.usage().object_properties(), 53);
         assert_eq!(runtime.usage().installed_code(), 0);
         assert_eq!(
             runtime.atom_usage(),
@@ -4358,6 +4688,121 @@ mod tests {
             |value| matches!(value, StoredValue::String(name) if name == JsString::from_utf8("Number").expect("name")),
         );
 
+        let string_prototype = runtime
+            .objects
+            .get(string.prototype)
+            .expect("String.prototype");
+        assert_eq!(
+            string_prototype.record.prototype(),
+            Some(HeapReference::Object(state.object_prototype))
+        );
+        assert!(
+            string_prototype
+                .boxed_primitive()
+                .and_then(crate::object::BoxedPrimitive::as_string)
+                .is_some_and(JsString::is_empty),
+            "String.prototype carries the empty String internal slot"
+        );
+        assert_eq!(
+            runtime
+                .realm_string_prototype(realm_id)
+                .expect("String.prototype intrinsic"),
+            string.prototype
+        );
+        assert_data_property(
+            &string_prototype.record,
+            &runtime,
+            PredefinedAtom::Length,
+            PropertyLayout::data(false, false, true),
+            |value| matches!(value, StoredValue::Number(number) if number.strict_equals(JsNumber::from_i32(0))),
+        );
+        assert_data_property(
+            &string_prototype.record,
+            &runtime,
+            PredefinedAtom::Constructor,
+            PropertyLayout::data(true, false, true),
+            |value| matches!(value, StoredValue::Function(id) if id == string.constructor),
+        );
+        let string_to_string = function_property(
+            &string_prototype.record,
+            &runtime,
+            PredefinedAtom::ToString,
+            PropertyLayout::data(true, false, true),
+        );
+        assert_native_method(
+            &runtime,
+            string_to_string,
+            function_prototype,
+            realm_id,
+            NativeFunctionKind::StringPrototypeToString,
+            PredefinedAtom::ToString,
+            0,
+        );
+        let string_value_of = function_property(
+            &string_prototype.record,
+            &runtime,
+            PredefinedAtom::ValueOf,
+            PropertyLayout::data(true, false, true),
+        );
+        assert_native_method(
+            &runtime,
+            string_value_of,
+            function_prototype,
+            realm_id,
+            NativeFunctionKind::StringPrototypeValueOf,
+            PredefinedAtom::ValueOf,
+            0,
+        );
+        for method in [string_to_string, string_value_of] {
+            let node = runtime
+                .functions
+                .get(method)
+                .expect("String prototype method");
+            assert!(
+                !node
+                    .native()
+                    .expect("native String method")
+                    .kind
+                    .is_constructor(),
+                "String prototype methods must not be constructors"
+            );
+            assert!(
+                !has_own_property(&node.object, &runtime, PredefinedAtom::Prototype),
+                "String prototype methods must not have an own prototype"
+            );
+        }
+
+        let string_constructor = runtime.functions.get(string.constructor).expect("String");
+        assert_eq!(
+            string_constructor.object.prototype(),
+            Some(HeapReference::Function(function_prototype))
+        );
+        let string_native = string_constructor.native().expect("native String");
+        assert_eq!(string_native.realm, realm_id);
+        assert_eq!(string_native.kind, NativeFunctionKind::StringConstructor);
+        assert!(string_native.kind.is_constructor());
+        assert_data_property(
+            &string_constructor.object,
+            &runtime,
+            PredefinedAtom::Prototype,
+            PropertyLayout::data(false, false, false),
+            |value| matches!(value, StoredValue::Object(id) if id == string.prototype),
+        );
+        assert_data_property(
+            &string_constructor.object,
+            &runtime,
+            PredefinedAtom::Length,
+            PropertyLayout::data(false, false, true),
+            |value| matches!(value, StoredValue::Number(number) if number.strict_equals(JsNumber::from_i32(1))),
+        );
+        assert_data_property(
+            &string_constructor.object,
+            &runtime,
+            PredefinedAtom::Name,
+            PropertyLayout::data(false, false, true),
+            |value| matches!(value, StoredValue::String(name) if name == JsString::from_utf8("String").expect("name")),
+        );
+
         let global = runtime
             .objects
             .get(state.global_object)
@@ -4386,6 +4831,13 @@ mod tests {
             PredefinedAtom::Number,
             PropertyLayout::data(true, false, true),
             |value| matches!(value, StoredValue::Function(id) if id == number.constructor),
+        );
+        assert_data_property(
+            &global.record,
+            &runtime,
+            PredefinedAtom::String,
+            PropertyLayout::data(true, false, true),
+            |value| matches!(value, StoredValue::Function(id) if id == string.constructor),
         );
     }
 
@@ -4445,22 +4897,22 @@ mod tests {
     fn function_intrinsic_creation_is_failure_atomic_at_each_limit() {
         for (limits, expected_resource, limit, observed) in [
             (
-                RuntimeLimits::default().with_max_heap_objects(3),
+                RuntimeLimits::default().with_max_heap_objects(4),
                 RuntimeResource::HeapObjects,
-                3,
                 4,
+                5,
             ),
             (
-                RuntimeLimits::default().with_max_heap_functions(11),
+                RuntimeLimits::default().with_max_heap_functions(14),
                 RuntimeResource::HeapFunctions,
-                11,
-                12,
+                14,
+                15,
             ),
             (
-                RuntimeLimits::default().with_max_object_properties(40),
+                RuntimeLimits::default().with_max_object_properties(52),
                 RuntimeResource::ObjectProperties,
-                40,
-                41,
+                52,
+                53,
             ),
         ] {
             let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -4481,7 +4933,7 @@ mod tests {
     #[test]
     fn boxed_boolean_allocation_limit_failure_is_atomic() {
         let mut runtime =
-            Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(4)).expect("runtime");
+            Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(5)).expect("runtime");
         let realm = runtime.create_realm().expect("realm");
         let realm_id = realm.0.id;
         let usage = runtime.usage();
@@ -4496,8 +4948,8 @@ mod tests {
                 error,
                 crate::ExecutionError::LimitExceeded {
                     resource: RuntimeResource::HeapObjects,
-                    limit: 4,
-                    observed: 5,
+                    limit: 5,
+                    observed: 6,
                 }
             ));
             assert_eq!(runtime.usage(), usage);
@@ -4508,7 +4960,7 @@ mod tests {
     #[test]
     fn boxed_boolean_allocation_at_exact_limit_preserves_brand_and_prototype() {
         let mut runtime =
-            Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(5)).expect("runtime");
+            Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(6)).expect("runtime");
         let realm = runtime.create_realm().expect("realm");
         let realm_id = realm.0.id;
         let prototype = runtime
@@ -4519,8 +4971,8 @@ mod tests {
             .allocate_boxed_boolean(realm_id, true)
             .expect("one boxed Boolean fits the exact limit");
 
-        assert_eq!(runtime.usage().heap_objects(), 5);
-        assert_eq!(runtime.usage().object_properties(), 41);
+        assert_eq!(runtime.usage().heap_objects(), 6);
+        assert_eq!(runtime.usage().object_properties(), 53);
         assert_eq!(
             runtime.boxed_boolean(object).expect("live wrapper"),
             Some(true)
@@ -4564,7 +5016,7 @@ mod tests {
     #[test]
     fn boxed_number_allocation_limit_failure_is_atomic() {
         let mut runtime =
-            Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(4)).expect("runtime");
+            Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(5)).expect("runtime");
         let realm = runtime.create_realm().expect("realm");
         let realm_id = realm.0.id;
         let usage = runtime.usage();
@@ -4583,8 +5035,8 @@ mod tests {
                 error,
                 crate::ExecutionError::LimitExceeded {
                     resource: RuntimeResource::HeapObjects,
-                    limit: 4,
-                    observed: 5,
+                    limit: 5,
+                    observed: 6,
                 }
             ));
             assert_eq!(runtime.usage(), usage);
@@ -4595,7 +5047,7 @@ mod tests {
     #[test]
     fn boxed_number_allocation_at_exact_limit_preserves_payload_and_prototype() {
         let mut runtime =
-            Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(5)).expect("runtime");
+            Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(6)).expect("runtime");
         let realm = runtime.create_realm().expect("realm");
         let realm_id = realm.0.id;
         let prototype = runtime
@@ -4607,8 +5059,8 @@ mod tests {
             .allocate_boxed_number(realm_id, negative_zero)
             .expect("one boxed Number fits the exact limit");
 
-        assert_eq!(runtime.usage().heap_objects(), 5);
-        assert_eq!(runtime.usage().object_properties(), 41);
+        assert_eq!(runtime.usage().heap_objects(), 6);
+        assert_eq!(runtime.usage().object_properties(), 53);
         assert!(
             runtime
                 .boxed_number(object)
@@ -4652,6 +5104,128 @@ mod tests {
     }
 
     #[test]
+    fn boxed_string_allocation_limits_fail_atomically() {
+        for (limits, resource, limit, observed) in [
+            (
+                RuntimeLimits::default().with_max_heap_objects(5),
+                RuntimeResource::HeapObjects,
+                5,
+                6,
+            ),
+            (
+                RuntimeLimits::default().with_max_object_properties(53),
+                RuntimeResource::ObjectProperties,
+                53,
+                54,
+            ),
+        ] {
+            let mut runtime = Runtime::try_new(limits).expect("runtime");
+            let realm = runtime.create_realm().expect("realm");
+            let realm_id = realm.0.id;
+            let usage = runtime.usage();
+            let collection_pending = runtime.collection_pending;
+
+            let error = runtime
+                .allocate_boxed_string(realm_id, JsString::from_utf8("xy").expect("String payload"))
+                .expect_err("boxed String must exceed the exact resource limit");
+
+            assert!(matches!(
+                error,
+                crate::ExecutionError::LimitExceeded {
+                    resource: actual_resource,
+                    limit: actual_limit,
+                    observed: actual_observed,
+                } if actual_resource == resource
+                    && actual_limit == limit
+                    && actual_observed == observed
+            ));
+            assert_eq!(runtime.usage(), usage);
+            assert_eq!(runtime.collection_pending, collection_pending);
+        }
+    }
+
+    #[test]
+    fn boxed_string_allocation_preserves_payload_prototype_and_exact_length_property() {
+        let limits = RuntimeLimits::default()
+            .with_max_heap_objects(6)
+            .with_max_object_properties(54);
+        let mut runtime = Runtime::try_new(limits).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let prototype = runtime
+            .realm_string_prototype(realm_id)
+            .expect("String.prototype");
+        let text = JsString::from_code_units([u16::from(b'A'), 0xd83d]).expect("String payload");
+
+        let object = runtime
+            .allocate_boxed_string(realm_id, text.clone())
+            .expect("one boxed String fits the exact limits");
+
+        assert_eq!(runtime.usage().heap_objects(), 6);
+        assert_eq!(runtime.usage().object_properties(), 54);
+        assert_eq!(
+            runtime.boxed_string(object).expect("live wrapper"),
+            Some(&text)
+        );
+        let wrapper = runtime.objects.get(object).expect("boxed String");
+        assert_eq!(
+            wrapper.record.prototype(),
+            Some(HeapReference::Object(prototype))
+        );
+        assert_data_property(
+            &wrapper.record,
+            &runtime,
+            PredefinedAtom::Length,
+            PropertyLayout::data(false, false, false),
+            |value| matches!(value, StoredValue::Number(number) if number.strict_equals(JsNumber::from_i32(2))),
+        );
+        assert_eq!(
+            runtime
+                .boxed_string_code_unit_at(object, 1)
+                .expect("live wrapper"),
+            Some(0xd83d)
+        );
+        assert_eq!(
+            runtime
+                .boxed_string_code_unit_at(object, 2)
+                .expect("live wrapper"),
+            None
+        );
+        assert!(runtime.collection_pending);
+    }
+
+    #[test]
+    fn string_brand_is_not_inferred_and_unrooted_wrapper_collection_releases_length_charge() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let prototype = runtime
+            .realm_string_prototype(realm_id)
+            .expect("String.prototype");
+        let fake = runtime
+            .allocate_ordinary_object_with_prototype(HeapReference::Object(prototype))
+            .expect("ordinary object with String.prototype");
+        assert!(runtime.boxed_string(fake).expect("live object").is_none());
+        let wrapper = runtime
+            .allocate_boxed_string(realm_id, JsString::from_utf8("temporary").expect("String"))
+            .expect("boxed String");
+        assert!(
+            runtime
+                .boxed_string(wrapper)
+                .expect("live wrapper")
+                .is_some()
+        );
+        assert_eq!(runtime.usage().object_properties(), 54);
+
+        let report = runtime.collect_cycles().expect("collection");
+
+        assert_eq!(report.objects(), 2);
+        assert!(runtime.objects.get(fake).is_none());
+        assert!(runtime.objects.get(wrapper).is_none());
+        assert_eq!(runtime.usage().object_properties(), 53);
+    }
+
+    #[test]
     fn function_call_atom_limit_failure_is_failure_atomic() {
         let atom_limits = AtomLimits::new(
             PREDEFINED_ATOM_COUNT,
@@ -4692,7 +5266,7 @@ mod tests {
         let report = runtime.collect_cycles().expect("collection");
 
         assert_eq!(report.functions(), 0);
-        assert_eq!(runtime.usage().heap_functions(), 12);
+        assert_eq!(runtime.usage().heap_functions(), 15);
         assert_eq!(runtime.usage().installed_code(), 0);
         assert_eq!(
             runtime
@@ -4742,8 +5316,8 @@ mod tests {
 
         assert_eq!(report.functions(), 1);
         assert!(runtime.functions.get(function_call).is_none());
-        assert_eq!(runtime.usage().heap_functions(), 11);
-        assert_eq!(runtime.usage().object_properties(), 39);
+        assert_eq!(runtime.usage().heap_functions(), 14);
+        assert_eq!(runtime.usage().object_properties(), 51);
     }
 
     #[test]
@@ -4840,7 +5414,7 @@ mod tests {
         assert!(runtime.functions.get(getter).is_some());
         assert!(runtime.functions.get(setter).is_some());
         assert!(runtime.functions.get(orphan).is_none());
-        assert_eq!(runtime.usage().object_properties(), 42);
+        assert_eq!(runtime.usage().object_properties(), 54);
     }
 
     #[test]
@@ -4947,7 +5521,7 @@ mod tests {
 
         runtime.rollback_root_environment(realm_id, &environment);
 
-        assert_eq!(runtime.usage().object_properties(), 42);
+        assert_eq!(runtime.usage().object_properties(), 54);
         assert!(matches!(
             runtime
                 .objects

@@ -889,6 +889,76 @@ fn object_prototype_to_string_boolean_boxing_is_limit_checked_and_transient() {
 }
 
 #[test]
+fn object_prototype_to_string_string_boxing_charges_and_releases_the_length_property() {
+    let mut limited = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = limited.create_realm().expect("realm");
+    let realm = limited.context(&realm).expect("context").realm;
+    let (to_string, native) = object_prototype_to_string_native(&limited, realm);
+    let usage_before = limited.usage();
+    limited.limits.max_object_properties = usage_before.object_properties();
+    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let Err(error) = dispatch_native_call(
+        &mut limited,
+        to_string,
+        native,
+        CallInputs {
+            receiver: StoredValue::String(JsString::from_utf8("xy").expect("String")),
+            arguments: CallArguments::empty(),
+            new_target: None,
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("String ToObject must honor the wrapper length-property limit");
+    };
+    let NativeFailure::Execution(ExecutionError::LimitExceeded {
+        resource,
+        limit,
+        observed,
+    }) = error
+    else {
+        panic!("String ToObject must report the exact object-property limit");
+    };
+    assert_eq!(resource, RuntimeResource::ObjectProperties);
+    assert_eq!(limit, usage_before.object_properties());
+    assert_eq!(observed, usage_before.object_properties() + 1);
+    assert_eq!(limited.usage(), usage_before);
+
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm = runtime.context(&realm).expect("context").realm;
+    let (to_string, native) = object_prototype_to_string_native(&runtime, realm);
+    let usage_before = runtime.usage();
+    runtime.limits.max_heap_objects = usage_before.heap_objects() + 1;
+    runtime.limits.max_object_properties = usage_before.object_properties() + 1;
+    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let Ok(NativeDispatch::Immediate(StoredValue::String(result))) = dispatch_native_call(
+        &mut runtime,
+        to_string,
+        native,
+        CallInputs {
+            receiver: StoredValue::String(JsString::from_utf8("xy").expect("String")),
+            arguments: CallArguments::empty(),
+            new_target: None,
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("String ToObject must finish immediately without a tag getter");
+    };
+    assert_eq!(result.to_utf8_lossy().expect("UTF-8"), "[object String]");
+    assert_eq!(runtime.usage(), usage_before);
+}
+
+#[test]
 fn object_prototype_to_string_reclaims_unescaped_boolean_receivers_within_one_execution() {
     let (mut runtime, realm, repeat, _getter, to_string) =
         runtime_with_boolean_tag_getter_and_invoker(
@@ -2713,7 +2783,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         "make",
     );
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(43)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(55)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
         .context(&realm)
@@ -2734,8 +2804,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 43,
-            observed: 44,
+            limit: 55,
+            observed: 56,
         }
     ));
     let failed = runtime.usage();

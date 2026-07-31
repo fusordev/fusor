@@ -334,8 +334,8 @@ A milestone is complete only when all of its checked items pass in CI.
         and non-callable values throw exact `TypeError: not a function`.
         Escaping child exceptions retain immediate-to-outer caller PCs and
         source spans. Static-property methods now use the same frame vector and
-        preserve their raw receiver; Boolean and Number receivers now use the
-        typed wrapper path below, while String/Symbol sloppy-`this`
+        preserve their raw receiver; Boolean, Number, and String receivers now
+        use the typed wrapper path below, while Symbol sloppy-`this`
         normalization, optional/spread/apply, tail calls, `arguments`, and
         direct eval remain fail closed.
   - [x] Execute ordinary `Function(...)` and `new Function(...)` without eval:
@@ -358,8 +358,9 @@ A milestone is complete only when all of its checked items pass in CI.
           constructor realm, iterative propagation through nested functions,
           exact missing-name and `typeof` behavior, cross-realm ownership,
           and constructor-realm sloppy dynamic-function `this` normalization
-          without caller capture. Boolean and Number receivers use their realm
-          wrappers below; String/Symbol receiver boxing remains fail closed.
+          without caller capture. Boolean, Number, and String receivers use
+          their realm wrappers below; Symbol receiver boxing remains fail
+          closed.
     - [x] Add escaped Program declaration instantiation: indirect-eval `var`
           and function declarations create configurable global-object
           bindings while preserving compatible existing properties, with
@@ -379,9 +380,9 @@ A milestone is complete only when all of its checked items pass in CI.
           `Object.prototype.valueOf`, and `Function.prototype.toString`
           natives with exact method/name/length descriptors, GC reachability,
           current object/function tags and identity, retained verified
-          bytecode source, and the pinned native-source form. Boolean and
-          Number boxing and data-valued tagging land below; String/Symbol
-          boxing and observable object-valued native names remain fail closed.
+          bytecode source, and the pinned native-source form. Boolean, Number,
+          and String boxing and data-valued tagging land below; Symbol boxing
+          and observable object-valued native names remain fail closed.
     - [x] Complete source-argument `ToPrimitive`: check
           `Symbol.toPrimitive` with the string hint, fall back to callable
           `toString` then `valueOf`, stop property lookup at data or accessor
@@ -514,9 +515,23 @@ A milestone is complete only when all of its checked items pass in CI.
         radices for the manifest's boundary words plus a fixed-seed sample
         through the public facade. The remaining Number static and prototype
         surface and BigInt-to-Number stay fail closed.
-  - [ ] Add String/Symbol wrapper payload consumers and prototypes, the
-        remaining conversion hints and built-in entry points, BigInt numeric
-        domains, and the remaining conversion/formatting surface.
+  - [x] Add the core String intrinsic vertical: every realm installs the exact
+        global constructor, empty-string-branded prototype, and native
+        `toString`/`valueOf` graph. Calls and construction use resumable
+        String-hint conversion with `toString` before `valueOf`; a direct
+        String call formats Symbols through the pinned descriptive-string
+        special case while construction rejects them. Conversion completes
+        before the observable `newTarget.prototype` Get and wrapper allocation,
+        including new-target-realm fallback and cross-realm brand checks.
+        String primitives and wrappers expose UTF-16 code-unit `length` and
+        indexed properties with the pinned flags and out-of-range prototype
+        fallback. Strict/sloppy writes, ordinary extra wrapper properties,
+        callee-realm sloppy boxing, `Object.prototype` boxing/tagging, GC roots,
+        resource limits, and failure-atomic realm creation are covered.
+  - [ ] Add the remaining String static/prototype surface, Symbol wrapper
+        payload consumers and prototype, BigInt numeric domains, and the
+        remaining conversion/formatting entry points. Symbol boxing remains
+        fail closed.
 - [ ] Complete property descriptors, interned shapes, mutable prototypes, and
       exotic objects.
 - [ ] Dense/sparse arrays and typed indexed access.
