@@ -233,7 +233,7 @@ A milestone is complete only when all of its checked items pass in CI.
         before user code with last-declaration-wins semantics, including
         argument redeclarations; strict block declarations instantiate on
         every scope entry. All compiler traversal uses explicit iterative work
-        stacks. `for-of`, inferred anonymous-function names, non-string atom
+        stacks. Inferred anonymous-function names, non-string atom
         namespaces, other value families, and immutable-write throws remain
         fail-closed.
   - [x] Add synchronous `for-in` through the ordinary compiler profile.
@@ -247,8 +247,8 @@ A milestone is complete only when all of its checked items pass in CI.
         is reached, preserves QuickJS key order and shadow suppression without
         invoking getters, rechecks deletions, boxes Boolean/Number/String
         values, and charges snapshot/visited work to explicit limits and VM
-        fuel. Symbol boxing specifically for `for-in`, destructuring heads,
-        and `for-of` lowering and execution remain fail-closed.
+        fuel. Symbol boxing specifically for `for-in` and destructuring heads
+        remain fail-closed.
   - [x] Add exact binary64 Number constants to the compiler-owned heterogeneous
         pool. Number literals requiring pool storage and direct child templates
         share one immutable `Arc`-backed source-order index namespace with no
@@ -451,9 +451,23 @@ A milestone is complete only when all of its checked items pass in CI.
         lookup, retains `next`, reads `done` before `value`, and appends in
         order. Abrupt completion after `next` acquisition performs
         `IteratorClose`, preserving the original exception even if `return`
-        lookup or invocation fails. `for-of`, call spread, iterator
-        destructuring, and async/generator iterator consumers remain
-        fail-closed.
+        lookup or invocation fails. Call spread, iterator destructuring, and
+        async/generator iterator consumers remain fail-closed.
+  - [x] Add ordinary synchronous `for-of` through the generic iterator
+        substrate. Lowering emits the pinned three-slot iterator/next/catch
+        record, supports declaration, identifier, and static/computed member
+        heads, rotates captured lexical cells per iteration, and closes every
+        crossed iterator for break, outward continue, return, throw, and
+        finally. Whole-function verification gives every record a same-site
+        typed identity, admits only `ForOfNext` offset zero, certifies the exact
+        return-preserving close rotation, and rejects forged, partial, copied,
+        joined, stored, or terminal records. The iterative VM retains the
+        iterator method and `next` receiver, reads `done` before `value`, skips
+        close on natural exhaustion and step failures, distinguishes normal
+        from exceptional `IteratorClose`, and roots suspended records through
+        collection. The pinned 40-case iterator differential covers 51 strict
+        feature tags. Destructuring heads, `for await`, and async/generator
+        iterator consumers remain fail-closed.
   - [ ] Represent synthetic native caller frames. In particular, each
         `Function.prototype.call`/`apply` continuation is frame-accounted but
         cannot yet render QuickJS's intervening `call (native)` or

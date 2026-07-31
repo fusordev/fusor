@@ -38,6 +38,15 @@ use super::*;
 pub(super) enum NativeDispatch {
     Immediate(StoredValue),
     Pair(StoredValue, StoredValue),
+    ForOfRecord {
+        iterator: StoredValue,
+        next: StoredValue,
+    },
+    ForOfStep {
+        value: StoredValue,
+        done: bool,
+    },
+    ForOfClosed,
     Frame(Frame),
     Call(NativeCall),
 }
@@ -161,7 +170,11 @@ pub(super) fn resume_iterator_abrupt_continuations(
                     NativeDispatch::Call(call) => {
                         prepend_native_continuations(call, continuations)?;
                     }
-                    NativeDispatch::Immediate(_) | NativeDispatch::Pair(_, _)
+                    NativeDispatch::Immediate(_)
+                    | NativeDispatch::Pair(_, _)
+                    | NativeDispatch::ForOfRecord { .. }
+                    | NativeDispatch::ForOfStep { .. }
+                    | NativeDispatch::ForOfClosed
                         if !continuations.is_empty() =>
                     {
                         return Err(EngineFault::RuntimeInvariant {
@@ -169,7 +182,11 @@ pub(super) fn resume_iterator_abrupt_continuations(
                         }
                         .into());
                     }
-                    NativeDispatch::Immediate(_) | NativeDispatch::Pair(_, _) => {}
+                    NativeDispatch::Immediate(_)
+                    | NativeDispatch::Pair(_, _)
+                    | NativeDispatch::ForOfRecord { .. }
+                    | NativeDispatch::ForOfStep { .. }
+                    | NativeDispatch::ForOfClosed => {}
                 }
                 return Ok(dispatch);
             }
@@ -261,6 +278,15 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::ArrayIteratorNext(state) => {
                 advance_array_iterator_next(runtime, state, value, return_to, execution_budget)?
             }
+            NativeContinuation::ForOfStart(state) => {
+                advance_for_of_start(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::ForOfNext(state) => {
+                advance_for_of_next(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::ForOfClose(state) => {
+                advance_for_of_close(state, &value, return_to)?
+            }
             NativeContinuation::IteratorAppend(state) => {
                 advance_iterator_append(runtime, state, value, return_to, execution_budget)?
             }
@@ -271,12 +297,15 @@ pub(super) fn resume_native_continuations(
         };
         match dispatch {
             NativeDispatch::Immediate(next) => value = next,
-            pair @ NativeDispatch::Pair(_, _) => {
+            dispatch @ (NativeDispatch::Pair(_, _)
+            | NativeDispatch::ForOfRecord { .. }
+            | NativeDispatch::ForOfStep { .. }
+            | NativeDispatch::ForOfClosed) => {
                 if continuations.is_empty() {
-                    return Ok(pair);
+                    return Ok(dispatch);
                 }
                 return Err(EngineFault::RuntimeInvariant {
-                    message: "operator value pair escaped into an outer native continuation",
+                    message: "structured native result escaped into an outer continuation",
                 }
                 .into());
             }
@@ -426,9 +455,12 @@ fn resolve_native_dispatch_inner(
                     compiler,
                     execution_budget,
                 )?,
-                NativeDispatch::Pair(_, _) => {
+                NativeDispatch::Pair(_, _)
+                | NativeDispatch::ForOfRecord { .. }
+                | NativeDispatch::ForOfStep { .. }
+                | NativeDispatch::ForOfClosed => {
                     return Err(EngineFault::RuntimeInvariant {
-                        message: "native function produced an operator value pair",
+                        message: "native function produced a structured continuation result",
                     }
                     .into());
                 }
@@ -532,8 +564,13 @@ pub(super) fn execute_native_entry(
     };
     match dispatch {
         Ok(NativeDispatch::Immediate(value)) => Ok(value),
-        Ok(NativeDispatch::Pair(_, _)) => Err(EngineFault::RuntimeInvariant {
-            message: "host native entry returned an operator value pair",
+        Ok(
+            NativeDispatch::Pair(_, _)
+            | NativeDispatch::ForOfRecord { .. }
+            | NativeDispatch::ForOfStep { .. }
+            | NativeDispatch::ForOfClosed,
+        ) => Err(EngineFault::RuntimeInvariant {
+            message: "host native entry returned a structured continuation result",
         }
         .into()),
         Ok(NativeDispatch::Frame(frame)) => {

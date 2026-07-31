@@ -103,6 +103,144 @@
       "covers": ["iterator-close-catch-boundary"],
       "body": "let log = \"\";\nlet inner = { next: function next() { throw \"original\"; }, return: function close() { log = log + \"i\"; return {}; } };\ninner[Symbol.iterator] = function iteratorMethod() { return inner; };\nlet outer = { next: function next() { try { [...inner]; } catch (error) { log = log + \"c\"; return {done: true}; } }, return: function close() { log = log + \"o\"; return {}; } };\nouter[Symbol.iterator] = function iteratorMethod() { return outer; };\n[...outer];\nreturn log;",
       "expect": {"kind": "string", "value": "ic"}
+    },
+    {
+      "id": "for-of-array-observes-holes-as-undefined",
+      "covers": ["for-of-array"],
+      "body": "let log = \"\";\nfor (const value of [1, , 3]) {\n  log = log + (value === void 0 ? \"u\" : value);\n}\nreturn log;",
+      "expect": {"kind": "string", "value": "1u3"}
+    },
+    {
+      "id": "for-of-string-uses-code-points",
+      "covers": ["for-of-string-code-point"],
+      "body": "let log = \"\";\nlet count = 0;\nfor (const value of \"A😀B\") {\n  log = log + value.length;\n  count = count + 1;\n}\nreturn log + \":\" + count;",
+      "expect": {"kind": "string", "value": "121:3"}
+    },
+    {
+      "id": "for-of-null-acquisition-names-symbol-iterator",
+      "covers": ["for-of-null-acquisition"],
+      "body": "for (const value of null) {}",
+      "expect": {"kind": "throw", "name": "TypeError", "message": "cannot read property 'Symbol.iterator' of null"}
+    },
+    {
+      "id": "for-of-undefined-acquisition-names-symbol-iterator",
+      "covers": ["for-of-undefined-acquisition"],
+      "body": "for (const value of void 0) {}",
+      "expect": {"kind": "throw", "name": "TypeError", "message": "cannot read property 'Symbol.iterator' of undefined"}
+    },
+    {
+      "id": "for-of-custom-iterator-retains-receivers-and-order",
+      "covers": ["for-of-custom-iterator", "for-of-iterator-method-receiver", "for-of-next-receiver", "for-of-next-retained", "for-of-step-order", "for-of-done-skips-value"],
+      "body": "let log = \"\";\nlet iterator = {};\nlet step = 0;\nfunction retainedNext() {\n  log = log + (this === iterator ? \"n\" : \"N\");\n  step = step + 1;\n  iterator.next = function reread() { throw \"next was reread\"; };\n  if (step === 1) {\n    return { get done() { log = log + \"d\"; return false; }, get value() { log = log + \"v\"; return \"x\"; } };\n  }\n  return { get done() { log = log + \"D\"; return true; }, get value() { log = log + \"V\"; return \"wrong\"; } };\n}\niterator.next = retainedNext;\nlet iterable = { get [Symbol.iterator]() { log = log + \"g\"; return function iteratorMethod() { log = log + (this === iterable ? \"i\" : \"I\"); return iterator; }; } };\nlet value = \"\";\nfor (const item of iterable) value = value + item;\nreturn log + \":\" + value;",
+      "expect": {"kind": "string", "value": "gindvnD:x"}
+    },
+    {
+      "id": "for-of-natural-exhaustion-does-not-close",
+      "covers": ["for-of-natural-exhaustion"],
+      "body": "let log = \"\";\nlet step = 0;\nlet iterator = { next: function next() { log = log + \"n\"; step = step + 1; return step === 1 ? {done: false, value: \"x\"} : {done: true}; }, return: function close() { log = log + \"r\"; return {}; } };\niterator[Symbol.iterator] = function iteratorMethod() { return iterator; };\nfor (const value of iterator) log = log + value;\nreturn log;",
+      "expect": {"kind": "string", "value": "nxn"}
+    },
+    {
+      "id": "for-of-var-head-remains-visible",
+      "covers": ["for-of-head-var"],
+      "body": "function readLast() {\n  for (var value of [1, 2]) {}\n  return value;\n}\nreturn readLast();",
+      "expect": {"kind": "number", "bits": "0x4000000000000000"}
+    },
+    {
+      "id": "for-of-let-head-is-loop-scoped",
+      "covers": ["for-of-head-let"],
+      "body": "let value = \"outer\";\nlet log = \"\";\nfor (let value of [1, 2]) log = log + value;\nreturn log + \":\" + value;",
+      "expect": {"kind": "string", "value": "12:outer"}
+    },
+    {
+      "id": "for-of-const-head-initializes-each-iteration",
+      "covers": ["for-of-head-const"],
+      "body": "let sum = 0;\nfor (const value of [1, 2]) sum = sum + value;\nreturn sum;",
+      "expect": {"kind": "number", "bits": "0x4008000000000000"}
+    },
+    {
+      "id": "for-of-identifier-head-assigns-existing-binding",
+      "covers": ["for-of-head-identifier"],
+      "body": "let value = 0;\nfor (value of [1, 2]) {}\nreturn value;",
+      "expect": {"kind": "number", "bits": "0x4000000000000000"}
+    },
+    {
+      "id": "for-of-static-member-head-assigns-property",
+      "covers": ["for-of-head-static-member"],
+      "body": "let target = {value: 0};\nfor (target.value of [1, 2]) {}\nreturn target.value;",
+      "expect": {"kind": "number", "bits": "0x4000000000000000"}
+    },
+    {
+      "id": "for-of-computed-head-evaluates-after-each-step",
+      "covers": ["for-of-head-computed-member"],
+      "body": "let log = \"\";\nlet step = 0;\nlet iterator = { next: function next() { step = step + 1; log = log + \"n\"; return step > 2 ? {done: true} : {done: false, value: step}; } };\niterator[Symbol.iterator] = function iteratorMethod() { return iterator; };\nlet target = {};\nfunction key() { log = log + \"k\"; return \"value\"; }\nfor (target[key()] of iterator) log = log + \"b\";\nreturn log + \":\" + target.value;",
+      "expect": {"kind": "string", "value": "nkbnkbn:2"}
+    },
+    {
+      "id": "for-of-lexical-captures-are-fresh",
+      "covers": ["for-of-capture-freshness"],
+      "body": "let first;\nlet second;\nfor (const value of [1, 2]) {\n  if (first === void 0) first = function readFirst() { return value; };\n  else second = function readSecond() { return value; };\n}\nreturn first() + \":\" + second();",
+      "expect": {"kind": "string", "value": "1:2"}
+    },
+    {
+      "id": "for-of-same-loop-continue-does-not-close",
+      "covers": ["for-of-continue-no-close"],
+      "body": "let closed = 0;\nlet step = 0;\nlet iterator = { next: function next() { step = step + 1; return step <= 2 ? {done: false, value: step} : {done: true}; }, return: function close() { closed = closed + 1; return {}; } };\niterator[Symbol.iterator] = function iteratorMethod() { return iterator; };\nfor (const value of iterator) { if (value < 3) continue; }\nreturn closed;",
+      "expect": {"kind": "number", "bits": "0x0000000000000000"}
+    },
+    {
+      "id": "for-of-break-performs-normal-close",
+      "covers": ["for-of-break-close"],
+      "body": "let log = \"\";\nlet iterator = { next: function next() { return {done: false, value: 1}; }, return: function close() { log = log + (this === iterator ? \"r\" : \"R\"); return {}; } };\niterator[Symbol.iterator] = function iteratorMethod() { return iterator; };\nfor (const value of iterator) { log = log + \"b\"; break; }\nreturn log;",
+      "expect": {"kind": "string", "value": "br"}
+    },
+    {
+      "id": "for-of-return-preserves-value-after-close",
+      "covers": ["for-of-return-close"],
+      "body": "let log = \"\";\nlet iterator = { next: function next() { return {done: false, value: 1}; }, return: function close() { log = log + \"r\"; return {}; } };\niterator[Symbol.iterator] = function iteratorMethod() { return iterator; };\nfunction take() { for (const value of iterator) return value + 1; return 0; }\nreturn take() + \":\" + log;",
+      "expect": {"kind": "string", "value": "2:r"}
+    },
+    {
+      "id": "for-of-labeled-break-closes-inner-then-outer",
+      "covers": ["for-of-labeled-close-order"],
+      "body": "let log = \"\";\nfunction makeIterator(name) {\n  let iterator = { next: function next() { return {done: false, value: 1}; }, return: function close() { log = log + name; return {}; } };\n  iterator[Symbol.iterator] = function iteratorMethod() { return iterator; };\n  return iterator;\n}\nouter: for (const outerValue of makeIterator(\"o\")) {\n  for (const innerValue of makeIterator(\"i\")) break outer;\n}\nreturn log;",
+      "expect": {"kind": "string", "value": "io"}
+    },
+    {
+      "id": "for-of-body-throw-closes-and-preserves-original",
+      "covers": ["for-of-body-throw-close", "for-of-close-original-wins"],
+      "body": "let log = \"\";\nlet iterator = { next: function next() { return {done: false, value: 1}; }, return: function close() { log = log + \"r\"; throw \"close\"; } };\niterator[Symbol.iterator] = function iteratorMethod() { return iterator; };\ntry {\n  for (const value of iterator) { log = log + \"b\"; throw \"body\"; }\n} catch (error) {\n  return error + \":\" + log;\n}",
+      "expect": {"kind": "string", "value": "body:br"}
+    },
+    {
+      "id": "for-of-binding-throw-closes-and-preserves-original",
+      "covers": ["for-of-binding-throw-close", "for-of-close-original-wins"],
+      "body": "let log = \"\";\nlet target = { set value(nextValue) { log = log + \"s\"; throw \"binding\"; } };\nlet iterator = { next: function next() { return {done: false, value: 1}; }, return: function close() { log = log + \"r\"; throw \"close\"; } };\niterator[Symbol.iterator] = function iteratorMethod() { return iterator; };\ntry {\n  for (target.value of iterator) {}\n} catch (error) {\n  return error + \":\" + log;\n}",
+      "expect": {"kind": "string", "value": "binding:sr"}
+    },
+    {
+      "id": "for-of-next-error-does-not-close",
+      "covers": ["for-of-next-error-no-close"],
+      "body": "let log = \"\";\nlet iterator = { next: function next() { throw \"next\"; }, return: function close() { log = log + \"r\"; return {}; } };\niterator[Symbol.iterator] = function iteratorMethod() { return iterator; };\ntry { for (const value of iterator) {} } catch (error) { return error + \":\" + log; }",
+      "expect": {"kind": "string", "value": "next:"}
+    },
+    {
+      "id": "for-of-done-error-does-not-close",
+      "covers": ["for-of-done-error-no-close"],
+      "body": "let log = \"\";\nlet iterator = { next: function next() { return { get done() { throw \"done\"; } }; }, return: function close() { log = log + \"r\"; return {}; } };\niterator[Symbol.iterator] = function iteratorMethod() { return iterator; };\ntry { for (const value of iterator) {} } catch (error) { return error + \":\" + log; }",
+      "expect": {"kind": "string", "value": "done:"}
+    },
+    {
+      "id": "for-of-value-error-does-not-close",
+      "covers": ["for-of-value-error-no-close"],
+      "body": "let log = \"\";\nlet iterator = { next: function next() { return { get done() { log = log + \"d\"; return false; }, get value() { throw \"value\"; } }; }, return: function close() { log = log + \"r\"; return {}; } };\niterator[Symbol.iterator] = function iteratorMethod() { return iterator; };\ntry { for (const value of iterator) {} } catch (error) { return error + \":\" + log; }",
+      "expect": {"kind": "string", "value": "value:d"}
+    },
+    {
+      "id": "for-of-normal-close-requires-object-result",
+      "covers": ["for-of-close-nonobject-result"],
+      "body": "let iterator = { next: function next() { return {done: false, value: 1}; }, return: function close() { return 1; } };\niterator[Symbol.iterator] = function iteratorMethod() { return iterator; };\nfor (const value of iterator) break;",
+      "expect": {"kind": "throw", "name": "TypeError", "message": "not an object"}
     }
   ]
 }

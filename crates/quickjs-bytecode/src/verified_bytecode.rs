@@ -1490,6 +1490,27 @@ pub enum BytecodeVerificationErrorKind {
         pc: BytecodePc,
     },
     /// An opcode forged, consumed, copied, stored, called, returned, or
+    /// reordered an internal synchronous `for-of` iterator record.
+    ForOfIteratorStackMismatch {
+        /// Final bytecode position.
+        pc: BytecodePc,
+        /// Opcode whose typed inputs were invalid.
+        opcode: FinalOpcode,
+    },
+    /// Control flow merged distinct synchronous `for-of` record identities or
+    /// mixed an iterator record with ordinary JavaScript values.
+    ForOfIteratorJoinMismatch {
+        /// Join target.
+        target: BytecodePc,
+        /// Incoming edge that disagreed with the established typed stack.
+        incoming_from: BytecodePc,
+    },
+    /// A terminal path retained a malformed synchronous `for-of` record.
+    ForOfIteratorMarkerAtExit {
+        /// Terminal bytecode position.
+        pc: BytecodePc,
+    },
+    /// An opcode forged, consumed, copied, stored, called, returned, or
     /// reordered an internal catch marker.
     CatchMarkerStackMismatch {
         /// Final bytecode position.
@@ -1817,6 +1838,21 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::ForInIteratorMarkerAtExit { pc } => write!(
                 formatter,
                 "terminal at PC {pc} retains an internal for-in iterator marker"
+            ),
+            Self::ForOfIteratorStackMismatch { pc, opcode } => write!(
+                formatter,
+                "opcode {opcode:?} at PC {pc} violates the typed for-of iterator stack"
+            ),
+            Self::ForOfIteratorJoinMismatch {
+                target,
+                incoming_from,
+            } => write!(
+                formatter,
+                "typed for-of iterator stack at PC {target} disagrees with the edge from PC {incoming_from}"
+            ),
+            Self::ForOfIteratorMarkerAtExit { pc } => write!(
+                formatter,
+                "terminal at PC {pc} retains an internal for-of iterator marker"
             ),
             Self::CatchMarkerStackMismatch { pc, opcode } => write!(
                 formatter,
@@ -2231,7 +2267,7 @@ fn verify_function_metadata(
         realm_global_initializer_prefix,
         &internal_stack,
     )?;
-    classify_for_in_declarative_local_puts(
+    classify_iteration_declarative_local_puts(
         id,
         flow,
         &metadata.variables,
@@ -4893,6 +4929,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Insert3
             | FinalOpcode::Swap
             | FinalOpcode::Rot3l
+            | FinalOpcode::Rot3r
             | FinalOpcode::CallConstructor
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
@@ -4937,6 +4974,9 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::DefineMethodComputed
             | FinalOpcode::ForInStart
             | FinalOpcode::ForInNext
+            | FinalOpcode::ForOfStart
+            | FinalOpcode::ForOfNext
+            | FinalOpcode::IteratorClose
             | FinalOpcode::IfFalse
             | FinalOpcode::IfTrue
             | FinalOpcode::Goto
@@ -5046,6 +5086,22 @@ enum InternalStackValue {
     ForInKey(BytecodePc),
     ForInDone(BytecodePc),
     ForInHeadKey(BytecodePc),
+    ForOfIterator(BytecodePc),
+    ForOfNextMethod(BytecodePc),
+    ForOfCatch(BytecodePc),
+    ForOfExhaustedIterator(BytecodePc),
+    ForOfExhaustedNextMethod(BytecodePc),
+    ForOfExhaustedCatch(BytecodePc),
+    ForOfClosableIterator(BytecodePc),
+    ForOfClosableNextMethod(BytecodePc),
+    ForOfClosableCatch(BytecodePc),
+    ForOfValue(BytecodePc),
+    ForOfDone(BytecodePc),
+    ForOfHeadValue(BytecodePc),
+    ForOfReturnValue(BytecodePc),
+    ForOfCloseIterator(BytecodePc),
+    ForOfCloseNextMethod(BytecodePc),
+    ForOfCloseDummy(BytecodePc),
     CatchMarker {
         site: BytecodePc,
         handler: InstructionIndex,
@@ -5066,6 +5122,10 @@ enum JavaScriptStackValue {
     ForInKey(BytecodePc),
     ForInDone(BytecodePc),
     ForInHeadKey(BytecodePc),
+    ForOfValue(BytecodePc),
+    ForOfDone(BytecodePc),
+    ForOfHeadValue(BytecodePc),
+    ForOfReturnValue(BytecodePc),
     CatchException(BytecodePc),
 }
 
@@ -5076,8 +5136,24 @@ impl JavaScriptStackValue {
             InternalStackValue::ForInKey(site) => Some(Self::ForInKey(site)),
             InternalStackValue::ForInDone(site) => Some(Self::ForInDone(site)),
             InternalStackValue::ForInHeadKey(site) => Some(Self::ForInHeadKey(site)),
+            InternalStackValue::ForOfValue(site) => Some(Self::ForOfValue(site)),
+            InternalStackValue::ForOfDone(site) => Some(Self::ForOfDone(site)),
+            InternalStackValue::ForOfHeadValue(site) => Some(Self::ForOfHeadValue(site)),
+            InternalStackValue::ForOfReturnValue(site) => Some(Self::ForOfReturnValue(site)),
             InternalStackValue::CatchException(site) => Some(Self::CatchException(site)),
             InternalStackValue::ForInIterator(_)
+            | InternalStackValue::ForOfIterator(_)
+            | InternalStackValue::ForOfNextMethod(_)
+            | InternalStackValue::ForOfCatch(_)
+            | InternalStackValue::ForOfExhaustedIterator(_)
+            | InternalStackValue::ForOfExhaustedNextMethod(_)
+            | InternalStackValue::ForOfExhaustedCatch(_)
+            | InternalStackValue::ForOfClosableIterator(_)
+            | InternalStackValue::ForOfClosableNextMethod(_)
+            | InternalStackValue::ForOfClosableCatch(_)
+            | InternalStackValue::ForOfCloseIterator(_)
+            | InternalStackValue::ForOfCloseNextMethod(_)
+            | InternalStackValue::ForOfCloseDummy(_)
             | InternalStackValue::CatchMarker { .. }
             | InternalStackValue::FinallyPending { .. }
             | InternalStackValue::FinallyReturn { .. } => None,
@@ -5090,6 +5166,10 @@ impl JavaScriptStackValue {
             Self::ForInKey(site) => InternalStackValue::ForInKey(site),
             Self::ForInDone(site) => InternalStackValue::ForInDone(site),
             Self::ForInHeadKey(site) => InternalStackValue::ForInHeadKey(site),
+            Self::ForOfValue(site) => InternalStackValue::ForOfValue(site),
+            Self::ForOfDone(site) => InternalStackValue::ForOfDone(site),
+            Self::ForOfHeadValue(site) => InternalStackValue::ForOfHeadValue(site),
+            Self::ForOfReturnValue(site) => InternalStackValue::ForOfReturnValue(site),
             Self::CatchException(site) => InternalStackValue::CatchException(site),
         }
     }
@@ -5100,6 +5180,18 @@ impl InternalStackValue {
         !matches!(
             self,
             Self::ForInIterator(_)
+                | Self::ForOfIterator(_)
+                | Self::ForOfNextMethod(_)
+                | Self::ForOfCatch(_)
+                | Self::ForOfExhaustedIterator(_)
+                | Self::ForOfExhaustedNextMethod(_)
+                | Self::ForOfExhaustedCatch(_)
+                | Self::ForOfClosableIterator(_)
+                | Self::ForOfClosableNextMethod(_)
+                | Self::ForOfClosableCatch(_)
+                | Self::ForOfCloseIterator(_)
+                | Self::ForOfCloseNextMethod(_)
+                | Self::ForOfCloseDummy(_)
                 | Self::CatchMarker { .. }
                 | Self::FinallyPending { .. }
                 | Self::FinallyReturn { .. }
@@ -5116,10 +5208,32 @@ impl InternalStackValue {
             Self::FinallyPending { .. } | Self::FinallyReturn { .. }
         )
     }
+
+    const fn is_for_of_value(self) -> bool {
+        matches!(
+            self,
+            Self::ForOfIterator(_)
+                | Self::ForOfNextMethod(_)
+                | Self::ForOfCatch(_)
+                | Self::ForOfExhaustedIterator(_)
+                | Self::ForOfExhaustedNextMethod(_)
+                | Self::ForOfExhaustedCatch(_)
+                | Self::ForOfClosableIterator(_)
+                | Self::ForOfClosableNextMethod(_)
+                | Self::ForOfClosableCatch(_)
+                | Self::ForOfValue(_)
+                | Self::ForOfDone(_)
+                | Self::ForOfHeadValue(_)
+                | Self::ForOfReturnValue(_)
+                | Self::ForOfCloseIterator(_)
+                | Self::ForOfCloseNextMethod(_)
+                | Self::ForOfCloseDummy(_)
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CertifiedForInLocalPut {
+struct CertifiedIterationLocalPut {
     local: u32,
     cursor_site: BytecodePc,
 }
@@ -5137,7 +5251,7 @@ struct CertifiedNipCatchTransform {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct InternalStackCertificate {
-    local_key_puts: Vec<Option<CertifiedForInLocalPut>>,
+    iteration_local_puts: Vec<Option<CertifiedIterationLocalPut>>,
     catch_local_puts: Vec<Option<CertifiedCatchLocalPut>>,
     nip_catch_transforms: Vec<Option<CertifiedNipCatchTransform>>,
     finally_continuations: Vec<Vec<InstructionIndex>>,
@@ -5145,8 +5259,8 @@ struct InternalStackCertificate {
 }
 
 impl InternalStackCertificate {
-    fn certifies_local_key_put(&self, instruction: usize, local: u32) -> bool {
-        self.local_key_puts
+    fn certifies_iteration_local_put(&self, instruction: usize, local: u32) -> bool {
+        self.iteration_local_puts
             .get(instruction)
             .copied()
             .flatten()
@@ -5200,7 +5314,7 @@ impl InternalStackCertificate {
 }
 
 #[derive(Clone, Copy, Default)]
-struct ForInLocalPutSummary {
+struct IterationLocalPutSummary {
     unchecked_puts: u32,
     certified_puts: u32,
     cursor_site: Option<BytecodePc>,
@@ -5213,8 +5327,14 @@ struct ForInLocalPutSummary {
 #[derive(Clone, Copy)]
 struct InternalStackTransfer {
     normal_completion: bool,
-    iteration_branch_key: Option<BytecodePc>,
+    iteration_branch_value: Option<IterationBranchValue>,
     ret_finalizer: Option<InstructionIndex>,
+}
+
+#[derive(Clone, Copy)]
+enum IterationBranchValue {
+    ForIn(BytecodePc),
+    ForOf(BytecodePc),
 }
 
 #[derive(Clone, Copy)]
@@ -5339,6 +5459,10 @@ fn verify_internal_operand_stack(
             verified.decoded().instruction().opcode(),
             FinalOpcode::ForInStart
                 | FinalOpcode::ForInNext
+                | FinalOpcode::ForOfStart
+                | FinalOpcode::ForOfNext
+                | FinalOpcode::IteratorClose
+                | FinalOpcode::Rot3r
                 | FinalOpcode::Nip
                 | FinalOpcode::Catch
                 | FinalOpcode::NipCatch
@@ -5367,10 +5491,10 @@ fn verify_internal_operand_stack(
         None::<u32>,
         BytecodeGraphResource::FrameStateEntries,
     )?;
-    let mut local_key_puts = try_filled_vec(
+    let mut iteration_local_puts = try_filled_vec(
         id,
         instructions.len(),
-        None::<CertifiedForInLocalPut>,
+        None::<CertifiedIterationLocalPut>,
         BytecodeGraphResource::FrameStateEntries,
     )?;
     let mut catch_local_puts = try_filled_vec(
@@ -5540,7 +5664,7 @@ fn verify_internal_operand_stack(
             effectively_reachable,
             instructions[index].successors().branch_target(),
             &mut state,
-            &mut local_key_puts,
+            &mut iteration_local_puts,
             &mut catch_local_puts,
             &mut nip_catch_transforms,
             &mut ret_finalizers,
@@ -5558,9 +5682,14 @@ fn verify_internal_operand_stack(
         ) {
             has_successor = true;
             let successor = edge.target;
-            let target_pc = instructions
+            let (target_pc, target_is_iterator_close) = instructions
                 .get(successor.get() as usize)
-                .map(|instruction| instruction.decoded().pc())
+                .map(|instruction| {
+                    (
+                        instruction.decoded().pc(),
+                        instruction.decoded().instruction().opcode() == FinalOpcode::IteratorClose,
+                    )
+                })
                 .ok_or_else(|| {
                     BytecodeVerificationError::function(
                         id,
@@ -5596,10 +5725,10 @@ fn verify_internal_operand_stack(
             } else {
                 None
             };
-            let branch_key_index = transfer
-                .iteration_branch_key
-                .map(|site| {
-                    let key_index = state.len().checked_sub(1).ok_or_else(|| {
+            let branch_value = transfer
+                .iteration_branch_value
+                .map(|branch_value| {
+                    let value_index = state.len().checked_sub(1).ok_or_else(|| {
                         internal_stack_error(
                             id,
                             decoded.pc(),
@@ -5607,20 +5736,67 @@ fn verify_internal_operand_stack(
                             &state,
                         )
                     })?;
-                    if state[key_index] != InternalStackValue::ForInKey(site) {
-                        return Err(internal_stack_error(
-                            id,
-                            decoded.pc(),
-                            decoded.instruction().opcode(),
-                            &state,
-                        ));
-                    }
-                    state[key_index] = if edge.is_branch_target {
-                        InternalStackValue::ForInHeadKey(site)
-                    } else {
-                        InternalStackValue::Ordinary
+                    let replacement = match branch_value {
+                        IterationBranchValue::ForIn(site)
+                            if state[value_index] == InternalStackValue::ForInKey(site) =>
+                        {
+                            if edge.is_branch_target {
+                                InternalStackValue::ForInHeadKey(site)
+                            } else {
+                                InternalStackValue::Ordinary
+                            }
+                        }
+                        IterationBranchValue::ForOf(site)
+                            if state[value_index] == InternalStackValue::ForOfValue(site) =>
+                        {
+                            let Some(record_index) = value_index.checked_sub(3) else {
+                                return Err(for_of_stack_error(
+                                    id,
+                                    decoded.pc(),
+                                    decoded.instruction().opcode(),
+                                ));
+                            };
+                            if !matches!(
+                                (
+                                    state[record_index],
+                                    state[record_index + 1],
+                                    state[record_index + 2],
+                                ),
+                                (
+                                    InternalStackValue::ForOfIterator(iterator),
+                                    InternalStackValue::ForOfNextMethod(next),
+                                    InternalStackValue::ForOfCatch(catch),
+                                ) if iterator == site && next == site && catch == site
+                            ) {
+                                return Err(for_of_stack_error(
+                                    id,
+                                    decoded.pc(),
+                                    decoded.instruction().opcode(),
+                                ));
+                            }
+                            if edge.is_branch_target {
+                                InternalStackValue::ForOfHeadValue(site)
+                            } else {
+                                state[record_index] =
+                                    InternalStackValue::ForOfExhaustedIterator(site);
+                                state[record_index + 1] =
+                                    InternalStackValue::ForOfExhaustedNextMethod(site);
+                                state[record_index + 2] =
+                                    InternalStackValue::ForOfExhaustedCatch(site);
+                                InternalStackValue::Ordinary
+                            }
+                        }
+                        _ => {
+                            return Err(internal_stack_error(
+                                id,
+                                decoded.pc(),
+                                decoded.instruction().opcode(),
+                                &state,
+                            ));
+                        }
                     };
-                    Ok(key_index)
+                    state[value_index] = replacement;
+                    Ok((value_index, branch_value))
                 })
                 .transpose()?;
             let catch_exception = if decoded.instruction().opcode() == FinalOpcode::Catch
@@ -5661,8 +5837,11 @@ fn verify_internal_operand_stack(
                 successor,
                 target_pc,
                 component,
-                catch_handler_targets[successor.get() as usize],
-                finally_targets[successor.get() as usize],
+                InternalStackTarget {
+                    catch_handler: catch_handler_targets[successor.get() as usize],
+                    finally_entry: finally_targets[successor.get() as usize],
+                    iterator_close: target_is_iterator_close,
+                },
                 edge.enters_finally,
                 &state,
                 &mut entries,
@@ -5672,9 +5851,23 @@ fn verify_internal_operand_stack(
                 limits.max_frame_state_entries,
                 usage,
             )?;
-            if let (Some(key_index), Some(site)) = (branch_key_index, transfer.iteration_branch_key)
-            {
-                state[key_index] = InternalStackValue::ForInKey(site);
+            if let Some((value_index, branch_value)) = branch_value {
+                state[value_index] = match branch_value {
+                    IterationBranchValue::ForIn(site) => InternalStackValue::ForInKey(site),
+                    IterationBranchValue::ForOf(site) => {
+                        let Some(record_index) = value_index.checked_sub(3) else {
+                            return Err(for_of_stack_error(
+                                id,
+                                decoded.pc(),
+                                decoded.instruction().opcode(),
+                            ));
+                        };
+                        state[record_index] = InternalStackValue::ForOfIterator(site);
+                        state[record_index + 1] = InternalStackValue::ForOfNextMethod(site);
+                        state[record_index + 2] = InternalStackValue::ForOfCatch(site);
+                        InternalStackValue::ForOfValue(site)
+                    }
+                };
             }
             if let Some((marker_index, site, handler)) = catch_exception {
                 state[marker_index] = InternalStackValue::CatchMarker { site, handler };
@@ -5723,7 +5916,7 @@ fn verify_internal_operand_stack(
         BytecodeGraphResource::PolicyTransfers,
     )?;
     Ok(InternalStackCertificate {
-        local_key_puts,
+        iteration_local_puts,
         catch_local_puts,
         nip_catch_transforms,
         finally_continuations,
@@ -5733,9 +5926,10 @@ fn verify_internal_operand_stack(
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "the classifier shares the graph resource limits and usage ledger with the typed stack pass"
 )]
-fn classify_for_in_declarative_local_puts(
+fn classify_iteration_declarative_local_puts(
     id: FunctionTemplateId,
     flow: &VerifiedControlFlow,
     variables: &[VariableDefinition],
@@ -5743,7 +5937,7 @@ fn classify_for_in_declarative_local_puts(
     limits: BytecodeGraphVerificationLimits,
     usage: &mut BytecodeGraphUsage,
 ) -> Result<(), BytecodeVerificationError> {
-    if certificate.local_key_puts.iter().all(Option::is_none) {
+    if certificate.iteration_local_puts.iter().all(Option::is_none) {
         return Ok(());
     }
 
@@ -5753,7 +5947,7 @@ fn classify_for_in_declarative_local_puts(
     let mut summaries = try_filled_vec(
         id,
         local_count,
-        ForInLocalPutSummary::default(),
+        IterationLocalPutSummary::default(),
         BytecodeGraphResource::FrameStateEntries,
     )?;
     let mut evaluations = 0_u64;
@@ -5780,7 +5974,11 @@ fn classify_for_in_declarative_local_puts(
         };
         summary.unchecked_puts = summary.unchecked_puts.saturating_add(1);
 
-        let certified = certificate.local_key_puts.get(index).copied().flatten();
+        let certified = certificate
+            .iteration_local_puts
+            .get(index)
+            .copied()
+            .flatten();
         let Some(certified) = certified else {
             summary.has_uncertified_put = true;
             continue;
@@ -5824,7 +6022,7 @@ fn classify_for_in_declarative_local_puts(
             && summary.unchecked_puts == summary.certified_puts;
     }
 
-    for certified in &mut certificate.local_key_puts {
+    for certified in &mut certificate.iteration_local_puts {
         let Some(local_put) = *certified else {
             continue;
         };
@@ -5851,7 +6049,7 @@ fn classify_for_in_declarative_local_puts(
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
-    reason = "marker isolation, edge-specific handler and key provenance, and ordinary stack transfer form one typed opcode boundary"
+    reason = "marker isolation, edge-specific handler and iteration provenance, and ordinary stack transfer form one typed opcode boundary"
 )]
 fn transfer_internal_operand_stack(
     id: FunctionTemplateId,
@@ -5860,7 +6058,7 @@ fn transfer_internal_operand_stack(
     effectively_reachable: bool,
     catch_handler: Option<InstructionIndex>,
     state: &mut Vec<InternalStackValue>,
-    local_key_puts: &mut [Option<CertifiedForInLocalPut>],
+    iteration_local_puts: &mut [Option<CertifiedIterationLocalPut>],
     catch_local_puts: &mut [Option<CertifiedCatchLocalPut>],
     nip_catch_transforms: &mut [Option<CertifiedNipCatchTransform>],
     ret_finalizers: &mut [Option<InstructionIndex>],
@@ -5888,7 +6086,7 @@ fn transfer_internal_operand_stack(
             });
             return Ok(InternalStackTransfer {
                 normal_completion: true,
-                iteration_branch_key: None,
+                iteration_branch_value: None,
                 ret_finalizer: None,
             });
         }
@@ -5903,7 +6101,7 @@ fn transfer_internal_operand_stack(
             *input = InternalStackValue::ForInIterator(decoded.pc());
             return Ok(InternalStackTransfer {
                 normal_completion: true,
-                iteration_branch_key: None,
+                iteration_branch_value: None,
                 ret_finalizer: None,
             });
         }
@@ -5925,11 +6123,101 @@ fn transfer_internal_operand_stack(
             state.push(InternalStackValue::ForInDone(site));
             return Ok(InternalStackTransfer {
                 normal_completion: true,
-                iteration_branch_key: None,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::ForOfStart => {
+            invalidate_internal_value_provenance(state);
+            let Some(input) = state.last_mut() else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            if *input != InternalStackValue::Ordinary {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            }
+            let site = decoded.pc();
+            *input = InternalStackValue::ForOfIterator(site);
+            state.try_reserve(2).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 2,
+                    },
+                )
+            })?;
+            state.push(InternalStackValue::ForOfNextMethod(site));
+            state.push(InternalStackValue::ForOfCatch(site));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::ForOfNext => {
+            if instruction.operands() != Operands::U8(0) {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            }
+            invalidate_internal_value_provenance(state);
+            let Some(base) = state.len().checked_sub(3) else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            let (
+                InternalStackValue::ForOfIterator(iterator),
+                InternalStackValue::ForOfNextMethod(next),
+                InternalStackValue::ForOfCatch(catch),
+            ) = (state[base], state[base + 1], state[base + 2])
+            else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            if iterator != next || next != catch {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            }
+            state.try_reserve(2).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 2,
+                    },
+                )
+            })?;
+            state.push(InternalStackValue::ForOfValue(iterator));
+            state.push(InternalStackValue::ForOfDone(iterator));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
                 ret_finalizer: None,
             });
         }
         FinalOpcode::IfFalse | FinalOpcode::IfFalse8 => {
+            if let Some(base) = state.len().checked_sub(5)
+                && let (
+                    InternalStackValue::ForOfIterator(iterator),
+                    InternalStackValue::ForOfNextMethod(next),
+                    InternalStackValue::ForOfCatch(catch),
+                    InternalStackValue::ForOfValue(value),
+                    InternalStackValue::ForOfDone(done),
+                ) = (
+                    state[base],
+                    state[base + 1],
+                    state[base + 2],
+                    state[base + 3],
+                    state[base + 4],
+                )
+                && iterator == next
+                && next == catch
+                && catch == value
+                && value == done
+            {
+                state.pop();
+                invalidate_internal_value_provenance(&mut state[..base]);
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: Some(IterationBranchValue::ForOf(value)),
+                    ret_finalizer: None,
+                });
+            }
             if let Some(base) = state.len().checked_sub(3)
                 && let (
                     InternalStackValue::ForInIterator(iterator),
@@ -5943,10 +6231,18 @@ fn transfer_internal_operand_stack(
                 invalidate_internal_value_provenance(&mut state[..base]);
                 return Ok(InternalStackTransfer {
                     normal_completion: true,
-                    iteration_branch_key: Some(key),
+                    iteration_branch_value: Some(IterationBranchValue::ForIn(key)),
                     ret_finalizer: None,
                 });
             }
+            if matches!(state.last(), Some(InternalStackValue::ForOfDone(_))) {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            }
+        }
+        FinalOpcode::IfTrue | FinalOpcode::IfTrue8
+            if matches!(state.last(), Some(InternalStackValue::ForOfDone(_))) =>
+        {
+            return Err(for_of_stack_error(id, decoded.pc(), opcode));
         }
         opcode if is_unchecked_local_put(opcode) => {
             if let Some(InternalStackValue::CatchException(_catch_site)) = state.last().copied() {
@@ -5961,7 +6257,7 @@ fn transfer_internal_operand_stack(
                 invalidate_internal_value_provenance(state);
                 return Ok(InternalStackTransfer {
                     normal_completion: true,
-                    iteration_branch_key: None,
+                    iteration_branch_value: None,
                     ret_finalizer: None,
                 });
             }
@@ -5975,10 +6271,10 @@ fn transfer_internal_operand_stack(
                 let Some(local) = local_operand(opcode, instruction.operands()) else {
                     return Err(for_in_stack_error(id, decoded.pc(), opcode));
                 };
-                let Some(certificate) = local_key_puts.get_mut(instruction_index) else {
+                let Some(certificate) = iteration_local_puts.get_mut(instruction_index) else {
                     return Err(for_in_stack_error(id, decoded.pc(), opcode));
                 };
-                *certificate = Some(CertifiedForInLocalPut {
+                *certificate = Some(CertifiedIterationLocalPut {
                     local,
                     cursor_site: key,
                 });
@@ -5986,7 +6282,41 @@ fn transfer_internal_operand_stack(
                 invalidate_internal_value_provenance(state);
                 return Ok(InternalStackTransfer {
                     normal_completion: true,
-                    iteration_branch_key: None,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
+            if let Some(marker) = state.len().checked_sub(4)
+                && let (
+                    InternalStackValue::ForOfIterator(iterator),
+                    InternalStackValue::ForOfNextMethod(next),
+                    InternalStackValue::ForOfCatch(catch),
+                    InternalStackValue::ForOfHeadValue(value),
+                ) = (
+                    state[marker],
+                    state[marker + 1],
+                    state[marker + 2],
+                    state[marker + 3],
+                )
+                && iterator == next
+                && next == catch
+                && catch == value
+            {
+                let Some(local) = local_operand(opcode, instruction.operands()) else {
+                    return Err(for_of_stack_error(id, decoded.pc(), opcode));
+                };
+                let Some(certificate) = iteration_local_puts.get_mut(instruction_index) else {
+                    return Err(for_of_stack_error(id, decoded.pc(), opcode));
+                };
+                *certificate = Some(CertifiedIterationLocalPut {
+                    local,
+                    cursor_site: value,
+                });
+                state.pop();
+                invalidate_internal_value_provenance(state);
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
                     ret_finalizer: None,
                 });
             }
@@ -5998,9 +6328,15 @@ fn transfer_internal_operand_stack(
                 }
                 return Ok(InternalStackTransfer {
                     normal_completion: false,
-                    iteration_branch_key: None,
+                    iteration_branch_value: None,
                     ret_finalizer: None,
                 });
+            }
+            if state
+                .last()
+                .is_some_and(|value| value.is_for_of_value() && !value.is_javascript_value())
+            {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
             }
             if let Some(InternalStackValue::FinallyReturn { target }) = state.last().copied()
                 && !matches!(
@@ -6017,7 +6353,7 @@ fn transfer_internal_operand_stack(
             invalidate_internal_value_provenance(state);
             return Ok(InternalStackTransfer {
                 normal_completion: true,
-                iteration_branch_key: None,
+                iteration_branch_value: None,
                 ret_finalizer: None,
             });
         }
@@ -6026,7 +6362,7 @@ fn transfer_internal_operand_stack(
                 if !effectively_reachable {
                     return Ok(InternalStackTransfer {
                         normal_completion: false,
-                        iteration_branch_key: None,
+                        iteration_branch_value: None,
                         ret_finalizer: None,
                     });
                 }
@@ -6036,7 +6372,7 @@ fn transfer_internal_operand_stack(
                 if !effectively_reachable {
                     return Ok(InternalStackTransfer {
                         normal_completion: false,
-                        iteration_branch_key: None,
+                        iteration_branch_value: None,
                         ret_finalizer: None,
                     });
                 }
@@ -6068,7 +6404,7 @@ fn transfer_internal_operand_stack(
             invalidate_internal_value_provenance(state);
             return Ok(InternalStackTransfer {
                 normal_completion: true,
-                iteration_branch_key: None,
+                iteration_branch_value: None,
                 ret_finalizer: None,
             });
         }
@@ -6077,7 +6413,7 @@ fn transfer_internal_operand_stack(
                 if !effectively_reachable {
                     return Ok(InternalStackTransfer {
                         normal_completion: false,
-                        iteration_branch_key: None,
+                        iteration_branch_value: None,
                         ret_finalizer: None,
                     });
                 }
@@ -6086,12 +6422,37 @@ fn transfer_internal_operand_stack(
             if !state[value_index].is_javascript_value() {
                 return Err(internal_stack_error(id, decoded.pc(), opcode, state));
             }
-            let Some(marker_index) = state[..value_index]
-                .iter()
-                .rposition(|value| matches!(value, InternalStackValue::CatchMarker { .. }))
-            else {
+            let Some(marker_index) = state[..value_index].iter().rposition(|value| {
+                matches!(
+                    value,
+                    InternalStackValue::CatchMarker { .. } | InternalStackValue::ForOfCatch(_)
+                )
+            }) else {
+                if state.iter().any(|value| value.is_for_of_value()) {
+                    return Err(for_of_stack_error(id, decoded.pc(), opcode));
+                }
                 return Err(catch_stack_error(id, decoded.pc(), opcode));
             };
+            let for_of_site = match state[marker_index] {
+                InternalStackValue::CatchMarker { .. } => None,
+                InternalStackValue::ForOfCatch(site) => {
+                    let Some(record_start) = marker_index.checked_sub(2) else {
+                        return Err(for_of_stack_error(id, decoded.pc(), opcode));
+                    };
+                    if !matches!(
+                        (state[record_start], state[record_start + 1]),
+                        (
+                            InternalStackValue::ForOfIterator(iterator),
+                            InternalStackValue::ForOfNextMethod(next)
+                        ) if iterator == site && next == site
+                    ) {
+                        return Err(for_of_stack_error(id, decoded.pc(), opcode));
+                    }
+                    Some(site)
+                }
+                _ => return Err(internal_stack_error(id, decoded.pc(), opcode, state)),
+            };
+            let marker_is_for_of = for_of_site.is_some();
             let mut cursor = marker_index + 1;
             while cursor < value_index {
                 match state[cursor] {
@@ -6110,7 +6471,11 @@ fn transfer_internal_operand_stack(
                         return Err(finally_stack_error(id, decoded.pc(), opcode));
                     }
                     _ => {
-                        return Err(catch_stack_error(id, decoded.pc(), opcode));
+                        return Err(if marker_is_for_of {
+                            for_of_stack_error(id, decoded.pc(), opcode)
+                        } else {
+                            catch_stack_error(id, decoded.pc(), opcode)
+                        });
                     }
                 }
             }
@@ -6119,21 +6484,126 @@ fn transfer_internal_operand_stack(
                 retained_prefix: usize_to_u32(marker_index),
             };
             let Some(certificate) = nip_catch_transforms.get_mut(instruction_index) else {
-                return Err(catch_stack_error(id, decoded.pc(), opcode));
+                return Err(if marker_is_for_of {
+                    for_of_stack_error(id, decoded.pc(), opcode)
+                } else {
+                    catch_stack_error(id, decoded.pc(), opcode)
+                });
             };
             match *certificate {
                 Some(established) if established != transform => {
-                    return Err(catch_stack_error(id, decoded.pc(), opcode));
+                    return Err(if marker_is_for_of {
+                        for_of_stack_error(id, decoded.pc(), opcode)
+                    } else {
+                        catch_stack_error(id, decoded.pc(), opcode)
+                    });
                 }
                 Some(_) => {}
                 None => *certificate = Some(transform),
             }
             state.truncate(marker_index);
-            state.push(InternalStackValue::Ordinary);
+            invalidate_internal_value_provenance(state);
+            state.push(for_of_site.map_or(
+                InternalStackValue::Ordinary,
+                InternalStackValue::ForOfReturnValue,
+            ));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::Rot3r => {
+            let Some(base) = state.len().checked_sub(3) else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            let (
+                InternalStackValue::ForOfIterator(iterator),
+                InternalStackValue::ForOfNextMethod(next),
+                InternalStackValue::ForOfReturnValue(completion),
+            ) = (state[base], state[base + 1], state[base + 2])
+            else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            if iterator != next || next != completion {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            }
+            state[base] = InternalStackValue::Ordinary;
+            state[base + 1] = InternalStackValue::ForOfCloseIterator(iterator);
+            state[base + 2] = InternalStackValue::ForOfCloseNextMethod(iterator);
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::Undefined => {
+            if let Some(base) = state.len().checked_sub(3)
+                && state[base].is_javascript_value()
+                && let (
+                    InternalStackValue::ForOfCloseIterator(iterator),
+                    InternalStackValue::ForOfCloseNextMethod(next),
+                ) = (state[base + 1], state[base + 2])
+                && iterator == next
+            {
+                state.try_reserve(1).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::AllocationFailed {
+                            resource: BytecodeGraphResource::FrameStateEntries,
+                            requested: 1,
+                        },
+                    )
+                })?;
+                state.push(InternalStackValue::ForOfCloseDummy(iterator));
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
+        }
+        FinalOpcode::IteratorClose => {
+            let Some(base) = state.len().checked_sub(3) else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            let valid = matches!(
+                (state[base], state[base + 1], state[base + 2]),
+                (
+                    InternalStackValue::ForOfIterator(iterator),
+                    InternalStackValue::ForOfNextMethod(next),
+                    InternalStackValue::ForOfCatch(catch)
+                ) if iterator == next && next == catch
+            ) || matches!(
+                (state[base], state[base + 1], state[base + 2]),
+                (
+                    InternalStackValue::ForOfExhaustedIterator(iterator),
+                    InternalStackValue::ForOfExhaustedNextMethod(next),
+                    InternalStackValue::ForOfExhaustedCatch(catch)
+                ) if iterator == next && next == catch
+            ) || matches!(
+                (state[base], state[base + 1], state[base + 2]),
+                (
+                    InternalStackValue::ForOfClosableIterator(iterator),
+                    InternalStackValue::ForOfClosableNextMethod(next),
+                    InternalStackValue::ForOfClosableCatch(catch)
+                ) if iterator == next && next == catch
+            ) || matches!(
+                (state[base], state[base + 1], state[base + 2]),
+                (
+                    InternalStackValue::ForOfCloseIterator(iterator),
+                    InternalStackValue::ForOfCloseNextMethod(next),
+                    InternalStackValue::ForOfCloseDummy(dummy)
+                ) if iterator == next && next == dummy
+            );
+            if !valid {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            }
+            state.truncate(base);
             invalidate_internal_value_provenance(state);
             return Ok(InternalStackTransfer {
                 normal_completion: true,
-                iteration_branch_key: None,
+                iteration_branch_value: None,
                 ret_finalizer: None,
             });
         }
@@ -6141,7 +6611,7 @@ fn transfer_internal_operand_stack(
             if !effectively_reachable && state.is_empty() {
                 return Ok(InternalStackTransfer {
                     normal_completion: false,
-                    iteration_branch_key: None,
+                    iteration_branch_value: None,
                     ret_finalizer: None,
                 });
             }
@@ -6179,11 +6649,22 @@ fn transfer_internal_operand_stack(
             invalidate_internal_value_provenance(state);
             return Ok(InternalStackTransfer {
                 normal_completion: true,
-                iteration_branch_key: None,
+                iteration_branch_value: None,
                 ret_finalizer: Some(target),
             });
         }
         _ => {}
+    }
+
+    if state.iter().any(|value| {
+        matches!(
+            value,
+            InternalStackValue::ForOfCloseIterator(_)
+                | InternalStackValue::ForOfCloseNextMethod(_)
+                | InternalStackValue::ForOfCloseDummy(_)
+        )
+    }) {
+        return Err(for_of_stack_error(id, decoded.pc(), opcode));
     }
 
     invalidate_internal_value_provenance(state);
@@ -6196,7 +6677,7 @@ fn transfer_internal_operand_stack(
         if !effectively_reachable {
             return Ok(InternalStackTransfer {
                 normal_completion: false,
-                iteration_branch_key: None,
+                iteration_branch_value: None,
                 ret_finalizer: None,
             });
         }
@@ -6232,7 +6713,7 @@ fn transfer_internal_operand_stack(
     state.resize(output_len, InternalStackValue::Ordinary);
     Ok(InternalStackTransfer {
         normal_completion: true,
-        iteration_branch_key: None,
+        iteration_branch_value: None,
         ret_finalizer: None,
     })
 }
@@ -6244,11 +6725,84 @@ fn invalidate_internal_value_provenance(state: &mut [InternalStackValue]) {
             InternalStackValue::ForInKey(_)
                 | InternalStackValue::ForInDone(_)
                 | InternalStackValue::ForInHeadKey(_)
+                | InternalStackValue::ForOfValue(_)
+                | InternalStackValue::ForOfDone(_)
+                | InternalStackValue::ForOfHeadValue(_)
+                | InternalStackValue::ForOfReturnValue(_)
                 | InternalStackValue::CatchException(_)
         ) {
             *value = InternalStackValue::Ordinary;
         }
     }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ForOfRecordState {
+    Active,
+    Exhausted,
+    Closable,
+}
+
+#[derive(Clone, Copy)]
+struct InternalStackTarget {
+    catch_handler: bool,
+    finally_entry: bool,
+    iterator_close: bool,
+}
+
+fn trailing_for_of_record(
+    state: &[InternalStackValue],
+) -> Option<(usize, BytecodePc, ForOfRecordState)> {
+    let base = state.len().checked_sub(3)?;
+    let (site, record_state) = match (state[base], state[base + 1], state[base + 2]) {
+        (
+            InternalStackValue::ForOfIterator(iterator),
+            InternalStackValue::ForOfNextMethod(next),
+            InternalStackValue::ForOfCatch(catch),
+        ) if iterator == next && next == catch => (iterator, ForOfRecordState::Active),
+        (
+            InternalStackValue::ForOfExhaustedIterator(iterator),
+            InternalStackValue::ForOfExhaustedNextMethod(next),
+            InternalStackValue::ForOfExhaustedCatch(catch),
+        ) if iterator == next && next == catch => (iterator, ForOfRecordState::Exhausted),
+        (
+            InternalStackValue::ForOfClosableIterator(iterator),
+            InternalStackValue::ForOfClosableNextMethod(next),
+            InternalStackValue::ForOfClosableCatch(catch),
+        ) if iterator == next && next == catch => (iterator, ForOfRecordState::Closable),
+        _ => return None,
+    };
+    Some((base, site, record_state))
+}
+
+fn merge_trailing_for_of_close_record(
+    established: &mut [InternalStackValue],
+    incoming: &[InternalStackValue],
+) -> Option<bool> {
+    if established.len() != incoming.len() {
+        return None;
+    }
+    let (established_base, established_site, established_state) =
+        trailing_for_of_record(established)?;
+    let (incoming_base, incoming_site, incoming_state) = trailing_for_of_record(incoming)?;
+    if established_base != incoming_base
+        || established_site != incoming_site
+        || established[..established_base] != incoming[..incoming_base]
+    {
+        return None;
+    }
+    let mergeable = established_state == ForOfRecordState::Closable
+        || incoming_state == ForOfRecordState::Closable
+        || established_state != incoming_state;
+    if !mergeable {
+        return None;
+    }
+    let changed = established_state != ForOfRecordState::Closable;
+    established[established_base] = InternalStackValue::ForOfClosableIterator(established_site);
+    established[established_base + 1] =
+        InternalStackValue::ForOfClosableNextMethod(established_site);
+    established[established_base + 2] = InternalStackValue::ForOfClosableCatch(established_site);
+    Some(changed)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6258,8 +6812,7 @@ fn propagate_internal_operand_stack(
     successor: InstructionIndex,
     target_pc: BytecodePc,
     component: u32,
-    target_is_catch_handler: bool,
-    target_is_finally: bool,
+    target: InternalStackTarget,
     enters_finally: bool,
     output: &[InternalStackValue],
     entries: &mut [Option<Vec<InternalStackValue>>],
@@ -6270,7 +6823,7 @@ fn propagate_internal_operand_stack(
     usage: &mut BytecodeGraphUsage,
 ) -> Result<(), BytecodeVerificationError> {
     let index = successor.get() as usize;
-    if target_is_finally {
+    if target.finally_entry {
         if !enters_finally
             || !matches!(
                 output.get(output.len().saturating_sub(2)..),
@@ -6315,7 +6868,7 @@ fn propagate_internal_operand_stack(
             // suffix. Ignore only that suffix when deciding whether a later,
             // disconnected compiler component is trying to smuggle an
             // independently forged marker into an already verified finalizer.
-            let component_prefix = if target_is_finally && enters_finally {
+            let component_prefix = if target.finally_entry && enters_finally {
                 &output[..output.len() - 2]
             } else {
                 output
@@ -6323,7 +6876,7 @@ fn propagate_internal_operand_stack(
             let carries_internal_value = component_prefix
                 .iter()
                 .any(|value| *value != InternalStackValue::Ordinary);
-            if existing != output && (target_is_catch_handler || carries_internal_value) {
+            if existing != output && (target.catch_handler || carries_internal_value) {
                 return Err(internal_join_error(
                     id, target_pc, source_pc, existing, output,
                 ));
@@ -6351,14 +6904,28 @@ fn propagate_internal_operand_stack(
         }
         Some(existing) if existing == output => {}
         Some(existing) => {
-            return Err(internal_join_error(
-                id, target_pc, source_pc, existing, output,
-            ));
+            let merged = target.iterator_close
+                && merge_trailing_for_of_close_record(existing, output).is_some_and(|changed| {
+                    if changed && !queued[index] {
+                        queued[index] = true;
+                        work.push_back(index);
+                    }
+                    true
+                });
+            if !merged {
+                return Err(internal_join_error(
+                    id, target_pc, source_pc, existing, output,
+                ));
+            }
         }
     }
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "terminal cleanup validates nested finally, catch, for-in, and synchronous for-of marker grammars together"
+)]
 fn verify_internal_stack_exit(
     id: FunctionTemplateId,
     decoded: crate::DecodedInstruction,
@@ -6403,26 +6970,56 @@ fn verify_internal_stack_exit(
         ));
     }
     if decoded.instruction().opcode() == FinalOpcode::Throw {
-        if state
-            .iter()
-            .all(|value| matches!(value, InternalStackValue::CatchMarker { .. }))
-        {
-            return Ok(());
+        let mut cursor = 0;
+        while cursor < state.len() {
+            match state[cursor] {
+                InternalStackValue::CatchMarker { .. } => cursor += 1,
+                InternalStackValue::ForOfIterator(site) => {
+                    if !matches!(
+                        state.get(cursor..cursor.saturating_add(3)),
+                        Some([
+                            InternalStackValue::ForOfIterator(iterator),
+                            InternalStackValue::ForOfNextMethod(next),
+                            InternalStackValue::ForOfCatch(catch),
+                        ]) if *iterator == site && *next == site && *catch == site
+                    ) {
+                        return Err(for_of_stack_error(
+                            id,
+                            decoded.pc(),
+                            decoded.instruction().opcode(),
+                        ));
+                    }
+                    cursor += 3;
+                }
+                value if value.is_for_of_value() => {
+                    return Err(for_of_stack_error(
+                        id,
+                        decoded.pc(),
+                        decoded.instruction().opcode(),
+                    ));
+                }
+                InternalStackValue::ForInIterator(_) => {
+                    return Err(for_in_stack_error(
+                        id,
+                        decoded.pc(),
+                        decoded.instruction().opcode(),
+                    ));
+                }
+                _ => {
+                    return Err(catch_stack_error(
+                        id,
+                        decoded.pc(),
+                        decoded.instruction().opcode(),
+                    ));
+                }
+            }
         }
-        if state
-            .iter()
-            .any(|value| matches!(value, InternalStackValue::ForInIterator(_)))
-        {
-            return Err(for_in_stack_error(
-                id,
-                decoded.pc(),
-                decoded.instruction().opcode(),
-            ));
-        }
-        return Err(catch_stack_error(
+        return Ok(());
+    }
+    if state.iter().any(|value| value.is_for_of_value()) {
+        return Err(BytecodeVerificationError::function(
             id,
-            decoded.pc(),
-            decoded.instruction().opcode(),
+            BytecodeVerificationErrorKind::ForOfIteratorMarkerAtExit { pc: decoded.pc() },
         ));
     }
     if state
@@ -6464,6 +7061,15 @@ fn internal_stack_error(
         || state.iter().any(|value| value.is_finally_value())
     {
         finally_stack_error(id, pc, opcode)
+    } else if matches!(
+        opcode,
+        FinalOpcode::ForOfStart
+            | FinalOpcode::ForOfNext
+            | FinalOpcode::IteratorClose
+            | FinalOpcode::Rot3r
+    ) || state.iter().any(|value| value.is_for_of_value())
+    {
+        for_of_stack_error(id, pc, opcode)
     } else if opcode == FinalOpcode::Catch
         || opcode == FinalOpcode::NipCatch
         || state.iter().any(|value| value.is_catch_value())
@@ -6507,6 +7113,17 @@ fn for_in_stack_error(
     )
 }
 
+fn for_of_stack_error(
+    id: FunctionTemplateId,
+    pc: BytecodePc,
+    opcode: FinalOpcode,
+) -> BytecodeVerificationError {
+    BytecodeVerificationError::function(
+        id,
+        BytecodeVerificationErrorKind::ForOfIteratorStackMismatch { pc, opcode },
+    )
+}
+
 fn internal_join_error(
     id: FunctionTemplateId,
     target: BytecodePc,
@@ -6520,6 +7137,15 @@ fn internal_join_error(
         .any(|value| value.is_finally_value())
     {
         BytecodeVerificationErrorKind::FinallyReturnJoinMismatch {
+            target,
+            incoming_from,
+        }
+    } else if established
+        .iter()
+        .chain(incoming)
+        .any(|value| value.is_for_of_value())
+    {
+        BytecodeVerificationErrorKind::ForOfIteratorJoinMismatch {
             target,
             incoming_from,
         }
@@ -6988,7 +7614,7 @@ fn verify_binding_states(
                 opcode,
                 tracked[position].1,
                 initializers.put_definitions[index] == Some(definition_index),
-                internal_stack.certifies_local_key_put(index, local),
+                internal_stack.certifies_iteration_local_put(index, local),
                 internal_stack.certifies_catch_local_put(index, local),
                 &mut state[position],
             )?;
@@ -7137,7 +7763,7 @@ fn initial_binding_state(definition: &VariableDefinition) -> u8 {
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
-    reason = "binding identity, declaration policy, initializer authority, and for-in key authority are checked together"
+    reason = "binding identity, declaration policy, initializer authority, and iteration-head authority are checked together"
 )]
 fn transfer_local_state(
     id: FunctionTemplateId,
@@ -7146,7 +7772,7 @@ fn transfer_local_state(
     opcode: FinalOpcode,
     definition: &VariableDefinition,
     is_function_initializer: bool,
-    is_for_in_key_put: bool,
+    is_iteration_head_put: bool,
     is_catch_initialization: bool,
     state: &mut u8,
 ) -> Result<bool, BytecodeVerificationError> {
@@ -7195,7 +7821,7 @@ fn transfer_local_state(
                 && !BindingState::only(*state, BindingState::INITIALIZED)
             {
                 false
-            } else if is_for_in_key_put {
+            } else if is_iteration_head_put {
                 BindingState::only(
                     *state,
                     BindingState::UNINITIALIZED | BindingState::INITIALIZED_CLOSED,
@@ -7512,6 +8138,9 @@ fn collect_requirements(
             }
             FinalOpcode::Append => {
                 push_requirement(requirements, ExecutionRequirement::Arrays);
+                push_requirement(requirements, ExecutionRequirement::Iterators);
+            }
+            FinalOpcode::ForOfStart | FinalOpcode::ForOfNext | FinalOpcode::IteratorClose => {
                 push_requirement(requirements, ExecutionRequirement::Iterators);
             }
             FinalOpcode::Object

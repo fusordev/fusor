@@ -221,9 +221,9 @@ remains bounded across shared parent edges. A selected
 nested root with imported cells fails closed until an explicit verified root
 environment exists. `compile_leaf` remains the explicit nested-function-free
 API and rejects a selection with children. BigInt and RegExp runtime values,
-non-string atom namespaces, raw class/function stack entries,
-inferred anonymous-function names, and `for-of` stay rejected until their
-owned records and semantics exist.
+non-string atom namespaces, raw class/function stack entries, and inferred
+anonymous-function names stay rejected until their owned records and semantics
+exist.
 
 Synchronous `for-in` is an ordinary-profile exception to the otherwise empty
 statement-stack rule. Lowering keeps one private cursor beneath the statement
@@ -236,6 +236,17 @@ that TDZ local to share the same cursor site. Correlated binding-and-cell
 states then permit a repeated `let`/`const` write only after the captured cell
 was closed. None of these private certificates or cursor values is exposed as
 JavaScript.
+
+Ordinary synchronous `for-of` is the second typed statement-stack exception.
+Its private same-site record owns the iterator, retained `next` method, and an
+active exceptional-close marker. The final verifier admits only the exact
+offset-zero step loop, its false-edge head value, normal three-slot close, and
+the return-preserving `nip_catch`/rotation/dummy/close sequence. It rejects
+forged, split, copied, stored, joined, or terminal record values. Runtime step
+failures deactivate the record before calling `next`, so `next`, `done`, and
+`value` failures do not close; body and binding failures retain an active
+record for iterative inner-to-outer exceptional close. Suspended iterator and
+close states participate in frame-value limits and collection root tracing.
 
 A final compiler-profile pass combines that staged graph with exact function
 metadata and source snapshots and returns immutable, `Arc`-backed
@@ -583,7 +594,7 @@ nonordinary constructor forms, optional/spread/apply/tail calls, the remaining
 Number built-ins, the remaining String built-ins, Symbol sloppy-`this` boxing
 and wrapper/prototype conversions, `for-in` Symbol boxing and destructuring
 heads, serialized input, raw function slots, destructuring catch bindings,
-`for-of`/async iterator markers, and packed exceptional stack values remain
+for-await and async iterator markers, and packed exceptional stack values remain
 fail closed. Ordinary
 accessors are typed slots: `GetField`
 and `GetField2` stop at the first own or inherited accessor, execute native or

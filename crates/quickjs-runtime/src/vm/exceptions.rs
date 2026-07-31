@@ -294,6 +294,9 @@ fn exception_caller_frames(
                 | FinalOpcode::GetArrayEl2
                 | FinalOpcode::PutArrayEl
                 | FinalOpcode::Append
+                | FinalOpcode::ForOfStart
+                | FinalOpcode::ForOfNext
+                | FinalOpcode::IteratorClose
                 | FinalOpcode::ToPropKey
                 | FinalOpcode::DefineMethodComputed
                 | FinalOpcode::Neg
@@ -349,18 +352,39 @@ pub(super) fn dispatch_pending_exception(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<(), ExecutionError> {
     loop {
+        #[derive(Clone, Copy)]
         enum Handler {
-            Catch(usize),
+            Catch { frame: usize, marker: usize },
+            ForOf { frame: usize, marker: usize },
             Native(usize),
         }
         let mut handler = None;
         for (index, frame) in frames.iter().enumerate().rev() {
-            if frame
-                .stack
-                .iter()
-                .any(|entry| matches!(entry, OperandStackEntry::Catch { .. }))
-            {
-                handler = Some(Handler::Catch(index));
+            if let Some(marker) = frame.stack.iter().rposition(|entry| {
+                matches!(
+                    entry,
+                    OperandStackEntry::Catch { .. } | OperandStackEntry::ForOfCatch { .. }
+                )
+            }) {
+                handler = Some(match frame.stack.get(marker) {
+                    Some(OperandStackEntry::Catch { .. }) => Handler::Catch {
+                        frame: index,
+                        marker,
+                    },
+                    Some(OperandStackEntry::ForOfCatch { .. }) => Handler::ForOf {
+                        frame: index,
+                        marker,
+                    },
+                    Some(
+                        OperandStackEntry::JavaScript(_) | OperandStackEntry::FinallyReturn { .. },
+                    )
+                    | None => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "exception handler search selected a non-handler marker",
+                        }
+                        .into());
+                    }
+                });
                 break;
             }
             if frame.native_returns.iter().any(|continuation| {
@@ -379,7 +403,114 @@ pub(super) fn dispatch_pending_exception(
             return Err(ExecutionError::Exception(exception));
         };
 
-        let Handler::Catch(handler_frame) = handler else {
+        if let Handler::ForOf {
+            frame: handler_frame,
+            marker,
+        } = handler
+        {
+            let cleanup_temporary_receivers =
+                frames_have_temporary_receiver(&frames[handler_frame..]);
+            while frames.len() > handler_frame.saturating_add(1) {
+                let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
+                    message: "exception unwinder lost a frame above its for-of handler",
+                })?;
+                *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
+                if let Some(dynamic) = frame.dynamic_return.take() {
+                    runtime.retire_dynamic_root(dynamic.root)?;
+                }
+            }
+            if cleanup_temporary_receivers && runtime.collection_pending {
+                let pending_root = match &pending.payload {
+                    PendingExceptionPayload::ThrownValue(value) => Some(value),
+                    PendingExceptionPayload::EngineError { .. } => None,
+                };
+                let pending_roots = pending_root.map_or(&[][..], std::slice::from_ref);
+                collect_cycles_with_execution_roots(runtime, frames, &[], pending_roots)?;
+                for frame in frames.iter_mut() {
+                    frame.transient_cleanup_pending = false;
+                }
+            }
+            let frame = frames
+                .get_mut(handler_frame)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "exception unwinder lost its for-of handler frame",
+                })?;
+            let (iterator, _next, active) = take_for_of_record_at(frame, marker)?;
+            if !active || matches!(iterator, StoredValue::Undefined) {
+                continue;
+            }
+
+            let active_frames = active_execution_frames(frames);
+            frames
+                .try_reserve(1)
+                .map_err(|_| ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::Frames,
+                    additional: 1,
+                })?;
+            let dispatch = begin_exceptional_iterator_close(
+                runtime,
+                iterator,
+                pending,
+                None,
+                execution_budget,
+            );
+            let dispatch = match dispatch {
+                Ok(dispatch) => resolve_native_dispatch(
+                    runtime,
+                    dispatch,
+                    frames,
+                    active_frames,
+                    *active_frame_values,
+                    compiler,
+                    execution_budget,
+                ),
+                Err(error) => Err(error),
+            };
+            match dispatch {
+                Ok(NativeDispatch::Frame(child)) => {
+                    *active_frame_values =
+                        active_frame_values.saturating_add(child.reserved_values);
+                    frames.push(child);
+                    return Ok(());
+                }
+                Ok(NativeDispatch::Call(_)) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "exceptional IteratorClose resolver returned an unresolved call",
+                    }
+                    .into());
+                }
+                Ok(
+                    NativeDispatch::Immediate(_)
+                    | NativeDispatch::Pair(_, _)
+                    | NativeDispatch::ForOfRecord { .. }
+                    | NativeDispatch::ForOfStep { .. }
+                    | NativeDispatch::ForOfClosed,
+                ) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "exceptional IteratorClose completed without rethrowing",
+                    }
+                    .into());
+                }
+                Err(NativeFailure::Abrupt(next)) => {
+                    pending = next;
+                    continue;
+                }
+                Err(NativeFailure::AbruptAfterTransient(next)) => {
+                    if let Some(parent) = frames.last_mut() {
+                        parent.transient_cleanup_pending = true;
+                    }
+                    pending = next;
+                    continue;
+                }
+                Err(NativeFailure::Execution(error)) => return Err(error),
+            }
+        }
+
+        let Handler::Catch {
+            frame: handler_frame,
+            marker: catch_marker,
+        } = handler
+        else {
             let Handler::Native(handler_frame) = handler else {
                 unreachable!("exception handler classification is exhaustive")
             };
@@ -449,6 +580,16 @@ pub(super) fn dispatch_pending_exception(
                         })?,
                     )?;
                 }
+                Ok(
+                    NativeDispatch::ForOfRecord { .. }
+                    | NativeDispatch::ForOfStep { .. }
+                    | NativeDispatch::ForOfClosed,
+                ) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "iterator abrupt resolver produced a for-of normal result",
+                    }
+                    .into());
+                }
                 Ok(NativeDispatch::Frame(child)) => {
                     *active_frame_values =
                         active_frame_values.saturating_add(child.reserved_values);
@@ -507,16 +648,13 @@ pub(super) fn dispatch_pending_exception(
             .ok_or(EngineFault::RuntimeInvariant {
                 message: "exception unwinder lost its catch handler frame",
             })?;
-        let marker = frame
-            .stack
-            .iter()
-            .rposition(|entry| matches!(entry, OperandStackEntry::Catch { .. }))
-            .ok_or(EngineFault::RuntimeInvariant {
-                message: "exception unwinder lost its verified catch marker",
-            })?;
-        let handler = match frame.stack.get(marker) {
+        let handler = match frame.stack.get(catch_marker) {
             Some(OperandStackEntry::Catch { handler }) => *handler,
-            Some(OperandStackEntry::JavaScript(_) | OperandStackEntry::FinallyReturn { .. })
+            Some(
+                OperandStackEntry::JavaScript(_)
+                | OperandStackEntry::ForOfCatch { .. }
+                | OperandStackEntry::FinallyReturn { .. },
+            )
             | None => {
                 return Err(EngineFault::RuntimeInvariant {
                     message: "exception unwinder selected a non-catch operand entry",
@@ -524,7 +662,7 @@ pub(super) fn dispatch_pending_exception(
                 .into());
             }
         };
-        frame.stack.truncate(marker);
+        frame.stack.truncate(catch_marker);
         push(frame, caught);
         frame.instruction = handler;
 

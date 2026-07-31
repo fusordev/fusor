@@ -177,9 +177,11 @@ pub(super) fn push(frame: &mut Frame, value: StoredValue) {
 pub(super) fn pop(frame: &mut Frame) -> Result<StoredValue, EngineFault> {
     match frame.stack.pop() {
         Some(OperandStackEntry::JavaScript(value)) => Ok(value),
-        Some(OperandStackEntry::Catch { .. }) => Err(EngineFault::RuntimeInvariant {
-            message: "verified JavaScript value operation consumed an internal catch marker",
-        }),
+        Some(OperandStackEntry::Catch { .. } | OperandStackEntry::ForOfCatch { .. }) => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "verified JavaScript value operation consumed an internal catch marker",
+            })
+        }
         Some(OperandStackEntry::FinallyReturn { .. }) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation consumed an internal finally return address",
         }),
@@ -195,9 +197,11 @@ pub(super) fn pop(frame: &mut Frame) -> Result<StoredValue, EngineFault> {
 pub(super) fn peek(frame: &Frame) -> Result<&StoredValue, EngineFault> {
     match frame.stack.last() {
         Some(OperandStackEntry::JavaScript(value)) => Ok(value),
-        Some(OperandStackEntry::Catch { .. }) => Err(EngineFault::RuntimeInvariant {
-            message: "verified JavaScript value operation inspected an internal catch marker",
-        }),
+        Some(OperandStackEntry::Catch { .. } | OperandStackEntry::ForOfCatch { .. }) => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "verified JavaScript value operation inspected an internal catch marker",
+            })
+        }
         Some(OperandStackEntry::FinallyReturn { .. }) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation inspected an internal finally return address",
         }),
@@ -213,9 +217,11 @@ pub(super) fn peek(frame: &Frame) -> Result<&StoredValue, EngineFault> {
 pub(super) fn stack_value_at(frame: &Frame, index: usize) -> Result<&StoredValue, EngineFault> {
     match frame.stack.get(index) {
         Some(OperandStackEntry::JavaScript(value)) => Ok(value),
-        Some(OperandStackEntry::Catch { .. }) => Err(EngineFault::RuntimeInvariant {
-            message: "verified JavaScript value operation indexed an internal catch marker",
-        }),
+        Some(OperandStackEntry::Catch { .. } | OperandStackEntry::ForOfCatch { .. }) => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "verified JavaScript value operation indexed an internal catch marker",
+            })
+        }
         Some(OperandStackEntry::FinallyReturn { .. }) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation indexed an internal finally return address",
         }),
@@ -231,11 +237,13 @@ pub(super) fn stack_value_at(frame: &Frame, index: usize) -> Result<&StoredValue
 pub(super) fn pop_finally_continuation(frame: &mut Frame) -> Result<InstructionIndex, EngineFault> {
     match frame.stack.pop() {
         Some(OperandStackEntry::FinallyReturn { continuation }) => Ok(continuation),
-        Some(OperandStackEntry::JavaScript(_) | OperandStackEntry::Catch { .. }) => {
-            Err(EngineFault::RuntimeInvariant {
-                message: "verified ret operand is not an internal finally return address",
-            })
-        }
+        Some(
+            OperandStackEntry::JavaScript(_)
+            | OperandStackEntry::Catch { .. }
+            | OperandStackEntry::ForOfCatch { .. },
+        ) => Err(EngineFault::RuntimeInvariant {
+            message: "verified ret operand is not an internal finally return address",
+        }),
         None => Err(EngineFault::StackDepthMismatch {
             function: frame.template,
             pc: BytecodePc::ZERO,
@@ -268,7 +276,12 @@ pub(super) fn nip_catch(
     let top = frame.stack.len().saturating_sub(1);
     let marker = frame.stack[..top]
         .iter()
-        .rposition(|entry| matches!(entry, OperandStackEntry::Catch { .. }))
+        .rposition(|entry| {
+            matches!(
+                entry,
+                OperandStackEntry::Catch { .. } | OperandStackEntry::ForOfCatch { .. }
+            )
+        })
         .ok_or(EngineFault::RuntimeInvariant {
             message: "verified nip_catch operand is not a catch marker",
         })?;
@@ -277,6 +290,187 @@ pub(super) fn nip_catch(
     frame.stack.truncate(marker);
     push(frame, top);
     Ok(())
+}
+
+pub(super) fn push_for_of_record(
+    frame: &mut Frame,
+    iterator: StoredValue,
+    next: StoredValue,
+    return_to: CallReturn,
+) -> Result<(), ExecutionError> {
+    if !matches!(return_to.disposition, ReturnDisposition::Push) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "for-of start reached a discarding continuation",
+        }
+        .into());
+    }
+    if frame.stack.capacity().saturating_sub(frame.stack.len()) < 3 {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified for-of record exceeds frame stack capacity",
+        }
+        .into());
+    }
+    push(frame, iterator);
+    push(frame, next);
+    frame
+        .stack
+        .push(OperandStackEntry::ForOfCatch { active: true });
+    frame.instruction = return_to.instruction;
+    Ok(())
+}
+
+pub(super) fn deactivate_for_of_record(
+    frame: &mut Frame,
+    allow_return_dummy: bool,
+) -> Result<(StoredValue, StoredValue), EngineFault> {
+    let marker = frame
+        .stack
+        .len()
+        .checked_sub(1)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "verified for-of operation has no record marker",
+        })?;
+    match frame.stack.get_mut(marker) {
+        Some(OperandStackEntry::ForOfCatch { active }) if allow_return_dummy || *active => {
+            *active = false;
+        }
+        Some(OperandStackEntry::JavaScript(StoredValue::Undefined)) if allow_return_dummy => {}
+        Some(
+            OperandStackEntry::JavaScript(_)
+            | OperandStackEntry::Catch { .. }
+            | OperandStackEntry::ForOfCatch { .. }
+            | OperandStackEntry::FinallyReturn { .. },
+        )
+        | None => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "verified for-of operation has the wrong record marker",
+            });
+        }
+    }
+    let iterator_index = marker.checked_sub(2).ok_or(EngineFault::RuntimeInvariant {
+        message: "verified for-of operation has an incomplete record",
+    })?;
+    let next_index = iterator_index.saturating_add(1);
+    let iterator = stack_value_at(frame, iterator_index)?.duplicate();
+    let next = stack_value_at(frame, next_index)?.duplicate();
+    Ok((iterator, next))
+}
+
+pub(super) fn finish_for_of_step(
+    frame: &mut Frame,
+    value: StoredValue,
+    done: bool,
+    return_to: CallReturn,
+) -> Result<(), ExecutionError> {
+    if !matches!(return_to.disposition, ReturnDisposition::Push) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "for-of step reached a discarding continuation",
+        }
+        .into());
+    }
+    let marker = frame
+        .stack
+        .len()
+        .checked_sub(1)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "for-of step completed without its record marker",
+        })?;
+    match frame.stack.get_mut(marker) {
+        Some(OperandStackEntry::ForOfCatch { active }) if !*active => {
+            *active = !done;
+        }
+        Some(
+            OperandStackEntry::JavaScript(_)
+            | OperandStackEntry::Catch { .. }
+            | OperandStackEntry::ForOfCatch { .. }
+            | OperandStackEntry::FinallyReturn { .. },
+        )
+        | None => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "for-of step completed with an active or invalid record marker",
+            }
+            .into());
+        }
+    }
+    if done {
+        let iterator = marker.checked_sub(2).ok_or(EngineFault::RuntimeInvariant {
+            message: "for-of step completed with an incomplete record",
+        })?;
+        frame.stack[iterator] = OperandStackEntry::JavaScript(StoredValue::Undefined);
+    }
+    if frame.stack.capacity().saturating_sub(frame.stack.len()) < 2 {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified for-of step exceeds frame stack capacity",
+        }
+        .into());
+    }
+    push(frame, value);
+    push(frame, StoredValue::Boolean(done));
+    frame.instruction = return_to.instruction;
+    Ok(())
+}
+
+pub(super) fn finish_for_of_close(
+    frame: &mut Frame,
+    return_to: CallReturn,
+) -> Result<(), ExecutionError> {
+    if !matches!(return_to.disposition, ReturnDisposition::Discard) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "for-of close reached a value-producing continuation",
+        }
+        .into());
+    }
+    let marker = frame
+        .stack
+        .len()
+        .checked_sub(1)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "for-of close completed without its record marker",
+        })?;
+    if !matches!(
+        frame.stack.get(marker),
+        Some(
+            OperandStackEntry::ForOfCatch { active: false }
+                | OperandStackEntry::JavaScript(StoredValue::Undefined)
+        )
+    ) || marker < 2
+    {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "for-of close completed with an active or incomplete record",
+        }
+        .into());
+    }
+    frame.stack.truncate(marker - 2);
+    frame.instruction = return_to.instruction;
+    Ok(())
+}
+
+pub(super) fn take_for_of_record_at(
+    frame: &mut Frame,
+    marker: usize,
+) -> Result<(StoredValue, StoredValue, bool), EngineFault> {
+    if marker < 2 || marker >= frame.stack.len() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "exception unwinder found an incomplete for-of record",
+        });
+    }
+    frame.stack.truncate(marker.saturating_add(1));
+    let active = match frame.stack.pop() {
+        Some(OperandStackEntry::ForOfCatch { active }) => active,
+        Some(
+            OperandStackEntry::JavaScript(_)
+            | OperandStackEntry::Catch { .. }
+            | OperandStackEntry::FinallyReturn { .. },
+        )
+        | None => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "exception unwinder selected a non-for-of marker",
+            });
+        }
+    };
+    let next = pop(frame)?;
+    let iterator = pop(frame)?;
+    Ok((iterator, next, active))
 }
 
 pub(super) fn drop_stack_entry(frame: &mut Frame) -> Result<(), EngineFault> {

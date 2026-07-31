@@ -177,6 +177,7 @@ const FUNCTION_APPLY_REQUIRED_COVERAGE: &[&str] = &[
     "target-validation-order",
 ];
 
+// `for await` and destructuring `for-of` heads are separate fail-closed milestones.
 const ITERATOR_REQUIRED_COVERAGE: &[&str] = &[
     "array-spread",
     "array-spread-elision",
@@ -185,6 +186,35 @@ const ITERATOR_REQUIRED_COVERAGE: &[&str] = &[
     "array-spread-pending-hole-length",
     "array-spread-string",
     "array-spread-string-code-point",
+    "for-of-array",
+    "for-of-binding-throw-close",
+    "for-of-body-throw-close",
+    "for-of-break-close",
+    "for-of-capture-freshness",
+    "for-of-close-nonobject-result",
+    "for-of-close-original-wins",
+    "for-of-continue-no-close",
+    "for-of-custom-iterator",
+    "for-of-done-error-no-close",
+    "for-of-done-skips-value",
+    "for-of-head-computed-member",
+    "for-of-head-const",
+    "for-of-head-identifier",
+    "for-of-head-let",
+    "for-of-head-static-member",
+    "for-of-head-var",
+    "for-of-iterator-method-receiver",
+    "for-of-labeled-close-order",
+    "for-of-natural-exhaustion",
+    "for-of-next-error-no-close",
+    "for-of-next-receiver",
+    "for-of-next-retained",
+    "for-of-null-acquisition",
+    "for-of-return-close",
+    "for-of-step-order",
+    "for-of-string-code-point",
+    "for-of-undefined-acquisition",
+    "for-of-value-error-no-close",
     "iterator-close",
     "iterator-close-boundary",
     "iterator-close-catch-boundary",
@@ -1638,7 +1668,8 @@ mod tests {
             RuntimeDifferentialSuite::Iterator,
         )
         .expect("checked-in iterator manifest");
-        assert_eq!(corpus.cases.len(), 17);
+        assert_eq!(super::ITERATOR_REQUIRED_COVERAGE.len(), 51);
+        assert_eq!(corpus.cases.len(), 40);
     }
 
     #[test]

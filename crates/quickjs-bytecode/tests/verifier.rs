@@ -828,7 +828,7 @@ fn each_missing_semantic_capability_fails_closed_with_a_typed_reason() {
         ),
         (
             encode(&[
-                (FinalOpcode::ForOfStart, Operands::None),
+                (FinalOpcode::ForAwaitOfStart, Operands::None),
                 (FinalOpcode::ReturnUndef, Operands::None),
             ]),
             FunctionIndexDomains::default(),
@@ -849,6 +849,66 @@ fn each_missing_semantic_capability_fails_closed_with_a_typed_reason() {
         assert_eq!(
             error.kind(),
             &VerificationErrorKind::UnsupportedOpcodeSemantics { feature }
+        );
+    }
+}
+
+#[test]
+fn synchronous_for_of_markers_are_compiler_only_structural_inputs() {
+    let bytecode = encode(&[
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::ForOfNext, Operands::U8(0)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ]);
+
+    verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode.clone(),
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect("the compiler structural pass defers exact synchronous marker proof");
+
+    let error = reject(bytecode, 5, FunctionIndexDomains::default());
+    assert_eq!(
+        error.kind(),
+        &VerificationErrorKind::UnsupportedOpcodeSemantics {
+            feature: UnsupportedVerifierFeature::IteratorMarkers,
+        }
+    );
+    assert_eq!(error.opcode(), Some(FinalOpcode::ForOfStart));
+
+    for (opcode, operands) in [
+        (FinalOpcode::ForAwaitOfStart, Operands::None),
+        (FinalOpcode::ForAwaitOfNext, Operands::None),
+        (FinalOpcode::IteratorGetValueDone, Operands::None),
+        (FinalOpcode::IteratorNext, Operands::None),
+        (FinalOpcode::IteratorCall, Operands::U8(0)),
+    ] {
+        let error = verify_compiler_control_flow(
+            UnverifiedCompilerFunctionBody::new(
+                encode(&[
+                    (opcode, operands),
+                    (FinalOpcode::ReturnUndef, Operands::None),
+                ]),
+                FunctionIndexDomains::default(),
+                UnverifiedFunctionHeader::default(),
+            ),
+            VerificationLimits::default(),
+        )
+        .expect_err("async and public iterator marker families stay fail-closed");
+        assert_eq!(
+            error.kind(),
+            &VerificationErrorKind::UnsupportedOpcodeSemantics {
+                feature: UnsupportedVerifierFeature::IteratorMarkers,
+            },
+            "{opcode}"
         );
     }
 }

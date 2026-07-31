@@ -190,6 +190,7 @@ enum FrameBinding {
 enum OperandStackEntry {
     JavaScript(StoredValue),
     Catch { handler: InstructionIndex },
+    ForOfCatch { active: bool },
     FinallyReturn { continuation: InstructionIndex },
 }
 
@@ -228,6 +229,9 @@ enum NativeContinuation {
     OperatorPrimitive(OperatorPrimitiveContinuation),
     IntrinsicGet(IntrinsicGetContinuation),
     ArrayIteratorNext(ArrayIteratorNextContinuation),
+    ForOfStart(ForOfStartContinuation),
+    ForOfNext(ForOfNextContinuation),
+    ForOfClose(ForOfCloseContinuation),
     IteratorAppend(IteratorAppendContinuation),
     IteratorClose(IteratorCloseContinuation),
     FunctionCall,
@@ -243,6 +247,9 @@ impl NativeContinuation {
             Self::OperatorPrimitive(state) => state.retained_values(),
             Self::IntrinsicGet(state) => state.retained_values(),
             Self::ArrayIteratorNext(state) => state.retained_values(),
+            Self::ForOfStart(state) => state.retained_values(),
+            Self::ForOfNext(state) => state.retained_values(),
+            Self::ForOfClose(state) => state.retained_values(),
             Self::IteratorAppend(state) => state.retained_values(),
             Self::IteratorClose(state) => state.retained_values(),
             Self::FunctionCall => 0,
@@ -333,6 +340,72 @@ struct ArrayIteratorNextContinuation {
     stage: ArrayIteratorNextStage,
     prepared_result: Option<PreparedIteratorResultPlan>,
     origin: JsStackFrame,
+}
+
+#[derive(Clone, Copy)]
+enum ForOfStartStage {
+    IteratorMethod,
+    Iterator,
+    NextMethod,
+}
+
+struct ForOfStartContinuation {
+    iterable: StoredValue,
+    iterator: Option<StoredValue>,
+    realm: RealmId,
+    stage: ForOfStartStage,
+    origin: JsStackFrame,
+}
+
+impl ForOfStartContinuation {
+    fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(u64::from(self.iterator.is_some()))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ForOfNextStage {
+    Result,
+    Done,
+    Value,
+}
+
+struct ForOfNextContinuation {
+    iterator: StoredValue,
+    next: StoredValue,
+    result: Option<StoredValue>,
+    realm: RealmId,
+    stage: ForOfNextStage,
+    origin: JsStackFrame,
+}
+
+impl ForOfNextContinuation {
+    fn retained_values(&self) -> u64 {
+        2_u64.saturating_add(u64::from(self.result.is_some()))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ForOfCloseStage {
+    AwaitReturnProperty,
+    AwaitReturnCall,
+}
+
+struct ForOfCloseContinuation {
+    iterator: StoredValue,
+    realm: RealmId,
+    stage: ForOfCloseStage,
+    origin: JsStackFrame,
+}
+
+impl ForOfCloseContinuation {
+    #[allow(
+        clippy::unused_self,
+        reason = "ordinary close always retains exactly its iterator receiver"
+    )]
+    const fn retained_values(&self) -> u64 {
+        1
+    }
 }
 
 impl ArrayIteratorNextContinuation {
@@ -837,6 +910,22 @@ fn trace_native_continuation_roots(
             mark(CollectionRoot::Heap(HeapReference::Object(state.iterator)));
             trace_stored_value_root(&state.iterated, mark);
         }
+        NativeContinuation::ForOfStart(state) => {
+            trace_stored_value_root(&state.iterable, mark);
+            if let Some(iterator) = &state.iterator {
+                trace_stored_value_root(iterator, mark);
+            }
+        }
+        NativeContinuation::ForOfNext(state) => {
+            trace_stored_value_root(&state.iterator, mark);
+            trace_stored_value_root(&state.next, mark);
+            if let Some(result) = &state.result {
+                trace_stored_value_root(result, mark);
+            }
+        }
+        NativeContinuation::ForOfClose(state) => {
+            trace_stored_value_root(&state.iterator, mark);
+        }
         NativeContinuation::IteratorAppend(state) => {
             mark(CollectionRoot::Heap(HeapReference::Object(state.array)));
             trace_stored_value_root(&state.iterable, mark);
@@ -972,7 +1061,11 @@ fn frames_have_temporary_receiver(frames: &[Frame]) -> bool {
 
 fn native_dispatch_has_temporary_receiver(dispatch: &NativeDispatch) -> bool {
     match dispatch {
-        NativeDispatch::Immediate(_) | NativeDispatch::Pair(_, _) => false,
+        NativeDispatch::Immediate(_)
+        | NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed => false,
         NativeDispatch::Frame(frame) => {
             native_continuations_have_temporary_receiver(&frame.native_returns)
         }
@@ -1552,9 +1645,15 @@ fn execute_frame_loop(
                                 })?;
                             push_call_result(parent, value, return_to)?;
                         }
-                        Ok(NativeDispatch::Pair(_, _)) => {
+                        Ok(
+                            NativeDispatch::Pair(_, _)
+                            | NativeDispatch::ForOfRecord { .. }
+                            | NativeDispatch::ForOfStep { .. }
+                            | NativeDispatch::ForOfClosed,
+                        ) => {
                             return Err(EngineFault::RuntimeInvariant {
-                                message: "native function call returned an operator value pair",
+                                message:
+                                    "native function call returned a structured continuation result",
                             }
                             .into());
                         }
@@ -1699,6 +1798,27 @@ fn execute_frame_loop(
                         })?;
                         push_operator_pair(parent, original, updated, return_to)?;
                     }
+                    Ok(NativeDispatch::ForOfRecord { iterator, next }) => {
+                        let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?;
+                        push_for_of_record(parent, iterator, next, return_to)?;
+                    }
+                    Ok(NativeDispatch::ForOfStep { value, done }) => {
+                        let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?;
+                        finish_for_of_step(parent, value, done, return_to)?;
+                    }
+                    Ok(NativeDispatch::ForOfClosed) => {
+                        let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?;
+                        finish_for_of_close(parent, return_to)?;
+                    }
                     Ok(NativeDispatch::Frame(child)) => {
                         *active_frame_values =
                             active_frame_values.saturating_add(child.reserved_values);
@@ -1837,6 +1957,39 @@ fn execute_frame_loop(
                                 message: "operator continuation has no caller continuation",
                             })?;
                             push_operator_pair(parent, original, updated, return_to)?;
+                            continue;
+                        }
+                        Ok(NativeDispatch::ForOfRecord { iterator, next }) => {
+                            let parent =
+                                frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                                    message: "for-of start continuation has no executing frame",
+                                })?;
+                            let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
+                                message: "for-of start continuation has no caller continuation",
+                            })?;
+                            push_for_of_record(parent, iterator, next, return_to)?;
+                            continue;
+                        }
+                        Ok(NativeDispatch::ForOfStep { value, done }) => {
+                            let parent =
+                                frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                                    message: "for-of step continuation has no executing frame",
+                                })?;
+                            let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
+                                message: "for-of step continuation has no caller continuation",
+                            })?;
+                            finish_for_of_step(parent, value, done, return_to)?;
+                            continue;
+                        }
+                        Ok(NativeDispatch::ForOfClosed) => {
+                            let parent =
+                                frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                                    message: "for-of close continuation has no executing frame",
+                                })?;
+                            let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
+                                message: "for-of close continuation has no caller continuation",
+                            })?;
+                            finish_for_of_close(parent, return_to)?;
                             continue;
                         }
                         Ok(NativeDispatch::Frame(child)) => {

@@ -3956,6 +3956,433 @@ fn for_in_marker_certificate_charges_exact_state_and_transfer_budgets() {
     );
 }
 
+#[test]
+fn for_of_marker_certificate_accepts_exact_loop_close_return_and_throw_grammars() {
+    let loop_body = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::ForOfNext, Operands::U8(0)),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(-9)),
+    ];
+    let verified = verify_compiler_bytecode_graph(
+        typed_stack_input(&loop_body, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a same-site synchronous for-of record survives stepping and closes on exit");
+    assert!(
+        verified
+            .requirements()
+            .contains(&ExecutionRequirement::Iterators)
+    );
+
+    let returning = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Rot3r, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&returning, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("return closes the iterator through the exact nip_catch/rot3r grammar");
+
+    let nested_return = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Rot3r, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Rot3r, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&nested_return, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("nested synchronous iterators close from the innermost record outward");
+
+    let throwing = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&throwing, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a complete for-of catch record may remain for exceptional VM cleanup");
+}
+
+#[test]
+fn for_of_head_value_certificate_allows_const_reinitialization_on_backedges() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        const_policy(),
+        true,
+        None,
+    );
+    let instructions = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::ForOfNext, Operands::U8(0)),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Goto8, Operands::Label8(-9)),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[atom("value")], &[definition]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("the immediate false-edge for-of value has fresh lexical initialization authority");
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the table covers forged, partial, copied, stored, and malformed close records"
+)]
+fn for_of_marker_certificate_rejects_forged_partial_or_exposed_records() {
+    let local = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        var_policy(),
+        false,
+        None,
+    );
+    let cases = [
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForOfStart, Operands::None),
+                (FinalOpcode::ForOfNext, Operands::U8(1)),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::IteratorClose, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            Vec::new(),
+            Vec::new(),
+            FinalOpcode::ForOfNext,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::IteratorClose, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            Vec::new(),
+            Vec::new(),
+            FinalOpcode::IteratorClose,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForOfStart, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            Vec::new(),
+            Vec::new(),
+            FinalOpcode::Drop,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForOfStart, Operands::None),
+                (FinalOpcode::Dup, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            Vec::new(),
+            Vec::new(),
+            FinalOpcode::Dup,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForOfStart, Operands::None),
+                (FinalOpcode::PutLoc0, Operands::NoneLoc),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            vec![atom("stored")],
+            vec![local],
+            FinalOpcode::PutLoc0,
+        ),
+    ];
+
+    for (instructions, atoms, variables, opcode) in cases {
+        let error = verify_compiler_bytecode_graph(
+            typed_stack_input(&instructions, &atoms, &variables),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("a synchronous for-of record cannot be forged, split, copied, or stored");
+        assert!(
+            matches!(
+                error.kind(),
+                BytecodeVerificationErrorKind::ForOfIteratorStackMismatch {
+                    opcode: actual,
+                    ..
+                } if *actual == opcode
+            ),
+            "{opcode}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn for_of_marker_certificate_requires_exact_site_and_return_close_provenance() {
+    let joined = [
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(5)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(3)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&joined, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("records created at different for-of sites cannot join");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::ForOfIteratorJoinMismatch { .. }
+    ));
+
+    let malformed_returns = [
+        vec![
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::Push2, Operands::NoneInt),
+            (FinalOpcode::Push3, Operands::NoneInt),
+            (FinalOpcode::Rot3r, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::ForOfStart, Operands::None),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::Rot3r, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::ForOfStart, Operands::None),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::NipCatch, Operands::None),
+            (FinalOpcode::Nop, Operands::None),
+            (FinalOpcode::Rot3r, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::IteratorClose, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::ForOfStart, Operands::None),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::NipCatch, Operands::None),
+            (FinalOpcode::Rot3r, Operands::None),
+            (FinalOpcode::Nop, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::IteratorClose, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::ForOfStart, Operands::None),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::NipCatch, Operands::None),
+            (FinalOpcode::Rot3r, Operands::None),
+            (FinalOpcode::Null, Operands::None),
+            (FinalOpcode::IteratorClose, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+    ];
+    for instructions in malformed_returns {
+        let error = verify_compiler_bytecode_graph(
+            typed_stack_input(&instructions, &[], &[]),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("rot3r and iterator_close require exact return-cleanup provenance");
+        assert!(matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::ForOfIteratorStackMismatch { .. }
+        ));
+    }
+}
+
+#[test]
+fn for_of_marker_certificate_rejects_restepping_the_natural_done_record() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::ForOfNext, Operands::U8(0)),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(-6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(-9)),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("done=true disables the iterator record and cannot re-enter for_of_next");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::ForOfIteratorJoinMismatch { .. }
+            | BytecodeVerificationErrorKind::ForOfIteratorStackMismatch {
+                opcode: FinalOpcode::ForOfNext,
+                ..
+            }
+    ));
+}
+
+#[test]
+fn for_of_marker_certificate_merges_active_and_exhausted_records_only_at_shared_close() {
+    let shared_close = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::ForOfNext, Operands::U8(0)),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(1)),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&shared_close, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("active break and natural exhaustion may share their exact iterator_close site");
+
+    let non_close_join = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::ForOfNext, Operands::U8(0)),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(1)),
+        (FinalOpcode::Nop, Operands::None),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&non_close_join, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("active and exhausted records cannot widen at a non-close instruction");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::ForOfIteratorJoinMismatch { .. }
+    ));
+}
+
+#[test]
+fn for_of_marker_certificate_rejects_a_marker_at_an_unreachable_terminal() {
+    let instructions = [
+        (FinalOpcode::Goto8, Operands::Label8(4)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("even unreachable terminals cannot retain a for-of record");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::ForOfIteratorMarkerAtExit { .. }
+    ));
+}
+
+#[test]
+fn for_of_marker_certificate_charges_exact_state_and_transfer_budgets() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let input = typed_stack_input(&instructions, &[], &[]);
+    let usage =
+        verify_compiler_bytecode_graph(input.clone(), BytecodeGraphVerificationLimits::default())
+            .expect("baseline typed for-of certificate")
+            .usage();
+    assert!(usage.frame_state_entries() > 0);
+    assert!(usage.policy_transfers() > 0);
+
+    assert_limit(
+        &input,
+        BytecodeGraphVerificationLimits::default()
+            .with_max_frame_state_entries(usage.frame_state_entries()),
+        BytecodeGraphVerificationLimits::default()
+            .with_max_frame_state_entries(usage.frame_state_entries() - 1),
+        BytecodeGraphResource::FrameStateEntries,
+        usage.frame_state_entries() - 1,
+        usage.frame_state_entries(),
+    );
+    assert_limit(
+        &input,
+        BytecodeGraphVerificationLimits::default()
+            .with_max_policy_transfers(usage.policy_transfers()),
+        BytecodeGraphVerificationLimits::default()
+            .with_max_policy_transfers(usage.policy_transfers() - 1),
+        BytecodeGraphResource::PolicyTransfers,
+        usage.policy_transfers() - 1,
+        usage.policy_transfers(),
+    );
+}
+
 fn shaped_input(
     instructions: &[(FinalOpcode, Operands)],
     atoms: &[CompilerAtom],

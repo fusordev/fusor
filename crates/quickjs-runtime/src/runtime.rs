@@ -740,6 +740,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Insert3
             | FinalOpcode::Swap
             | FinalOpcode::Rot3l
+            | FinalOpcode::Rot3r
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
             | FinalOpcode::CallConstructor
@@ -767,6 +768,9 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CloseLoc
             | FinalOpcode::ForInStart
             | FinalOpcode::ForInNext
+            | FinalOpcode::ForOfStart
+            | FinalOpcode::ForOfNext
+            | FinalOpcode::IteratorClose
             | FinalOpcode::GetField
             | FinalOpcode::GetField2
             | FinalOpcode::GetArrayEl

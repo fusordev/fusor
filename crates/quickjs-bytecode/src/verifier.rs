@@ -1645,6 +1645,7 @@ fn verify_control_flow_common(
         function_header.kind(),
         compiler_capture_layout.as_ref(),
         compiler_constant_layout.as_ref(),
+        stack_mode.requires_empty_exits(),
     )?;
     let (computed_stack_size, transfer_evaluations) =
         analyze_ordinary_stack(&mut instructions, limits, stack_mode.requires_empty_exits())?;
@@ -1981,6 +1982,10 @@ fn predecode_complete(
     Ok(instructions)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "decoded control-flow domains and compiler-only metadata form one static-semantics boundary"
+)]
 fn validate_static_semantics(
     decoded: &[DecodedInstruction],
     instruction_start_bitmap: &[u64],
@@ -1989,6 +1994,7 @@ fn validate_static_semantics(
     function_kind: FunctionKind,
     compiler_capture_layout: Option<&ValidatedCompilerCaptureLayout>,
     compiler_constant_layout: Option<&CompilerConstantLayout>,
+    compiler_generated: bool,
 ) -> Result<Vec<VerifiedInstruction>, VerificationError> {
     let mut verified = Vec::new();
     verified.try_reserve_exact(decoded.len()).map_err(|_| {
@@ -2052,6 +2058,15 @@ fn validate_static_semantics(
                         VerificationErrorKind::UnsupportedOpcodeSemantics { feature },
                     ));
                 }
+            } else if compiler_generated
+                && matches!(
+                    decoded.instruction().opcode(),
+                    FinalOpcode::ForOfStart | FinalOpcode::ForOfNext | FinalOpcode::IteratorClose
+                )
+            {
+                // Compiler-owned control flow is still non-executable. The
+                // whole-function typed stack verifier proves the exact
+                // synchronous iterator record before granting authority.
             } else {
                 return Err(VerificationError::at_instruction(
                     decoded,
@@ -3070,9 +3085,12 @@ fn analyze_ordinary_stack(
 
     let mut computed_max = 0_u32;
     let mut evaluations = 0_u64;
-    let has_catch_marker = instructions
-        .iter()
-        .any(|instruction| instruction.decoded.instruction().opcode() == FinalOpcode::Catch);
+    let has_catch_marker = instructions.iter().any(|instruction| {
+        matches!(
+            instruction.decoded.instruction().opcode(),
+            FinalOpcode::Catch | FinalOpcode::ForOfStart
+        )
+    });
     let has_gosub = instructions
         .iter()
         .any(|instruction| instruction.decoded.instruction().opcode() == FinalOpcode::Gosub);

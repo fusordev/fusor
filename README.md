@@ -95,12 +95,20 @@ whole-graph-verified `Append` bytecode and executes the generic synchronous
 `Symbol.iterator`/`next`/`done`/`value` protocol. Abrupt completion after
 acquiring `next` performs `IteratorClose` while preserving the original
 exception. Allocation, property, stack, and fuel limits are checked before
-mutation.
+mutation. Ordinary synchronous `for-of` uses the same generic iterator
+substrate through exact verified `ForOfStart`/`ForOfNext`/`IteratorClose`
+records. It supports `var`, `let`, `const`, identifier, and static/computed
+member heads; fresh captured lexical cells; same-loop and outward `continue`;
+and nested `break`, return, throw, catch, and finally cleanup. Natural
+exhaustion and step failures do not call `return`; normal abrupt exits require
+an object close result, while exceptional close preserves the original
+completion. The VM unwinds and closes iterators iteratively, roots suspended
+records through collection, and executes only whole-function typed authority.
 BigInt values and mixed numeric domains, the remaining `Array` static and
 prototype methods, other exotic objects, shorthand/spread and `__proto__`
 data-initializer semantics, anonymous data-function inferred names,
 async/generator methods, `super`/home-object semantics, realm-global accessor
-writes, optional calls, call spread, `for-of`, iterator destructuring,
+writes, optional calls, call spread, iterator destructuring, `for await`,
 async/generator iterator consumers, the remaining Number built-ins, the
 remaining String built-ins, serialized bytecode, every form of eval, Error
 constructors and `Error.prototype.toString`, and destructuring-catch semantics

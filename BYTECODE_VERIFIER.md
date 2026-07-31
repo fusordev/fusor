@@ -59,11 +59,13 @@ creation; serialized bodies still reject every constant opcode. It admits the
 structural branch and height effects of `catch` and `nip_catch`, while their
 non-forgeable marker identity is proved only in the final compiler-profile
 pass. The slice rejects opcodes whose correct verification needs actual
-constant values, verified child bodies, raw function slots, `for-of`/async
-iterator markers, finally return addresses, or packed stack offsets.
-Compiler-private catch and synchronous `for-in` state receive their
-identity proofs only in the final whole-graph pass. The staged certificate has
-no execution API and cannot cross the VM trust boundary.
+constant values, verified child bodies, raw function slots, async iterator
+markers, finally return addresses, or packed stack offsets. Compiler bodies
+may carry the structural height effects of synchronous `for-of`; serialized
+bodies still reject those private opcodes. Compiler-private catch,
+synchronous `for-in`, and synchronous `for-of` state receive their identity
+proofs only in the final whole-graph pass. The staged certificate has no
+execution API and cannot cross the VM trust boundary.
 
 The next compiler-only slice returns
 `VerifiedCompilerFunctionGraph`. It takes a flat `Arc`-backed graph, requires

@@ -461,6 +461,36 @@ fn nip_catch_precharges_the_bounded_scan_before_mutating_the_stack() {
 }
 
 #[test]
+fn inactive_for_of_record_cannot_be_stepped_again_but_can_be_closed() {
+    let (_, _, mut frame) = ordinary_test_frame();
+    push(&mut frame, StoredValue::Number(JsNumber::from_i32(1)));
+    push(&mut frame, StoredValue::Number(JsNumber::from_i32(2)));
+    frame
+        .stack
+        .push(OperandStackEntry::ForOfCatch { active: false });
+
+    assert!(matches!(
+        deactivate_for_of_record(&mut frame, false),
+        Err(EngineFault::RuntimeInvariant {
+            message: "verified for-of operation has the wrong record marker",
+        })
+    ));
+    assert!(matches!(
+        frame.stack.last(),
+        Some(OperandStackEntry::ForOfCatch { active: false })
+    ));
+
+    let (iterator, next) =
+        deactivate_for_of_record(&mut frame, true).expect("inactive record remains closable");
+    assert!(
+        matches!(iterator, StoredValue::Number(value) if value.strict_equals(JsNumber::from_i32(1)))
+    );
+    assert!(
+        matches!(next, StoredValue::Number(value) if value.strict_equals(JsNumber::from_i32(2)))
+    );
+}
+
+#[test]
 fn exception_unwind_discards_intervening_finally_return_addresses() {
     let (mut runtime, realm, mut frame) = ordinary_test_frame();
     let handler = frame.instruction;
@@ -498,6 +528,72 @@ fn exception_unwind_discards_intervening_finally_return_addresses() {
         [OperandStackEntry::JavaScript(StoredValue::Number(caught))]
             if caught.strict_equals(JsNumber::from_i32(9))
     ));
+}
+
+#[test]
+fn exceptional_for_of_close_keeps_the_iterator_rooted_through_pending_collection() {
+    let (mut runtime, realm, mut frame) = ordinary_test_frame();
+    let iterator = source_object(&mut runtime, realm);
+    let thrown = source_object(&mut runtime, realm);
+    push(&mut frame, StoredValue::Object(iterator));
+    push(&mut frame, StoredValue::Undefined);
+    frame
+        .stack
+        .push(OperandStackEntry::ForOfCatch { active: true });
+    frame.transient_cleanup_pending = true;
+    runtime.collection_pending = true;
+
+    let mut active_frame_values = frame.reserved_values;
+    let mut frames = vec![frame];
+    let mut execution_budget = ExecutionBudget::new(ExecutionLimits::default());
+    let error = dispatch_pending_exception(
+        &mut runtime,
+        &mut frames,
+        &mut active_frame_values,
+        PendingException {
+            realm,
+            payload: PendingExceptionPayload::ThrownValue(StoredValue::Object(thrown)),
+            origin: native_function_host_origin(),
+        },
+        None,
+        &mut execution_budget,
+    )
+    .expect_err("the original body error must escape after exceptional close");
+
+    let ExecutionError::Exception(exception) = error else {
+        panic!("the explicit body throw must remain a JavaScript exception");
+    };
+    assert_eq!(exception.kind(), None);
+    assert!(
+        exception
+            .thrown_value()
+            .expect("explicit body throw")
+            .clone()
+            .into_object()
+            .is_ok(),
+        "the original thrown object must survive collection through close"
+    );
+    assert!(
+        runtime.heap_reference_is_live(HeapReference::Object(iterator)),
+        "the iterator must survive collection until its return property is read"
+    );
+    assert!(
+        runtime.heap_reference_is_live(HeapReference::Object(thrown)),
+        "the pending thrown object must remain rooted until exception publication"
+    );
+    drop(exception);
+    frames.clear();
+    runtime
+        .collect_cycles()
+        .expect("release completed for-of iterator");
+    assert!(
+        !runtime.heap_reference_is_live(HeapReference::Object(iterator)),
+        "the iterator record must stop rooting the iterator after unwind"
+    );
+    assert!(
+        !runtime.heap_reference_is_live(HeapReference::Object(thrown)),
+        "the completed exception must release the original thrown object"
+    );
 }
 
 #[test]

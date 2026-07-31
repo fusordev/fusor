@@ -6,10 +6,10 @@ use oxc_ast::{
         ArrayExpression, ArrayExpressionElement, AssignmentExpression, AssignmentTarget,
         BindingPattern, BlockStatement, CallExpression, CatchClause, ComputedMemberExpression,
         ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForInStatement,
-        ForStatement, ForStatementInit, ForStatementLeft, Function, FunctionBody, FunctionType,
-        IdentifierReference, IfStatement, LabelIdentifier, LabeledStatement, LogicalExpression,
-        NewExpression, ObjectExpression, ObjectProperty, ObjectPropertyKind, Program,
-        PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement, SequenceExpression,
+        ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft, Function, FunctionBody,
+        FunctionType, IdentifierReference, IfStatement, LabelIdentifier, LabeledStatement,
+        LogicalExpression, NewExpression, ObjectExpression, ObjectProperty, ObjectPropertyKind,
+        Program, PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement, SequenceExpression,
         SimpleAssignmentTarget, Statement, StaticMemberExpression, SwitchStatement, ThrowStatement,
         TryStatement, UnaryExpression, UpdateExpression, VariableDeclaration,
         VariableDeclarationKind, WhileStatement,
@@ -566,12 +566,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     /// supports simple local declarations, immediate primitive values,
     /// resolved argument/local reads and mutable writes, value operators
     /// including short-circuit and conditional expressions, lexical blocks,
-    /// `if`/`else`, `while`, `do`/`while`, classic `for`, `switch`, labeled and
-    /// unlabeled `break`/`continue`, exact-span no-op `debugger` statements,
-    /// expression statements, and explicit or implicit returns. A leaf may own
-    /// ordinary value constants and may read or write frame cells captured from
-    /// an ancestor. The entire function is converted to typed symbolic
-    /// instructions before branch relaxation emits any bytes.
+    /// `if`/`else`, `while`, `do`/`while`, classic `for`, `for-in`, ordinary
+    /// synchronous `for-of`, `switch`, labeled and unlabeled `break`/`continue`,
+    /// exact-span no-op `debugger` statements, expression statements, and
+    /// explicit or implicit returns. A leaf may own ordinary value constants
+    /// and may read or write frame cells captured from an ancestor. The entire
+    /// function is converted to typed symbolic instructions before branch
+    /// relaxation emits any bytes.
     /// A selected static ordinary method/accessor may be staged here for
     /// inspection, but this leaf artifact is never execution authority; only
     /// [`Self::compile_tree`] on its owning parent can certify and publish the
@@ -1680,8 +1681,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 flow.pop_statement_stack_base(span)?;
             }
             StatementWork::PushControl(mut control) => {
-                let owns_for_in_marker = control.owns_for_in_marker;
-                if owns_for_in_marker {
+                let owned_iteration_marker = control.owned_iteration_marker;
+                if owned_iteration_marker.is_some() {
                     state.abrupt_markers.try_reserve(1).map_err(|_| {
                         LeafCompilationError::CapacityExceeded {
                             domain: "statement abrupt-marker stack",
@@ -1691,17 +1692,29 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 let abrupt_marker_depth = state
                     .abrupt_markers
                     .len()
-                    .checked_add(usize::from(owns_for_in_marker))
+                    .checked_add(usize::from(owned_iteration_marker.is_some()))
                     .ok_or(LeafCompilationError::CapacityExceeded {
                         domain: "statement abrupt-marker depth",
                     })?;
                 control.abrupt_marker_depth = Some(abrupt_marker_depth);
+                let owned_marker_scope_depth = control.owned_marker_scope_depth;
                 state.controls.push(control, body_span)?;
-                if owns_for_in_marker {
-                    state.abrupt_markers.push(AbruptMarker::new(
-                        AbruptMarkerKind::ForIn,
-                        state.active_scopes.len(),
-                    ));
+                if let Some(marker) = owned_iteration_marker {
+                    let scope_depth = owned_marker_scope_depth.ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "owned iteration marker has a scope depth",
+                            span: Some(body_span),
+                        },
+                    )?;
+                    if scope_depth > state.active_scopes.len() {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "owned iteration marker scope remains active",
+                            span: Some(body_span),
+                        });
+                    }
+                    state
+                        .abrupt_markers
+                        .push(AbruptMarker::new(marker.abrupt_kind(), scope_depth));
                 }
             }
             StatementWork::PopControl => {
@@ -1719,12 +1732,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         span: Some(body_span),
                     });
                 }
-                if control.owns_for_in_marker
-                    && state.abrupt_markers.pop().map(|marker| marker.tag())
-                        != Some(AbruptMarkerTag::ForIn)
+                if let Some(marker) = control.owned_iteration_marker
+                    && state.abrupt_markers.pop().map(|marker| marker.tag()) != Some(marker.tag())
                 {
                     return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "for-in control owns the innermost abrupt marker",
+                        invariant: "iteration control owns the innermost abrupt marker",
                         span: Some(body_span),
                     });
                 }
@@ -1757,13 +1769,15 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 planning.constants,
                 flow,
             )?,
-            StatementWork::ForInAssignment(left) => self.plan_for_in_assignment(
-                left,
-                planning.layout,
-                planning.tree_layout,
-                planning.constants,
-                flow,
-            )?,
+            StatementWork::ForOfHead(left) => self.plan_for_of_head(left, planning.layout)?,
+            StatementWork::ForInAssignment(left) | StatementWork::ForOfAssignment(left) => self
+                .plan_for_in_assignment(
+                    left,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    flow,
+                )?,
             StatementWork::Expression(expression) => self.plan_expression(
                 expression,
                 planning.layout,
@@ -1898,6 +1912,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 Self::reset_script_completion(state.completion, statement.span, flow)?;
                 self.plan_for_in_statement(statement, Vec::new(), flow, state)?;
             }
+            Statement::ForOfStatement(statement) => {
+                Self::reset_script_completion(state.completion, statement.span, flow)?;
+                self.plan_for_of_statement(statement, Vec::new(), flow, state)?;
+            }
             Statement::BreakStatement(statement) => {
                 self.plan_control_jump(
                     statement.label.as_ref(),
@@ -2001,10 +2019,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         let has_pending_finally_subroutine = abrupt_markers
             .iter()
             .any(|marker| matches!(&marker.kind, AbruptMarkerKind::FinallySubroutine));
+        let closes_iterator = abrupt_markers
+            .iter()
+            .any(|marker| matches!(&marker.kind, AbruptMarkerKind::ForOf));
         let has_physical_marker = abrupt_markers.iter().any(|marker| {
             matches!(
                 &marker.kind,
-                AbruptMarkerKind::Catch { .. } | AbruptMarkerKind::ForIn
+                AbruptMarkerKind::Catch { .. } | AbruptMarkerKind::ForIn | AbruptMarkerKind::ForOf
             )
         });
         if let Some(argument) = &statement.argument {
@@ -2016,7 +2037,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             )));
             Self::schedule_value_return_cleanup(abrupt_markers, statement.span, work);
             work.push(StatementWork::Expression(argument));
-        } else if crosses_finalizer || (has_pending_finally_subroutine && has_physical_marker) {
+        } else if crosses_finalizer
+            || closes_iterator
+            || (has_pending_finally_subroutine && has_physical_marker)
+        {
             Self::reserve_return_work(abrupt_markers, work)?;
             work.push(StatementWork::Emit(PlannedInstruction::new(
                 FinalOpcode::Return,
@@ -2039,6 +2063,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                             statement.span,
                         ))?;
                     }
+                    AbruptMarkerKind::ForOf => {
+                        flow.emit(PlannedInstruction::new(
+                            FinalOpcode::IteratorClose,
+                            Operands::None,
+                            statement.span,
+                        ))?;
+                    }
                     AbruptMarkerKind::FinallySubroutine => {}
                 }
             }
@@ -2055,7 +2086,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         abrupt_markers: &[AbruptMarker],
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
-        work.try_reserve(abrupt_markers.len().saturating_mul(3).saturating_add(2))
+        let capacity = abrupt_markers
+            .len()
+            .checked_mul(4)
+            .and_then(|capacity| capacity.checked_add(2))
+            .ok_or(LeafCompilationError::CapacityExceeded {
+                domain: "statement return cleanup",
+            })?;
+        work.try_reserve(capacity)
             .map_err(|_| LeafCompilationError::CapacityExceeded {
                 domain: "statement work stack",
             })
@@ -2089,6 +2127,28 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         span,
                     )));
                 }
+                AbruptMarkerKind::ForOf => {
+                    work.push(StatementWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::IteratorClose,
+                        Operands::None,
+                        span,
+                    )));
+                    work.push(StatementWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Undefined,
+                        Operands::None,
+                        span,
+                    )));
+                    work.push(StatementWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Rot3r,
+                        Operands::None,
+                        span,
+                    )));
+                    work.push(StatementWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::NipCatch,
+                        Operands::None,
+                        span,
+                    )));
+                }
                 AbruptMarkerKind::FinallySubroutine => {
                     for _ in 0..2 {
                         work.push(StatementWork::Emit(PlannedInstruction::new(
@@ -2111,18 +2171,25 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             .iter()
             .rposition(|marker| marker.tag() == AbruptMarkerTag::Catch)
             .map_or(abrupt_markers, |catch| &abrupt_markers[catch + 1..]);
-        let cleanup_instructions = removable_markers
+        let preserves_for_of_marker = removable_markers
             .iter()
-            .try_fold(0_usize, |count, marker| {
-                count.checked_add(match marker.tag() {
-                    AbruptMarkerTag::ForIn => 1,
-                    AbruptMarkerTag::FinallySubroutine => 2,
-                    AbruptMarkerTag::Catch => 0,
+            .any(|marker| marker.tag() == AbruptMarkerTag::ForOf);
+        let cleanup_instructions = if preserves_for_of_marker {
+            0
+        } else {
+            removable_markers
+                .iter()
+                .try_fold(0_usize, |count, marker| {
+                    count.checked_add(match marker.tag() {
+                        AbruptMarkerTag::ForIn => 1,
+                        AbruptMarkerTag::FinallySubroutine => 2,
+                        AbruptMarkerTag::Catch | AbruptMarkerTag::ForOf => 0,
+                    })
                 })
-            })
-            .ok_or(LeafCompilationError::CapacityExceeded {
-                domain: "statement throw cleanup",
-            })?;
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "statement throw cleanup",
+                })?
+        };
         work.try_reserve(cleanup_instructions.saturating_add(2))
             .map_err(|_| LeafCompilationError::CapacityExceeded {
                 domain: "statement work stack",
@@ -2132,18 +2199,20 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Operands::None,
             statement.span,
         )));
-        for marker in removable_markers {
-            let nips = match marker.tag() {
-                AbruptMarkerTag::ForIn => 1,
-                AbruptMarkerTag::FinallySubroutine => 2,
-                AbruptMarkerTag::Catch => 0,
-            };
-            for _ in 0..nips {
-                work.push(StatementWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::Nip,
-                    Operands::None,
-                    statement.span,
-                )));
+        if !preserves_for_of_marker {
+            for marker in removable_markers {
+                let nips = match marker.tag() {
+                    AbruptMarkerTag::ForIn => 1,
+                    AbruptMarkerTag::FinallySubroutine => 2,
+                    AbruptMarkerTag::Catch | AbruptMarkerTag::ForOf => 0,
+                };
+                for _ in 0..nips {
+                    work.push(StatementWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Nip,
+                        Operands::None,
+                        statement.span,
+                    )));
+                }
             }
         }
         work.push(StatementWork::Expression(&statement.argument));
@@ -2547,6 +2616,31 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         )
     }
 
+    fn plan_for_of_statement<'statement>(
+        &self,
+        statement: &'statement ForOfStatement<'arena>,
+        labels: Vec<&'statement str>,
+        flow: &mut PlannedControlFlow,
+        state: &mut StatementPlanningState<'statement, 'arena>,
+    ) -> Result<(), LeafCompilationError> {
+        if statement.r#await {
+            return unsupported(UnsupportedLeafFeature::UnsupportedBody, statement.span);
+        }
+        let scope = self.created_scope(
+            statement.scope_id.get(),
+            statement.node_id.get(),
+            statement.span,
+        )?;
+        Self::schedule_for_of_statement(
+            statement,
+            scope,
+            flow,
+            &mut state.work,
+            state.active_scopes.len(),
+            labels,
+        )
+    }
+
     fn plan_labeled_statement<'statement>(
         &self,
         statement: &'statement LabeledStatement<'arena>,
@@ -2597,6 +2691,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Statement::ForInStatement(statement) => {
                 Self::reset_script_completion(state.completion, statement.span, flow)?;
                 self.plan_for_in_statement(statement, labels, flow, state)
+            }
+            Statement::ForOfStatement(statement) => {
+                Self::reset_script_completion(state.completion, statement.span, flow)?;
+                self.plan_for_of_statement(statement, labels, flow, state)
             }
             Statement::SwitchStatement(statement) => {
                 Self::reset_script_completion(state.completion, statement.span, flow)?;
@@ -2898,6 +2996,104 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         work.push(StatementWork::CloseScope(scope));
         work.push(StatementWork::Expression(&statement.right));
         work.push(StatementWork::ForInHead(&statement.left));
+        work.push(StatementWork::PushScope {
+            scope,
+            creator: statement.node_id.get(),
+            span: statement.span,
+        });
+        Ok(())
+    }
+
+    fn schedule_for_of_statement<'statement>(
+        statement: &'statement ForOfStatement<'arena>,
+        scope: ScopeId,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+        enclosing_scope_depth: usize,
+        labels: Vec<&'statement str>,
+    ) -> Result<(), LeafCompilationError> {
+        let next = flow.new_statement_label_with_offset(statement.right.span(), 3)?;
+        let assign = flow.new_statement_label_with_offset(statement.left.span(), 4)?;
+        let rotate = flow.new_statement_label_with_offset(statement.span, 3)?;
+        let cleanup = flow.new_statement_label_with_offset(statement.span, 3)?;
+        let done = flow.new_statement_label(statement.span)?;
+        let control = ControlRegion::for_of_iteration(
+            labels,
+            cleanup.clone(),
+            next.clone(),
+            enclosing_scope_depth,
+        );
+
+        work.try_reserve(32)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement work stack",
+            })?;
+        work.push(StatementWork::Bind(done));
+        work.push(StatementWork::PopScope(scope));
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::IteratorClose,
+            Operands::None,
+            statement.span,
+        )));
+        work.push(StatementWork::Bind(cleanup.clone()));
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Goto,
+            target: next.clone(),
+            span: statement.span,
+        });
+        work.push(StatementWork::CloseScope(scope));
+        work.push(StatementWork::Bind(rotate.clone()));
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Goto,
+            target: rotate,
+            span: statement.body.span(),
+        });
+        for _ in 0..3 {
+            work.push(StatementWork::PopStatementStackBase {
+                span: statement.span,
+            });
+        }
+        work.push(StatementWork::PopControl);
+        work.push(StatementWork::Visit(&statement.body));
+        work.push(StatementWork::PushControl(control));
+        for _ in 0..3 {
+            work.push(StatementWork::PushStatementStackBase {
+                span: statement.span,
+            });
+        }
+        work.push(StatementWork::ForOfAssignment(&statement.left));
+        work.push(StatementWork::Bind(assign.clone()));
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Goto,
+            target: cleanup,
+            span: statement.span,
+        });
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            statement.span,
+        )));
+        work.push(StatementWork::Branch {
+            kind: BranchKind::IfFalse,
+            target: assign,
+            span: statement.span,
+        });
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ForOfNext,
+            Operands::U8(0),
+            statement.span,
+        )));
+        work.push(StatementWork::Bind(next));
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ForOfStart,
+            Operands::None,
+            statement.right.span(),
+        )));
+        // The RHS closes the initial lexical environment so closures created
+        // there keep the TDZ cell rather than the first iteration's cell.
+        work.push(StatementWork::CloseScope(scope));
+        work.push(StatementWork::Expression(&statement.right));
+        work.push(StatementWork::ForOfHead(&statement.left));
         work.push(StatementWork::PushScope {
             scope,
             creator: statement.node_id.get(),
@@ -3343,6 +3539,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 flow.branch(BranchKind::Gosub, finalizer, span)?;
                 flow.emit(PlannedInstruction::new(
                     FinalOpcode::Drop,
+                    Operands::None,
+                    span,
+                ))?;
+            }
+            AbruptMarkerKind::ForOf => {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::IteratorClose,
                     Operands::None,
                     span,
                 ))?;
@@ -3903,6 +4106,27 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         }
         self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
         self.emit_for_in_declaration_write(declaration.kind, identifier, layout, tree_layout, flow)
+    }
+
+    fn plan_for_of_head(
+        &self,
+        left: &ForStatementLeft<'arena>,
+        layout: &FrameLayout,
+    ) -> Result<(), LeafCompilationError> {
+        let ForStatementLeft::VariableDeclaration(declaration) = left else {
+            if left.as_assignment_target().is_none() {
+                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, left.span());
+            }
+            return Ok(());
+        };
+        let (_, initializer) = self.validate_for_in_declaration(declaration, layout)?;
+        if let Some(initializer) = initializer {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc rejects initializers in for-of declarations",
+                span: Some(initializer.span()),
+            });
+        }
+        Ok(())
     }
 
     fn plan_for_in_assignment(
@@ -6955,6 +7179,8 @@ enum StatementWork<'statement, 'arena> {
     SetCompletion(StatementCompletion),
     ForInHead(&'statement ForStatementLeft<'arena>),
     ForInAssignment(&'statement ForStatementLeft<'arena>),
+    ForOfHead(&'statement ForStatementLeft<'arena>),
+    ForOfAssignment(&'statement ForStatementLeft<'arena>),
     Declaration(&'statement VariableDeclaration<'arena>),
     Expression(&'statement Expression<'arena>),
     Emit(PlannedInstruction),
@@ -7022,6 +7248,7 @@ impl AbruptMarker {
         match self.kind {
             AbruptMarkerKind::Catch { .. } => AbruptMarkerTag::Catch,
             AbruptMarkerKind::ForIn => AbruptMarkerTag::ForIn,
+            AbruptMarkerKind::ForOf => AbruptMarkerTag::ForOf,
             AbruptMarkerKind::FinallySubroutine => AbruptMarkerTag::FinallySubroutine,
         }
     }
@@ -7031,6 +7258,7 @@ impl AbruptMarker {
 enum AbruptMarkerKind {
     Catch { finalizer: Option<CompilerLabel> },
     ForIn,
+    ForOf,
     FinallySubroutine,
 }
 
@@ -7038,7 +7266,30 @@ enum AbruptMarkerKind {
 enum AbruptMarkerTag {
     Catch,
     ForIn,
+    ForOf,
     FinallySubroutine,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IterationMarkerKind {
+    ForIn,
+    ForOf,
+}
+
+impl IterationMarkerKind {
+    const fn abrupt_kind(self) -> AbruptMarkerKind {
+        match self {
+            Self::ForIn => AbruptMarkerKind::ForIn,
+            Self::ForOf => AbruptMarkerKind::ForOf,
+        }
+    }
+
+    const fn tag(self) -> AbruptMarkerTag {
+        match self {
+            Self::ForIn => AbruptMarkerTag::ForIn,
+            Self::ForOf => AbruptMarkerTag::ForOf,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -7054,7 +7305,8 @@ struct ControlRegion<'statement> {
     continue_target: Option<CompilerLabel>,
     accepts_unlabeled_break: bool,
     scope_depth: usize,
-    owns_for_in_marker: bool,
+    owned_iteration_marker: Option<IterationMarkerKind>,
+    owned_marker_scope_depth: Option<usize>,
     abrupt_marker_depth: Option<usize>,
 }
 
@@ -7071,7 +7323,8 @@ impl<'statement> ControlRegion<'statement> {
             continue_target: Some(continue_target),
             accepts_unlabeled_break: true,
             scope_depth,
-            owns_for_in_marker: false,
+            owned_iteration_marker: None,
+            owned_marker_scope_depth: None,
             abrupt_marker_depth: None,
         }
     }
@@ -7088,7 +7341,26 @@ impl<'statement> ControlRegion<'statement> {
             continue_target: Some(continue_target),
             accepts_unlabeled_break: true,
             scope_depth,
-            owns_for_in_marker: true,
+            owned_iteration_marker: Some(IterationMarkerKind::ForIn),
+            owned_marker_scope_depth: Some(scope_depth),
+            abrupt_marker_depth: None,
+        }
+    }
+
+    fn for_of_iteration(
+        labels: Vec<&'statement str>,
+        break_target: CompilerLabel,
+        continue_target: CompilerLabel,
+        scope_depth: usize,
+    ) -> Self {
+        Self {
+            labels,
+            break_target,
+            continue_target: Some(continue_target),
+            accepts_unlabeled_break: true,
+            scope_depth,
+            owned_iteration_marker: Some(IterationMarkerKind::ForOf),
+            owned_marker_scope_depth: Some(scope_depth),
             abrupt_marker_depth: None,
         }
     }
@@ -7105,7 +7377,8 @@ impl<'statement> ControlRegion<'statement> {
             continue_target: None,
             accepts_unlabeled_break,
             scope_depth,
-            owns_for_in_marker: false,
+            owned_iteration_marker: None,
+            owned_marker_scope_depth: None,
             abrupt_marker_depth: None,
         }
     }
@@ -7126,7 +7399,7 @@ impl<'statement> StatementControlStack<'statement> {
         span: Span,
     ) -> Result<Self, LeafCompilationError> {
         let mut controls = Self::default();
-        control.abrupt_marker_depth = Some(usize::from(control.owns_for_in_marker));
+        control.abrupt_marker_depth = Some(usize::from(control.owned_iteration_marker.is_some()));
         controls.push(control, span)?;
         Ok(controls)
     }

@@ -635,6 +635,14 @@ pub(super) fn execute_one(
             push(frame, third);
             push(frame, first);
         }
+        FinalOpcode::Rot3r => {
+            let third = pop(frame)?;
+            let second = pop(frame)?;
+            let first = pop(frame)?;
+            push(frame, third);
+            push(frame, first);
+            push(frame, second);
+        }
         FinalOpcode::Call
         | FinalOpcode::Call0
         | FinalOpcode::Call1
@@ -1349,6 +1357,7 @@ pub(super) fn execute_one(
                         | StoredValue::Object(_),
                     )
                     | OperandStackEntry::Catch { .. }
+                    | OperandStackEntry::ForOfCatch { .. }
                     | OperandStackEntry::FinallyReturn { .. },
                 ) => {
                     return Err(EngineFault::RuntimeInvariant {
@@ -1385,6 +1394,81 @@ pub(super) fn execute_one(
                     }
                 }
             }
+        }
+        FinalOpcode::ForOfStart => {
+            let iterable = pop(frame)?;
+            let realm = code(runtime, frame.code)?.realm;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_for_of_start(
+                    runtime,
+                    iterable,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
+        }
+        FinalOpcode::ForOfNext => {
+            if operands != Operands::U8(0) {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified ordinary for-of has a nonzero temporary offset",
+                }
+                .into());
+            }
+            let (iterator, next) = deactivate_for_of_record(frame, false)?;
+            let realm = code(runtime, frame.code)?.realm;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_for_of_next(
+                    iterator,
+                    next,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
+        }
+        FinalOpcode::IteratorClose => {
+            let (iterator, _next) = deactivate_for_of_record(frame, true)?;
+            let realm = code(runtime, frame.code)?.realm;
+            let return_to =
+                CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_for_of_close(
+                    runtime,
+                    iterator,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
         }
         FinalOpcode::IfFalse | FinalOpcode::IfFalse8 => {
             let condition = pop(frame)?;

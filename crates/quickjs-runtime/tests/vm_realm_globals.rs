@@ -595,10 +595,8 @@ fn global_var_property_limit_failure_is_atomic() {
             (FinalOpcode::Return, Operands::None),
         ],
     );
-    let mut runtime = Runtime::try_new(
-        RuntimeLimits::default().with_max_object_properties(135),
-    )
-    .expect("runtime");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(135))
+        .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let baseline = runtime.usage();
     let mut context = runtime.context(&realm).expect("context");

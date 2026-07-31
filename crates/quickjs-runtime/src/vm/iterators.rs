@@ -470,6 +470,376 @@ pub(super) fn begin_string_iterator_next(
     Ok(NativeDispatch::Immediate(StoredValue::Object(result)))
 }
 
+pub(super) fn begin_for_of_start(
+    runtime: &mut Runtime,
+    iterable: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let state = ForOfStartContinuation {
+        iterable,
+        iterator: None,
+        realm,
+        stage: ForOfStartStage::IteratorMethod,
+        origin,
+    };
+    read_for_of_start_property(
+        runtime,
+        state,
+        &runtime.predefined_symbol_property_key(PredefinedAtom::SymbolIterator),
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn advance_for_of_start(
+    runtime: &mut Runtime,
+    mut state: ForOfStartContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        ForOfStartStage::IteratorMethod => {
+            let StoredValue::Function(method) = completion else {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "value is not iterable",
+                )?);
+            };
+            let receiver = state.iterable.duplicate();
+            state.stage = ForOfStartStage::Iterator;
+            let origin = state.origin.clone();
+            iterator_method_call(
+                method,
+                receiver,
+                NativeContinuation::ForOfStart(state),
+                return_to,
+                origin,
+            )
+        }
+        ForOfStartStage::Iterator => {
+            if !matches!(
+                completion,
+                StoredValue::Function(_) | StoredValue::Object(_)
+            ) {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "not an object",
+                )?);
+            }
+            state.iterator = Some(completion);
+            state.stage = ForOfStartStage::NextMethod;
+            read_for_of_start_property(
+                runtime,
+                state,
+                &runtime.predefined_property_key(PredefinedAtom::Next),
+                return_to,
+                execution_budget,
+            )
+        }
+        ForOfStartStage::NextMethod => {
+            let iterator = state.iterator.ok_or(EngineFault::RuntimeInvariant {
+                message: "for-of next lookup completed without an iterator",
+            })?;
+            Ok(NativeDispatch::ForOfRecord {
+                iterator,
+                next: completion,
+            })
+        }
+    }
+}
+
+fn read_for_of_start_property(
+    runtime: &mut Runtime,
+    state: ForOfStartContinuation,
+    key: &PropertyKey,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (base, property_name) = match state.stage {
+        ForOfStartStage::IteratorMethod => (&state.iterable, "Symbol.iterator"),
+        ForOfStartStage::NextMethod => {
+            let iterator = state
+                .iterator
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "for-of next lookup has no iterator",
+                })?;
+            (iterator, "next")
+        }
+        ForOfStartStage::Iterator => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "for-of iterator call stage attempted a property read",
+            }
+            .into());
+        }
+    };
+    charge_iterator_property_lookup(runtime, base, execution_budget)?;
+    match read_static_property(runtime, state.realm, base, key)? {
+        PropertyReadOutcome::Value(value) => {
+            advance_for_of_start(runtime, state, value, return_to, execution_budget)
+        }
+        PropertyReadOutcome::Getter { function, receiver } => {
+            let origin = state.origin.clone();
+            iterator_getter_call(
+                function,
+                receiver,
+                NativeContinuation::ForOfStart(state),
+                return_to,
+                origin,
+                None,
+            )
+        }
+        PropertyReadOutcome::Failed(failure) => {
+            let property_name = JsString::from_utf8(property_name)?;
+            Err(NativeFailure::Abrupt(property_exception_at(
+                state.realm,
+                state.origin,
+                Some(&property_name),
+                failure,
+            )?))
+        }
+    }
+}
+
+pub(super) fn begin_for_of_next(
+    iterator: StoredValue,
+    next: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let function = match &next {
+        StoredValue::Function(function) => *function,
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::Object(_) => {
+            return Err(iterator_exception(
+                realm,
+                origin,
+                ExceptionKind::TypeError,
+                "not a function",
+            )?);
+        }
+    };
+    execution_budget.charge_instructions(1)?;
+    let receiver = iterator.duplicate();
+    let state = ForOfNextContinuation {
+        iterator,
+        next,
+        result: None,
+        realm,
+        stage: ForOfNextStage::Result,
+        origin: origin.clone(),
+    };
+    iterator_method_call(
+        function,
+        receiver,
+        NativeContinuation::ForOfNext(state),
+        return_to,
+        origin,
+    )
+}
+
+pub(super) fn advance_for_of_next(
+    runtime: &mut Runtime,
+    mut state: ForOfNextContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        ForOfNextStage::Result => {
+            if !matches!(
+                completion,
+                StoredValue::Function(_) | StoredValue::Object(_)
+            ) {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "iterator must return an object",
+                )?);
+            }
+            state.result = Some(completion);
+            state.stage = ForOfNextStage::Done;
+            read_for_of_next_property(
+                runtime,
+                state,
+                &runtime.predefined_property_key(PredefinedAtom::Done),
+                return_to,
+                execution_budget,
+            )
+        }
+        ForOfNextStage::Done => {
+            if completion.is_truthy() {
+                return Ok(NativeDispatch::ForOfStep {
+                    value: StoredValue::Undefined,
+                    done: true,
+                });
+            }
+            state.stage = ForOfNextStage::Value;
+            read_for_of_next_property(
+                runtime,
+                state,
+                &runtime.predefined_property_key(PredefinedAtom::Value),
+                return_to,
+                execution_budget,
+            )
+        }
+        ForOfNextStage::Value => Ok(NativeDispatch::ForOfStep {
+            value: completion,
+            done: false,
+        }),
+    }
+}
+
+fn read_for_of_next_property(
+    runtime: &mut Runtime,
+    state: ForOfNextContinuation,
+    key: &PropertyKey,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let result = state.result.as_ref().ok_or(EngineFault::RuntimeInvariant {
+        message: "for-of result property lookup has no result object",
+    })?;
+    charge_iterator_property_lookup(runtime, result, execution_budget)?;
+    match read_static_property(runtime, state.realm, result, key)? {
+        PropertyReadOutcome::Value(value) => {
+            advance_for_of_next(runtime, state, value, return_to, execution_budget)
+        }
+        PropertyReadOutcome::Getter { function, receiver } => {
+            let origin = state.origin.clone();
+            iterator_getter_call(
+                function,
+                receiver,
+                NativeContinuation::ForOfNext(state),
+                return_to,
+                origin,
+                None,
+            )
+        }
+        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
+            state.realm,
+            state.origin,
+            None,
+            failure,
+        )?)),
+    }
+}
+
+pub(super) fn begin_for_of_close(
+    runtime: &mut Runtime,
+    iterator: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(iterator, StoredValue::Undefined) {
+        return Ok(NativeDispatch::ForOfClosed);
+    }
+    let state = ForOfCloseContinuation {
+        iterator,
+        realm,
+        stage: ForOfCloseStage::AwaitReturnProperty,
+        origin,
+    };
+    read_for_of_return(runtime, state, return_to, execution_budget)
+}
+
+fn read_for_of_return(
+    runtime: &mut Runtime,
+    state: ForOfCloseContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let key = runtime.predefined_property_key(PredefinedAtom::Return);
+    charge_iterator_property_lookup(runtime, &state.iterator, execution_budget)?;
+    match read_static_property(runtime, state.realm, &state.iterator, &key)? {
+        PropertyReadOutcome::Value(value) => advance_for_of_close(state, &value, return_to),
+        PropertyReadOutcome::Getter { function, receiver } => {
+            let origin = state.origin.clone();
+            iterator_getter_call(
+                function,
+                receiver,
+                NativeContinuation::ForOfClose(state),
+                return_to,
+                origin,
+                None,
+            )
+        }
+        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
+            state.realm,
+            state.origin,
+            None,
+            failure,
+        )?)),
+    }
+}
+
+pub(super) fn advance_for_of_close(
+    mut state: ForOfCloseContinuation,
+    completion: &StoredValue,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        ForOfCloseStage::AwaitReturnProperty => match completion {
+            StoredValue::Undefined | StoredValue::Null => Ok(NativeDispatch::ForOfClosed),
+            StoredValue::Function(function) => {
+                let receiver = state.iterator.duplicate();
+                state.stage = ForOfCloseStage::AwaitReturnCall;
+                let origin = state.origin.clone();
+                iterator_method_call(
+                    *function,
+                    receiver,
+                    NativeContinuation::ForOfClose(state),
+                    return_to,
+                    origin,
+                )
+            }
+            StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_)
+            | StoredValue::Object(_) => Err(iterator_exception(
+                state.realm,
+                state.origin,
+                ExceptionKind::TypeError,
+                "not a function",
+            )?),
+        },
+        ForOfCloseStage::AwaitReturnCall => {
+            if matches!(
+                completion,
+                StoredValue::Function(_) | StoredValue::Object(_)
+            ) {
+                Ok(NativeDispatch::ForOfClosed)
+            } else {
+                Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "not an object",
+                )?)
+            }
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "Append starts with explicit destination, cursor, realm, provenance, and execution authority"
@@ -796,6 +1166,16 @@ fn begin_iterator_close(
     let iterator = state.iterator.ok_or(EngineFault::RuntimeInvariant {
         message: "IteratorClose started before iterator acquisition",
     })?;
+    begin_exceptional_iterator_close(runtime, iterator, original, return_to, execution_budget)
+}
+
+pub(super) fn begin_exceptional_iterator_close(
+    runtime: &mut Runtime,
+    iterator: StoredValue,
+    original: PendingException,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
     let close = IteratorCloseContinuation {
         iterator,
         original,
