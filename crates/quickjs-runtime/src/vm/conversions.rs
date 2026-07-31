@@ -131,6 +131,35 @@ pub(super) fn string_receiver_value(
     }))
 }
 
+pub(super) fn symbol_receiver_value(
+    runtime: &Runtime,
+    realm: RealmId,
+    receiver: &StoredValue,
+    origin: Option<&JsStackFrame>,
+) -> Result<crate::Atom, NativeFailure> {
+    let value = match receiver {
+        StoredValue::Symbol(value) => Some(value.clone()),
+        StoredValue::Object(object) => runtime.boxed_symbol(*object)?.cloned(),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_)
+        | StoredValue::Function(_) => None,
+    };
+    if let Some(value) = value {
+        return Ok(value);
+    }
+    Err(NativeFailure::Abrupt(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8("not a symbol")?,
+        },
+        origin: origin.cloned().unwrap_or_else(native_function_host_origin),
+    }))
+}
+
 pub(super) fn begin_boolean_constructor_wrapper(
     runtime: &mut Runtime,
     new_target: FunctionId,
@@ -383,6 +412,7 @@ pub(super) fn intrinsic_getter_call_with_reserved_continuation(
         return_to,
         origin: origin.unwrap_or_else(native_function_host_origin),
         continuations,
+        pre_call: None,
     })
 }
 
@@ -888,6 +918,7 @@ fn function_source_method_call(
         return_to,
         origin,
         continuations,
+        pre_call: None,
     }))
 }
 
@@ -1093,6 +1124,7 @@ fn property_key_method_call(
         return_to,
         origin,
         continuations,
+        pre_call: None,
     }))
 }
 
@@ -1396,9 +1428,14 @@ fn operator_primitive_method_call(
         return_to,
         origin,
         continuations,
+        pre_call: None,
     }))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "primitive conversion targets remain centralized at the audited conversion boundary"
+)]
 fn finish_operator_primitive_target(
     runtime: &mut Runtime,
     value: StoredValue,
@@ -1478,6 +1515,24 @@ fn finish_operator_primitive_target(
             } else {
                 Ok(NativeDispatch::Immediate(StoredValue::String(value)))
             }
+        }
+        OperatorPrimitiveTarget::SymbolIntrinsic { global_registry } => {
+            let description = operator_primitive_to_string(value, realm, origin)?;
+            let symbol = if global_registry {
+                runtime.intern_global_symbol(&description)?
+            } else {
+                runtime.new_unique_symbol(Some(&description))?
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::Symbol(symbol)))
+        }
+        OperatorPrimitiveTarget::StringIteratorIntrinsic => {
+            let string = operator_primitive_to_string(value, realm, origin)?;
+            Ok(NativeDispatch::Immediate(StoredValue::Object(
+                runtime.allocate_string_iterator(realm, string)?,
+            )))
+        }
+        OperatorPrimitiveTarget::ArrayIteratorLength(state) => {
+            finish_array_iterator_length(runtime, state, value, return_to, execution_budget)
         }
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             finish_function_apply_length(runtime, state, value, return_to, execution_budget)
@@ -2027,6 +2082,7 @@ fn finish_property_key_target(
                         return_to,
                         origin: origin.clone(),
                         continuations: Vec::new(),
+                        pre_call: None,
                     }))
                 }
                 PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
@@ -2085,6 +2141,7 @@ fn finish_property_key_target(
                         return_to,
                         origin: origin.clone(),
                         continuations: Vec::new(),
+                        pre_call: None,
                     }))
                 }
                 PropertyWriteOutcome::Failed(failure) => Err(NativeFailure::Abrupt(

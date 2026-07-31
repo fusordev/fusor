@@ -275,6 +275,8 @@ impl Runtime {
                 number,
                 string,
                 array,
+                symbol,
+                iterators,
             } = realm.intrinsics
             {
                 mark_heap_reference(
@@ -352,6 +354,30 @@ impl Runtime {
                     &mut marked_objects,
                     &mut work,
                 );
+                mark_heap_reference(
+                    HeapReference::Object(symbol.prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(symbol.constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                for prototype in [
+                    iterators.iterator_prototype,
+                    iterators.array_iterator_prototype,
+                    iterators.string_iterator_prototype,
+                ] {
+                    mark_heap_reference(
+                        HeapReference::Object(prototype),
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
             }
         }
         trace_additional_roots(&mut |root| {
@@ -402,6 +428,14 @@ impl Runtime {
                 GraphNode::Object(id) => {
                     if let Some(object) = self.objects.get(id) {
                         if let Some(current) = object.for_in_current() {
+                            mark_heap_reference(
+                                current,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
+                        if let Some(current) = object.array_iterator_current() {
                             mark_heap_reference(
                                 current,
                                 &mut marked_functions,

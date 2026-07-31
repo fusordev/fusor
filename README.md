@@ -65,14 +65,19 @@ fall through the matching realm's branded empty-string prototype; a custom
 new-target wrapper follows its selected prototype. Wrapper indices and
 `length` retain their non-writable exotic behavior while ordinary extra
 properties remain ordinary.
-The remaining String methods and all Symbol boxing remain deferred and fail
-closed. Nested calls, recursion,
-getter/setter dispatch, and abrupt unwinding use an explicit frame vector with
-cumulative frame/value ceilings and shared fuel. Installation scans every
-instruction in every template before mutation. Dense and elided array literals
-now allocate realm-owned branded arrays with exact `length`; elisions remain
-absent indexed properties and a trailing elision extends `length` without
-materializing `undefined`. The realm-owned `Array` global is callable and
+Each realm also owns the nonconstructable global `Symbol`, its prototype, and
+the complete pinned set of 13 well-known static Symbol identities. `Symbol`,
+`Symbol.for`, `Symbol.keyFor`, `description`, `toString`, `valueOf`, and
+`Symbol.toPrimitive` are implemented together with core Symbol property
+access, wrapper branding/coercion, and `Object.prototype` tagging/boxing.
+The remaining String methods, `for-in` Symbol boxing, and sloppy Symbol
+receiver normalization remain deferred and fail closed. Nested calls,
+recursion, getter/setter dispatch, and abrupt unwinding use an explicit frame
+vector with cumulative frame/value ceilings and shared fuel. Installation
+scans every instruction in every template before mutation. Dense and elided
+array literals now allocate realm-owned branded arrays with exact `length`;
+elisions remain absent indexed properties, and a trailing elision extends
+`length` without materializing `undefined`. The realm-owned `Array` global is callable and
 constructable: exactly one primitive Number validates as an exact uint32 and
 allocates sparsely in constant space, while every other argument list becomes
 dense. Construction resolves `newTarget.prototype` before length validation
@@ -83,16 +88,23 @@ with `RangeError`, and truncate configurable indices. Array indices enumerate
 in canonical order,
 `Function.prototype.apply` consumes a real array through its ordinary
 observable access path, and `Object.prototype.toString` observes the array
-brand. Allocation, property, stack, and fuel limits are checked before
+brand. `Array.prototype.values`, `keys`, `entries`, and `Symbol.iterator`, plus
+String `Symbol.iterator`, use realm-owned objects with hidden shared Iterator,
+Array Iterator, and String Iterator prototypes. Array-literal spread lowers to
+whole-graph-verified `Append` bytecode and executes the generic synchronous
+`Symbol.iterator`/`next`/`done`/`value` protocol. Abrupt completion after
+acquiring `next` performs `IteratorClose` while preserving the original
+exception. Allocation, property, stack, and fuel limits are checked before
 mutation.
-BigInt values and mixed numeric domains, array spread, `Array` static and
-`Array.prototype` methods, other exotic objects, shorthand/spread and `__proto__`
+BigInt values and mixed numeric domains, the remaining `Array` static and
+prototype methods, other exotic objects, shorthand/spread and `__proto__`
 data-initializer semantics, anonymous data-function inferred names,
 async/generator methods, `super`/home-object semantics, realm-global accessor
-writes, optional/spread/apply calls, the remaining Number built-ins,
-the remaining String built-ins, Symbol wrapper coercions, serialized bytecode,
-every form of eval, Error constructors and `Error.prototype.toString`, and
-destructuring-catch semantics remain deferred and fail closed. Ordinary
+writes, optional calls, call spread, `for-of`, iterator destructuring,
+async/generator iterator consumers, the remaining Number built-ins, the
+remaining String built-ins, serialized bytecode, every form of eval, Error
+constructors and `Error.prototype.toString`, and destructuring-catch semantics
+remain deferred and fail closed. Ordinary
 synchronous `try`/`catch`/`finally` now uses verified shared finalizer
 subroutines and preserves or overrides return, throw, break, and continue
 completions with bounded typed operand-stack state.
@@ -134,9 +146,9 @@ verified-bytecode getters and methods resume on the same iterative frame
 vector, and throws stop conversion before parsing. `call` preserves the target
 realm's strict/sloppy receiver rules and forwards the Oxc compiler service when
 its target is the ordinary `Function` constructor. Sloppy Boolean, Number, and
-String boxing is implemented; Symbol boxing, persistent global lexical
-collisions, `Function.prototype.bind`, and `Symbol.hasInstance` remain
-fail-closed.
+String boxing is implemented; sloppy Symbol receiver boxing, persistent global
+lexical collisions, `Function.prototype.bind`, and `Symbol.hasInstance`
+remain fail-closed.
 Per-session compilation-count and generated-source limits bound nested
 construction. No dynamic-Function path uses eval or captures a caller lexical
 frame.
@@ -201,6 +213,7 @@ cargo xtask dynamic-function-differential --oracle /path/to/quickjs-2026-06-04/q
 cargo xtask number-radix-differential --oracle /path/to/quickjs-2026-06-04/qjs
 cargo xtask control-flow-differential --oracle /path/to/quickjs-2026-06-04/qjs
 cargo xtask function-apply-differential --oracle /path/to/quickjs-2026-06-04/qjs
+cargo xtask iterator-differential --oracle /path/to/quickjs-2026-06-04/qjs
 ```
 
 The upstream C engine may be built separately as a development oracle for

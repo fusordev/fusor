@@ -499,6 +499,68 @@ pub(super) fn execute_one(
             frame.stack.truncate(first);
             push(frame, StoredValue::Object(array));
         }
+        FinalOpcode::Append => {
+            let iterable = pop(frame)?;
+            let position = pop(frame)?;
+            let array = pop(frame)?;
+            let StoredValue::Object(array) = array else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified append destination is not an object",
+                }
+                .into());
+            };
+            if !runtime.is_array_object(array)? {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified append destination is not an Array",
+                }
+                .into());
+            }
+            let StoredValue::Number(position) = position else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified append cursor is not a number",
+                }
+                .into());
+            };
+            let position_number = position.as_f64();
+            if !position_number.is_finite()
+                || position_number < 0.0
+                || position_number.fract() != 0.0
+                || position_number > f64::from(u32::MAX)
+            {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified append cursor is outside the u32 domain",
+                }
+                .into());
+            }
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the verified append cursor was checked against the exact u32 integer domain"
+            )]
+            let position = position_number as u32;
+            let realm = code(runtime, frame.code)?.realm;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_iterator_append(
+                    runtime,
+                    array,
+                    position,
+                    iterable,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
+        }
         FinalOpcode::Catch => {
             let handler = branch_successor(verified_instruction, true, frame)?;
             frame.stack.push(OperandStackEntry::Catch { handler });
@@ -525,6 +587,23 @@ pub(super) fn execute_one(
         FinalOpcode::Dup => {
             let value = peek(frame)?.duplicate();
             push(frame, value);
+        }
+        FinalOpcode::Dup1 => {
+            let top = pop(frame)?;
+            let index =
+                frame
+                    .stack
+                    .len()
+                    .checked_sub(1)
+                    .ok_or(EngineFault::StackDepthMismatch {
+                        function: frame.template,
+                        pc: source_pc,
+                        expected: 2,
+                        actual: frame.stack.len().saturating_add(1),
+                    })?;
+            let value = stack_value_at(frame, index)?.duplicate();
+            push(frame, value);
+            push(frame, top);
         }
         FinalOpcode::Insert2 => {
             let right = pop(frame)?;
@@ -788,7 +867,47 @@ pub(super) fn execute_one(
             let value = pop(frame)?;
             let key_value = pop(frame)?;
             let base = peek(frame)?.duplicate();
-            let property = computed_property_operand(runtime, &key_value)?;
+            let property = match &key_value {
+                StoredValue::Number(number) => {
+                    let raw = number.as_f64();
+                    if !raw.is_finite()
+                        || raw < 0.0
+                        || raw.fract() != 0.0
+                        || raw >= f64::from(u32::MAX)
+                    {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "verified Array literal cursor is not an array index",
+                        }
+                        .into());
+                    }
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "the verified Array literal cursor was checked against the exact array-index domain"
+                    )]
+                    let raw = raw as u32;
+                    let index = ArrayIndex::new(raw).ok_or(EngineFault::RuntimeInvariant {
+                        message: "verified Array literal cursor is not an array index",
+                    })?;
+                    StaticPropertyOperand {
+                        key: PropertyKey::from_index(index),
+                        name: number.to_javascript_string()?,
+                    }
+                }
+                StoredValue::String(_) | StoredValue::Symbol(_) => {
+                    computed_property_operand(runtime, &key_value)?
+                }
+                StoredValue::Undefined
+                | StoredValue::Null
+                | StoredValue::Boolean(_)
+                | StoredValue::Function(_)
+                | StoredValue::Object(_) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "computed Array property operand was not a verified key",
+                    }
+                    .into());
+                }
+            };
             if let PropertyWriteOutcome::Failed(failure) =
                 define_static_property(runtime, &base, property.key, value, execution_budget)?
             {

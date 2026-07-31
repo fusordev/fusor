@@ -293,6 +293,7 @@ fn exception_caller_frames(
                 | FinalOpcode::GetArrayEl
                 | FinalOpcode::GetArrayEl2
                 | FinalOpcode::PutArrayEl
+                | FinalOpcode::Append
                 | FinalOpcode::ToPropKey
                 | FinalOpcode::DefineMethodComputed
                 | FinalOpcode::Neg
@@ -335,80 +336,207 @@ fn exception_caller_frames(
     Ok(caller_frames)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "catch and abrupt native-continuation unwinding share one iterative ownership boundary"
+)]
 pub(super) fn dispatch_pending_exception(
     runtime: &mut Runtime,
     frames: &mut Vec<Frame>,
     active_frame_values: &mut u64,
-    pending: PendingException,
+    mut pending: PendingException,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<(), ExecutionError> {
-    let handler_frame = frames.iter().rposition(|frame| {
-        frame
+    loop {
+        enum Handler {
+            Catch(usize),
+            Native(usize),
+        }
+        let mut handler = None;
+        for (index, frame) in frames.iter().enumerate().rev() {
+            if frame
+                .stack
+                .iter()
+                .any(|entry| matches!(entry, OperandStackEntry::Catch { .. }))
+            {
+                handler = Some(Handler::Catch(index));
+                break;
+            }
+            if frame.native_returns.iter().any(|continuation| {
+                matches!(
+                    continuation,
+                    NativeContinuation::IteratorAppend(_) | NativeContinuation::IteratorClose(_)
+                )
+            }) {
+                handler = Some(Handler::Native(index));
+                break;
+            }
+        }
+        let Some(handler) = handler else {
+            let caller_frames = exception_caller_frames(runtime, frames)?;
+            let exception = finish_exception(runtime, pending, caller_frames)?;
+            return Err(ExecutionError::Exception(exception));
+        };
+
+        let Handler::Catch(handler_frame) = handler else {
+            let Handler::Native(handler_frame) = handler else {
+                unreachable!("exception handler classification is exhaustive")
+            };
+            let cleanup_temporary_receivers =
+                frames_have_temporary_receiver(&frames[handler_frame..]);
+            while frames.len() > handler_frame.saturating_add(1) {
+                let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
+                    message: "exception unwinder lost a frame above its native handler",
+                })?;
+                *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
+                if let Some(dynamic) = frame.dynamic_return.take() {
+                    runtime.retire_dynamic_root(dynamic.root)?;
+                }
+            }
+            let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
+                message: "exception unwinder lost its native handler frame",
+            })?;
+            *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
+            if let Some(dynamic) = frame.dynamic_return.take() {
+                runtime.retire_dynamic_root(dynamic.root)?;
+            }
+            let return_to = frame.return_to;
+            let native_returns = std::mem::take(&mut frame.native_returns);
+            let active_frames = active_execution_frames(frames);
+            let dispatch = resume_iterator_abrupt_continuations(
+                runtime,
+                native_returns,
+                pending,
+                return_to,
+                execution_budget,
+            );
+            let dispatch = match dispatch {
+                Ok(dispatch) => resolve_native_dispatch(
+                    runtime,
+                    dispatch,
+                    frames,
+                    active_frames,
+                    *active_frame_values,
+                    compiler,
+                    execution_budget,
+                ),
+                Err(error) => Err(error),
+            };
+            match dispatch {
+                Ok(NativeDispatch::Immediate(value)) => {
+                    let parent = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                        message: "iterator native handler completed without a parent frame",
+                    })?;
+                    push_call_result(
+                        parent,
+                        value,
+                        return_to.ok_or(EngineFault::RuntimeInvariant {
+                            message: "iterator native handler has no caller continuation",
+                        })?,
+                    )?;
+                }
+                Ok(NativeDispatch::Pair(original, updated)) => {
+                    let parent = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                        message: "iterator native handler produced a pair without a parent frame",
+                    })?;
+                    push_operator_pair(
+                        parent,
+                        original,
+                        updated,
+                        return_to.ok_or(EngineFault::RuntimeInvariant {
+                            message: "iterator native handler has no caller continuation",
+                        })?,
+                    )?;
+                }
+                Ok(NativeDispatch::Frame(child)) => {
+                    *active_frame_values =
+                        active_frame_values.saturating_add(child.reserved_values);
+                    frames.push(child);
+                }
+                Ok(NativeDispatch::Call(_)) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "iterator abrupt resolver returned an unresolved call",
+                    }
+                    .into());
+                }
+                Err(NativeFailure::Abrupt(next)) => {
+                    pending = next;
+                    continue;
+                }
+                Err(NativeFailure::AbruptAfterTransient(next)) => {
+                    if let Some(parent) = frames.last_mut() {
+                        parent.transient_cleanup_pending = true;
+                    }
+                    pending = next;
+                    continue;
+                }
+                Err(NativeFailure::Execution(error)) => return Err(error),
+            }
+            if cleanup_temporary_receivers && runtime.collection_pending {
+                collect_cycles_with_execution_roots(runtime, frames, &[], &[])?;
+            }
+            return Ok(());
+        };
+
+        let cleanup_temporary_receivers = frames_have_temporary_receiver(&frames[handler_frame..]);
+        let PendingException {
+            realm,
+            payload,
+            origin: _,
+        } = pending;
+        let caught = match payload {
+            PendingExceptionPayload::ThrownValue(value) => value,
+            PendingExceptionPayload::EngineError { kind, message } => {
+                StoredValue::Object(runtime.materialize_error_object(realm, kind, message)?)
+            }
+        };
+
+        while frames.len() > handler_frame.saturating_add(1) {
+            let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
+                message: "exception unwinder lost a frame above its catch handler",
+            })?;
+            *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
+            if let Some(dynamic) = frame.dynamic_return.take() {
+                runtime.retire_dynamic_root(dynamic.root)?;
+            }
+        }
+
+        let frame = frames
+            .get_mut(handler_frame)
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "exception unwinder lost its catch handler frame",
+            })?;
+        let marker = frame
             .stack
             .iter()
-            .any(|entry| matches!(entry, OperandStackEntry::Catch { .. }))
-    });
-    let Some(handler_frame) = handler_frame else {
-        let caller_frames = exception_caller_frames(runtime, frames)?;
-        let exception = finish_exception(runtime, pending, caller_frames)?;
-        return Err(ExecutionError::Exception(exception));
-    };
-
-    let cleanup_temporary_receivers = frames_have_temporary_receiver(&frames[handler_frame..]);
-    let PendingException {
-        realm,
-        payload,
-        origin: _,
-    } = pending;
-    let caught = match payload {
-        PendingExceptionPayload::ThrownValue(value) => value,
-        PendingExceptionPayload::EngineError { kind, message } => {
-            StoredValue::Object(runtime.materialize_error_object(realm, kind, message)?)
-        }
-    };
-
-    while frames.len() > handler_frame.saturating_add(1) {
-        let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
-            message: "exception unwinder lost a frame above its catch handler",
-        })?;
-        *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
-        if let Some(dynamic) = frame.dynamic_return.take() {
-            runtime.retire_dynamic_root(dynamic.root)?;
-        }
-    }
-
-    let frame = frames
-        .get_mut(handler_frame)
-        .ok_or(EngineFault::RuntimeInvariant {
-            message: "exception unwinder lost its catch handler frame",
-        })?;
-    let marker = frame
-        .stack
-        .iter()
-        .rposition(|entry| matches!(entry, OperandStackEntry::Catch { .. }))
-        .ok_or(EngineFault::RuntimeInvariant {
-            message: "exception unwinder lost its verified catch marker",
-        })?;
-    let handler = match frame.stack.get(marker) {
-        Some(OperandStackEntry::Catch { handler }) => *handler,
-        Some(OperandStackEntry::JavaScript(_) | OperandStackEntry::FinallyReturn { .. }) | None => {
-            return Err(EngineFault::RuntimeInvariant {
-                message: "exception unwinder selected a non-catch operand entry",
+            .rposition(|entry| matches!(entry, OperandStackEntry::Catch { .. }))
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "exception unwinder lost its verified catch marker",
+            })?;
+        let handler = match frame.stack.get(marker) {
+            Some(OperandStackEntry::Catch { handler }) => *handler,
+            Some(OperandStackEntry::JavaScript(_) | OperandStackEntry::FinallyReturn { .. })
+            | None => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "exception unwinder selected a non-catch operand entry",
+                }
+                .into());
             }
-            .into());
-        }
-    };
-    frame.stack.truncate(marker);
-    push(frame, caught);
-    frame.instruction = handler;
+        };
+        frame.stack.truncate(marker);
+        push(frame, caught);
+        frame.instruction = handler;
 
-    if cleanup_temporary_receivers && runtime.collection_pending {
-        collect_cycles_with_execution_roots(runtime, frames, &[], &[])?;
-        for frame in frames {
-            frame.transient_cleanup_pending = false;
+        if cleanup_temporary_receivers && runtime.collection_pending {
+            collect_cycles_with_execution_roots(runtime, frames, &[], &[])?;
+            for frame in frames {
+                frame.transient_cleanup_pending = false;
+            }
         }
+
+        return Ok(());
     }
-
-    Ok(())
 }
 
 pub(super) fn finish_exception(

@@ -41,6 +41,16 @@ fn array_from_is_admitted_by_whole_graph_runtime_preflight() {
 }
 
 #[test]
+fn array_spread_opcodes_are_admitted_without_public_iterator_markers() {
+    use quickjs_bytecode::FinalOpcode;
+
+    assert!(is_supported_opcode(FinalOpcode::Append));
+    assert!(is_supported_opcode(FinalOpcode::Dup1));
+    assert!(!is_supported_opcode(FinalOpcode::IteratorNext));
+    assert!(!is_supported_opcode(FinalOpcode::IteratorClose));
+}
+
+#[test]
 fn realm_installs_a_rooted_branded_array_prototype_with_exact_length() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -66,8 +76,8 @@ fn realm_installs_a_rooted_branded_array_prototype_with_exact_length() {
         }) if layout == PropertyLayout::data(true, false, false)
             && value.strict_equals(JsNumber::from_i32(0))
     ));
-    assert_eq!(runtime.usage().heap_objects(), 12);
-    assert_eq!(runtime.usage().object_properties(), 74);
+    assert_eq!(runtime.usage().heap_objects(), 16);
+    assert_eq!(runtime.usage().object_properties(), 135);
 
     assert_eq!(runtime.collect_cycles().expect("collection").objects(), 0);
     assert!(runtime.objects.contains(prototype));
@@ -145,9 +155,9 @@ fn realm_installs_a_realm_owned_array_constructor_with_exact_descriptors() {
         PropertyLayout::data(true, false, true),
         |value| matches!(value, StoredValue::Function(id) if id == array.constructor),
     );
-    assert_eq!(runtime.usage().heap_objects(), 12);
-    assert_eq!(runtime.usage().heap_functions(), 17);
-    assert_eq!(runtime.usage().object_properties(), 74);
+    assert_eq!(runtime.usage().heap_objects(), 16);
+    assert_eq!(runtime.usage().heap_functions(), 31);
+    assert_eq!(runtime.usage().object_properties(), 135);
 }
 
 #[test]
@@ -560,22 +570,24 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         number,
         string,
         array: _,
+        symbol: _,
+        iterators: _,
     } = state.intrinsics
     else {
         panic!("realm intrinsics remained uninitialized");
     };
 
     assert_eq!(runtime.usage().realms(), 1);
-    assert_eq!(runtime.usage().heap_objects(), 12);
-    assert_eq!(runtime.usage().heap_functions(), 17);
-    assert_eq!(runtime.usage().object_properties(), 74);
+    assert_eq!(runtime.usage().heap_objects(), 16);
+    assert_eq!(runtime.usage().heap_functions(), 31);
+    assert_eq!(runtime.usage().object_properties(), 135);
     assert_eq!(runtime.usage().installed_code(), 0);
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 1,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 4,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 1,
+            live_atoms: PREDEFINED_ATOM_COUNT + 16,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 144,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 16,
         }
     );
 
@@ -1190,9 +1202,9 @@ fn function_call_is_realm_owned_while_its_dynamic_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 1,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 4,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 1,
+            live_atoms: PREDEFINED_ATOM_COUNT + 16,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 144,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 16,
         }
     );
 }
@@ -1239,9 +1251,9 @@ fn function_apply_is_realm_owned_while_its_predefined_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 1,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 4,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 1,
+            live_atoms: PREDEFINED_ATOM_COUNT + 16,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 144,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 16,
         }
     );
 }
@@ -1260,9 +1272,9 @@ fn realm_installs_realm_owned_error_prototype_chains_without_public_constructors
         panic!("realm intrinsics remained uninitialized");
     };
 
-    assert_eq!(runtime.usage().heap_objects(), 12);
-    assert_eq!(runtime.usage().heap_functions(), 17);
-    assert_eq!(runtime.usage().object_properties(), 74);
+    assert_eq!(runtime.usage().heap_objects(), 16);
+    assert_eq!(runtime.usage().heap_functions(), 31);
+    assert_eq!(runtime.usage().object_properties(), 135);
 
     let error_prototype = runtime.objects.get(errors.error).expect("Error.prototype");
     assert_eq!(
@@ -1444,16 +1456,16 @@ fn engine_error_materialization_is_realm_owned_branded_and_exact() {
 fn engine_error_materialization_limit_failures_are_atomic() {
     for (limits, expected_resource, expected_limit, expected_observed) in [
         (
-            RuntimeLimits::default().with_max_heap_objects(12),
+            RuntimeLimits::default().with_max_heap_objects(16),
             RuntimeResource::HeapObjects,
-            12,
-            13,
+            16,
+            17,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(74),
+            RuntimeLimits::default().with_max_object_properties(135),
             RuntimeResource::ObjectProperties,
-            74,
-            75,
+            135,
+            136,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -1505,30 +1517,30 @@ fn unrooted_engine_error_is_collected_without_reclaiming_error_prototypes() {
     assert_eq!(report.objects(), 1);
     assert!(runtime.objects.get(error).is_none());
     assert!(runtime.objects.get(prototype).is_some());
-    assert_eq!(runtime.usage().heap_objects(), 12);
-    assert_eq!(runtime.usage().object_properties(), 74);
+    assert_eq!(runtime.usage().heap_objects(), 16);
+    assert_eq!(runtime.usage().object_properties(), 135);
 }
 
 #[test]
 fn realm_intrinsic_creation_is_failure_atomic_at_each_limit() {
     for (limits, expected_resource, limit, observed) in [
         (
-            RuntimeLimits::default().with_max_heap_objects(11),
+            RuntimeLimits::default().with_max_heap_objects(15),
             RuntimeResource::HeapObjects,
-            11,
-            12,
-        ),
-        (
-            RuntimeLimits::default().with_max_heap_functions(16),
-            RuntimeResource::HeapFunctions,
+            15,
             16,
-            17,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(73),
+            RuntimeLimits::default().with_max_heap_functions(30),
+            RuntimeResource::HeapFunctions,
+            30,
+            31,
+        ),
+        (
+            RuntimeLimits::default().with_max_object_properties(134),
             RuntimeResource::ObjectProperties,
-            73,
-            74,
+            134,
+            135,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -1549,7 +1561,7 @@ fn realm_intrinsic_creation_is_failure_atomic_at_each_limit() {
 #[test]
 fn boxed_boolean_allocation_limit_failure_is_atomic() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(12)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(16)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = realm.0.id;
     let usage = runtime.usage();
@@ -1564,8 +1576,8 @@ fn boxed_boolean_allocation_limit_failure_is_atomic() {
             error,
             ExecutionError::LimitExceeded {
                 resource: RuntimeResource::HeapObjects,
-                limit: 12,
-                observed: 13,
+                limit: 16,
+                observed: 17,
             }
         ));
         assert_eq!(runtime.usage(), usage);
@@ -1576,7 +1588,7 @@ fn boxed_boolean_allocation_limit_failure_is_atomic() {
 #[test]
 fn boxed_boolean_allocation_at_exact_limit_preserves_brand_and_prototype() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(13)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(17)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = realm.0.id;
     let prototype = runtime
@@ -1587,8 +1599,8 @@ fn boxed_boolean_allocation_at_exact_limit_preserves_brand_and_prototype() {
         .allocate_boxed_boolean(realm_id, true)
         .expect("one boxed Boolean fits the exact limit");
 
-    assert_eq!(runtime.usage().heap_objects(), 13);
-    assert_eq!(runtime.usage().object_properties(), 74);
+    assert_eq!(runtime.usage().heap_objects(), 17);
+    assert_eq!(runtime.usage().object_properties(), 135);
     assert_eq!(
         runtime.boxed_boolean(object).expect("live wrapper"),
         Some(true)
@@ -1632,7 +1644,7 @@ fn boolean_brand_is_not_inferred_from_the_prototype_chain() {
 #[test]
 fn boxed_number_allocation_limit_failure_is_atomic() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(12)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(16)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = realm.0.id;
     let usage = runtime.usage();
@@ -1651,8 +1663,8 @@ fn boxed_number_allocation_limit_failure_is_atomic() {
             error,
             ExecutionError::LimitExceeded {
                 resource: RuntimeResource::HeapObjects,
-                limit: 12,
-                observed: 13,
+                limit: 16,
+                observed: 17,
             }
         ));
         assert_eq!(runtime.usage(), usage);
@@ -1663,7 +1675,7 @@ fn boxed_number_allocation_limit_failure_is_atomic() {
 #[test]
 fn boxed_number_allocation_at_exact_limit_preserves_payload_and_prototype() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(13)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(17)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = realm.0.id;
     let prototype = runtime
@@ -1675,8 +1687,8 @@ fn boxed_number_allocation_at_exact_limit_preserves_payload_and_prototype() {
         .allocate_boxed_number(realm_id, negative_zero)
         .expect("one boxed Number fits the exact limit");
 
-    assert_eq!(runtime.usage().heap_objects(), 13);
-    assert_eq!(runtime.usage().object_properties(), 74);
+    assert_eq!(runtime.usage().heap_objects(), 17);
+    assert_eq!(runtime.usage().object_properties(), 135);
     assert!(
         runtime
             .boxed_number(object)
@@ -1723,16 +1735,16 @@ fn number_brand_is_not_inferred_from_the_prototype_chain() {
 fn boxed_string_allocation_limits_fail_atomically() {
     for (limits, resource, limit, observed) in [
         (
-            RuntimeLimits::default().with_max_heap_objects(12),
+            RuntimeLimits::default().with_max_heap_objects(16),
             RuntimeResource::HeapObjects,
-            12,
-            13,
+            16,
+            17,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(74),
+            RuntimeLimits::default().with_max_object_properties(135),
             RuntimeResource::ObjectProperties,
-            74,
-            75,
+            135,
+            136,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -1763,8 +1775,8 @@ fn boxed_string_allocation_limits_fail_atomically() {
 #[test]
 fn boxed_string_allocation_preserves_payload_prototype_and_exact_length_property() {
     let limits = RuntimeLimits::default()
-        .with_max_heap_objects(13)
-        .with_max_object_properties(75);
+        .with_max_heap_objects(17)
+        .with_max_object_properties(136);
     let mut runtime = Runtime::try_new(limits).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = realm.0.id;
@@ -1777,8 +1789,8 @@ fn boxed_string_allocation_preserves_payload_prototype_and_exact_length_property
         .allocate_boxed_string(realm_id, text.clone())
         .expect("one boxed String fits the exact limits");
 
-    assert_eq!(runtime.usage().heap_objects(), 13);
-    assert_eq!(runtime.usage().object_properties(), 75);
+    assert_eq!(runtime.usage().heap_objects(), 17);
+    assert_eq!(runtime.usage().object_properties(), 136);
     assert_eq!(
         runtime.boxed_string(object).expect("live wrapper"),
         Some(&text)
@@ -1831,14 +1843,14 @@ fn string_brand_is_not_inferred_and_unrooted_wrapper_collection_releases_length_
             .expect("live wrapper")
             .is_some()
     );
-    assert_eq!(runtime.usage().object_properties(), 75);
+    assert_eq!(runtime.usage().object_properties(), 136);
 
     let report = runtime.collect_cycles().expect("collection");
 
     assert_eq!(report.objects(), 2);
     assert!(runtime.objects.get(fake).is_none());
     assert!(runtime.objects.get(wrapper).is_none());
-    assert_eq!(runtime.usage().object_properties(), 74);
+    assert_eq!(runtime.usage().object_properties(), 135);
 }
 
 #[test]
@@ -1869,6 +1881,36 @@ fn function_call_atom_limit_failure_is_failure_atomic() {
 }
 
 #[test]
+fn partial_dynamic_realm_atom_failure_rolls_back_every_interned_name() {
+    const PERMITTED_DYNAMIC_ATOMS: u32 = 8;
+    let atom_limits = AtomLimits::new(
+        PREDEFINED_ATOM_COUNT + PERMITTED_DYNAMIC_ATOMS,
+        PREDEFINED_DESCRIPTION_CODE_UNITS + 144,
+        PREDEFINED_INTERNER_SLOTS + 16,
+    );
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_atom_limits(atom_limits)).expect("runtime");
+    let usage_before = runtime.usage();
+    let atoms_before = runtime.atom_usage();
+
+    let error = runtime
+        .create_realm()
+        .expect_err("the ninth dynamic intrinsic name must exceed the atom limit");
+
+    assert!(matches!(
+        error,
+        RuntimeError::Atom(AtomError::LiveAtomLimit {
+            current,
+            additional: 1,
+            maximum,
+        }) if current == PREDEFINED_ATOM_COUNT + PERMITTED_DYNAMIC_ATOMS
+            && maximum == PREDEFINED_ATOM_COUNT + PERMITTED_DYNAMIC_ATOMS
+    ));
+    assert_eq!(runtime.usage(), usage_before);
+    assert_eq!(runtime.atom_usage(), atoms_before);
+}
+
+#[test]
 fn realm_function_intrinsics_remain_roots_during_collection() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -1882,7 +1924,7 @@ fn realm_function_intrinsics_remain_roots_during_collection() {
     let report = runtime.collect_cycles().expect("collection");
 
     assert_eq!(report.functions(), 0);
-    assert_eq!(runtime.usage().heap_functions(), 17);
+    assert_eq!(runtime.usage().heap_functions(), 31);
     assert_eq!(runtime.usage().installed_code(), 0);
     assert_eq!(
         runtime
@@ -1952,8 +1994,8 @@ fn function_methods_are_collected_after_their_realm_prototype_edges_are_replaced
     assert_eq!(report.functions(), 2);
     assert!(runtime.functions.get(function_call).is_none());
     assert!(runtime.functions.get(function_apply).is_none());
-    assert_eq!(runtime.usage().heap_functions(), 15);
-    assert_eq!(runtime.usage().object_properties(), 70);
+    assert_eq!(runtime.usage().heap_functions(), 29);
+    assert_eq!(runtime.usage().object_properties(), 131);
 }
 
 #[test]
@@ -2050,7 +2092,7 @@ fn accessor_getter_and_setter_are_traced_as_function_edges() {
     assert!(runtime.functions.get(getter).is_some());
     assert!(runtime.functions.get(setter).is_some());
     assert!(runtime.functions.get(orphan).is_none());
-    assert_eq!(runtime.usage().object_properties(), 75);
+    assert_eq!(runtime.usage().object_properties(), 136);
 }
 
 #[test]
@@ -2157,7 +2199,7 @@ fn accessor_to_data_global_replacement_rolls_back_the_complete_slot() {
 
     runtime.rollback_root_environment(realm_id, &environment);
 
-    assert_eq!(runtime.usage().object_properties(), 75);
+    assert_eq!(runtime.usage().object_properties(), 136);
     assert!(matches!(
         runtime
             .objects
@@ -2410,7 +2452,7 @@ fn for_in_boxes_primitives_and_enumerates_utf16_string_indices() {
 fn for_in_limits_roll_back_primitive_wrappers_and_gc_traces_iterator_current() {
     let mut limited = Runtime::try_new(
         RuntimeLimits::default()
-            .with_max_heap_objects(14)
+            .with_max_heap_objects(18)
             .with_max_for_in_entries(0),
     )
     .expect("runtime");

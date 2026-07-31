@@ -45,8 +45,8 @@ use crate::{
         ArrayDefineOutcome, ArrayLengthWriteOutcome, BindingCell, BytecodeFunction, CollectionRoot,
         EnvironmentBinding, ForInAdvance, FrameBindingAddress, FunctionImplementation,
         HeapFunction, InstalledCode, InstalledConstant, InstalledRoot, InstalledTemplate,
-        NativeFunction, NativeFunctionKind, RealmGlobalBindingState, array_length_from_number,
-        check_execution_limit, global_declaration_error, usize_to_u64,
+        NativeFunction, NativeFunctionKind, PreparedIteratorResultPlan, RealmGlobalBindingState,
+        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -56,6 +56,7 @@ mod conversions;
 mod dynamic;
 mod exceptions;
 mod execution;
+mod iterators;
 mod native;
 mod properties;
 mod stack;
@@ -65,8 +66,8 @@ mod stack;
     reason = "private VM sibling modules share one interpreter implementation namespace"
 )]
 use {
-    bindings::*, conversions::*, dynamic::*, exceptions::*, execution::*, native::*, properties::*,
-    stack::*,
+    bindings::*, conversions::*, dynamic::*, exceptions::*, execution::*, iterators::*, native::*,
+    properties::*, stack::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -226,6 +227,9 @@ enum NativeContinuation {
     PropertyKey(PropertyKeyContinuation),
     OperatorPrimitive(OperatorPrimitiveContinuation),
     IntrinsicGet(IntrinsicGetContinuation),
+    ArrayIteratorNext(ArrayIteratorNextContinuation),
+    IteratorAppend(IteratorAppendContinuation),
+    IteratorClose(IteratorCloseContinuation),
     FunctionCall,
 }
 
@@ -238,6 +242,9 @@ impl NativeContinuation {
             Self::PropertyKey(state) => state.retained_values(),
             Self::OperatorPrimitive(state) => state.retained_values(),
             Self::IntrinsicGet(state) => state.retained_values(),
+            Self::ArrayIteratorNext(state) => state.retained_values(),
+            Self::IteratorAppend(state) => state.retained_values(),
+            Self::IteratorClose(state) => state.retained_values(),
             Self::FunctionCall => 0,
         }
     }
@@ -293,6 +300,7 @@ enum ObjectPrototypeTag {
     Number,
     Object,
     String,
+    Symbol,
 }
 
 impl ObjectPrototypeTag {
@@ -305,7 +313,94 @@ impl ObjectPrototypeTag {
             Self::Number => "Number",
             Self::Object => "Object",
             Self::String => "String",
+            Self::Symbol => "Symbol",
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ArrayIteratorNextStage {
+    AwaitLength,
+    AwaitValue,
+}
+
+struct ArrayIteratorNextContinuation {
+    iterator: ObjectId,
+    iterated: StoredValue,
+    kind: crate::object::ArrayIteratorKind,
+    index: u32,
+    realm: RealmId,
+    stage: ArrayIteratorNextStage,
+    prepared_result: Option<PreparedIteratorResultPlan>,
+    origin: JsStackFrame,
+}
+
+impl ArrayIteratorNextContinuation {
+    fn retained_values(&self) -> u64 {
+        2_u64.saturating_add(
+            self.prepared_result
+                .as_ref()
+                .map_or(0, PreparedIteratorResultPlan::retained_values),
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "the Await prefix makes every resumable protocol boundary explicit"
+)]
+enum IteratorAppendStage {
+    AwaitProbe,
+    AwaitMethod,
+    AwaitIterator,
+    AwaitNextMethod,
+    AwaitNextResult,
+    AwaitDone,
+    AwaitValue,
+}
+
+struct IteratorAppendContinuation {
+    array: ObjectId,
+    next_index: u32,
+    iterable: StoredValue,
+    iterator: Option<StoredValue>,
+    next_acquired: bool,
+    next_method: Option<FunctionId>,
+    result: Option<StoredValue>,
+    realm: RealmId,
+    stage: IteratorAppendStage,
+    origin: JsStackFrame,
+}
+
+impl IteratorAppendContinuation {
+    fn retained_values(&self) -> u64 {
+        2_u64
+            .saturating_add(u64::from(self.iterator.is_some()))
+            .saturating_add(u64::from(self.next_method.is_some()))
+            .saturating_add(u64::from(self.result.is_some()))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum IteratorCloseStage {
+    AwaitReturnProperty,
+    AwaitReturnCall,
+}
+
+struct IteratorCloseContinuation {
+    iterator: StoredValue,
+    original: PendingException,
+    stage: IteratorCloseStage,
+}
+
+impl IteratorCloseContinuation {
+    #[allow(
+        clippy::unused_self,
+        reason = "close always retains iterator and original completion"
+    )]
+    const fn retained_values(&self) -> u64 {
+        2
     }
 }
 
@@ -492,6 +587,11 @@ enum OperatorPrimitiveTarget {
     StringIntrinsic {
         new_target: Option<FunctionId>,
     },
+    SymbolIntrinsic {
+        global_registry: bool,
+    },
+    StringIteratorIntrinsic,
+    ArrayIteratorLength(ArrayIteratorNextContinuation),
     FunctionApplyLength(FunctionApplyContinuation),
     ArrayLengthWrite(ArrayLengthWriteState),
 }
@@ -501,7 +601,9 @@ impl OperatorPrimitiveTarget {
         match self {
             Self::Unary { .. }
             | Self::NumberIntrinsic { new_target: None }
-            | Self::StringIntrinsic { new_target: None } => 0,
+            | Self::StringIntrinsic { new_target: None }
+            | Self::SymbolIntrinsic { .. }
+            | Self::StringIteratorIntrinsic => 0,
             Self::BinaryRight { .. }
             | Self::BinaryFinish { .. }
             | Self::EqualityFinish { .. }
@@ -512,6 +614,7 @@ impl OperatorPrimitiveTarget {
             | Self::StringIntrinsic {
                 new_target: Some(_),
             } => 1,
+            Self::ArrayIteratorLength(state) => state.retained_values(),
             Self::FunctionApplyLength(state) => state.retained_values(),
             Self::ArrayLengthWrite(state) => {
                 1_u64.saturating_add(u64::from(state.original.is_some()))
@@ -542,6 +645,11 @@ struct NativeCall {
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
     continuations: Vec<NativeContinuation>,
+    pre_call: Option<NativePreCall>,
+}
+
+enum NativePreCall {
+    AdvanceArrayIterator(ObjectId),
 }
 
 struct CallArguments {
@@ -630,7 +738,10 @@ fn trace_operator_primitive_target_roots(
     mark: &mut dyn FnMut(CollectionRoot),
 ) {
     match target {
-        OperatorPrimitiveTarget::Unary { .. } | OperatorPrimitiveTarget::NumberToString { .. } => {}
+        OperatorPrimitiveTarget::Unary { .. }
+        | OperatorPrimitiveTarget::NumberToString { .. }
+        | OperatorPrimitiveTarget::SymbolIntrinsic { .. }
+        | OperatorPrimitiveTarget::StringIteratorIntrinsic => {}
         OperatorPrimitiveTarget::BinaryRight { right, .. } => {
             trace_stored_value_root(right, mark);
         }
@@ -645,6 +756,10 @@ fn trace_operator_primitive_target_roots(
             if let Some(new_target) = new_target {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }
+        }
+        OperatorPrimitiveTarget::ArrayIteratorLength(state) => {
+            mark(CollectionRoot::Heap(HeapReference::Object(state.iterator)));
+            trace_stored_value_root(&state.iterated, mark);
         }
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             trace_function_apply_roots(state, mark);
@@ -718,6 +833,29 @@ fn trace_native_continuation_roots(
                 }
             }
         },
+        NativeContinuation::ArrayIteratorNext(state) => {
+            mark(CollectionRoot::Heap(HeapReference::Object(state.iterator)));
+            trace_stored_value_root(&state.iterated, mark);
+        }
+        NativeContinuation::IteratorAppend(state) => {
+            mark(CollectionRoot::Heap(HeapReference::Object(state.array)));
+            trace_stored_value_root(&state.iterable, mark);
+            if let Some(iterator) = &state.iterator {
+                trace_stored_value_root(iterator, mark);
+            }
+            if let Some(method) = state.next_method {
+                mark(CollectionRoot::Heap(HeapReference::Function(method)));
+            }
+            if let Some(result) = &state.result {
+                trace_stored_value_root(result, mark);
+            }
+        }
+        NativeContinuation::IteratorClose(state) => {
+            trace_stored_value_root(&state.iterator, mark);
+            if let PendingExceptionPayload::ThrownValue(value) = &state.original.payload {
+                trace_stored_value_root(value, mark);
+            }
+        }
         NativeContinuation::FunctionCall => {}
     }
 }
@@ -1356,7 +1494,14 @@ fn execute_frame_loop(
                             },
                             origin,
                         };
-                        dispatch_pending_exception(runtime, frames, active_frame_values, pending)?;
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
                         continue;
                     }
                     let active_frames = active_execution_frames(frames);
@@ -1430,6 +1575,8 @@ fn execute_frame_loop(
                                 frames,
                                 active_frame_values,
                                 pending,
+                                compiler,
+                                execution_budget,
                             )?;
                         }
                         Err(NativeFailure::AbruptAfterTransient(pending)) => {
@@ -1442,6 +1589,8 @@ fn execute_frame_loop(
                                 frames,
                                 active_frame_values,
                                 pending,
+                                compiler,
+                                execution_budget,
                             )?;
                         }
                         Err(NativeFailure::Execution(error)) => return Err(error),
@@ -1457,7 +1606,14 @@ fn execute_frame_loop(
                         },
                         origin,
                     };
-                    dispatch_pending_exception(runtime, frames, active_frame_values, pending)?;
+                    dispatch_pending_exception(
+                        runtime,
+                        frames,
+                        active_frame_values,
+                        pending,
+                        compiler,
+                        execution_budget,
+                    )?;
                     continue;
                 }
                 let plan = plan_frame(
@@ -1555,14 +1711,28 @@ fn execute_frame_loop(
                         .into());
                     }
                     Err(NativeFailure::Abrupt(pending)) => {
-                        dispatch_pending_exception(runtime, frames, active_frame_values, pending)?;
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
                     }
                     Err(NativeFailure::AbruptAfterTransient(pending)) => {
                         let frame = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
                             message: "transient native throw has no executing frame",
                         })?;
                         frame.transient_cleanup_pending = true;
-                        dispatch_pending_exception(runtime, frames, active_frame_values, pending)?;
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
                     }
                     Err(NativeFailure::Execution(error)) => return Err(error),
                 }
@@ -1573,7 +1743,14 @@ fn execute_frame_loop(
                 // Allocate provenance, then immediately publish the escaping
                 // root; no collection safe point may be inserted between
                 // these operations.
-                dispatch_pending_exception(runtime, frames, active_frame_values, pending)?;
+                dispatch_pending_exception(
+                    runtime,
+                    frames,
+                    active_frame_values,
+                    pending,
+                    compiler,
+                    execution_budget,
+                )?;
             }
             Step::Return(value) => {
                 let mut finished = frames.pop().ok_or(EngineFault::MissingInstruction {
@@ -1591,6 +1768,8 @@ fn execute_frame_loop(
                                 frames,
                                 active_frame_values,
                                 pending,
+                                compiler,
+                                execution_budget,
                             )?;
                             continue;
                         }
@@ -1678,6 +1857,8 @@ fn execute_frame_loop(
                                 frames,
                                 active_frame_values,
                                 pending,
+                                compiler,
+                                execution_budget,
                             )?;
                             continue;
                         }
@@ -1691,6 +1872,8 @@ fn execute_frame_loop(
                                 frames,
                                 active_frame_values,
                                 pending,
+                                compiler,
+                                execution_budget,
                             )?;
                             continue;
                         }

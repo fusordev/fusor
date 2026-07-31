@@ -1448,29 +1448,43 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     atom_candidates,
                 )?;
             }
-            AstKind::ArrayExpression(array)
-                if !array.elements.iter().any(ArrayExpressionElement::is_spread) =>
-            {
-                Self::record_sparse_array_property_candidates(owner, array, atom_candidates)?;
+            AstKind::ArrayExpression(array) => {
+                Self::record_array_property_candidates(owner, array, atom_candidates)?;
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn record_sparse_array_property_candidates(
+    fn record_array_property_candidates(
         owner: ExecutableId,
         array: &ArrayExpression<'arena>,
         atom_candidates: &mut [Vec<CompiledAtomCandidate>],
     ) -> Result<(), LeafCompilationError> {
-        let Some(first_elision) = array
+        let first_spread = array
             .elements
             .iter()
-            .position(ArrayExpressionElement::is_elision)
-        else {
-            return Ok(());
+            .position(ArrayExpressionElement::is_spread);
+        let first_static_index = if first_spread.is_some() {
+            Self::spread_array_dense_prefix_len(array)
+        } else {
+            let Some(first_elision) = array
+                .elements
+                .iter()
+                .position(ArrayExpressionElement::is_elision)
+            else {
+                return Ok(());
+            };
+            first_elision
         };
-        for (index, element) in array.elements.iter().enumerate().skip(first_elision + 1) {
+        let static_end = first_spread.unwrap_or(array.elements.len());
+        for (index, element) in array
+            .elements
+            .iter()
+            .enumerate()
+            .skip(first_static_index)
+            .take(static_end - first_static_index)
+        {
             if element.is_elision() {
                 continue;
             }
@@ -1497,11 +1511,19 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 atom_candidates,
             )?;
         }
-        if let Some(last) = array.elements.last().filter(|element| element.is_elision()) {
+        let final_length_span = match first_spread {
+            Some(_) => Self::spread_array_final_length_span(array),
+            None => array
+                .elements
+                .last()
+                .filter(|element| element.is_elision())
+                .map(GetSpan::span),
+        };
+        if let Some(final_length_span) = final_length_span {
             record_property_candidate_for(
                 owner,
-                compiler_identifier_string("length", last.span())?,
-                last.span(),
+                compiler_identifier_string("length", final_length_span)?,
+                final_length_span,
                 CompiledPropertyAtomKey::ArrayLength { array: array.span },
                 atom_candidates,
             )?;
@@ -4540,8 +4562,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
-        if let Some(spread) = array.elements.iter().find(|element| element.is_spread()) {
-            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, spread.span());
+        if let Some(first_spread) = array
+            .elements
+            .iter()
+            .position(ArrayExpressionElement::is_spread)
+        {
+            return Self::plan_spread_array_expression(array, first_spread, constants, work);
         }
         let Some(first_elision) = array
             .elements
@@ -4552,6 +4578,177 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         };
 
         Self::plan_sparse_array_expression(array, first_elision, constants, work)
+    }
+
+    fn spread_array_dense_prefix_len(array: &ArrayExpression<'arena>) -> usize {
+        // The pinned parser only stack-builds a small direct prefix before it
+        // switches to explicit fields and the dynamic spread cursor.
+        const QUICKJS_STACK_ARRAY_ELEMENT_LIMIT: usize = 32;
+
+        array
+            .elements
+            .iter()
+            .take(QUICKJS_STACK_ARRAY_ELEMENT_LIMIT)
+            .take_while(|element| !element.is_elision() && !element.is_spread())
+            .count()
+    }
+
+    fn spread_array_final_length_span(array: &ArrayExpression<'arena>) -> Option<Span> {
+        // A spread does not clear a pending hole: an empty trailing iterable
+        // still requires the cursor to become the array's observable length.
+        let mut final_length_span = None;
+        for element in array
+            .elements
+            .iter()
+            .skip(Self::spread_array_dense_prefix_len(array))
+        {
+            match element {
+                ArrayExpressionElement::SpreadElement(_) => {}
+                ArrayExpressionElement::Elision(elision) => {
+                    final_length_span = Some(elision.span);
+                }
+                _ => final_length_span = None,
+            }
+        }
+        final_length_span
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the exact QuickJS array-spread stack program is planned as one reviewable transaction"
+    )]
+    fn plan_spread_array_expression<'expression>(
+        array: &'expression ArrayExpression<'arena>,
+        first_spread: usize,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let dense_prefix = Self::spread_array_dense_prefix_len(array);
+        let argument_count =
+            u16::try_from(dense_prefix).map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "array literal stack prefix",
+            })?;
+        let dynamic_index =
+            i32::try_from(first_spread).map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "array literal dynamic index",
+            })?;
+        let first_spread_span = array.elements[first_spread].span();
+        let final_length_span = Self::spread_array_final_length_span(array);
+        let mut planned = Vec::new();
+
+        for element in array.elements.iter().take(dense_prefix) {
+            let expression =
+                element
+                    .as_expression()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "prevalidated spread-array stack prefix contains expressions",
+                        span: Some(element.span()),
+                    })?;
+            planned.push(ExpressionWork::Visit(expression));
+        }
+        planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ArrayFrom,
+            Operands::NPop { argument_count },
+            array.span,
+        )));
+
+        for (index, element) in array
+            .elements
+            .iter()
+            .enumerate()
+            .take(first_spread)
+            .skip(dense_prefix)
+        {
+            if element.is_elision() {
+                continue;
+            }
+            let expression =
+                element
+                    .as_expression()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "pre-spread array element is an expression or elision",
+                        span: Some(element.span()),
+                    })?;
+            let index =
+                u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "array literal element indices",
+                })?;
+            planned.push(ExpressionWork::Visit(expression));
+            planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::DefineField,
+                Operands::Atom(constants.array_index_atom_index(
+                    array.span,
+                    index,
+                    expression.span(),
+                )?),
+                expression.span(),
+            )));
+        }
+
+        planned.push(ExpressionWork::Emit(plan_push_integer(
+            dynamic_index,
+            first_spread_span,
+        )));
+        for element in array.elements.iter().skip(first_spread) {
+            match element {
+                ArrayExpressionElement::SpreadElement(spread) => {
+                    planned.push(ExpressionWork::Visit(&spread.argument));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Append,
+                        Operands::None,
+                        spread.span,
+                    )));
+                }
+                ArrayExpressionElement::Elision(elision) => {
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Inc,
+                        Operands::None,
+                        elision.span,
+                    )));
+                }
+                _ => {
+                    let expression = element.as_expression().ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "dynamic array element is an expression, spread, or elision",
+                            span: Some(element.span()),
+                        },
+                    )?;
+                    planned.push(ExpressionWork::Visit(expression));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::DefineArrayEl,
+                        Operands::None,
+                        expression.span(),
+                    )));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Inc,
+                        Operands::None,
+                        expression.span(),
+                    )));
+                }
+            }
+        }
+
+        if let Some(final_length_span) = final_length_span {
+            planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Dup1,
+                Operands::None,
+                final_length_span,
+            )));
+            planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PutField,
+                Operands::Atom(constants.array_length_atom_index(array.span, final_length_span)?),
+                final_length_span,
+            )));
+        } else {
+            planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                array.span,
+            )));
+        }
+
+        work.extend(planned.into_iter().rev());
+        Ok(())
     }
 
     fn plan_dense_array_expression<'expression>(

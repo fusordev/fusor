@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "array-spread-preserves-elements",
+      "covers": ["array-spread"],
+      "body": "let value = [1, ...[2, 3], 4];\nreturn \"\" + value[0] + value[1] + value[2] + value[3] + \":\" + value.length;",
+      "expect": {"kind": "string", "value": "1234:4"}
+    },
+    {
+      "id": "array-spread-densifies-elisions",
+      "covers": ["array-spread-elision"],
+      "body": "let value = [, ...[, 2], ,];\nreturn (value[0] === void 0) + \":\" + (value[1] === void 0) + \":\" + value[2] + \":\" + (value[3] === void 0) + \":\" + value.length;",
+      "expect": {"kind": "string", "value": "true:true:2:true:4"}
+    },
+    {
+      "id": "array-spread-evaluates-left-to-right",
+      "covers": ["array-spread-evaluation-order"],
+      "body": "let log = \"\";\nfunction mark(value) { log = log + value; return value; }\nlet result = [mark(\"a\"), ...[mark(\"b\")], mark(\"c\")];\nreturn log + \":\" + result[0] + result[1] + result[2];",
+      "expect": {"kind": "string", "value": "abc:abc"}
+    },
+    {
+      "id": "array-spread-supports-multiple-sources",
+      "covers": ["array-spread-multiple"],
+      "body": "let value = [...[1], 2, ...[3, 4]];\nreturn \"\" + value[0] + value[1] + value[2] + value[3] + \":\" + value.length;",
+      "expect": {"kind": "string", "value": "1234:4"}
+    },
+    {
+      "id": "empty-trailing-spread-preserves-hole-length",
+      "covers": ["array-spread-pending-hole-length"],
+      "body": "let value = [1, , ...[]];\nreturn value.length + \":\" + (value[1] === void 0);",
+      "expect": {"kind": "string", "value": "2:true"}
+    },
+    {
+      "id": "string-spread-uses-code-points",
+      "covers": ["array-spread-string", "array-spread-string-code-point"],
+      "body": "let ascii = [...\"ab\"];\nlet astral = [...\"A😀B\"];\nreturn ascii[0] + ascii[1] + \":\" + ascii.length + \"|\" + astral.length + \":\" + astral[0].length + \":\" + astral[1].length + \":\" + astral[2].length;",
+      "expect": {"kind": "string", "value": "ab:2|3:1:2:1"}
+    },
+    {
+      "id": "custom-iterator-orders-and-retains-methods",
+      "covers": ["iterator-method-receiver", "iterator-next-retained", "iterator-done-before-value", "iterator-done-skips-value"],
+      "body": "let log = \"\";\nlet iterable = {};\nlet iterator = {};\nlet step = 0;\nfunction retained() {\n  log = log + \"n\";\n  step = step + 1;\n  iterator.next = function reread() { throw new Error(\"next was reread\"); };\n  if (step === 1) return { get done() { log = log + \"d\"; return false; }, get value() { log = log + \"v\"; return \"x\"; } };\n  return { get done() { log = log + \"D\"; return true; }, get value() { log = log + \"V\"; return \"wrong\"; } };\n}\niterator.next = retained;\niterable[Symbol.iterator] = function iteratorMethod() { log = log + (this === iterable ? \"i\" : \"I\"); return iterator; };\nlet value = [...iterable];\nreturn log + \":\" + value[0] + \":\" + value.length;",
+      "expect": {"kind": "string", "value": "indvnD:x:1"}
+    },
+    {
+      "id": "append-performs-quickjs-method-probe",
+      "covers": ["iterator-method-double-lookup"],
+      "body": "let log = \"\";\nlet iterator = { next: function next() { return {done: true}; } };\nlet iterable = { get [Symbol.iterator]() { log = log + \"g\"; return function iteratorMethod() { log = log + \"c\"; return iterator; }; } };\n[...iterable];\nreturn log;",
+      "expect": {"kind": "string", "value": "ggc"}
+    },
+    {
+      "id": "normal-exhaustion-does-not-close",
+      "covers": ["iterator-close"],
+      "body": "let closed = 0;\nlet iterator = { next: function next() { return {done: true}; }, return: function close() { closed = closed + 1; return {}; } };\nlet iterable = {};\niterable[Symbol.iterator] = function iteratorMethod() { return iterator; };\n[...iterable];\nreturn closed;",
+      "expect": {"kind": "number", "bits": "0x0000000000000000"}
+    },
+    {
+      "id": "noncallable-iterator-method-is-rejected",
+      "covers": ["iterator-noncallable-method"],
+      "body": "let iterable = {};\niterable[Symbol.iterator] = 1;\nreturn [...iterable];",
+      "expect": {"kind": "throw", "name": "TypeError", "message": "value is not iterable"}
+    },
+    {
+      "id": "iterator-method-must-return-object",
+      "covers": ["iterator-nonobject"],
+      "body": "let iterable = {};\niterable[Symbol.iterator] = function iteratorMethod() { return 1; };\nreturn [...iterable];",
+      "expect": {"kind": "throw", "name": "TypeError", "message": "not an object"}
+    },
+    {
+      "id": "next-must-return-object",
+      "covers": ["iterator-result-nonobject"],
+      "body": "let iterable = {};\niterable[Symbol.iterator] = function iteratorMethod() { return { next: function next() { return 1; } }; };\nreturn [...iterable];",
+      "expect": {"kind": "throw", "name": "TypeError", "message": "iterator must return an object"}
+    },
+    {
+      "id": "iterator-close-preserves-next-exception",
+      "covers": ["iterator-close-preserves-exception"],
+      "body": "let log = \"\";\nlet step = 0;\nlet iterator = {};\niterator.next = function next() { log = log + \"n\"; step = step + 1; if (step === 1) return {done: false, value: \"x\"}; throw \"original\"; };\niterator.return = function close() { log = log + \"r\"; throw \"close\"; };\nlet iterable = {};\niterable[Symbol.iterator] = function iteratorMethod() { return iterator; };\ntry { [...iterable]; } catch (error) { return log + \":\" + error; }",
+      "expect": {"kind": "string", "value": "nnr:original"}
+    },
+    {
+      "id": "iterator-close-preserves-value-exception",
+      "covers": ["iterator-close-preserves-exception"],
+      "body": "let log = \"\";\nlet iterator = {};\niterator.next = function next() { return { get done() { log = log + \"d\"; return false; }, get value() { log = log + \"v\"; throw \"original\"; } }; };\niterator.return = function close() { log = log + \"r\"; return 1; };\nlet iterable = {};\niterable[Symbol.iterator] = function iteratorMethod() { return iterator; };\ntry { [...iterable]; } catch (error) { return log + \":\" + error; }",
+      "expect": {"kind": "string", "value": "dvr:original"}
+    },
+    {
+      "id": "initial-next-getter-failure-does-not-close",
+      "covers": ["iterator-next-getter", "iterator-close-boundary"],
+      "body": "let log = \"\";\nlet iterator = { get next() { log = log + \"g\"; throw \"original\"; }, return: function close() { log = log + \"r\"; return {}; } };\nlet iterable = {};\niterable[Symbol.iterator] = function iteratorMethod() { return iterator; };\ntry { [...iterable]; } catch (error) { return log + \":\" + error; }",
+      "expect": {"kind": "string", "value": "g:original"}
+    },
+    {
+      "id": "nested-abrupt-iteration-closes-inner-and-outer",
+      "covers": ["iterator-close-nested", "iterator-close-order"],
+      "body": "let log = \"\";\nlet inner = { next: function next() { throw \"original\"; }, return: function close() { log = log + \"i\"; return {}; } };\ninner[Symbol.iterator] = function iteratorMethod() { return inner; };\nlet outer = { next: function next() { [...inner]; }, return: function close() { log = log + \"o\"; return {}; } };\nouter[Symbol.iterator] = function iteratorMethod() { return outer; };\ntry { [...outer]; } catch (error) { return error + \":\" + log; }",
+      "expect": {"kind": "string", "value": "original:io"}
+    },
+    {
+      "id": "nested-inner-close-reaches-catch-before-outer-close",
+      "covers": ["iterator-close-catch-boundary"],
+      "body": "let log = \"\";\nlet inner = { next: function next() { throw \"original\"; }, return: function close() { log = log + \"i\"; return {}; } };\ninner[Symbol.iterator] = function iteratorMethod() { return inner; };\nlet outer = { next: function next() { try { [...inner]; } catch (error) { log = log + \"c\"; return {done: true}; } }, return: function close() { log = log + \"o\"; return {}; } };\nouter[Symbol.iterator] = function iteratorMethod() { return outer; };\n[...outer];\nreturn log;",
+      "expect": {"kind": "string", "value": "ic"}
+    }
+  ]
+}

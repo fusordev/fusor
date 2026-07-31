@@ -30,19 +30,44 @@ use std::collections::TryReserveError;
 use super::{
     Arc, Arena, ArrayIntrinsics, ArrayState, Atom, AtomError, AtomTable, BooleanIntrinsics,
     BoxedPrimitive, Context, ErrorIntrinsics, FunctionId, FunctionImplementation, HandleError,
-    HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, JsNumber, JsString,
-    NativeFunction, NativeFunctionKind, NumberIntrinsics, ObjectId, ObjectRecord, PredefinedAtom,
-    PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState,
-    ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource,
-    StoredValue, StringIntrinsics, check_limit, predefined_string, usize_to_u64,
+    HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, IteratorIntrinsics, JsNumber,
+    JsString, NativeFunction, NativeFunctionKind, NumberIntrinsics, ObjectId, ObjectRecord,
+    PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics,
+    RealmState, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
+    RuntimeResource, StoredValue, StringIntrinsics, SymbolIntrinsics, check_limit,
+    predefined_string, usize_to_u64,
 };
 
-const REALM_OBJECT_COUNT: usize = 12;
-const REALM_FUNCTION_COUNT: usize = 17;
-const REALM_PROPERTY_COUNT: u64 = 74;
+const REALM_OBJECT_COUNT: usize = 16;
+const REALM_FUNCTION_COUNT: usize = 31;
+const REALM_PROPERTY_COUNT: u64 = 135;
+const CALL_ATOM_INDEX: usize = 0;
+const ENTRIES_ATOM_INDEX: usize = 1;
+const KEY_FOR_ATOM_INDEX: usize = 2;
+const DESCRIPTION_ATOM_INDEX: usize = 3;
+const SYMBOL_STATIC_ATOM_START: usize = 4;
+
+const DYNAMIC_SYMBOL_STATIC_PROPERTIES: [(&str, PredefinedAtom); 12] = [
+    ("toPrimitive", PredefinedAtom::SymbolToPrimitive),
+    ("iterator", PredefinedAtom::SymbolIterator),
+    ("match", PredefinedAtom::SymbolMatch),
+    ("matchAll", PredefinedAtom::SymbolMatchAll),
+    ("replace", PredefinedAtom::SymbolReplace),
+    ("search", PredefinedAtom::SymbolSearch),
+    ("toStringTag", PredefinedAtom::SymbolToStringTag),
+    (
+        "isConcatSpreadable",
+        PredefinedAtom::SymbolIsConcatSpreadable,
+    ),
+    ("hasInstance", PredefinedAtom::SymbolHasInstance),
+    ("species", PredefinedAtom::SymbolSpecies),
+    ("unscopables", PredefinedAtom::SymbolUnscopables),
+    ("asyncIterator", PredefinedAtom::SymbolAsyncIterator),
+];
 
 const METHOD_PROPERTY: PropertyLayout = PropertyLayout::data(true, false, true);
 const IDENTITY_PROPERTY: PropertyLayout = PropertyLayout::data(false, false, true);
+const FROZEN_PROPERTY: PropertyLayout = PropertyLayout::data(false, false, false);
 const CONSTRUCTOR_PROTOTYPE_PROPERTY: PropertyLayout = PropertyLayout::data(false, false, false);
 const ARRAY_LENGTH_PROPERTY: PropertyLayout = PropertyLayout::data(true, false, false);
 
@@ -52,6 +77,7 @@ struct RealmKeys {
     number: PropertyKey,
     string: PropertyKey,
     array: PropertyKey,
+    symbol: PropertyKey,
     prototype: PropertyKey,
     constructor: PropertyKey,
     length: PropertyKey,
@@ -60,6 +86,14 @@ struct RealmKeys {
     to_string: PropertyKey,
     value_of: PropertyKey,
     apply: PropertyKey,
+    values: PropertyKey,
+    keys: PropertyKey,
+    next: PropertyKey,
+    symbol_iterator: PropertyKey,
+    symbol_to_primitive: PropertyKey,
+    symbol_to_string_tag: PropertyKey,
+    for_key: PropertyKey,
+    split: PropertyKey,
 }
 
 impl RealmKeys {
@@ -71,6 +105,7 @@ impl RealmKeys {
             number: key(PredefinedAtom::Number),
             string: key(PredefinedAtom::String),
             array: key(PredefinedAtom::Array),
+            symbol: key(PredefinedAtom::Symbol),
             prototype: key(PredefinedAtom::Prototype),
             constructor: key(PredefinedAtom::Constructor),
             length: key(PredefinedAtom::Length),
@@ -79,6 +114,20 @@ impl RealmKeys {
             to_string: key(PredefinedAtom::ToString),
             value_of: key(PredefinedAtom::ValueOf),
             apply: key(PredefinedAtom::Apply),
+            values: key(PredefinedAtom::Values),
+            keys: key(PredefinedAtom::Keys),
+            next: key(PredefinedAtom::Next),
+            symbol_iterator: PropertyKey::from_validated_symbol(
+                atoms.predefined(PredefinedAtom::SymbolIterator),
+            ),
+            symbol_to_primitive: PropertyKey::from_validated_symbol(
+                atoms.predefined(PredefinedAtom::SymbolToPrimitive),
+            ),
+            symbol_to_string_tag: PropertyKey::from_validated_symbol(
+                atoms.predefined(PredefinedAtom::SymbolToStringTag),
+            ),
+            for_key: key(PredefinedAtom::For),
+            split: key(PredefinedAtom::Split),
         }
     }
 }
@@ -89,6 +138,7 @@ struct RealmNames {
     number: JsString,
     string: JsString,
     array: JsString,
+    symbol: JsString,
     empty: JsString,
     to_string: JsString,
     value_of: JsString,
@@ -100,6 +150,18 @@ struct RealmNames {
     syntax_error: JsString,
     type_error: JsString,
     call: JsString,
+    values: JsString,
+    keys: JsString,
+    entries: JsString,
+    next: JsString,
+    key_for: JsString,
+    symbol_for: JsString,
+    description: JsString,
+    array_iterator: JsString,
+    string_iterator: JsString,
+    symbol_iterator_name: JsString,
+    symbol_to_primitive_name: JsString,
+    get_description: JsString,
 }
 
 impl RealmNames {
@@ -110,6 +172,7 @@ impl RealmNames {
             number: predefined_string(atoms, PredefinedAtom::Number),
             string: predefined_string(atoms, PredefinedAtom::String),
             array: predefined_string(atoms, PredefinedAtom::Array),
+            symbol: predefined_string(atoms, PredefinedAtom::Symbol),
             empty: predefined_string(atoms, PredefinedAtom::EmptyString),
             to_string: predefined_string(atoms, PredefinedAtom::ToString),
             value_of: predefined_string(atoms, PredefinedAtom::ValueOf),
@@ -121,6 +184,20 @@ impl RealmNames {
             syntax_error: predefined_string(atoms, PredefinedAtom::SyntaxError),
             type_error: predefined_string(atoms, PredefinedAtom::TypeError),
             call: JsString::from_utf8("call").map_err(AtomError::from)?,
+            values: predefined_string(atoms, PredefinedAtom::Values),
+            keys: predefined_string(atoms, PredefinedAtom::Keys),
+            entries: JsString::from_utf8("entries").map_err(AtomError::from)?,
+            next: predefined_string(atoms, PredefinedAtom::Next),
+            key_for: JsString::from_utf8("keyFor").map_err(AtomError::from)?,
+            symbol_for: predefined_string(atoms, PredefinedAtom::For),
+            description: JsString::from_utf8("description").map_err(AtomError::from)?,
+            array_iterator: predefined_string(atoms, PredefinedAtom::ArrayIterator),
+            string_iterator: predefined_string(atoms, PredefinedAtom::StringIterator),
+            symbol_iterator_name: JsString::from_utf8("[Symbol.iterator]")
+                .map_err(AtomError::from)?,
+            symbol_to_primitive_name: JsString::from_utf8("[Symbol.toPrimitive]")
+                .map_err(AtomError::from)?,
+            get_description: JsString::from_utf8("get description").map_err(AtomError::from)?,
         })
     }
 }
@@ -158,6 +235,30 @@ struct ArrayIntrinsicRecords {
     constructor: ObjectRecord,
 }
 
+struct IteratorIntrinsicRecords {
+    iterator_prototype: ObjectRecord,
+    iterator_method: ObjectRecord,
+    array_iterator_prototype: ObjectRecord,
+    array_iterator_next: ObjectRecord,
+    array_values: ObjectRecord,
+    array_keys: ObjectRecord,
+    array_entries: ObjectRecord,
+    string_iterator_prototype: ObjectRecord,
+    string_iterator_next: ObjectRecord,
+    string_iterator: ObjectRecord,
+}
+
+struct SymbolIntrinsicRecords {
+    prototype: ObjectRecord,
+    constructor: ObjectRecord,
+    to_string: ObjectRecord,
+    value_of: ObjectRecord,
+    to_primitive: ObjectRecord,
+    description: ObjectRecord,
+    symbol_for: ObjectRecord,
+    key_for: ObjectRecord,
+}
+
 struct RealmRecords {
     base: RealmBaseRecords,
     errors: ErrorPrototypeRecords,
@@ -165,6 +266,8 @@ struct RealmRecords {
     number: PrimitiveIntrinsicRecords,
     string: PrimitiveIntrinsicRecords,
     array: ArrayIntrinsicRecords,
+    iterators: IteratorIntrinsicRecords,
+    symbol: SymbolIntrinsicRecords,
 }
 
 impl RealmRecords {
@@ -172,7 +275,7 @@ impl RealmRecords {
         // Keep these reservations in the original transaction order so a
         // recoverable allocation failure reports the same `additional` value.
         let base = RealmBaseRecords {
-            global: reserved_record(5)?,
+            global: reserved_record(6)?,
             object_prototype: reserved_record(2)?,
             function_prototype: reserved_record(6)?,
             function_constructor: reserved_record(3)?,
@@ -203,13 +306,13 @@ impl RealmRecords {
             value_of: reserved_record(2)?,
         };
         let string = PrimitiveIntrinsicRecords {
-            prototype: reserved_record(4)?,
+            prototype: reserved_record(5)?,
             constructor: reserved_record(3)?,
             to_string: reserved_record(2)?,
             value_of: reserved_record(2)?,
         };
         let mut array = ArrayIntrinsicRecords {
-            prototype: reserved_record(2)?,
+            prototype: reserved_record(6)?,
             constructor: reserved_record(3)?,
         };
         array
@@ -220,6 +323,28 @@ impl RealmRecords {
                 StoredValue::Number(JsNumber::from_i32(0)),
             )
             .map_err(|_| property_allocation_failed(1))?;
+        let iterators = IteratorIntrinsicRecords {
+            iterator_prototype: reserved_record(1)?,
+            iterator_method: reserved_record(2)?,
+            array_iterator_prototype: reserved_record(2)?,
+            array_iterator_next: reserved_record(2)?,
+            array_values: reserved_record(2)?,
+            array_keys: reserved_record(2)?,
+            array_entries: reserved_record(2)?,
+            string_iterator_prototype: reserved_record(2)?,
+            string_iterator_next: reserved_record(2)?,
+            string_iterator: reserved_record(2)?,
+        };
+        let symbol = SymbolIntrinsicRecords {
+            prototype: reserved_record(6)?,
+            constructor: reserved_record(18)?,
+            to_string: reserved_record(2)?,
+            value_of: reserved_record(2)?,
+            to_primitive: reserved_record(2)?,
+            description: reserved_record(2)?,
+            symbol_for: reserved_record(2)?,
+            key_for: reserved_record(2)?,
+        };
         Ok(Self {
             base,
             errors,
@@ -227,6 +352,8 @@ impl RealmRecords {
             number,
             string,
             array,
+            iterators,
+            symbol,
         })
     }
 }
@@ -279,6 +406,30 @@ struct ArrayIntrinsicGraph {
     constructor: FunctionId,
 }
 
+struct IteratorIntrinsicGraph {
+    iterator_prototype: ObjectId,
+    iterator_method: FunctionId,
+    array_iterator_prototype: ObjectId,
+    array_iterator_next: FunctionId,
+    array_values: FunctionId,
+    array_keys: FunctionId,
+    array_entries: FunctionId,
+    string_iterator_prototype: ObjectId,
+    string_iterator_next: FunctionId,
+    string_iterator: FunctionId,
+}
+
+struct SymbolIntrinsicGraph {
+    prototype: ObjectId,
+    constructor: FunctionId,
+    to_string: FunctionId,
+    value_of: FunctionId,
+    to_primitive: FunctionId,
+    description: FunctionId,
+    symbol_for: FunctionId,
+    key_for: FunctionId,
+}
+
 impl RealmBase {
     fn rollback(self, runtime: &mut Runtime) {
         for function in [
@@ -300,17 +451,33 @@ impl RealmBase {
 
 struct RealmGraph {
     base: RealmBase,
-    call_atom: Atom,
+    dynamic_atoms: Vec<Atom>,
     errors: ErrorPrototypeGraph,
     boolean: PrimitiveIntrinsicGraph,
     number: PrimitiveIntrinsicGraph,
     string: PrimitiveIntrinsicGraph,
     array: ArrayIntrinsicGraph,
+    iterators: IteratorIntrinsicGraph,
+    symbol: SymbolIntrinsicGraph,
 }
 
 impl RealmGraph {
     fn rollback(self, runtime: &mut Runtime) {
         for function in [
+            self.symbol.key_for,
+            self.symbol.symbol_for,
+            self.symbol.description,
+            self.symbol.to_primitive,
+            self.symbol.value_of,
+            self.symbol.to_string,
+            self.symbol.constructor,
+            self.iterators.string_iterator,
+            self.iterators.string_iterator_next,
+            self.iterators.array_entries,
+            self.iterators.array_keys,
+            self.iterators.array_values,
+            self.iterators.array_iterator_next,
+            self.iterators.iterator_method,
             self.array.constructor,
             self.string.value_of,
             self.string.to_string,
@@ -325,6 +492,10 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for object in [
+            self.symbol.prototype,
+            self.iterators.string_iterator_prototype,
+            self.iterators.array_iterator_prototype,
+            self.iterators.iterator_prototype,
             self.array.prototype,
             self.string.prototype,
             self.number.prototype,
@@ -339,7 +510,9 @@ impl RealmGraph {
             debug_assert!(runtime.objects.remove(object).is_some());
         }
         self.base.rollback(runtime);
-        runtime.atoms.rollback_interned_string(self.call_atom);
+        for atom in self.dynamic_atoms.into_iter().rev() {
+            runtime.atoms.rollback_interned_string(atom);
+        }
     }
 }
 
@@ -436,6 +609,15 @@ impl Runtime {
                 prototype: graph.array.prototype,
                 constructor: graph.array.constructor,
             },
+            symbol: SymbolIntrinsics {
+                prototype: graph.symbol.prototype,
+                constructor: graph.symbol.constructor,
+            },
+            iterators: IteratorIntrinsics {
+                iterator_prototype: graph.iterators.iterator_prototype,
+                array_iterator_prototype: graph.iterators.array_iterator_prototype,
+                string_iterator_prototype: graph.iterators.string_iterator_prototype,
+            },
         };
         self.object_properties += REALM_PROPERTY_COUNT;
         Ok(Realm(Arc::new(RealmHandle {
@@ -481,14 +663,47 @@ impl Runtime {
         records: RealmRecords,
         names: &RealmNames,
     ) -> Result<RealmGraph, RuntimeError> {
-        let base = self.insert_realm_base(records.base);
-        let call_atom = match self.atoms.intern_string(&names.call) {
-            Ok(atom) => atom,
-            Err(error) => {
-                base.rollback(self);
-                return Err(error.into());
+        let mut dynamic_atoms = Vec::new();
+        dynamic_atoms
+            .try_reserve_exact(4 + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len())
+            .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, 16))?;
+        for name in [
+            &names.call,
+            &names.entries,
+            &names.key_for,
+            &names.description,
+        ] {
+            match self.atoms.intern_string(name) {
+                Ok(atom) => dynamic_atoms.push(atom),
+                Err(error) => {
+                    for atom in dynamic_atoms.into_iter().rev() {
+                        self.atoms.rollback_interned_string(atom);
+                    }
+                    return Err(error.into());
+                }
             }
-        };
+        }
+        for (name, _) in DYNAMIC_SYMBOL_STATIC_PROPERTIES {
+            let name = match JsString::from_utf8(name) {
+                Ok(name) => name,
+                Err(error) => {
+                    for atom in dynamic_atoms.into_iter().rev() {
+                        self.atoms.rollback_interned_string(atom);
+                    }
+                    return Err(AtomError::from(error).into());
+                }
+            };
+            match self.atoms.intern_string(&name) {
+                Ok(atom) => dynamic_atoms.push(atom),
+                Err(error) => {
+                    for atom in dynamic_atoms.into_iter().rev() {
+                        self.atoms.rollback_interned_string(atom);
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+        let base = self.insert_realm_base(records.base);
 
         let errors = self.insert_error_prototypes(&base, records.errors);
         let boolean = self.insert_primitive_intrinsics(
@@ -522,15 +737,19 @@ impl Runtime {
             },
         );
         let array = self.insert_array_intrinsics(&base, records.array);
+        let iterators = self.insert_iterator_intrinsics(&base, records.iterators);
+        let symbol = self.insert_symbol_intrinsics(&base, records.symbol);
 
         Ok(RealmGraph {
             base,
-            call_atom,
+            dynamic_atoms,
             errors,
             boolean,
             number,
             string,
             array,
+            iterators,
+            symbol,
         })
     }
 
@@ -706,6 +925,140 @@ impl Runtime {
         }
     }
 
+    fn insert_iterator_intrinsics(
+        &mut self,
+        base: &RealmBase,
+        mut records: IteratorIntrinsicRecords,
+    ) -> IteratorIntrinsicGraph {
+        records
+            .iterator_prototype
+            .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
+        let iterator_prototype =
+            self.insert_reserved_object(HeapObject::ordinary(records.iterator_prototype));
+        let iterator_method = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::IteratorPrototypeIterator,
+            records.iterator_method,
+        );
+
+        records
+            .array_iterator_prototype
+            .replace_prototype(Some(HeapReference::Object(iterator_prototype)));
+        let array_iterator_prototype =
+            self.insert_reserved_object(HeapObject::ordinary(records.array_iterator_prototype));
+        let array_iterator_next = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ArrayIteratorNext,
+            records.array_iterator_next,
+        );
+        let array_values = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ArrayPrototypeValues,
+            records.array_values,
+        );
+        let array_keys = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ArrayPrototypeKeys,
+            records.array_keys,
+        );
+        let array_entries = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ArrayPrototypeEntries,
+            records.array_entries,
+        );
+
+        records
+            .string_iterator_prototype
+            .replace_prototype(Some(HeapReference::Object(iterator_prototype)));
+        let string_iterator_prototype =
+            self.insert_reserved_object(HeapObject::ordinary(records.string_iterator_prototype));
+        let string_iterator_next = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::StringIteratorNext,
+            records.string_iterator_next,
+        );
+        let string_iterator = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::StringPrototypeIterator,
+            records.string_iterator,
+        );
+        IteratorIntrinsicGraph {
+            iterator_prototype,
+            iterator_method,
+            array_iterator_prototype,
+            array_iterator_next,
+            array_values,
+            array_keys,
+            array_entries,
+            string_iterator_prototype,
+            string_iterator_next,
+            string_iterator,
+        }
+    }
+
+    fn insert_symbol_intrinsics(
+        &mut self,
+        base: &RealmBase,
+        mut records: SymbolIntrinsicRecords,
+    ) -> SymbolIntrinsicGraph {
+        records
+            .prototype
+            .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
+        let prototype = self.insert_reserved_object(HeapObject::ordinary(records.prototype));
+        let make = |runtime: &mut Self, kind, record| {
+            runtime.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                kind,
+                record,
+            )
+        };
+        let constructor = make(
+            self,
+            NativeFunctionKind::SymbolConstructor,
+            records.constructor,
+        );
+        let to_string = make(
+            self,
+            NativeFunctionKind::SymbolPrototypeToString,
+            records.to_string,
+        );
+        let value_of = make(
+            self,
+            NativeFunctionKind::SymbolPrototypeValueOf,
+            records.value_of,
+        );
+        let to_primitive = make(
+            self,
+            NativeFunctionKind::SymbolPrototypeToPrimitive,
+            records.to_primitive,
+        );
+        let description = make(
+            self,
+            NativeFunctionKind::SymbolPrototypeDescription,
+            records.description,
+        );
+        let symbol_for = make(self, NativeFunctionKind::SymbolFor, records.symbol_for);
+        let key_for = make(self, NativeFunctionKind::SymbolKeyFor, records.key_for);
+        SymbolIntrinsicGraph {
+            prototype,
+            constructor,
+            to_string,
+            value_of,
+            to_primitive,
+            description,
+            symbol_for,
+            key_for,
+        }
+    }
+
     fn insert_reserved_native(
         &mut self,
         realm: RealmId,
@@ -794,6 +1147,8 @@ impl Runtime {
             names,
         )?;
         self.publish_array_intrinsic_properties(&graph.array, keys, names)?;
+        self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
+        self.publish_symbol_intrinsic_properties(&graph.symbol, graph, keys, names)?;
         self.append_object_methods(
             graph.base.global_object,
             [
@@ -802,6 +1157,7 @@ impl Runtime {
                 (&keys.number, graph.number.constructor),
                 (&keys.string, graph.string.constructor),
                 (&keys.array, graph.array.constructor),
+                (&keys.symbol, graph.symbol.constructor),
             ],
         )
     }
@@ -872,7 +1228,7 @@ impl Runtime {
                 StoredValue::Function(graph.base.function_to_string),
             )?;
             record.append_data(
-                PropertyKey::from_validated_atom(graph.call_atom.clone()),
+                PropertyKey::from_validated_atom(graph.dynamic_atoms[CALL_ATOM_INDEX].clone()),
                 METHOD_PROPERTY,
                 StoredValue::Function(graph.base.function_call),
             )?;
@@ -955,6 +1311,193 @@ impl Runtime {
             &names.array,
             keys,
         )
+    }
+
+    fn publish_iterator_intrinsic_properties(
+        &mut self,
+        iterators: &IteratorIntrinsicGraph,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        self.append_object_methods(
+            iterators.iterator_prototype,
+            [(&keys.symbol_iterator, iterators.iterator_method)],
+        )?;
+        self.append_function_identity(
+            iterators.iterator_method,
+            &names.symbol_iterator_name,
+            0,
+            keys,
+        )?;
+
+        self.append_object_methods(
+            iterators.array_iterator_prototype,
+            [(&keys.next, iterators.array_iterator_next)],
+        )?;
+        self.objects
+            .get_mut(iterators.array_iterator_prototype)
+            .expect("new Array Iterator prototype remains live")
+            .record
+            .append_data(
+                keys.symbol_to_string_tag.clone(),
+                IDENTITY_PROPERTY,
+                StoredValue::String(names.array_iterator.clone()),
+            )?;
+        self.append_function_identity(iterators.array_iterator_next, &names.next, 0, keys)?;
+
+        let entries =
+            PropertyKey::from_validated_atom(graph.dynamic_atoms[ENTRIES_ATOM_INDEX].clone());
+        self.append_object_methods(
+            graph.array.prototype,
+            [
+                (&keys.values, iterators.array_values),
+                (&keys.symbol_iterator, iterators.array_values),
+                (&keys.keys, iterators.array_keys),
+                (&entries, iterators.array_entries),
+            ],
+        )?;
+        for (function, name) in [
+            (iterators.array_values, &names.values),
+            (iterators.array_keys, &names.keys),
+            (iterators.array_entries, &names.entries),
+        ] {
+            self.append_function_identity(function, name, 0, keys)?;
+        }
+
+        self.append_object_methods(
+            iterators.string_iterator_prototype,
+            [(&keys.next, iterators.string_iterator_next)],
+        )?;
+        self.objects
+            .get_mut(iterators.string_iterator_prototype)
+            .expect("new String Iterator prototype remains live")
+            .record
+            .append_data(
+                keys.symbol_to_string_tag.clone(),
+                IDENTITY_PROPERTY,
+                StoredValue::String(names.string_iterator.clone()),
+            )?;
+        self.append_function_identity(iterators.string_iterator_next, &names.next, 0, keys)?;
+        self.append_object_methods(
+            graph.string.prototype,
+            [(&keys.symbol_iterator, iterators.string_iterator)],
+        )?;
+        self.append_function_identity(
+            iterators.string_iterator,
+            &names.symbol_iterator_name,
+            0,
+            keys,
+        )
+    }
+
+    fn publish_symbol_intrinsic_properties(
+        &mut self,
+        symbol: &SymbolIntrinsicGraph,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        let description_key =
+            PropertyKey::from_validated_atom(graph.dynamic_atoms[DESCRIPTION_ATOM_INDEX].clone());
+        {
+            let record = &mut self
+                .objects
+                .get_mut(symbol.prototype)
+                .expect("new Symbol prototype remains live")
+                .record;
+            for (key, function) in [
+                (&keys.constructor, symbol.constructor),
+                (&keys.to_string, symbol.to_string),
+                (&keys.value_of, symbol.value_of),
+            ] {
+                record.append_data(
+                    key.clone(),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            }
+            record.append_data(
+                keys.symbol_to_primitive.clone(),
+                IDENTITY_PROPERTY,
+                StoredValue::Function(symbol.to_primitive),
+            )?;
+            record.append_data(
+                keys.symbol_to_string_tag.clone(),
+                IDENTITY_PROPERTY,
+                StoredValue::String(names.symbol.clone()),
+            )?;
+            record.append_accessor(
+                description_key,
+                PropertyLayout::accessor(false, true),
+                Some(symbol.description),
+                None,
+            )?;
+        }
+
+        {
+            let key_for_key =
+                PropertyKey::from_validated_atom(graph.dynamic_atoms[KEY_FOR_ATOM_INDEX].clone());
+            let record = &mut self
+                .functions
+                .get_mut(symbol.constructor)
+                .expect("new Symbol constructor remains live")
+                .object;
+            record.append_data(
+                keys.prototype.clone(),
+                CONSTRUCTOR_PROTOTYPE_PROPERTY,
+                StoredValue::Object(symbol.prototype),
+            )?;
+            record.append_data(
+                keys.length.clone(),
+                IDENTITY_PROPERTY,
+                StoredValue::Number(JsNumber::from_i32(0)),
+            )?;
+            record.append_data(
+                keys.name.clone(),
+                IDENTITY_PROPERTY,
+                StoredValue::String(names.symbol.clone()),
+            )?;
+            record.append_data(
+                keys.for_key.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(symbol.symbol_for),
+            )?;
+            record.append_data(
+                key_for_key,
+                METHOD_PROPERTY,
+                StoredValue::Function(symbol.key_for),
+            )?;
+            for (index, ((_, symbol_atom), name_atom)) in DYNAMIC_SYMBOL_STATIC_PROPERTIES
+                .iter()
+                .zip(&graph.dynamic_atoms[SYMBOL_STATIC_ATOM_START..])
+                .enumerate()
+            {
+                if index == 6 {
+                    record.append_data(
+                        keys.split.clone(),
+                        FROZEN_PROPERTY,
+                        StoredValue::Symbol(self.atoms.predefined(PredefinedAtom::SymbolSplit)),
+                    )?;
+                }
+                record.append_data(
+                    PropertyKey::from_validated_atom(name_atom.clone()),
+                    FROZEN_PROPERTY,
+                    StoredValue::Symbol(self.atoms.predefined(*symbol_atom)),
+                )?;
+            }
+        }
+        for (function, name, length) in [
+            (symbol.to_string, &names.to_string, 0),
+            (symbol.value_of, &names.value_of, 0),
+            (symbol.to_primitive, &names.symbol_to_primitive_name, 1),
+            (symbol.description, &names.get_description, 0),
+            (symbol.symbol_for, &names.symbol_for, 1),
+            (symbol.key_for, &names.key_for, 1),
+        ] {
+            self.append_function_identity(function, name, length, keys)?;
+        }
+        Ok(())
     }
 
     fn append_constructor_identity(

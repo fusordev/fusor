@@ -42,13 +42,16 @@ use crate::{
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     object::{
-        ArrayState, BoxedPrimitive, ForInIterator, ForInSnapshot, HeapObject, ObjectRecord,
-        OwnProperty,
+        ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, ForInIterator, ForInSnapshot,
+        HeapObject, ObjectRecord, OwnProperty, StringIterator,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
 
+mod iterators;
 mod limits;
+mod symbols;
+pub(crate) use iterators::PreparedIteratorResultPlan;
 pub use limits::{RuntimeLimits, RuntimeUsage};
 
 struct RealmState {
@@ -73,6 +76,8 @@ enum RealmIntrinsics {
         number: NumberIntrinsics,
         string: StringIntrinsics,
         array: ArrayIntrinsics,
+        symbol: SymbolIntrinsics,
+        iterators: IteratorIntrinsics,
     },
 }
 
@@ -120,6 +125,23 @@ struct StringIntrinsics {
 struct ArrayIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SymbolIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "the intrinsic names make each hidden iterator prototype ownership edge explicit"
+)]
+struct IteratorIntrinsics {
+    iterator_prototype: ObjectId,
+    array_iterator_prototype: ObjectId,
+    string_iterator_prototype: ObjectId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -248,6 +270,20 @@ pub(crate) enum NativeFunctionKind {
     StringPrototypeToString,
     StringPrototypeValueOf,
     ArrayConstructor,
+    SymbolConstructor,
+    SymbolPrototypeToString,
+    SymbolPrototypeValueOf,
+    SymbolPrototypeToPrimitive,
+    SymbolPrototypeDescription,
+    SymbolFor,
+    SymbolKeyFor,
+    IteratorPrototypeIterator,
+    ArrayPrototypeValues,
+    ArrayPrototypeKeys,
+    ArrayPrototypeEntries,
+    ArrayIteratorNext,
+    StringPrototypeIterator,
+    StringIteratorNext,
 }
 
 impl NativeFunctionKind {
@@ -691,6 +727,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushTrue
             | FinalOpcode::Object
             | FinalOpcode::ArrayFrom
+            | FinalOpcode::Append
             | FinalOpcode::Catch
             | FinalOpcode::Gosub
             | FinalOpcode::Ret
@@ -698,6 +735,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Nip
             | FinalOpcode::NipCatch
             | FinalOpcode::Dup
+            | FinalOpcode::Dup1
             | FinalOpcode::Insert2
             | FinalOpcode::Insert3
             | FinalOpcode::Swap

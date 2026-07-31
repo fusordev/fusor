@@ -472,6 +472,7 @@ fn exception_unwind_discards_intervening_finally_return_addresses() {
         .push(OperandStackEntry::FinallyReturn { continuation });
     let mut active_frame_values = frame.reserved_values;
     let mut frames = vec![frame];
+    let mut execution_budget = ExecutionBudget::new(ExecutionLimits::default());
 
     dispatch_pending_exception(
         &mut runtime,
@@ -484,6 +485,8 @@ fn exception_unwind_discards_intervening_finally_return_addresses() {
             ))),
             origin: native_function_host_origin(),
         },
+        None,
+        &mut execution_budget,
     )
     .expect("verified catch dispatch");
 
@@ -495,6 +498,510 @@ fn exception_unwind_discards_intervening_finally_return_addresses() {
         [OperandStackEntry::JavaScript(StoredValue::Number(caught))]
             if caught.strict_equals(JsNumber::from_i32(9))
     ));
+}
+
+#[test]
+fn array_iterator_creation_boxes_a_primitive_receiver_once() {
+    let (mut runtime, realm, _) = ordinary_test_frame();
+    let Ok(dispatch) = begin_array_iterator_method(
+        &mut runtime,
+        StoredValue::Number(JsNumber::from_i32(7)),
+        crate::object::ArrayIteratorKind::Value,
+        realm,
+        native_function_host_origin(),
+    ) else {
+        panic!("Array iterator creation failed");
+    };
+    let NativeDispatch::Immediate(StoredValue::Object(iterator)) = dispatch else {
+        panic!("Array iterator creation must complete immediately");
+    };
+    let snapshot = runtime
+        .array_iterator_snapshot(iterator)
+        .expect("Array iterator state");
+    let Some(StoredValue::Object(wrapper)) = snapshot.iterated else {
+        panic!("primitive receiver must be retained as one wrapper");
+    };
+    assert!(
+        runtime
+            .boxed_number(wrapper)
+            .expect("live Number wrapper")
+            .is_some_and(|number| number.strict_equals(JsNumber::from_i32(7)))
+    );
+}
+
+#[test]
+fn array_iterator_primitive_boxing_preflights_the_complete_transaction() {
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(17)).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let usage = runtime.usage();
+    let collection_pending = runtime.collection_pending;
+
+    let result = begin_array_iterator_method(
+        &mut runtime,
+        StoredValue::Number(JsNumber::from_i32(7)),
+        crate::object::ArrayIteratorKind::Value,
+        realm_id,
+        native_function_host_origin(),
+    );
+    assert!(matches!(
+        result,
+        Err(NativeFailure::Execution(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::HeapObjects,
+            limit: 17,
+            observed: 18,
+        }))
+    ));
+    assert_eq!(runtime.usage(), usage);
+    assert_eq!(runtime.collection_pending, collection_pending);
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one matrix regression proves heap and property atomicity for all Array iterator result shapes"
+)]
+fn array_iterator_result_preflight_preserves_cursor_and_allows_retry() {
+    for (kind, result_objects, result_properties) in [
+        (crate::object::ArrayIteratorKind::Key, 1_u64, 2_u64),
+        (crate::object::ArrayIteratorKind::Value, 1, 2),
+        (crate::object::ArrayIteratorKind::KeyAndValue, 2, 5),
+    ] {
+        for constrained in [
+            RuntimeResource::HeapObjects,
+            RuntimeResource::ObjectProperties,
+        ] {
+            let (mut runtime, realm, _) = ordinary_test_frame();
+            let iterated = runtime
+                .allocate_array(realm, vec![StoredValue::Number(JsNumber::from_i32(11))])
+                .expect("iterated Array");
+            let iterator = runtime
+                .allocate_array_iterator(realm, StoredValue::Object(iterated), kind)
+                .expect("Array iterator");
+            let baseline = runtime.usage();
+            let collection_pending = runtime.collection_pending;
+            let original_limits = runtime.limits;
+            let (limit, observed) = match constrained {
+                RuntimeResource::HeapObjects => {
+                    let observed = baseline.heap_objects() + result_objects;
+                    runtime.limits.max_heap_objects = observed - 1;
+                    (runtime.limits.max_heap_objects, observed)
+                }
+                RuntimeResource::ObjectProperties => {
+                    let observed = baseline.object_properties() + result_properties;
+                    runtime.limits.max_object_properties = observed - 1;
+                    (runtime.limits.max_object_properties, observed)
+                }
+                _ => unreachable!("the matrix only constrains iterator-result resources"),
+            };
+            let state = ArrayIteratorNextContinuation {
+                iterator,
+                iterated: StoredValue::Object(iterated),
+                kind,
+                index: 0,
+                realm,
+                stage: ArrayIteratorNextStage::AwaitLength,
+                prepared_result: None,
+                origin: native_function_host_origin(),
+            };
+            let mut execution_budget = ExecutionBudget::new(ExecutionLimits::default());
+
+            let failure = finish_array_iterator_length(
+                &mut runtime,
+                state,
+                StoredValue::Number(JsNumber::from_i32(1)),
+                None,
+                &mut execution_budget,
+            );
+
+            assert!(matches!(
+                failure,
+                Err(NativeFailure::Execution(ExecutionError::LimitExceeded {
+                    resource,
+                    limit: actual_limit,
+                    observed: actual_observed,
+                })) if resource == constrained
+                    && actual_limit == limit
+                    && actual_observed == observed
+            ));
+            assert_eq!(runtime.usage(), baseline);
+            assert_eq!(runtime.collection_pending, collection_pending);
+            assert_eq!(
+                runtime
+                    .array_iterator_snapshot(iterator)
+                    .expect("Array iterator after failed preflight")
+                    .next,
+                0
+            );
+
+            runtime.limits = original_limits;
+            let retry_state = ArrayIteratorNextContinuation {
+                iterator,
+                iterated: StoredValue::Object(iterated),
+                kind,
+                index: 0,
+                realm,
+                stage: ArrayIteratorNextStage::AwaitLength,
+                prepared_result: None,
+                origin: native_function_host_origin(),
+            };
+            let Ok(retry) = finish_array_iterator_length(
+                &mut runtime,
+                retry_state,
+                StoredValue::Number(JsNumber::from_i32(1)),
+                None,
+                &mut execution_budget,
+            ) else {
+                panic!("retry after restoring resource capacity failed");
+            };
+            assert!(matches!(
+                retry,
+                NativeDispatch::Immediate(StoredValue::Object(_))
+            ));
+            assert_eq!(
+                runtime
+                    .array_iterator_snapshot(iterator)
+                    .expect("Array iterator after retry")
+                    .next,
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn string_iterator_result_preflight_preserves_cursor_and_allows_retry() {
+    for constrained in [
+        RuntimeResource::HeapObjects,
+        RuntimeResource::ObjectProperties,
+    ] {
+        let (mut runtime, realm, _) = ordinary_test_frame();
+        let iterator = runtime
+            .allocate_string_iterator(realm, JsString::from_utf8("A").expect("String"))
+            .expect("String iterator");
+        let baseline = runtime.usage();
+        let collection_pending = runtime.collection_pending;
+        let original_limits = runtime.limits;
+        let (limit, observed) = match constrained {
+            RuntimeResource::HeapObjects => {
+                runtime.limits.max_heap_objects = baseline.heap_objects();
+                (baseline.heap_objects(), baseline.heap_objects() + 1)
+            }
+            RuntimeResource::ObjectProperties => {
+                runtime.limits.max_object_properties = baseline.object_properties() + 1;
+                (
+                    baseline.object_properties() + 1,
+                    baseline.object_properties() + 2,
+                )
+            }
+            _ => unreachable!("the matrix only constrains iterator-result resources"),
+        };
+
+        let failure = begin_string_iterator_next(
+            &mut runtime,
+            StoredValue::Object(iterator),
+            realm,
+            native_function_host_origin(),
+        );
+
+        assert!(matches!(
+            failure,
+            Err(NativeFailure::Execution(ExecutionError::LimitExceeded {
+                resource,
+                limit: actual_limit,
+                observed: actual_observed,
+            })) if resource == constrained
+                && actual_limit == limit
+                && actual_observed == observed
+        ));
+        assert_eq!(runtime.usage(), baseline);
+        assert_eq!(runtime.collection_pending, collection_pending);
+        assert_eq!(
+            runtime
+                .objects
+                .get(iterator)
+                .expect("String iterator after failed preflight")
+                .string_iterator_state()
+                .expect("String Iterator class")
+                .next(),
+            0
+        );
+
+        runtime.limits = original_limits;
+        let Ok(retry) = begin_string_iterator_next(
+            &mut runtime,
+            StoredValue::Object(iterator),
+            realm,
+            native_function_host_origin(),
+        ) else {
+            panic!("retry after restoring resource capacity failed");
+        };
+        assert!(matches!(
+            retry,
+            NativeDispatch::Immediate(StoredValue::Object(_))
+        ));
+        assert_eq!(
+            runtime
+                .objects
+                .get(iterator)
+                .expect("String iterator after retry")
+                .string_iterator_state()
+                .expect("String Iterator class")
+                .next(),
+            1
+        );
+    }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one matrix regression covers getter admission for both prepared Array iterator result shapes"
+)]
+fn array_iterator_getter_admission_preserves_cursor_and_prepared_values() {
+    for (kind, prepared_values) in [
+        (crate::object::ArrayIteratorKind::Value, 2_u64),
+        (crate::object::ArrayIteratorKind::KeyAndValue, 5_u64),
+    ] {
+        for constrained in [RuntimeResource::Frames, RuntimeResource::FrameValues] {
+            let (mut runtime, realm, getter_frame) = ordinary_test_frame();
+            let getter = getter_frame.function;
+            let prototype = runtime
+                .realm_array_prototype(realm)
+                .expect("Array.prototype");
+            let iterated = runtime
+                .allocate_sparse_array_with_prototype(HeapReference::Object(prototype), 1)
+                .expect("sparse Array");
+            runtime
+                .append_accessor_property(
+                    HeapReference::Object(iterated),
+                    PropertyKey::from_index(ArrayIndex::new(0).expect("index")),
+                    PropertyLayout::accessor(true, true),
+                    Some(getter),
+                    None,
+                )
+                .expect("element getter");
+            let iterator = runtime
+                .allocate_array_iterator(realm, StoredValue::Object(iterated), kind)
+                .expect("Array iterator");
+            let baseline = runtime.usage();
+            let collection_pending = runtime.collection_pending;
+            let original_limits = runtime.limits;
+            let expected_continuation_values = 2_u64.saturating_add(prepared_values);
+            let (expected_limit, expected_observed) = match constrained {
+                RuntimeResource::Frames => {
+                    runtime.limits.max_active_frames = 1;
+                    (1, 2)
+                }
+                RuntimeResource::FrameValues => {
+                    runtime.limits.max_active_frame_values =
+                        expected_continuation_values.saturating_sub(1);
+                    (
+                        expected_continuation_values.saturating_sub(1),
+                        expected_continuation_values,
+                    )
+                }
+                _ => unreachable!("the matrix only constrains call-admission resources"),
+            };
+            let state = ArrayIteratorNextContinuation {
+                iterator,
+                iterated: StoredValue::Object(iterated),
+                kind,
+                index: 0,
+                realm,
+                stage: ArrayIteratorNextStage::AwaitLength,
+                prepared_result: None,
+                origin: native_function_host_origin(),
+            };
+            let mut execution_budget = ExecutionBudget::new(ExecutionLimits::default());
+            let Ok(dispatch) = finish_array_iterator_length(
+                &mut runtime,
+                state,
+                StoredValue::Number(JsNumber::from_i32(1)),
+                None,
+                &mut execution_budget,
+            ) else {
+                panic!("element getter dispatch must be prepared");
+            };
+            let NativeDispatch::Call(call) = &dispatch else {
+                panic!("an accessor element must dispatch its getter");
+            };
+            assert_eq!(
+                native_continuation_values(&call.continuations),
+                expected_continuation_values
+            );
+            assert_eq!(
+                runtime
+                    .array_iterator_snapshot(iterator)
+                    .expect("Array iterator before getter admission")
+                    .next,
+                0
+            );
+
+            let failure = resolve_native_dispatch(
+                &mut runtime,
+                dispatch,
+                &[],
+                0,
+                0,
+                None,
+                &mut execution_budget,
+            );
+
+            assert!(matches!(
+                failure,
+                Err(NativeFailure::Execution(ExecutionError::LimitExceeded {
+                    resource,
+                    limit,
+                    observed,
+                })) if resource == constrained
+                    && limit == expected_limit
+                    && observed == expected_observed
+            ));
+            assert_eq!(runtime.usage(), baseline);
+            assert_eq!(runtime.collection_pending, collection_pending);
+            assert_eq!(
+                runtime
+                    .array_iterator_snapshot(iterator)
+                    .expect("Array iterator after rejected getter")
+                    .next,
+                0
+            );
+
+            runtime.limits = original_limits;
+            let retry_state = ArrayIteratorNextContinuation {
+                iterator,
+                iterated: StoredValue::Object(iterated),
+                kind,
+                index: 0,
+                realm,
+                stage: ArrayIteratorNextStage::AwaitLength,
+                prepared_result: None,
+                origin: native_function_host_origin(),
+            };
+            let mut retry_budget = ExecutionBudget::new(ExecutionLimits::default());
+            let Ok(retry_dispatch) = finish_array_iterator_length(
+                &mut runtime,
+                retry_state,
+                StoredValue::Number(JsNumber::from_i32(1)),
+                None,
+                &mut retry_budget,
+            ) else {
+                panic!("getter retry must be prepared");
+            };
+            let Ok(resolved) = resolve_native_dispatch(
+                &mut runtime,
+                retry_dispatch,
+                &[],
+                0,
+                0,
+                None,
+                &mut retry_budget,
+            ) else {
+                panic!("getter retry must pass call admission");
+            };
+            assert!(matches!(resolved, NativeDispatch::Frame(_)));
+            assert_eq!(
+                runtime
+                    .array_iterator_snapshot(iterator)
+                    .expect("Array iterator after admitted getter")
+                    .next,
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn array_iterator_lookup_fuel_failure_preserves_cursor_and_allows_retry() {
+    let (mut runtime, realm, _) = ordinary_test_frame();
+    let iterated = runtime
+        .allocate_array(realm, vec![StoredValue::Number(JsNumber::from_i32(11))])
+        .expect("iterated Array");
+    let iterator = runtime
+        .allocate_array_iterator(
+            realm,
+            StoredValue::Object(iterated),
+            crate::object::ArrayIteratorKind::Value,
+        )
+        .expect("Array iterator");
+    let baseline = runtime.usage();
+    let collection_pending = runtime.collection_pending;
+    let mut preview = ExecutionBudget::new(ExecutionLimits::default());
+    charge_iterator_property_lookup(&runtime, &StoredValue::Object(iterated), &mut preview)
+        .unwrap_or_else(|_| panic!("property-lookup work preview failed"));
+    let required_fuel = preview.executed_instructions;
+    assert!(required_fuel > 0);
+    let mut tight_budget =
+        ExecutionBudget::new(ExecutionLimits::default().with_instruction_fuel(required_fuel - 1));
+    let state = ArrayIteratorNextContinuation {
+        iterator,
+        iterated: StoredValue::Object(iterated),
+        kind: crate::object::ArrayIteratorKind::Value,
+        index: 0,
+        realm,
+        stage: ArrayIteratorNextStage::AwaitLength,
+        prepared_result: None,
+        origin: native_function_host_origin(),
+    };
+
+    let failure = finish_array_iterator_length(
+        &mut runtime,
+        state,
+        StoredValue::Number(JsNumber::from_i32(1)),
+        None,
+        &mut tight_budget,
+    );
+
+    let Err(NativeFailure::Execution(ExecutionError::InstructionLimitExceeded { limit, executed })) =
+        failure
+    else {
+        panic!("tight iterator lookup fuel must fail before cursor mutation");
+    };
+    assert_eq!(limit, required_fuel - 1);
+    assert_eq!(executed, required_fuel - 1);
+    assert_eq!(runtime.usage(), baseline);
+    assert_eq!(runtime.collection_pending, collection_pending);
+    assert_eq!(
+        runtime
+            .array_iterator_snapshot(iterator)
+            .expect("Array iterator after fuel rejection")
+            .next,
+        0
+    );
+
+    let retry_state = ArrayIteratorNextContinuation {
+        iterator,
+        iterated: StoredValue::Object(iterated),
+        kind: crate::object::ArrayIteratorKind::Value,
+        index: 0,
+        realm,
+        stage: ArrayIteratorNextStage::AwaitLength,
+        prepared_result: None,
+        origin: native_function_host_origin(),
+    };
+    let mut retry_budget = ExecutionBudget::new(ExecutionLimits::default());
+    let Ok(retry) = finish_array_iterator_length(
+        &mut runtime,
+        retry_state,
+        StoredValue::Number(JsNumber::from_i32(1)),
+        None,
+        &mut retry_budget,
+    ) else {
+        panic!("retry with sufficient lookup fuel failed");
+    };
+    assert!(matches!(
+        retry,
+        NativeDispatch::Immediate(StoredValue::Object(_))
+    ));
+    assert_eq!(
+        runtime
+            .array_iterator_snapshot(iterator)
+            .expect("Array iterator after fuel retry")
+            .next,
+        1
+    );
 }
 
 #[test]
@@ -4184,8 +4691,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(76)).expect("runtime");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(137))
+        .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
         .context(&realm)
@@ -4206,8 +4713,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 76,
-            observed: 77,
+            limit: 137,
+            observed: 138,
         }
     ));
     let failed = runtime.usage();

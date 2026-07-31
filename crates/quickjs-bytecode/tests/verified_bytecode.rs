@@ -12,9 +12,9 @@ use quickjs_bytecode::{
     MAX_GOSUB_SITES_PER_FUNCTION, MetadataAtomField, Operands, PcSourceSpan, ScopeLink,
     SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction,
     UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader,
-    UnverifiedFunctionMetadata, VariableDefinition, VerificationLimits, VerifiedBytecode,
-    VerifiedControlFlow, verify_compiler_bytecode_graph, verify_compiler_control_flow,
-    verify_compiler_function_graph,
+    UnverifiedFunctionMetadata, VariableDefinition, VerificationErrorKind, VerificationLimits,
+    VerifiedBytecode, VerifiedControlFlow, verify_compiler_bytecode_graph,
+    verify_compiler_control_flow, verify_compiler_function_graph,
 };
 
 fn atom(text: &str) -> CompilerAtom {
@@ -407,6 +407,414 @@ fn final_authority_admits_array_from_with_a_sorted_array_requirement() {
 }
 
 #[test]
+fn final_authority_admits_only_compiler_shaped_array_append_pairs() {
+    let instructions = [
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 1 }),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (
+            FinalOpcode::DefineField,
+            Operands::Atom(AtomPoolIndex::new(0)),
+        ),
+        (FinalOpcode::Push4, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::DefineArrayEl, Operands::None),
+        (FinalOpcode::Inc, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+
+    let verified = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[static_property_only_atom("2")], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a sparse prefix and dynamic suffix retain one checked array append pair");
+
+    assert!(
+        verified
+            .requirements()
+            .contains(&ExecutionRequirement::Iterators)
+    );
+}
+
+#[test]
+fn final_authority_admits_only_the_trailing_elision_dup1_length_shape() {
+    let instructions = [
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::Inc, Operands::None),
+        (FinalOpcode::Dup1, Operands::None),
+        (FinalOpcode::PutField, Operands::Atom(AtomPoolIndex::new(0))),
+        (FinalOpcode::Return, Operands::None),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[atom("length")], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("dup1 may only finalize the exact trailing-elision array length shape");
+
+    let hole_before_initial_spread = [
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 1 }),
+        (FinalOpcode::Push3, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::Dup1, Operands::None),
+        (FinalOpcode::PutField, Operands::Atom(AtomPoolIndex::new(0))),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&hole_before_initial_spread, &[atom("length")], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("an initial cursor gap retains the pending trailing elision across append");
+
+    let hole_before_later_spread = [
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::Inc, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::Dup1, Operands::None),
+        (FinalOpcode::PutField, Operands::Atom(AtomPoolIndex::new(0))),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&hole_before_later_spread, &[atom("length")], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a pending trailing elision survives every following spread");
+
+    let forged = [
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Dup1, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&forged, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("dup1 remains closed outside trailing append length finalization");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::AppendOperandStackMismatch {
+            opcode: FinalOpcode::Dup1,
+            ..
+        }
+    ));
+
+    let no_trailing_elision = [
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::Dup1, Operands::None),
+        (FinalOpcode::PutField, Operands::Atom(AtomPoolIndex::new(0))),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&no_trailing_elision, &[atom("length")], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("dup1 requires a cursor advanced by an actual trailing elision");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::AppendOperandStackMismatch {
+            opcode: FinalOpcode::Dup1,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn final_authority_rejects_forged_moved_or_aliased_array_append_pairs() {
+    let cases = [
+        vec![
+            (FinalOpcode::Object, Operands::None),
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+            (FinalOpcode::Dup, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (FinalOpcode::Dup, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (FinalOpcode::Swap, Operands::None),
+            (FinalOpcode::Swap, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::Add, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+    ];
+
+    for instructions in cases {
+        let error = verify_compiler_bytecode_graph(
+            typed_stack_input(&instructions, &[], &[]),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("append requires one exact unaliased destination/cursor pair");
+        assert!(
+            matches!(
+                error.kind(),
+                BytecodeVerificationErrorKind::AppendOperandStackMismatch {
+                    opcode: FinalOpcode::Append,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn final_authority_rejects_append_cursor_without_its_required_increment() {
+    let instructions = [
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::DefineArrayEl, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("define_array_el must be followed by the compiler-owned cursor increment");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::AppendOperandStackMismatch {
+            opcode: FinalOpcode::Undefined,
+            ..
+        }
+    ));
+
+    let erased_cursor = [
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::DefineArrayEl, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&erased_cursor, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("the required increment cannot be erased before returning the destination");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::AppendOperandStackMismatch {
+            opcode: FinalOpcode::Drop,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn final_authority_rejects_append_provenance_at_a_terminal() {
+    let instructions = [
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            encode(&instructions),
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect_err("the staged gate rejects append provenance before it can reach a terminal");
+    assert_eq!(
+        error.kind(),
+        &VerificationErrorKind::NonEmptyCompilerExitStack { remaining: 2 }
+    );
+}
+
+#[test]
+fn final_authority_rejects_linear_append_provenance_laundering() {
+    let cases = [
+        vec![
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Dup, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Inc, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+    ];
+
+    for instructions in cases {
+        let error = verify_compiler_bytecode_graph(
+            typed_stack_input(&instructions, &[], &[]),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("linear append ownership cannot be copied, collapsed, or dropped pending");
+        assert!(
+            matches!(
+                error.kind(),
+                BytecodeVerificationErrorKind::AppendOperandStackMismatch { .. }
+            ),
+            "{error:?}"
+        );
+    }
+
+    let collapsed_pair = [
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::Nip, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&collapsed_pair, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("nip cannot collapse a live append destination/cursor pair");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::ForInIteratorStackMismatch {
+            opcode: FinalOpcode::Nip,
+            ..
+        }
+    ));
+
+    let variable = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        var_policy(),
+        false,
+        None,
+    );
+    let stored_cursor = [
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&stored_cursor, &[atom("local")], &[variable]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("an append cursor cannot be laundered through frame storage");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::AppendOperandStackMismatch {
+                opcode: FinalOpcode::PutLoc0,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn final_authority_rejects_linear_append_provenance_join_laundering() {
+    let instructions = [
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse, Operands::Label(10)),
+        (FinalOpcode::Inc, Operands::None),
+        (FinalOpcode::Goto, Operands::Label(5)),
+        (FinalOpcode::Nop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("joins cannot merge checked and pending-elision append ownership");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::AppendProvenanceJoinMismatch { .. }
+    ));
+}
+
+#[test]
 fn execution_requirement_capacity_matches_the_exhaustive_sorted_family_set() {
     let requirements = [
         ExecutionRequirement::CoreValues,
@@ -415,6 +823,7 @@ fn execution_requirement_capacity_matches_the_exhaustive_sorted_family_set() {
         ExecutionRequirement::BigInts,
         ExecutionRequirement::Closures,
         ExecutionRequirement::Arrays,
+        ExecutionRequirement::Iterators,
         ExecutionRequirement::OrdinaryObjects,
         ExecutionRequirement::DynamicPropertyKeys,
         ExecutionRequirement::Calls,

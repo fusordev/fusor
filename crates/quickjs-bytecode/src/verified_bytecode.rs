@@ -705,6 +705,8 @@ pub enum ExecutionRequirement {
     Closures,
     /// Dense ordinary array construction.
     Arrays,
+    /// Synchronous iterator acquisition, stepping, closing, and append.
+    Iterators,
     /// Ordinary objects, static property access, and own data properties.
     OrdinaryObjects,
     /// Runtime conversion and lookup of computed property keys.
@@ -725,7 +727,7 @@ pub enum ExecutionRequirement {
 
 /// Number of conservative runtime implementation families selectable by the
 /// whole-graph compiler authority.
-pub const EXECUTION_REQUIREMENT_COUNT: usize = 14;
+pub const EXECUTION_REQUIREMENT_COUNT: usize = 15;
 
 const fn execution_requirement_ordinal(requirement: ExecutionRequirement) -> usize {
     match requirement {
@@ -735,14 +737,15 @@ const fn execution_requirement_ordinal(requirement: ExecutionRequirement) -> usi
         ExecutionRequirement::BigInts => 3,
         ExecutionRequirement::Closures => 4,
         ExecutionRequirement::Arrays => 5,
-        ExecutionRequirement::OrdinaryObjects => 6,
-        ExecutionRequirement::DynamicPropertyKeys => 7,
-        ExecutionRequirement::Calls => 8,
-        ExecutionRequirement::AbruptCompletions => 9,
-        ExecutionRequirement::LexicalBindings => 10,
-        ExecutionRequirement::RealmGlobalBindings => 11,
-        ExecutionRequirement::ObjectOperators => 12,
-        ExecutionRequirement::DynamicOperators => 13,
+        ExecutionRequirement::Iterators => 6,
+        ExecutionRequirement::OrdinaryObjects => 7,
+        ExecutionRequirement::DynamicPropertyKeys => 8,
+        ExecutionRequirement::Calls => 9,
+        ExecutionRequirement::AbruptCompletions => 10,
+        ExecutionRequirement::LexicalBindings => 11,
+        ExecutionRequirement::RealmGlobalBindings => 12,
+        ExecutionRequirement::ObjectOperators => 13,
+        ExecutionRequirement::DynamicOperators => 14,
     }
 }
 
@@ -1525,6 +1528,26 @@ pub enum BytecodeVerificationErrorKind {
         /// Final bytecode position of `define_array_el`.
         pc: BytecodePc,
     },
+    /// `append` or one of its compiler-owned setup operations did not retain
+    /// one unaliased `array_from` destination and its checked integer cursor.
+    AppendOperandStackMismatch {
+        /// Final bytecode position.
+        pc: BytecodePc,
+        /// Opcode whose typed inputs were invalid.
+        opcode: FinalOpcode,
+    },
+    /// A terminal path retained compiler-internal array-append provenance.
+    AppendMarkerAtExit {
+        /// Terminal bytecode position.
+        pc: BytecodePc,
+    },
+    /// Control flow merged distinct linear array-append ownership states.
+    AppendProvenanceJoinMismatch {
+        /// Join target.
+        target: BytecodePc,
+        /// Incoming edge that disagreed with established provenance.
+        incoming_from: BytecodePc,
+    },
     /// An ordinary-method template closure is not consumed by its one
     /// compiler-shaped `define_method` site.
     OrdinaryMethodTemplatePlacementMismatch {
@@ -1823,6 +1846,21 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::DefineArrayElementKeyMismatch { pc } => write!(
                 formatter,
                 "define_array_el at PC {pc} does not use a key converted before its value on one fresh object literal"
+            ),
+            Self::AppendOperandStackMismatch { pc, opcode } => write!(
+                formatter,
+                "opcode {opcode:?} at PC {pc} does not retain one fresh array_from destination and checked append cursor"
+            ),
+            Self::AppendMarkerAtExit { pc } => write!(
+                formatter,
+                "terminal at PC {pc} retains compiler-internal array append provenance"
+            ),
+            Self::AppendProvenanceJoinMismatch {
+                target,
+                incoming_from,
+            } => write!(
+                formatter,
+                "linear array append provenance at PC {target} disagrees with the edge from PC {incoming_from}"
             ),
             Self::OrdinaryMethodTemplatePlacementMismatch { pc, child } => write!(
                 formatter,
@@ -3756,6 +3794,8 @@ fn verify_method_definitions(
                 FinalOpcode::DefineMethod
                     | FinalOpcode::DefineMethodComputed
                     | FinalOpcode::DefineArrayEl
+                    | FinalOpcode::Append
+                    | FinalOpcode::Dup1
             )
         }) {
             verify_object_definition_provenance(parent_id, parent, internal_stack, limits, usage)?;
@@ -3844,6 +3884,14 @@ const fn is_method_definition_opcode(opcode: FinalOpcode) -> bool {
 enum ObjectDefinitionProvenance {
     Unknown,
     FreshObject(u32),
+    FreshArray { site: u32, minimum_cursor: u32 },
+    ArrayCursorCandidate { site: u32, value: u32 },
+    AppendDestination(u32),
+    CheckedAppendCursor(u32),
+    AppendCursorAfterElision(u32),
+    AppendCursorNeedsIncrement(u32),
+    AppendLengthTarget(u32),
+    AppendLengthCursor(u32),
     ConvertedPropertyKey(u32),
 }
 
@@ -3915,7 +3963,26 @@ fn verify_object_definition_provenance(
         )?;
         let mut state = try_copy_slice(id, entry, BytecodeGraphResource::FrameStateEntries)?;
         let decoded = instructions[index].decoded();
-        match decoded.instruction().opcode() {
+        let instruction = decoded.instruction();
+        let opcode = instruction.opcode();
+        if state.iter().copied().any(is_append_length_marker)
+            && (opcode != FinalOpcode::PutField
+                || !is_append_length_finalizer(function, instruction.operands(), &state))
+        {
+            return Err(append_stack_error(id, decoded.pc(), opcode));
+        }
+        if state.iter().any(|value| {
+            matches!(
+                value,
+                ObjectDefinitionProvenance::AppendCursorNeedsIncrement(_)
+            )
+        }) && (opcode != FinalOpcode::Inc
+            || append_pair_needing_increment_at_top(&state).is_none())
+        {
+            return Err(append_stack_error(id, decoded.pc(), opcode));
+        }
+        verify_linear_append_inputs(id, decoded, function, &state)?;
+        match opcode {
             FinalOpcode::DefineMethod
                 if !matches!(
                     state.get(state.len().saturating_sub(2)),
@@ -3935,15 +4002,40 @@ fn verify_object_definition_provenance(
             FinalOpcode::DefineArrayEl => {
                 let object = state.get(state.len().saturating_sub(3));
                 let key = state.get(state.len().saturating_sub(2));
-                if !matches!(
+                let object_literal = matches!(
                     (object, key),
                     (
                         Some(ObjectDefinitionProvenance::FreshObject(object_site)),
                         Some(ObjectDefinitionProvenance::ConvertedPropertyKey(key_site))
                     ) if object_site == key_site
-                ) {
+                );
+                if !object_literal && append_pair_for_element(&state).is_none() {
                     return Err(define_array_element_key_error(id, decoded.pc()));
                 }
+            }
+            FinalOpcode::DefineField
+                if matches!(
+                    state.get(state.len().saturating_sub(2)),
+                    Some(ObjectDefinitionProvenance::FreshArray { .. })
+                ) =>
+            {
+                let Some(index) = static_array_index(function, instruction.operands()) else {
+                    return Err(append_stack_error(id, decoded.pc(), opcode));
+                };
+                let Some(ObjectDefinitionProvenance::FreshArray { minimum_cursor, .. }) =
+                    state.get(state.len() - 2)
+                else {
+                    return Err(append_stack_error(id, decoded.pc(), opcode));
+                };
+                if index < *minimum_cursor {
+                    return Err(append_stack_error(id, decoded.pc(), opcode));
+                }
+            }
+            FinalOpcode::Append if append_pair_for_append(&state).is_none() => {
+                return Err(append_stack_error(id, decoded.pc(), opcode));
+            }
+            FinalOpcode::Dup1 if trailing_elision_pair_at_top(&state).is_none() => {
+                return Err(append_stack_error(id, decoded.pc(), opcode));
             }
             _ => {}
         }
@@ -3952,12 +4044,15 @@ fn verify_object_definition_provenance(
             index,
             decoded,
             internal_stack.nip_catch_transform(index),
+            function,
             &mut state,
         )? {
             continue;
         }
 
+        let mut has_successor = false;
         for edge in internal_stack.effective_successors(instructions, index) {
+            has_successor = true;
             let successor = edge.target;
             if edge.enters_finally {
                 state.try_reserve(1).map_err(|_| {
@@ -3982,6 +4077,7 @@ fn verify_object_definition_provenance(
                 id,
                 decoded.pc(),
                 successor,
+                instructions[successor.get() as usize].decoded().pc(),
                 &state,
                 &mut entries,
                 &mut queued,
@@ -3993,6 +4089,12 @@ fn verify_object_definition_provenance(
                 state.pop();
             }
         }
+        if !has_successor && state.iter().copied().any(is_append_provenance) {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::AppendMarkerAtExit { pc: decoded.pc() },
+            ));
+        }
     }
     charge(
         &mut usage.policy_transfers,
@@ -4002,11 +4104,16 @@ fn verify_object_definition_provenance(
     )
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "fresh object definitions and the exact array-append state machine share one stack transfer boundary"
+)]
 fn transfer_object_definition_provenance(
     id: FunctionTemplateId,
     instruction_index: usize,
     decoded: crate::DecodedInstruction,
     nip_catch_transform: Option<CertifiedNipCatchTransform>,
+    function: &VerifiedCompilerFunction,
     state: &mut Vec<ObjectDefinitionProvenance>,
 ) -> Result<bool, BytecodeVerificationError> {
     let instruction = decoded.instruction();
@@ -4044,11 +4151,38 @@ fn transfer_object_definition_provenance(
         FinalOpcode::Object => state.push(ObjectDefinitionProvenance::FreshObject(usize_to_u32(
             instruction_index,
         ))),
+        FinalOpcode::ArrayFrom => {
+            let Some(argument_count) = instruction.operands().dynamic_argument_count() else {
+                return Err(append_stack_error(id, decoded.pc(), instruction.opcode()));
+            };
+            state.truncate(state.len() - pops);
+            state.push(ObjectDefinitionProvenance::FreshArray {
+                site: usize_to_u32(instruction_index),
+                minimum_cursor: u32::from(argument_count),
+            });
+        }
         FinalOpcode::Dup => {
             let value = *state
                 .last()
                 .ok_or_else(|| object_definition_error(id, decoded.pc()))?;
-            state.push(shuffled_object_definition_provenance(value));
+            if is_append_provenance(value) {
+                *state
+                    .last_mut()
+                    .ok_or_else(|| object_definition_error(id, decoded.pc()))? =
+                    ObjectDefinitionProvenance::Unknown;
+                state.push(ObjectDefinitionProvenance::Unknown);
+            } else {
+                state.push(shuffled_object_definition_provenance(value));
+            }
+        }
+        FinalOpcode::Dup1 => {
+            let Some(site) = trailing_elision_pair_at_top(state) else {
+                return Err(append_stack_error(id, decoded.pc(), instruction.opcode()));
+            };
+            let pair = state.len() - 2;
+            state[pair] = ObjectDefinitionProvenance::AppendDestination(site);
+            state[pair + 1] = ObjectDefinitionProvenance::AppendLengthTarget(site);
+            state.push(ObjectDefinitionProvenance::AppendLengthCursor(site));
         }
         FinalOpcode::Insert2 => {
             let left_index = state.len() - 2;
@@ -4069,31 +4203,124 @@ fn transfer_object_definition_provenance(
             state.push(third);
         }
         FinalOpcode::GetField2 => {
+            let base = state.len() - 1;
+            if is_append_provenance(state[base]) {
+                state[base] = ObjectDefinitionProvenance::Unknown;
+            }
             state.push(ObjectDefinitionProvenance::Unknown);
         }
         FinalOpcode::GetArrayEl2 => {
-            let base = state[state.len() - 2];
+            let base = retained_object_definition_provenance(state[state.len() - 2]);
             state.truncate(state.len() - 2);
             state.push(base);
             state.push(ObjectDefinitionProvenance::Unknown);
         }
         FinalOpcode::ToPropKey => convert_property_key_provenance(state),
-        FinalOpcode::DefineField | FinalOpcode::DefineMethod => {
+        FinalOpcode::DefineField => {
             let base = state[state.len() - 2];
+            let base = match base {
+                ObjectDefinitionProvenance::FreshArray { site, .. } => {
+                    let Some(index) = static_array_index(function, instruction.operands()) else {
+                        return Err(append_stack_error(id, decoded.pc(), instruction.opcode()));
+                    };
+                    ObjectDefinitionProvenance::FreshArray {
+                        site,
+                        minimum_cursor: index.saturating_add(1),
+                    }
+                }
+                value => retained_object_definition_provenance(value),
+            };
+            state.truncate(state.len() - 2);
+            state.push(base);
+        }
+        FinalOpcode::DefineMethod => {
+            let base = retained_object_definition_provenance(state[state.len() - 2]);
             state.truncate(state.len() - 2);
             state.push(base);
         }
         FinalOpcode::DefineArrayEl => {
-            let base = state[state.len() - 3];
-            let key = state[state.len() - 2];
-            state.truncate(state.len() - 3);
-            state.push(base);
-            state.push(key);
+            if let Some(site) = append_pair_for_element(state) {
+                state.truncate(state.len() - 3);
+                state.push(ObjectDefinitionProvenance::AppendDestination(site));
+                state.push(ObjectDefinitionProvenance::AppendCursorNeedsIncrement(site));
+            } else {
+                let base = state[state.len() - 3];
+                let key = state[state.len() - 2];
+                state.truncate(state.len() - 3);
+                state.push(base);
+                state.push(key);
+            }
         }
         FinalOpcode::DefineMethodComputed => {
-            let base = state[state.len() - 3];
+            let base = retained_object_definition_provenance(state[state.len() - 3]);
             state.truncate(state.len() - 3);
             state.push(base);
+        }
+        FinalOpcode::Append => {
+            let Some(pair) = append_pair_for_append(state) else {
+                return Err(append_stack_error(id, decoded.pc(), instruction.opcode()));
+            };
+            state.truncate(state.len() - 3);
+            state.push(ObjectDefinitionProvenance::AppendDestination(pair.site));
+            state.push(if pair.pending_elision {
+                ObjectDefinitionProvenance::AppendCursorAfterElision(pair.site)
+            } else {
+                ObjectDefinitionProvenance::CheckedAppendCursor(pair.site)
+            });
+        }
+        FinalOpcode::Inc => {
+            let cursor = state.len() - 1;
+            let destination = cursor.saturating_sub(1);
+            let next = match (state.get(destination), state.get(cursor)) {
+                (
+                    Some(ObjectDefinitionProvenance::AppendDestination(destination)),
+                    Some(ObjectDefinitionProvenance::AppendCursorNeedsIncrement(cursor)),
+                ) if destination == cursor => Some(
+                    ObjectDefinitionProvenance::CheckedAppendCursor(*destination),
+                ),
+                (
+                    Some(ObjectDefinitionProvenance::AppendDestination(destination)),
+                    Some(
+                        ObjectDefinitionProvenance::CheckedAppendCursor(cursor)
+                        | ObjectDefinitionProvenance::AppendCursorAfterElision(cursor),
+                    ),
+                ) if destination == cursor => Some(
+                    ObjectDefinitionProvenance::AppendCursorAfterElision(*destination),
+                ),
+                _ => None,
+            };
+            if let Some(next) = next {
+                state[cursor] = next;
+            } else {
+                state.truncate(state.len() - pops);
+                state.resize(output_len, ObjectDefinitionProvenance::Unknown);
+            }
+        }
+        FinalOpcode::Drop if checked_append_pair_at_top(state).is_some() => {
+            state.truncate(state.len() - 2);
+            state.push(ObjectDefinitionProvenance::Unknown);
+        }
+        FinalOpcode::PutField
+            if is_append_length_finalizer(function, instruction.operands(), state) =>
+        {
+            state.truncate(state.len() - 3);
+            state.push(ObjectDefinitionProvenance::Unknown);
+        }
+        opcode if integer_opcode_value(opcode, instruction.operands()).is_some() => {
+            let value = integer_opcode_value(opcode, instruction.operands())
+                .and_then(|value| u32::try_from(value).ok());
+            let candidate = state.last().copied().and_then(|provenance| {
+                let ObjectDefinitionProvenance::FreshArray {
+                    site,
+                    minimum_cursor,
+                } = provenance
+                else {
+                    return None;
+                };
+                let value = value.filter(|value| *value >= minimum_cursor)?;
+                Some(ObjectDefinitionProvenance::ArrayCursorCandidate { site, value })
+            });
+            state.push(candidate.unwrap_or(ObjectDefinitionProvenance::Unknown));
         }
         _ => {
             state.truncate(state.len() - pops);
@@ -4136,8 +4363,281 @@ const fn shuffled_object_definition_provenance(
     value: ObjectDefinitionProvenance,
 ) -> ObjectDefinitionProvenance {
     match value {
-        ObjectDefinitionProvenance::ConvertedPropertyKey(_) => ObjectDefinitionProvenance::Unknown,
+        ObjectDefinitionProvenance::ConvertedPropertyKey(_)
+        | ObjectDefinitionProvenance::FreshArray { .. }
+        | ObjectDefinitionProvenance::ArrayCursorCandidate { .. }
+        | ObjectDefinitionProvenance::AppendDestination(_)
+        | ObjectDefinitionProvenance::CheckedAppendCursor(_)
+        | ObjectDefinitionProvenance::AppendCursorAfterElision(_)
+        | ObjectDefinitionProvenance::AppendCursorNeedsIncrement(_)
+        | ObjectDefinitionProvenance::AppendLengthTarget(_)
+        | ObjectDefinitionProvenance::AppendLengthCursor(_) => ObjectDefinitionProvenance::Unknown,
         value => value,
+    }
+}
+
+const fn retained_object_definition_provenance(
+    value: ObjectDefinitionProvenance,
+) -> ObjectDefinitionProvenance {
+    if is_append_provenance(value) {
+        ObjectDefinitionProvenance::Unknown
+    } else {
+        value
+    }
+}
+
+const fn is_append_provenance(value: ObjectDefinitionProvenance) -> bool {
+    matches!(
+        value,
+        ObjectDefinitionProvenance::FreshArray { .. }
+            | ObjectDefinitionProvenance::ArrayCursorCandidate { .. }
+            | ObjectDefinitionProvenance::AppendDestination(_)
+            | ObjectDefinitionProvenance::CheckedAppendCursor(_)
+            | ObjectDefinitionProvenance::AppendCursorAfterElision(_)
+            | ObjectDefinitionProvenance::AppendCursorNeedsIncrement(_)
+            | ObjectDefinitionProvenance::AppendLengthTarget(_)
+            | ObjectDefinitionProvenance::AppendLengthCursor(_)
+    )
+}
+
+const fn is_append_length_marker(value: ObjectDefinitionProvenance) -> bool {
+    matches!(
+        value,
+        ObjectDefinitionProvenance::AppendLengthTarget(_)
+            | ObjectDefinitionProvenance::AppendLengthCursor(_)
+    )
+}
+
+const fn is_linear_append_provenance(value: ObjectDefinitionProvenance) -> bool {
+    matches!(
+        value,
+        ObjectDefinitionProvenance::AppendDestination(_)
+            | ObjectDefinitionProvenance::CheckedAppendCursor(_)
+            | ObjectDefinitionProvenance::AppendCursorAfterElision(_)
+            | ObjectDefinitionProvenance::AppendCursorNeedsIncrement(_)
+            | ObjectDefinitionProvenance::AppendLengthTarget(_)
+            | ObjectDefinitionProvenance::AppendLengthCursor(_)
+    )
+}
+
+fn verify_linear_append_inputs(
+    id: FunctionTemplateId,
+    decoded: crate::DecodedInstruction,
+    function: &VerifiedCompilerFunction,
+    state: &[ObjectDefinitionProvenance],
+) -> Result<(), BytecodeVerificationError> {
+    if !state.iter().copied().any(is_linear_append_provenance) {
+        return Ok(());
+    }
+    let instruction = decoded.instruction();
+    let opcode = instruction.opcode();
+    let exact_transition = match opcode {
+        FinalOpcode::Append => {
+            append_pair_for_append(state).is_some()
+                && state
+                    .last()
+                    .copied()
+                    .is_some_and(|value| !is_linear_append_provenance(value))
+        }
+        FinalOpcode::DefineArrayEl => {
+            append_pair_for_element(state).is_some()
+                && state
+                    .last()
+                    .copied()
+                    .is_some_and(|value| !is_linear_append_provenance(value))
+        }
+        FinalOpcode::Inc => append_cursor_pair_at_top(state).is_some(),
+        FinalOpcode::Dup1 => trailing_elision_pair_at_top(state).is_some(),
+        FinalOpcode::PutField => {
+            is_append_length_finalizer(function, instruction.operands(), state)
+        }
+        FinalOpcode::Drop => checked_append_pair_at_top(state).is_some(),
+        _ => false,
+    };
+    if exact_transition {
+        return Ok(());
+    }
+    if opcode == FinalOpcode::NipCatch {
+        return Err(append_stack_error(id, decoded.pc(), opcode));
+    }
+    let effect = instruction
+        .stack_effect()
+        .map_err(|_| append_stack_error(id, decoded.pc(), opcode))?;
+    let pops = effect.pops() as usize;
+    let input_start = state
+        .len()
+        .checked_sub(pops)
+        .ok_or_else(|| append_stack_error(id, decoded.pc(), opcode))?;
+    if state[input_start..]
+        .iter()
+        .copied()
+        .any(is_linear_append_provenance)
+    {
+        return Err(append_stack_error(id, decoded.pc(), opcode));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CertifiedAppendPair {
+    site: u32,
+    pending_elision: bool,
+}
+
+fn append_pair_for_append(state: &[ObjectDefinitionProvenance]) -> Option<CertifiedAppendPair> {
+    let base = state.len().checked_sub(3)?;
+    match (state[base], state[base + 1]) {
+        (
+            ObjectDefinitionProvenance::FreshArray {
+                site,
+                minimum_cursor,
+            },
+            ObjectDefinitionProvenance::ArrayCursorCandidate {
+                site: cursor_site,
+                value,
+            },
+        ) if site == cursor_site && value >= minimum_cursor => Some(CertifiedAppendPair {
+            site,
+            pending_elision: value > minimum_cursor,
+        }),
+        (
+            ObjectDefinitionProvenance::AppendDestination(destination),
+            ObjectDefinitionProvenance::CheckedAppendCursor(cursor),
+        ) if destination == cursor => Some(CertifiedAppendPair {
+            site: destination,
+            pending_elision: false,
+        }),
+        (
+            ObjectDefinitionProvenance::AppendDestination(destination),
+            ObjectDefinitionProvenance::AppendCursorAfterElision(cursor),
+        ) if destination == cursor => Some(CertifiedAppendPair {
+            site: destination,
+            pending_elision: true,
+        }),
+        _ => None,
+    }
+}
+
+fn append_pair_for_element(state: &[ObjectDefinitionProvenance]) -> Option<u32> {
+    let base = state.len().checked_sub(3)?;
+    match (state[base], state[base + 1]) {
+        (
+            ObjectDefinitionProvenance::AppendDestination(destination),
+            ObjectDefinitionProvenance::CheckedAppendCursor(cursor)
+            | ObjectDefinitionProvenance::AppendCursorAfterElision(cursor),
+        ) if destination == cursor => Some(destination),
+        _ => None,
+    }
+}
+
+fn append_pair_needing_increment_at_top(state: &[ObjectDefinitionProvenance]) -> Option<u32> {
+    let base = state.len().checked_sub(2)?;
+    match (state[base], state[base + 1]) {
+        (
+            ObjectDefinitionProvenance::AppendDestination(destination),
+            ObjectDefinitionProvenance::AppendCursorNeedsIncrement(cursor),
+        ) if destination == cursor => Some(destination),
+        _ => None,
+    }
+}
+
+fn append_cursor_pair_at_top(state: &[ObjectDefinitionProvenance]) -> Option<u32> {
+    let base = state.len().checked_sub(2)?;
+    match (state[base], state[base + 1]) {
+        (
+            ObjectDefinitionProvenance::AppendDestination(destination),
+            ObjectDefinitionProvenance::CheckedAppendCursor(cursor)
+            | ObjectDefinitionProvenance::AppendCursorAfterElision(cursor)
+            | ObjectDefinitionProvenance::AppendCursorNeedsIncrement(cursor),
+        ) if destination == cursor => Some(destination),
+        _ => None,
+    }
+}
+
+fn checked_append_pair_at_top(state: &[ObjectDefinitionProvenance]) -> Option<u32> {
+    let base = state.len().checked_sub(2)?;
+    match (state[base], state[base + 1]) {
+        (
+            ObjectDefinitionProvenance::AppendDestination(destination),
+            ObjectDefinitionProvenance::CheckedAppendCursor(cursor),
+        ) if destination == cursor => Some(destination),
+        _ => None,
+    }
+}
+
+fn trailing_elision_pair_at_top(state: &[ObjectDefinitionProvenance]) -> Option<u32> {
+    let base = state.len().checked_sub(2)?;
+    match (state[base], state[base + 1]) {
+        (
+            ObjectDefinitionProvenance::AppendDestination(destination),
+            ObjectDefinitionProvenance::AppendCursorAfterElision(cursor),
+        ) if destination == cursor => Some(destination),
+        _ => None,
+    }
+}
+
+fn is_append_length_finalizer(
+    function: &VerifiedCompilerFunction,
+    operands: Operands,
+    state: &[ObjectDefinitionProvenance],
+) -> bool {
+    let Some(base) = state.len().checked_sub(3) else {
+        return false;
+    };
+    let (
+        ObjectDefinitionProvenance::AppendDestination(destination),
+        ObjectDefinitionProvenance::AppendLengthTarget(target),
+        ObjectDefinitionProvenance::AppendLengthCursor(cursor),
+    ) = (state[base], state[base + 1], state[base + 2])
+    else {
+        return false;
+    };
+    destination == target
+        && target == cursor
+        && operands
+            .atom_pool_index()
+            .and_then(|index| usize::try_from(index.get()).ok())
+            .and_then(|index| function.atoms().get(index))
+            .is_some_and(|atom| compiler_string_is_ascii(atom.string(), b"length"))
+}
+
+fn static_array_index(function: &VerifiedCompilerFunction, operands: Operands) -> Option<u32> {
+    let atom = operands
+        .atom_pool_index()
+        .and_then(|index| usize::try_from(index.get()).ok())
+        .and_then(|index| function.atoms().get(index))?;
+    if !atom.is_static_property_only() || !atom.string().is_tagged_integer_atom() {
+        return None;
+    }
+    let mut value = 0_u32;
+    for unit in atom.string().code_units() {
+        let digit = u32::from(unit.checked_sub(u16::from(b'0'))?);
+        value = value.checked_mul(10)?.checked_add(digit)?;
+    }
+    (value < i32::MAX as u32).then_some(value)
+}
+
+fn compiler_string_is_ascii(value: &crate::CompilerString, expected: &[u8]) -> bool {
+    value
+        .code_units()
+        .eq(expected.iter().copied().map(u16::from))
+}
+
+const fn integer_opcode_value(opcode: FinalOpcode, operands: Operands) -> Option<i32> {
+    match (opcode, operands) {
+        (FinalOpcode::PushMinus1, Operands::NoneInt) => Some(-1),
+        (FinalOpcode::Push0, Operands::NoneInt) => Some(0),
+        (FinalOpcode::Push1, Operands::NoneInt) => Some(1),
+        (FinalOpcode::Push2, Operands::NoneInt) => Some(2),
+        (FinalOpcode::Push3, Operands::NoneInt) => Some(3),
+        (FinalOpcode::Push4, Operands::NoneInt) => Some(4),
+        (FinalOpcode::Push5, Operands::NoneInt) => Some(5),
+        (FinalOpcode::Push6, Operands::NoneInt) => Some(6),
+        (FinalOpcode::Push7, Operands::NoneInt) => Some(7),
+        (FinalOpcode::PushI8, Operands::I8(value)) => Some(value as i32),
+        (FinalOpcode::PushI16, Operands::I16(value)) => Some(value as i32),
+        (FinalOpcode::PushI32, Operands::I32(value)) => Some(value),
+        _ => None,
     }
 }
 
@@ -4162,6 +4662,7 @@ fn propagate_object_definition_provenance(
     id: FunctionTemplateId,
     source_pc: BytecodePc,
     successor: InstructionIndex,
+    target_pc: BytecodePc,
     output: &[ObjectDefinitionProvenance],
     entries: &mut [Option<Vec<ObjectDefinitionProvenance>>],
     queued: &mut [bool],
@@ -4186,15 +4687,20 @@ fn propagate_object_definition_provenance(
         Some(existing) if existing.len() == output.len() => {
             let mut changed = false;
             for (target, incoming) in existing.iter_mut().zip(output) {
+                if *target != *incoming
+                    && (is_linear_append_provenance(*target)
+                        || is_linear_append_provenance(*incoming))
+                {
+                    return Err(BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::AppendProvenanceJoinMismatch {
+                            target: target_pc,
+                            incoming_from: source_pc,
+                        },
+                    ));
+                }
                 let merged = match (*target, *incoming) {
-                    (
-                        ObjectDefinitionProvenance::FreshObject(left),
-                        ObjectDefinitionProvenance::FreshObject(right),
-                    ) if left == right => *target,
-                    (
-                        ObjectDefinitionProvenance::ConvertedPropertyKey(left),
-                        ObjectDefinitionProvenance::ConvertedPropertyKey(right),
-                    ) if left == right => *target,
+                    (established, incoming) if established == incoming => established,
                     _ => ObjectDefinitionProvenance::Unknown,
                 };
                 changed |= merged != *target;
@@ -4203,6 +4709,17 @@ fn propagate_object_definition_provenance(
             changed
         }
         Some(existing) => {
+            if existing.iter().copied().any(is_linear_append_provenance)
+                || output.iter().copied().any(is_linear_append_provenance)
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AppendProvenanceJoinMismatch {
+                        target: target_pc,
+                        incoming_from: source_pc,
+                    },
+                ));
+            }
             let changed = existing
                 .iter()
                 .any(|value| *value != ObjectDefinitionProvenance::Unknown);
@@ -4265,6 +4782,17 @@ fn define_array_element_key_error(
     BytecodeVerificationError::function(
         id,
         BytecodeVerificationErrorKind::DefineArrayElementKeyMismatch { pc },
+    )
+}
+
+fn append_stack_error(
+    id: FunctionTemplateId,
+    pc: BytecodePc,
+    opcode: FinalOpcode,
+) -> BytecodeVerificationError {
+    BytecodeVerificationError::function(
+        id,
+        BytecodeVerificationErrorKind::AppendOperandStackMismatch { pc, opcode },
     )
 }
 
@@ -4360,6 +4888,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Drop
             | FinalOpcode::Nip
             | FinalOpcode::Dup
+            | FinalOpcode::Dup1
             | FinalOpcode::Insert2
             | FinalOpcode::Insert3
             | FinalOpcode::Swap
@@ -4403,6 +4932,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ToPropKey
             | FinalOpcode::DefineField
             | FinalOpcode::DefineArrayEl
+            | FinalOpcode::Append
             | FinalOpcode::DefineMethod
             | FinalOpcode::DefineMethodComputed
             | FinalOpcode::ForInStart
@@ -6979,6 +7509,10 @@ fn collect_requirements(
             }
             FinalOpcode::ArrayFrom => {
                 push_requirement(requirements, ExecutionRequirement::Arrays);
+            }
+            FinalOpcode::Append => {
+                push_requirement(requirements, ExecutionRequirement::Arrays);
+                push_requirement(requirements, ExecutionRequirement::Iterators);
             }
             FinalOpcode::Object
             | FinalOpcode::GetField

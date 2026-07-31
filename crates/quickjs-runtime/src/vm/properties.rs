@@ -398,18 +398,12 @@ pub(super) fn read_static_property(
             base.duplicate(),
             key,
         )?,
-        StoredValue::Symbol(atom) => {
-            if property_key_has_string_name(key, "description") {
-                atom.description().map_or_else(
-                    || PropertyReadOutcome::Value(StoredValue::Undefined),
-                    |description| {
-                        PropertyReadOutcome::Value(StoredValue::String(description.clone()))
-                    },
-                )
-            } else {
-                PropertyReadOutcome::Value(StoredValue::Undefined)
-            }
-        }
+        StoredValue::Symbol(_) => read_heap_property_for_receiver(
+            runtime,
+            HeapReference::Object(runtime.realm_symbol_prototype(realm)?),
+            base.duplicate(),
+            key,
+        )?,
         StoredValue::String(value) => {
             if let Some(index) = key.as_index()
                 && index.get() < value.len()
@@ -444,15 +438,6 @@ pub(super) fn read_static_property(
             base.duplicate(),
             key,
         )?,
-    })
-}
-
-fn property_key_has_string_name(key: &PropertyKey, expected: &str) -> bool {
-    key.as_atom().is_some_and(|atom| {
-        atom.kind() == crate::AtomKind::String
-            && atom
-                .description()
-                .is_some_and(|name| name.code_units().eq(expected.encode_utf16()))
     })
 }
 

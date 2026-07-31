@@ -247,8 +247,8 @@ A milestone is complete only when all of its checked items pass in CI.
         is reached, preserves QuickJS key order and shadow suppression without
         invoking getters, rechecks deletions, boxes Boolean/Number/String
         values, and charges snapshot/visited work to explicit limits and VM
-        fuel. Symbol boxing, destructuring heads, and the iterator protocol
-        used by `for-of` remain fail-closed.
+        fuel. Symbol boxing specifically for `for-in`, destructuring heads,
+        and `for-of` lowering and execution remain fail-closed.
   - [x] Add exact binary64 Number constants to the compiler-owned heterogeneous
         pool. Number literals requiring pool storage and direct child templates
         share one immutable `Arc`-backed source-order index namespace with no
@@ -394,8 +394,9 @@ A milestone is complete only when all of its checked items pass in CI.
           natives with exact method/name/length descriptors, GC reachability,
           current object/function tags and identity, retained verified
           bytecode source, and the pinned native-source form. Boolean, Number,
-          and String boxing and data-valued tagging land below; Symbol boxing
-          and observable object-valued native names remain fail closed.
+          String, and core Symbol boxing and data-valued tagging land below;
+          Symbol sloppy-`this` normalization and observable object-valued
+          native names remain fail closed.
     - [x] Complete source-argument `ToPrimitive`: check
           `Symbol.toPrimitive` with the string hint, fall back to callable
           `toString` then `valueOf`, stop property lookup at data or accessor
@@ -425,7 +426,7 @@ A milestone is complete only when all of its checked items pass in CI.
     - [ ] Add persistent global lexical collision checks and
           `Function.prototype.bind`/`Symbol.hasInstance`.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
-      stack traces, iterator-protocol execution, and generators.
+      stack traces, remaining iterator-protocol consumers, and generators.
   - [x] First escaping exception path: local/captured TDZ access returns a
         structured `ReferenceError` with the exact QuickJS message, function
         template, verified bytecode PC, source name, and retained source span.
@@ -437,6 +438,22 @@ A milestone is complete only when all of its checked items pass in CI.
         path while unwinding the existing frame vector; provenance allocation
         precedes publication of an escaping heap root; cloned exceptions share
         one `Arc` root header; and handler/finally opcodes remain fail-closed.
+  - [x] Add the generic synchronous iterator vertical required by array-literal
+        spread. Every realm publishes the complete pinned well-known `Symbol`
+        static identity set and core `Symbol` constructor/prototype surface,
+        plus hidden `%IteratorPrototype%`, `%ArrayIteratorPrototype%`, and
+        `%StringIteratorPrototype%` graphs. Array `values`/`keys`/`entries` and
+        String code-point iteration use realm-owned iterator objects. Compiler
+        lowering emits the exact `ArrayFrom`/`Append` dynamic-index shape;
+        final whole-graph verification tracks unforgeable destination/cursor
+        provenance and records explicit array and iterator requirements before
+        runtime admission. The resumable VM performs generic `@@iterator`
+        lookup, retains `next`, reads `done` before `value`, and appends in
+        order. Abrupt completion after `next` acquisition performs
+        `IteratorClose`, preserving the original exception even if `return`
+        lookup or invocation fails. `for-of`, call spread, iterator
+        destructuring, and async/generator iterator consumers remain
+        fail-closed.
   - [ ] Represent synthetic native caller frames. In particular, each
         `Function.prototype.call`/`apply` continuation is frame-accounted but
         cannot yet render QuickJS's intervening `call (native)` or
@@ -549,9 +566,9 @@ A milestone is complete only when all of its checked items pass in CI.
         fallback. Strict/sloppy writes, ordinary extra wrapper properties,
         callee-realm sloppy boxing, `Object.prototype` boxing/tagging, GC roots,
         resource limits, and failure-atomic realm creation are covered.
-  - [ ] Add the remaining String static/prototype surface, Symbol wrapper
-        payload consumers and prototype, BigInt numeric domains, and the
-        remaining conversion/formatting entry points. Symbol boxing remains
+  - [ ] Add the remaining String static/prototype surface, BigInt numeric
+        domains, and the remaining conversion/formatting entry points.
+        Symbol boxing for `for-in` and sloppy-`this` normalization remains
         fail closed.
 - [ ] Complete property descriptors, interned shapes, mutable prototypes, and
       exotic objects.

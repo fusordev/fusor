@@ -127,8 +127,65 @@ fn prepend_native_continuations(
     Ok(())
 }
 
+pub(super) fn take_iterator_abrupt_handler(
+    continuations: &mut Vec<NativeContinuation>,
+) -> Option<NativeContinuation> {
+    let index = continuations.iter().rposition(|continuation| {
+        matches!(
+            continuation,
+            NativeContinuation::IteratorAppend(_) | NativeContinuation::IteratorClose(_)
+        )
+    })?;
+    let handler = continuations.remove(index);
+    continuations.truncate(index);
+    Some(handler)
+}
+
+pub(super) fn resume_iterator_abrupt_continuations(
+    runtime: &mut Runtime,
+    mut continuations: Vec<NativeContinuation>,
+    mut pending: PendingException,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    loop {
+        let Some(handler) = take_iterator_abrupt_handler(&mut continuations) else {
+            return Err(NativeFailure::Abrupt(pending));
+        };
+        match resume_iterator_abrupt(runtime, handler, pending, return_to, execution_budget) {
+            Ok(mut dispatch) => {
+                match &mut dispatch {
+                    NativeDispatch::Frame(frame) => {
+                        attach_native_continuations(frame, continuations)?;
+                    }
+                    NativeDispatch::Call(call) => {
+                        prepend_native_continuations(call, continuations)?;
+                    }
+                    NativeDispatch::Immediate(_) | NativeDispatch::Pair(_, _)
+                        if !continuations.is_empty() =>
+                    {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "iterator abrupt completion skipped an outer continuation",
+                        }
+                        .into());
+                    }
+                    NativeDispatch::Immediate(_) | NativeDispatch::Pair(_, _) => {}
+                }
+                return Ok(dispatch);
+            }
+            Err(NativeFailure::Abrupt(next) | NativeFailure::AbruptAfterTransient(next)) => {
+                pending = next;
+            }
+            Err(NativeFailure::Execution(error)) => {
+                return Err(NativeFailure::Execution(error));
+            }
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "resuming a native abstract operation needs the same explicit execution authority and budgets as its originating call"
 )]
 pub(super) fn resume_native_continuations(
@@ -201,6 +258,15 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::IntrinsicGet(state) => {
                 finish_intrinsic_get(runtime, state, value, active_root_frames, &continuations)?
             }
+            NativeContinuation::ArrayIteratorNext(state) => {
+                advance_array_iterator_next(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorAppend(state) => {
+                advance_iterator_append(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorClose(state) => {
+                advance_iterator_close(state, value, return_to)?
+            }
             NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
         };
         match dispatch {
@@ -267,6 +333,7 @@ pub(super) fn resolve_native_dispatch(
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "the iterative native-to-bytecode transition carries explicit frame and dynamic-compilation budgets"
 )]
 fn resolve_native_dispatch_inner(
@@ -312,6 +379,7 @@ fn resolve_native_dispatch_inner(
             .native()
             .copied();
         if let Some(native) = native {
+            apply_native_pre_call(runtime, call.pre_call.as_ref())?;
             let outcome = dispatch_native_call(
                 runtime,
                 call.function,
@@ -327,7 +395,25 @@ fn resolve_native_dispatch_inner(
                 suspended_values,
                 compiler,
                 execution_budget,
-            )?;
+            );
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(
+                    NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending),
+                ) => {
+                    dispatch = resume_iterator_abrupt_continuations(
+                        runtime,
+                        call.continuations,
+                        pending,
+                        call.return_to,
+                        execution_budget,
+                    )?;
+                    continue;
+                }
+                Err(NativeFailure::Execution(error)) => {
+                    return Err(NativeFailure::Execution(error));
+                }
+            };
             dispatch = match outcome {
                 NativeDispatch::Immediate(value) => resume_native_continuations(
                     runtime,
@@ -370,8 +456,22 @@ fn resolve_native_dispatch_inner(
         )
         .map_err(NativeFailure::Execution)?;
         attach_native_continuations(&mut frame, call.continuations)?;
+        apply_native_pre_call(runtime, call.pre_call.as_ref())?;
         return Ok(NativeDispatch::Frame(frame));
     }
+}
+
+fn apply_native_pre_call(
+    runtime: &mut Runtime,
+    pre_call: Option<&NativePreCall>,
+) -> Result<(), NativeFailure> {
+    match pre_call {
+        Some(NativePreCall::AdvanceArrayIterator(iterator)) => {
+            runtime.advance_array_iterator(*iterator)?;
+        }
+        None => {}
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -482,7 +582,7 @@ pub(super) fn dispatch_native_call(
     runtime: &mut Runtime,
     function: FunctionId,
     native: NativeFunction,
-    inputs: CallInputs,
+    mut inputs: CallInputs,
     return_to: Option<CallReturn>,
     origin: Option<JsStackFrame>,
     active_frames: usize,
@@ -551,6 +651,7 @@ pub(super) fn dispatch_native_call(
                 return_to,
                 origin,
                 continuations,
+                pre_call: None,
             }))
         }
         NativeFunctionKind::OrdinaryFunctionConstructor => {
@@ -617,12 +718,10 @@ pub(super) fn dispatch_native_call(
                     origin,
                 }))
             }
-            StoredValue::Symbol(_) => Err(NativeFailure::Execution(
-                EngineFault::RuntimeInvariant {
-                    message: "Object.prototype.valueOf Symbol boxing is not implemented",
-                }
-                .into(),
-            )),
+            StoredValue::Symbol(value) => {
+                let object = runtime.allocate_boxed_symbol(native.realm, value)?;
+                Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+            }
         },
         NativeFunctionKind::BooleanConstructor => {
             let mut arguments = inputs.arguments;
@@ -756,6 +855,140 @@ pub(super) fn dispatch_native_call(
                 )
             }
         }
+        NativeFunctionKind::SymbolConstructor => {
+            let mut arguments = inputs.arguments;
+            let Some(argument) = arguments.take_first() else {
+                return Ok(NativeDispatch::Immediate(StoredValue::Symbol(
+                    runtime.new_unique_symbol(None)?,
+                )));
+            };
+            if matches!(argument, StoredValue::Undefined) {
+                return Ok(NativeDispatch::Immediate(StoredValue::Symbol(
+                    runtime.new_unique_symbol(None)?,
+                )));
+            }
+            begin_operator_primitive_conversion(
+                runtime,
+                argument,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::SymbolIntrinsic {
+                    global_registry: false,
+                },
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::SymbolPrototypeToString => {
+            let value =
+                symbol_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                symbol_descriptive_string(&value)?,
+            )))
+        }
+        NativeFunctionKind::SymbolPrototypeValueOf
+        | NativeFunctionKind::SymbolPrototypeToPrimitive => {
+            let value =
+                symbol_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
+            Ok(NativeDispatch::Immediate(StoredValue::Symbol(value)))
+        }
+        NativeFunctionKind::SymbolPrototypeDescription => {
+            let value =
+                symbol_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
+            Ok(NativeDispatch::Immediate(
+                value
+                    .description()
+                    .map_or(StoredValue::Undefined, |description| {
+                        StoredValue::String(description.clone())
+                    }),
+            ))
+        }
+        NativeFunctionKind::SymbolFor => {
+            let argument = inputs.arguments.take_first_or_undefined();
+            begin_operator_primitive_conversion(
+                runtime,
+                argument,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::SymbolIntrinsic {
+                    global_registry: true,
+                },
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::SymbolKeyFor => {
+            let argument = inputs.arguments.take_first_or_undefined();
+            let StoredValue::Symbol(symbol) = argument else {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    realm: native.realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("not a symbol")?,
+                    },
+                    origin: origin.unwrap_or_else(native_function_host_origin),
+                }));
+            };
+            Ok(NativeDispatch::Immediate(
+                if symbol.kind() == crate::AtomKind::GlobalSymbol {
+                    symbol
+                        .description()
+                        .map_or(StoredValue::Undefined, |description| {
+                            StoredValue::String(description.clone())
+                        })
+                } else {
+                    StoredValue::Undefined
+                },
+            ))
+        }
+        NativeFunctionKind::IteratorPrototypeIterator => {
+            Ok(NativeDispatch::Immediate(inputs.receiver))
+        }
+        NativeFunctionKind::ArrayPrototypeValues => begin_array_iterator_method(
+            runtime,
+            inputs.receiver,
+            crate::object::ArrayIteratorKind::Value,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::ArrayPrototypeKeys => begin_array_iterator_method(
+            runtime,
+            inputs.receiver,
+            crate::object::ArrayIteratorKind::Key,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::ArrayPrototypeEntries => begin_array_iterator_method(
+            runtime,
+            inputs.receiver,
+            crate::object::ArrayIteratorKind::KeyAndValue,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::ArrayIteratorNext => begin_array_iterator_next(
+            runtime,
+            inputs.receiver,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::StringPrototypeIterator => begin_string_iterator_method(
+            runtime,
+            inputs.receiver,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::StringIteratorNext => begin_string_iterator_next(
+            runtime,
+            inputs.receiver,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
         NativeFunctionKind::FunctionPrototypeToString => {
             let StoredValue::Function(function) = inputs.receiver else {
                 let Some(origin) = origin else {
@@ -1074,6 +1307,7 @@ fn function_apply_getter_call(
         return_to,
         origin,
         continuations,
+        pre_call: None,
     }))
 }
 
@@ -1099,6 +1333,7 @@ fn function_apply_target_call(
         return_to,
         origin,
         continuations,
+        pre_call: None,
     }))
 }
 

@@ -1,9 +1,7 @@
 use quickjs_bytecode::{
     BytecodePc, ExecutionRequirement, FinalOpcode, Operands, VerificationLimits,
 };
-use quickjs_compiler::{
-    CompilationContext, CompiledFunctionTree, LeafCompilationError, UnsupportedLeafFeature,
-};
+use quickjs_compiler::{CompilationContext, CompiledFunctionTree, LeafCompilationError};
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
 fn compile(source: &str) -> CompiledFunctionTree {
@@ -18,7 +16,7 @@ fn compile(source: &str) -> CompiledFunctionTree {
                 .expect("named function executable");
             context
                 .compile_tree(&executable, VerificationLimits::default())
-                .expect("dense array lowering and whole-graph verification must succeed")
+                .expect("array lowering and whole-graph verification must succeed")
         },
     )
     .expect("front-end acceptance")
@@ -276,18 +274,181 @@ fn sparse_array_expressions_remain_left_to_right_around_initial_allocation() {
 }
 
 #[test]
-fn elisions_and_spread_fail_closed_at_the_exact_element_span() {
-    for (source, expected) in [
-        ("function make(items){return [1,...items,3];}", "...items"),
-        ("function make(items){return [,...items,,];}", "...items"),
-    ] {
-        let error = compile_error(source);
-        let LeafCompilationError::Unsupported { feature, span } = error else {
-            panic!("expected exact-span unsupported error, got {error:?}");
-        };
-        assert_eq!(feature, UnsupportedLeafFeature::UnsupportedExpression);
-        assert_eq!(&source[span.start as usize..span.end as usize], expected);
-    }
+fn spread_array_uses_array_from_checked_cursor_and_append_exactly() {
+    let source = "function make(items){return [1,...items,3];}";
+    let tree = compile(source);
+
+    assert_eq!(
+        instructions(&tree),
+        [
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 1 }),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Push3, Operands::NoneInt),
+            (FinalOpcode::DefineArrayEl, Operands::None),
+            (FinalOpcode::Inc, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(tree.root().control_flow().computed_stack_size(), 3);
+    let append_pc = tree
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .find_map(|instruction| {
+            let decoded = instruction.decoded();
+            (decoded.instruction().opcode() == FinalOpcode::Append).then_some(decoded.pc())
+        })
+        .expect("one append instruction");
+    assert_eq!(source_slice_at(&tree, source, append_pc), "...items");
+}
+
+#[test]
+fn holes_before_and_after_spread_use_static_then_dynamic_indices_and_final_length() {
+    let tree = compile("function make(items){return [1,,2,...items,,4,,];}");
+
+    assert_eq!(
+        instructions(&tree),
+        [
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 1 }),
+            (FinalOpcode::Push2, Operands::NoneInt),
+            (
+                FinalOpcode::DefineField,
+                Operands::Atom(quickjs_bytecode::AtomPoolIndex::new(0)),
+            ),
+            (FinalOpcode::Push3, Operands::NoneInt),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Inc, Operands::None),
+            (FinalOpcode::Push4, Operands::NoneInt),
+            (FinalOpcode::DefineArrayEl, Operands::None),
+            (FinalOpcode::Inc, Operands::None),
+            (FinalOpcode::Inc, Operands::None),
+            (FinalOpcode::Dup1, Operands::None),
+            (
+                FinalOpcode::PutField,
+                Operands::Atom(quickjs_bytecode::AtomPoolIndex::new(1)),
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(atom_text(&tree, 0), "2");
+    assert_eq!(atom_text(&tree, 1), "length");
+}
+
+#[test]
+fn hole_immediately_before_final_spread_preserves_the_dynamic_length_update() {
+    let tree = compile("function make(items){return [1,,...items];}");
+
+    assert_eq!(
+        instructions(&tree),
+        [
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 1 }),
+            (FinalOpcode::Push2, Operands::NoneInt),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Dup1, Operands::None),
+            (
+                FinalOpcode::PutField,
+                Operands::Atom(quickjs_bytecode::AtomPoolIndex::new(0)),
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(atom_text(&tree, 0), "length");
+}
+
+#[test]
+fn multiple_spreads_each_emit_append_and_keep_one_dynamic_cursor() {
+    let tree = compile("function make(first,second){return [...first,2,...second];}");
+
+    assert_eq!(
+        instructions(&tree),
+        [
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Push2, Operands::NoneInt),
+            (FinalOpcode::DefineArrayEl, Operands::None),
+            (FinalOpcode::Inc, Operands::None),
+            (FinalOpcode::GetArg1, Operands::NoneArg),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+}
+
+#[test]
+fn nested_spread_expressions_preserve_observable_left_to_right_evaluation() {
+    let tree = compile(
+        "function make(prefix,outer,inner,suffix){return [prefix(),...outer(inner()),suffix()];}",
+    );
+
+    assert_eq!(
+        instructions(&tree),
+        [
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::Call0, Operands::NPopX),
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 1 }),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::GetArg1, Operands::NoneArg),
+            (FinalOpcode::GetArg2, Operands::NoneArg),
+            (FinalOpcode::Call0, Operands::NPopX),
+            (FinalOpcode::Call1, Operands::NPopX),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::GetArg3, Operands::NoneArg),
+            (FinalOpcode::Call0, Operands::NPopX),
+            (FinalOpcode::DefineArrayEl, Operands::None),
+            (FinalOpcode::Inc, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+}
+
+#[test]
+fn spread_after_quickjs_stack_prefix_uses_static_index_and_checked_dynamic_cursor() {
+    let prefix = (0..33).map(|_| "0").collect::<Vec<_>>().join(",");
+    let source = format!("function make(items){{return [{prefix},...items];}}");
+    let tree = compile(&source);
+    let instructions = instructions(&tree);
+    let array_from = instructions
+        .iter()
+        .position(|(opcode, _)| *opcode == FinalOpcode::ArrayFrom)
+        .expect("one stack-prefix allocation");
+
+    assert_eq!(array_from, 32);
+    assert_eq!(
+        instructions[array_from],
+        (
+            FinalOpcode::ArrayFrom,
+            Operands::NPop { argument_count: 32 }
+        )
+    );
+    assert_eq!(
+        &instructions[array_from + 1..],
+        [
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (
+                FinalOpcode::DefineField,
+                Operands::Atom(quickjs_bytecode::AtomPoolIndex::new(0)),
+            ),
+            (FinalOpcode::PushI8, Operands::I8(33)),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::Append, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(atom_text(&tree, 0), "32");
 }
 
 #[test]

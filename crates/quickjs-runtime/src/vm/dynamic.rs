@@ -230,6 +230,8 @@ pub(super) fn begin_object_prototype_to_string(
                 ObjectPrototypeTag::Number
             } else if runtime.boxed_string(*object)?.is_some() {
                 ObjectPrototypeTag::String
+            } else if runtime.boxed_symbol(*object)?.is_some() {
+                ObjectPrototypeTag::Symbol
             } else if runtime
                 .objects
                 .get(*object)
@@ -245,13 +247,14 @@ pub(super) fn begin_object_prototype_to_string(
                 ObjectPrototypeTag::Object
             },
         ),
-        StoredValue::Symbol(_) => {
-            return Err(NativeFailure::Execution(
-                EngineFault::RuntimeInvariant {
-                    message: "Object.prototype.toString Symbol boxing is not implemented",
-                }
-                .into(),
-            ));
+        StoredValue::Symbol(value) => {
+            return begin_boxed_symbol_object_prototype_to_string(
+                runtime,
+                realm,
+                value.clone(),
+                return_to,
+                origin,
+            );
         }
     };
     let to_string_tag = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag);
@@ -422,6 +425,59 @@ fn begin_boxed_string_object_prototype_to_string(
             remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
             Err(EngineFault::RuntimeInvariant {
                 message: "String boxing intrinsic Get produced a primitive property failure",
+            }
+            .into())
+        }
+    }
+}
+
+fn begin_boxed_symbol_object_prototype_to_string(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    value: crate::Atom,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let continuations = reserve_intrinsic_get_continuation()?;
+    let to_string_tag = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag);
+    let collection_pending = runtime.collection_pending;
+    let temporary = runtime.allocate_boxed_symbol(realm, value)?;
+    let receiver = StoredValue::Object(temporary);
+    let continuation = IntrinsicGetContinuation::ObjectPrototypeToString {
+        default_tag: ObjectPrototypeTag::Symbol,
+        temporary_receiver: Some(temporary),
+    };
+    let outcome = match read_heap_property_for_receiver(
+        runtime,
+        HeapReference::Object(temporary),
+        receiver,
+        &to_string_tag,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
+            return Err(error.into());
+        }
+    };
+    match outcome {
+        PropertyReadOutcome::Value(tag) => {
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
+            finish_object_prototype_to_string(ObjectPrototypeTag::Symbol, tag)
+        }
+        PropertyReadOutcome::Getter { function, receiver } => {
+            Ok(intrinsic_getter_call_with_reserved_continuation(
+                function,
+                receiver,
+                continuation,
+                return_to,
+                origin,
+                continuations,
+            ))
+        }
+        PropertyReadOutcome::Failed(_) => {
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
+            Err(EngineFault::RuntimeInvariant {
+                message: "Symbol boxing intrinsic Get produced a primitive property failure",
             }
             .into())
         }

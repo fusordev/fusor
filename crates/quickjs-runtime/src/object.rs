@@ -90,6 +90,79 @@ pub(crate) struct ForInIterator {
     visited: HashSet<PropertyKey>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayIteratorKind {
+    Key,
+    Value,
+    KeyAndValue,
+}
+
+pub(crate) struct ArrayIterator {
+    iterated: Option<StoredValue>,
+    kind: ArrayIteratorKind,
+    next: u32,
+}
+
+impl ArrayIterator {
+    pub(crate) const fn new(iterated: StoredValue, kind: ArrayIteratorKind) -> Self {
+        Self {
+            iterated: Some(iterated),
+            kind,
+            next: 0,
+        }
+    }
+
+    pub(crate) const fn iterated(&self) -> Option<&StoredValue> {
+        self.iterated.as_ref()
+    }
+
+    pub(crate) const fn kind(&self) -> ArrayIteratorKind {
+        self.kind
+    }
+
+    pub(crate) const fn next(&self) -> u32 {
+        self.next
+    }
+
+    pub(crate) fn advance(&mut self) {
+        self.next = self.next.saturating_add(1);
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.iterated = None;
+    }
+}
+
+pub(crate) struct StringIterator {
+    iterated: Option<JsString>,
+    next: u32,
+}
+
+impl StringIterator {
+    pub(crate) const fn new(iterated: JsString) -> Self {
+        Self {
+            iterated: Some(iterated),
+            next: 0,
+        }
+    }
+
+    pub(crate) const fn iterated(&self) -> Option<&JsString> {
+        self.iterated.as_ref()
+    }
+
+    pub(crate) const fn next(&self) -> u32 {
+        self.next
+    }
+
+    pub(crate) fn set_next(&mut self, next: u32) {
+        self.next = next;
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.iterated = None;
+    }
+}
+
 impl ForInIterator {
     pub(crate) fn new(current: Option<HeapReference>, snapshot: ForInSnapshot) -> Self {
         Self {
@@ -742,13 +815,20 @@ pub(crate) enum HeapObjectKind {
     Error,
     BoxedPrimitive(BoxedPrimitive),
     ForInIterator(ForInIterator),
+    ArrayIterator(ArrayIterator),
+    StringIterator(StringIterator),
 }
 
 impl HeapObjectKind {
     #[must_use]
     pub(crate) const fn boxed_primitive(&self) -> Option<&BoxedPrimitive> {
         match self {
-            Self::Ordinary | Self::Array(_) | Self::Error | Self::ForInIterator(_) => None,
+            Self::Ordinary
+            | Self::Array(_)
+            | Self::Error
+            | Self::ForInIterator(_)
+            | Self::ArrayIterator(_)
+            | Self::StringIterator(_) => None,
             Self::BoxedPrimitive(value) => Some(value),
         }
     }
@@ -756,28 +836,96 @@ impl HeapObjectKind {
     pub(crate) const fn array(&self) -> Option<&ArrayState> {
         match self {
             Self::Array(state) => Some(state),
-            Self::Ordinary | Self::Error | Self::BoxedPrimitive(_) | Self::ForInIterator(_) => None,
+            Self::Ordinary
+            | Self::Error
+            | Self::BoxedPrimitive(_)
+            | Self::ForInIterator(_)
+            | Self::ArrayIterator(_)
+            | Self::StringIterator(_) => None,
         }
     }
 
     pub(crate) const fn array_mut(&mut self) -> Option<&mut ArrayState> {
         match self {
             Self::Array(state) => Some(state),
-            Self::Ordinary | Self::Error | Self::BoxedPrimitive(_) | Self::ForInIterator(_) => None,
+            Self::Ordinary
+            | Self::Error
+            | Self::BoxedPrimitive(_)
+            | Self::ForInIterator(_)
+            | Self::ArrayIterator(_)
+            | Self::StringIterator(_) => None,
         }
     }
 
     pub(crate) const fn for_in_iterator(&self) -> Option<&ForInIterator> {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
-            Self::Ordinary | Self::Array(_) | Self::Error | Self::BoxedPrimitive(_) => None,
+            Self::Ordinary
+            | Self::Array(_)
+            | Self::Error
+            | Self::BoxedPrimitive(_)
+            | Self::ArrayIterator(_)
+            | Self::StringIterator(_) => None,
         }
     }
 
     pub(crate) const fn for_in_iterator_mut(&mut self) -> Option<&mut ForInIterator> {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
-            Self::Ordinary | Self::Array(_) | Self::Error | Self::BoxedPrimitive(_) => None,
+            Self::Ordinary
+            | Self::Array(_)
+            | Self::Error
+            | Self::BoxedPrimitive(_)
+            | Self::ArrayIterator(_)
+            | Self::StringIterator(_) => None,
+        }
+    }
+
+    pub(crate) const fn array_iterator(&self) -> Option<&ArrayIterator> {
+        match self {
+            Self::ArrayIterator(iterator) => Some(iterator),
+            Self::Ordinary
+            | Self::Array(_)
+            | Self::Error
+            | Self::BoxedPrimitive(_)
+            | Self::ForInIterator(_)
+            | Self::StringIterator(_) => None,
+        }
+    }
+
+    pub(crate) const fn array_iterator_mut(&mut self) -> Option<&mut ArrayIterator> {
+        match self {
+            Self::ArrayIterator(iterator) => Some(iterator),
+            Self::Ordinary
+            | Self::Array(_)
+            | Self::Error
+            | Self::BoxedPrimitive(_)
+            | Self::ForInIterator(_)
+            | Self::StringIterator(_) => None,
+        }
+    }
+
+    pub(crate) const fn string_iterator(&self) -> Option<&StringIterator> {
+        match self {
+            Self::StringIterator(iterator) => Some(iterator),
+            Self::Ordinary
+            | Self::Array(_)
+            | Self::Error
+            | Self::BoxedPrimitive(_)
+            | Self::ForInIterator(_)
+            | Self::ArrayIterator(_) => None,
+        }
+    }
+
+    pub(crate) const fn string_iterator_mut(&mut self) -> Option<&mut StringIterator> {
+        match self {
+            Self::StringIterator(iterator) => Some(iterator),
+            Self::Ordinary
+            | Self::Array(_)
+            | Self::Error
+            | Self::BoxedPrimitive(_)
+            | Self::ForInIterator(_)
+            | Self::ArrayIterator(_) => None,
         }
     }
 }
@@ -835,6 +983,24 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn array_iterator(record: ObjectRecord, iterator: ArrayIterator) -> Self {
+        Self {
+            kind: HeapObjectKind::ArrayIterator(iterator),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn string_iterator(record: ObjectRecord, iterator: StringIterator) -> Self {
+        Self {
+            kind: HeapObjectKind::StringIterator(iterator),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     #[allow(
         dead_code,
         reason = "kind inspection supports class-sensitive object behavior beyond the first Boolean consumer"
@@ -874,6 +1040,26 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn array_iterator_state(&self) -> Option<&ArrayIterator> {
+        self.kind.array_iterator()
+    }
+
+    #[must_use]
+    pub(crate) const fn array_iterator_state_mut(&mut self) -> Option<&mut ArrayIterator> {
+        self.kind.array_iterator_mut()
+    }
+
+    #[must_use]
+    pub(crate) const fn string_iterator_state(&self) -> Option<&StringIterator> {
+        self.kind.string_iterator()
+    }
+
+    #[must_use]
+    pub(crate) const fn string_iterator_state_mut(&mut self) -> Option<&mut StringIterator> {
+        self.kind.string_iterator_mut()
+    }
+
+    #[must_use]
     pub(crate) fn for_in_entry_count(&self) -> usize {
         self.for_in_state().map_or(0, ForInIterator::entry_count)
     }
@@ -884,6 +1070,14 @@ impl HeapObject {
             Some(iterator) => iterator.current(),
             None => None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn array_iterator_current(&self) -> Option<HeapReference> {
+        self.kind
+            .array_iterator()
+            .and_then(ArrayIterator::iterated)
+            .and_then(StoredValue::heap_reference)
     }
 }
 
