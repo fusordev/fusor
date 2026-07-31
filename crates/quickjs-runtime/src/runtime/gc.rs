@@ -291,16 +291,23 @@ impl Runtime {
                     &mut marked_objects,
                     &mut work,
                 );
-                for prototype in [
-                    errors.error,
-                    errors.internal_error,
-                    errors.range_error,
-                    errors.reference_error,
-                    errors.syntax_error,
-                    errors.type_error,
-                ] {
+                for intrinsic in errors.entries {
                     mark_heap_reference(
-                        HeapReference::Object(prototype),
+                        HeapReference::Object(intrinsic.prototype),
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                    mark_heap_reference(
+                        HeapReference::Function(intrinsic.constructor),
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
+                for function in [errors.to_string, errors.is_error] {
+                    mark_heap_reference(
+                        HeapReference::Function(function),
                         &mut marked_functions,
                         &mut marked_objects,
                         &mut work,

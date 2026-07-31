@@ -27,8 +27,24 @@ dispatch, strict receiver-aware static method calls, and arbitrary explicit
 bindings, captured catch bindings, shared and nested finalizers, rethrow, and
 abrupt cleanup across calls, loops, and `for-in` iterator state. Engine-thrown
 InternalError, RangeError, ReferenceError, SyntaxError, and TypeError values
-materialize as branded objects in the throwing realm with inherited `name` and
-an exact own `message`. Computed property reads, writes, calls, data definitions, and
+freeze headerless stacks before unwinding and materialize as branded objects
+in the throwing realm with inherited `name` plus exact own `message` and
+`stack` properties. Each realm also installs `Error`, `EvalError`,
+`RangeError`, `ReferenceError`, `SyntaxError`, `TypeError`, `URIError`,
+`InternalError`, and `AggregateError` as one failure-atomic intrinsic graph.
+The current complete realm graph is regression-locked at 19 objects, 42
+functions, and 192 properties, including exact Error constructor/prototype
+descriptors, own-property order, and inheritance. All nine constructors are
+callable and constructable and create internally branded objects. Observable
+`newTarget.prototype` selection, `message` conversion, inherited or own
+`cause`, generic `Error.prototype.toString`, and strict `Error.isError`
+branding execute through resumable continuations. `AggregateError` processes
+message and cause before acquiring its iterator, reads `done` before `value`,
+collects into a constructor-realm Array, and applies the pinned exceptional
+`IteratorClose` rules with original-error precedence. Constructor-created
+errors receive an own writable, non-enumerable, configurable `stack` snapshot
+containing headerless verified-bytecode frames. Computed property reads,
+writes, calls, data definitions, and
 synchronous methods/accessors perform resumable `ToPropertyKey`, including
 exact well-known Symbol identity. Non-BigInt unary, update, arithmetic, shift,
 bitwise, relational, loose-equality, and strict-equality operators execute with
@@ -110,9 +126,15 @@ data-initializer semantics, anonymous data-function inferred names,
 async/generator methods, `super`/home-object semantics, realm-global accessor
 writes, optional calls, call spread, iterator destructuring, `for await`,
 async/generator iterator consumers, the remaining Number built-ins, the
-remaining String built-ins, serialized bytecode, every form of eval, Error
-constructors and `Error.prototype.toString`, and destructuring-catch semantics
-remain deferred and fail closed. Ordinary
+remaining String built-ins, serialized bytecode, every form of eval,
+destructuring-catch semantics, and complete Error compatibility remain
+deferred and fail closed. The Error checkpoint still lacks the `Object` and
+`Reflect` surface needed by several reflection/new-target probes, a global
+`undefined` binding, synthetic `call (native)`/`apply (native)` stack frames,
+deleted-stack rebuild for explicitly thrown branded Errors, and host
+observation that normalizes an escaping explicitly thrown Error object.
+Its strict differential corpus contains 35 cases and 59 feature tags; the
+current candidate matches 18 of 35 cases. Ordinary
 synchronous `try`/`catch`/`finally` now uses verified shared finalizer
 subroutines and preserves or overrides return, throw, break, and continue
 completions with bounded typed operand-stack state.
@@ -222,6 +244,7 @@ cargo xtask number-radix-differential --oracle /path/to/quickjs-2026-06-04/qjs
 cargo xtask control-flow-differential --oracle /path/to/quickjs-2026-06-04/qjs
 cargo xtask function-apply-differential --oracle /path/to/quickjs-2026-06-04/qjs
 cargo xtask iterator-differential --oracle /path/to/quickjs-2026-06-04/qjs
+cargo xtask error-differential --oracle /path/to/quickjs-2026-06-04/qjs
 ```
 
 The upstream C engine may be built separately as a development oracle for

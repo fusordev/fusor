@@ -1,0 +1,216 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "all-error-families-call-and-construct",
+      "covers": ["aggregate-call", "aggregate-construct", "error-call", "error-construct", "error-families", "internal-error"],
+      "body": "function check(C, name, aggregate) {\n  let called = aggregate ? C([1], \"m\") : C(\"m\");\n  let constructed = aggregate ? new C([1], \"m\") : new C(\"m\");\n  return called.name + \":\" + called.message + \":\" + (Object.getPrototypeOf(called) === C.prototype) + \":\" + (Object.getPrototypeOf(constructed) === C.prototype) + \":\" + String(constructed);\n}\nreturn check(Error, \"Error\", false) + \"|\" + check(EvalError, \"EvalError\", false) + \"|\" + check(RangeError, \"RangeError\", false) + \"|\" + check(ReferenceError, \"ReferenceError\", false) + \"|\" + check(SyntaxError, \"SyntaxError\", false) + \"|\" + check(TypeError, \"TypeError\", false) + \"|\" + check(URIError, \"URIError\", false) + \"|\" + check(AggregateError, \"AggregateError\", true) + \"|\" + check(InternalError, \"InternalError\", false);",
+      "expect": {"kind": "string", "value": "Error:m:true:true:Error: m|EvalError:m:true:true:EvalError: m|RangeError:m:true:true:RangeError: m|ReferenceError:m:true:true:ReferenceError: m|SyntaxError:m:true:true:SyntaxError: m|TypeError:m:true:true:TypeError: m|URIError:m:true:true:URIError: m|AggregateError:m:true:true:AggregateError: m|InternalError:m:true:true:InternalError: m"}
+    },
+    {
+      "id": "constructor-and-prototype-descriptors",
+      "covers": ["constructor-metadata", "prototype-descriptors", "tostring-descriptor"],
+      "body": "function flags(object, property) {\n  let descriptor = Object.getOwnPropertyDescriptor(object, property);\n  return typeof descriptor.value + \",\" + descriptor.writable + \",\" + descriptor.enumerable + \",\" + descriptor.configurable;\n}\nreturn Error.length + \":\" + AggregateError.length + \"|\" + flags(Error, \"length\") + \"|\" + flags(Error, \"name\") + \"|\" + flags(Error, \"prototype\") + \"|\" + flags(Error.prototype, \"constructor\") + \"|\" + flags(Error.prototype, \"name\") + \"|\" + flags(Error.prototype, \"message\") + \"|\" + flags(Error.prototype, \"toString\") + \"|\" + Error.prototype.toString.length + \":\" + Error.prototype.toString.name;",
+      "expect": {"kind": "string", "value": "1:2|number,false,false,true|string,false,false,true|object,false,false,false|function,true,false,true|string,true,false,true|string,true,false,true|function,true,false,true|0:toString"}
+    },
+    {
+      "id": "family-prototype-chains-and-brand",
+      "covers": ["error-brand", "prototype-chain"],
+      "body": "function check(C, parent, aggregate) {\n  let value = aggregate ? C([]) : C();\n  return (Object.getPrototypeOf(C) === parent) + \":\" + (Object.getPrototypeOf(C.prototype) === (C === Error ? Object.prototype : Error.prototype)) + \":\" + Object.prototype.toString.call(value);\n}\nreturn check(Error, Function.prototype, false) + \"|\" + check(EvalError, Error, false) + \"|\" + check(RangeError, Error, false) + \"|\" + check(ReferenceError, Error, false) + \"|\" + check(SyntaxError, Error, false) + \"|\" + check(TypeError, Error, false) + \"|\" + check(URIError, Error, false) + \"|\" + check(AggregateError, Error, true) + \"|\" + check(InternalError, Error, false);",
+      "expect": {"kind": "string", "value": "true:true:[object Error]|true:true:[object Error]|true:true:[object Error]|true:true:[object Error]|true:true:[object Error]|true:true:[object Error]|true:true:[object Error]|true:true:[object Error]|true:true:[object Error]"}
+    },
+    {
+      "id": "family-prototype-name-and-message",
+      "covers": ["family-prototype-metadata", "internal-error"],
+      "body": "return Error.prototype.name + \":\" + Error.prototype.message + \"|\" + EvalError.prototype.name + \":\" + EvalError.prototype.message + \"|\" + RangeError.prototype.name + \":\" + RangeError.prototype.message + \"|\" + ReferenceError.prototype.name + \":\" + ReferenceError.prototype.message + \"|\" + SyntaxError.prototype.name + \":\" + SyntaxError.prototype.message + \"|\" + TypeError.prototype.name + \":\" + TypeError.prototype.message + \"|\" + URIError.prototype.name + \":\" + URIError.prototype.message + \"|\" + AggregateError.prototype.name + \":\" + AggregateError.prototype.message + \"|\" + InternalError.prototype.name + \":\" + InternalError.prototype.message;",
+      "expect": {"kind": "string", "value": "Error:|EvalError:|RangeError:|ReferenceError:|SyntaxError:|TypeError:|URIError:|AggregateError:|InternalError:"}
+    },
+    {
+      "id": "all-families-install-cause",
+      "covers": ["cause-present", "family-cause"],
+      "body": "return Error(\"x\", {cause: \"e\"}).cause + EvalError(\"x\", {cause: \"v\"}).cause + RangeError(\"x\", {cause: \"r\"}).cause + ReferenceError(\"x\", {cause: \"f\"}).cause + SyntaxError(\"x\", {cause: \"s\"}).cause + TypeError(\"x\", {cause: \"t\"}).cause + URIError(\"x\", {cause: \"u\"}).cause + AggregateError([], \"x\", {cause: \"a\"}).cause + InternalError(\"x\", {cause: \"i\"}).cause;",
+      "expect": {"kind": "string", "value": "evrfstuai"}
+    },
+    {
+      "id": "message-omission-empty-null-and-descriptor",
+      "covers": ["message-absent", "message-descriptor", "message-empty"],
+      "body": "function own(object, property) { return Object.prototype.hasOwnProperty.call(object, property); }\nlet absent = Error();\nlet undefinedMessage = Error(undefined);\nlet empty = Error(\"\");\nlet nullMessage = Error(null);\nlet descriptor = Object.getOwnPropertyDescriptor(empty, \"message\");\nreturn own(absent, \"message\") + \"|\" + own(undefinedMessage, \"message\") + \"|\" + own(empty, \"message\") + \":\" + empty.message + \"|\" + own(nullMessage, \"message\") + \":\" + nullMessage.message + \"|\" + Object.keys(empty).length + \"|\" + typeof descriptor.value + \",\" + descriptor.writable + \",\" + descriptor.enumerable + \",\" + descriptor.configurable;",
+      "expect": {"kind": "string", "value": "false|false|true:|true:null|0|string,true,false,true"}
+    },
+    {
+      "id": "message-coercion-precedes-cause-get",
+      "covers": ["cause-getter-order", "message-coercion"],
+      "body": "let log = \"\";\nlet message = {toString() { log = log + \"m\"; return \"text\"; }};\nlet options = {get cause() { log = log + \"c\"; return \"why\"; }};\nlet error = Error(message, options);\nreturn error.message + \"|\" + error.cause + \"|\" + log;",
+      "expect": {"kind": "string", "value": "text|why|mc"}
+    },
+    {
+      "id": "message-abrupt-skips-cause-get",
+      "covers": ["cause-getter-order", "message-abrupt"],
+      "body": "let log = \"\";\ntry {\n  Error({toString() { log = log + \"m\"; throw \"message\"; }}, {get cause() { log = log + \"c\"; return 1; }});\n} catch (error) {\n  return error + \"|\" + log;\n}",
+      "expect": {"kind": "string", "value": "message|m"}
+    },
+    {
+      "id": "cause-abrupt-follows-message-coercion",
+      "covers": ["cause-abrupt", "cause-getter-order"],
+      "body": "let log = \"\";\ntry {\n  Error({toString() { log = log + \"m\"; return \"ok\"; }}, {get cause() { log = log + \"c\"; throw \"cause\"; }});\n} catch (error) {\n  return error + \"|\" + log;\n}",
+      "expect": {"kind": "string", "value": "cause|mc"}
+    },
+    {
+      "id": "cause-presence-inheritance-and-primitive-options",
+      "covers": ["cause-absent", "cause-inherited", "cause-present"],
+      "body": "function own(object, property) { return Object.prototype.hasOwnProperty.call(object, property); }\nlet absent = Error(\"x\");\nlet emptyOptions = Error(\"x\", {});\nlet explicitUndefined = Error(\"x\", {cause: undefined});\nfunction Options() {}\nOptions.prototype.cause = \"inherited\";\nlet inherited = Error(\"x\", new Options());\nreturn own(absent, \"cause\") + \"|\" + own(emptyOptions, \"cause\") + \"|\" + own(explicitUndefined, \"cause\") + \":\" + explicitUndefined.cause + \"|\" + own(inherited, \"cause\") + \":\" + inherited.cause + \"|\" + own(Error(\"x\", null), \"cause\") + \"|\" + own(Error(\"x\", 0), \"cause\") + \"|\" + own(Error(\"x\", true), \"cause\") + \"|\" + own(Error(\"x\", \"options\"), \"cause\") + \"|\" + own(Error(\"x\", Symbol(\"options\")), \"cause\");",
+      "expect": {"kind": "string", "value": "false|false|true:undefined|true:inherited|false|false|false|false|false"}
+    },
+    {
+      "id": "cause-descriptor-and-value-identity",
+      "covers": ["cause-descriptor"],
+      "body": "let cause = {};\nlet error = Error(\"x\", {cause: cause});\nlet descriptor = Object.getOwnPropertyDescriptor(error, \"cause\");\nreturn (error.cause === cause) + \"|\" + typeof descriptor.value + \",\" + descriptor.writable + \",\" + descriptor.enumerable + \",\" + descriptor.configurable + \"|\" + Object.keys(error).length;",
+      "expect": {"kind": "string", "value": "true|object,true,false,true|0"}
+    },
+    {
+      "id": "error-call-ignores-this-receiver",
+      "covers": ["error-call-ignores-this"],
+      "body": "let receiver = {};\nlet called = Error.call(receiver, \"x\");\nlet constructed = new Error(\"x\");\nreturn (called === receiver) + \"|\" + (Object.getPrototypeOf(called) === Error.prototype) + \"|\" + (Object.getPrototypeOf(constructed) === Error.prototype) + \"|\" + (called === constructed) + \"|\" + Object.prototype.hasOwnProperty.call(receiver, \"message\");",
+      "expect": {"kind": "string", "value": "false|true|true|false|false"}
+    },
+    {
+      "id": "new-target-selects-custom-prototype",
+      "covers": ["error-is-error", "new-target-prototype"],
+      "body": "function Custom() {}\nCustom.prototype = {marker: \"custom\"};\nlet error = Reflect.construct(Error, [\"x\"], Custom);\nreturn (Object.getPrototypeOf(error) === Custom.prototype) + \"|\" + (Object.getPrototypeOf(error) === Error.prototype) + \"|\" + Error.prototype.toString.call(error) + \"|\" + error.marker + \"|\" + Error.isError(error);",
+      "expect": {"kind": "string", "value": "true|false|Error: x|custom|true"}
+    },
+    {
+      "id": "new-target-nonobject-prototype-uses-family-intrinsic",
+      "covers": ["new-target-intrinsic-fallback", "realm-owned-prototype"],
+      "body": "function Custom() {}\nCustom.prototype = 1;\nlet fallback = Reflect.construct(TypeError, [\"x\"], Custom);\nlet selected = Reflect.construct(Error, [\"m\"], TypeError);\nreturn (Object.getPrototypeOf(fallback) === TypeError.prototype) + \"|\" + (Object.getPrototypeOf(Object.getPrototypeOf(fallback)) === Error.prototype) + \"|\" + String(fallback) + \"|\" + (Object.getPrototypeOf(selected) === TypeError.prototype) + \"|\" + (Object.getPrototypeOf(Object.getPrototypeOf(selected)) === Error.prototype) + \"|\" + String(selected);",
+      "expect": {"kind": "string", "value": "true|true|TypeError: x|true|true|TypeError: m"}
+    },
+    {
+      "id": "tostring-default-and-empty-branches",
+      "covers": ["tostring-default-message", "tostring-default-name", "tostring-empty-message", "tostring-empty-name", "tostring-generic"],
+      "body": "let toString = Error.prototype.toString;\nreturn toString.call({name: \"N\", message: \"M\"}) + \"|\" + toString.call({message: \"M\"}) + \"|\" + toString.call({name: \"N\"}) + \"|<\" + toString.call({name: \"\", message: \"M\"}) + \">|<\" + toString.call({name: \"N\", message: \"\"}) + \">|<\" + toString.call({}) + \">\";",
+      "expect": {"kind": "string", "value": "N: M|Error: M|N|<M>|<N>|<Error>"}
+    },
+    {
+      "id": "tostring-getter-and-coercion-order",
+      "covers": ["tostring-getter-order", "tostring-message-coercion", "tostring-name-coercion"],
+      "body": "let log = \"\";\nlet receiver = {\n  get name() { log = log + \"gN\"; return {toString() { log = log + \"sN\"; return \"N\"; }}; },\n  get message() { log = log + \"gM\"; return {toString() { log = log + \"sM\"; return \"M\"; }}; }\n};\nreturn Error.prototype.toString.call(receiver) + \"|\" + log;",
+      "expect": {"kind": "string", "value": "N: M|gNsNgMsM"}
+    },
+    {
+      "id": "tostring-name-getter-abrupt-skips-message",
+      "covers": ["tostring-name-abrupt"],
+      "body": "let log = \"\";\nlet receiver = {get name() { log = log + \"n\"; throw \"NAME\"; }, get message() { log = log + \"m\"; return \"M\"; }};\ntry { Error.prototype.toString.call(receiver); } catch (error) { return error + \"|\" + log; }",
+      "expect": {"kind": "string", "value": "NAME|n"}
+    },
+    {
+      "id": "tostring-message-getter-abrupt-after-name",
+      "covers": ["tostring-message-abrupt"],
+      "body": "let log = \"\";\nlet receiver = {get name() { log = log + \"n\"; return \"N\"; }, get message() { log = log + \"m\"; throw \"MESSAGE\"; }};\ntry { Error.prototype.toString.call(receiver); } catch (error) { return error + \"|\" + log; }",
+      "expect": {"kind": "string", "value": "MESSAGE|nm"}
+    },
+    {
+      "id": "symbol-message-and-tostring-coercion-errors",
+      "covers": ["tostring-coercion-abrupt"],
+      "body": "function observe(action) { try { action(); } catch (error) { return error.name + \":\" + error.message; } }\nreturn observe(function() { Error(Symbol(\"message\")); }) + \"|\" + observe(function() { Error.prototype.toString.call({name: Symbol(\"name\")}); }) + \"|\" + observe(function() { Error.prototype.toString.call({name: \"N\", message: Symbol(\"message\")}); });",
+      "expect": {"kind": "string", "value": "TypeError:cannot convert symbol to string|TypeError:cannot convert symbol to string|TypeError:cannot convert symbol to string"}
+    },
+    {
+      "id": "tostring-rejects-primitive-receivers",
+      "covers": ["tostring-primitive-receiver"],
+      "body": "function observe(value) { try { Error.prototype.toString.call(value); } catch (error) { return error.name + \":\" + error.message; } }\nreturn observe(null) + \"|\" + observe(0) + \"|\" + observe(true) + \"|\" + observe(\"text\") + \"|\" + observe(Symbol(\"value\"));",
+      "expect": {"kind": "string", "value": "TypeError:not an object|TypeError:not an object|TypeError:not an object|TypeError:not an object|TypeError:not an object"}
+    },
+    {
+      "id": "aggregate-errors-message-and-cause-descriptors",
+      "covers": ["aggregate-errors-descriptor"],
+      "body": "function flags(descriptor) { return typeof descriptor.value + \",\" + descriptor.writable + \",\" + descriptor.enumerable + \",\" + descriptor.configurable; }\nlet error = AggregateError([1, \"x\"], \"many\", {cause: \"why\"});\nreturn error.name + \"|\" + error.message + \"|\" + error.cause + \"|\" + error.errors.length + \":\" + error.errors[0] + \":\" + error.errors[1] + \"|\" + flags(Object.getOwnPropertyDescriptor(error, \"errors\")) + \"|\" + flags(Object.getOwnPropertyDescriptor(error, \"message\")) + \"|\" + flags(Object.getOwnPropertyDescriptor(error, \"cause\")) + \"|\" + String(error);",
+      "expect": {"kind": "string", "value": "AggregateError|many|why|2:1:x|object,true,false,true|string,true,false,true|string,true,false,true|AggregateError: many"}
+    },
+    {
+      "id": "aggregate-consumes-iterable-in-order",
+      "covers": ["aggregate-iteration"],
+      "body": "let log = \"\";\nlet iterable = {[Symbol.iterator]() {\n  log = log + \"i\";\n  let next = 0;\n  return {next() { log = log + \"n\"; next = next + 1; return next < 3 ? {value: next * 10, done: false} : {done: true}; }};\n}};\nlet error = AggregateError(iterable);\nreturn log + \"|\" + error.errors.length + \":\" + error.errors[0] + \":\" + error.errors[1];",
+      "expect": {"kind": "string", "value": "innn|2:10:20"}
+    },
+    {
+      "id": "aggregate-message-and-cause-precede-iteration",
+      "covers": ["aggregate-order"],
+      "body": "let log = \"\";\nlet errors = {[Symbol.iterator]() { log = log + \"i\"; return {next() { log = log + \"n\"; return {done: true}; }}; }};\nlet message = {toString() { log = log + \"m\"; return \"M\"; }};\nlet options = {get cause() { log = log + \"c\"; return 1; }};\nlet error = AggregateError(errors, message, options);\nreturn error.message + \"|\" + error.cause + \"|\" + log;",
+      "expect": {"kind": "string", "value": "M|1|mcin"}
+    },
+    {
+      "id": "aggregate-iteration-abrupt-closes-iterator",
+      "covers": ["aggregate-iteration-abrupt"],
+      "body": "let log = \"\";\nlet errors = {[Symbol.iterator]() {\n  log = log + \"i\";\n  return {next() { log = log + \"n\"; throw \"ITER\"; }, return() { log = log + \"r\"; return {}; }};\n}};\nlet message = {toString() { log = log + \"m\"; return \"M\"; }};\nlet options = {get cause() { log = log + \"c\"; return 1; }};\ntry { AggregateError(errors, message, options); } catch (error) { return error + \"|\" + log; }",
+      "expect": {"kind": "string", "value": "ITER|mcinr"}
+    },
+    {
+      "id": "aggregate-new-target-selects-custom-prototype",
+      "covers": ["error-is-error", "new-target-aggregate"],
+      "body": "function Custom() {}\nCustom.prototype = {name: \"CustomAggregate\", marker: \"custom\"};\nlet error = Reflect.construct(AggregateError, [[1], \"many\"], Custom);\nreturn (Object.getPrototypeOf(error) === Custom.prototype) + \"|\" + (Object.getPrototypeOf(error) === AggregateError.prototype) + \"|\" + error.errors.length + \":\" + error.errors[0] + \"|\" + Error.prototype.toString.call(error) + \"|\" + error.marker + \"|\" + Error.isError(error);",
+      "expect": {"kind": "string", "value": "true|false|1:1|CustomAggregate: many|custom|true"}
+    },
+    {
+      "id": "unhandled-thrown-error-is-normalized",
+      "covers": ["thrown-error"],
+      "body": "throw new TypeError(\"boom\", {cause: \"why\"});",
+      "expect": {"kind": "throw", "name": "TypeError", "message": "boom"}
+    },
+    {
+      "id": "caught-error-preserves-family-message-and-cause",
+      "covers": ["caught-error"],
+      "body": "try {\n  throw new RangeError(\"range\", {cause: \"why\"});\n} catch (error) {\n  return error.name + \"|\" + error.message + \"|\" + error.cause + \"|\" + String(error) + \"|\" + Object.prototype.toString.call(error);\n}",
+      "expect": {"kind": "string", "value": "RangeError|range|why|RangeError: range|[object Error]"}
+    },
+    {
+      "id": "realm-local-error-prototype-mutation",
+      "covers": ["realm-isolation", "realm-owned-prototype"],
+      "body": "Error.prototype.realmMarker = \"local\";\nreturn (new Error()).realmMarker + \"|\" + (new TypeError()).realmMarker;",
+      "expect": {"kind": "string", "value": "local|local"}
+    },
+    {
+      "id": "fresh-realm-starts-with-clean-error-prototype",
+      "covers": ["realm-isolation"],
+      "body": "return Object.prototype.hasOwnProperty.call(Error.prototype, \"realmMarker\") + \"|\" + ((new Error()).realmMarker === undefined);",
+      "expect": {"kind": "string", "value": "false|true"}
+    },
+    {
+      "id": "error-is-error-uses-the-internal-brand",
+      "covers": ["error-is-error", "error-is-error-descriptor"],
+      "body": "function flags(descriptor) { return typeof descriptor.value + \",\" + descriptor.writable + \",\" + descriptor.enumerable + \",\" + descriptor.configurable; }\nlet error = Error();\nreturn Error.isError(error) + \"|\" + Error.isError(Error.prototype) + \"|\" + Error.isError(Object.create(Error.prototype)) + \"|\" + Error.isError({}) + \"|\" + Error.isError(null) + \"|\" + Error.isError(new TypeError()) + \"|\" + Error.isError.length + \":\" + Error.isError.name + \"|\" + flags(Object.getOwnPropertyDescriptor(Error, \"isError\"));",
+      "expect": {"kind": "string", "value": "true|false|false|false|false|true|1:isError|function,true,false,true"}
+    },
+    {
+      "id": "stack-is-own-headerless-and-snapshotted",
+      "covers": ["own-property-order", "stack-descriptor", "stack-format", "stack-snapshot"],
+      "body": "function flags(descriptor) { return typeof descriptor.value + \",\" + descriptor.writable + \",\" + descriptor.enumerable + \",\" + descriptor.configurable; }\nlet error = Error(\"message\", {cause: 1});\nlet aggregate = AggregateError([], \"message\", {cause: 1});\nlet snapshot = error.stack;\nerror.message = \"changed\";\nreturn Object.getOwnPropertyNames(error).join(\",\") + \"|\" + Object.getOwnPropertyNames(aggregate).join(\",\") + \"|\" + flags(Object.getOwnPropertyDescriptor(error, \"stack\")) + \"|\" + error.stack.slice(0, 7) + \"|\" + (error.stack === snapshot);",
+      "expect": {"kind": "string", "value": "message,cause,stack|message,cause,errors,stack|string,true,false,true|    at |true"}
+    },
+    {
+      "id": "constructors-expose-only-the-pinned-own-surface",
+      "covers": ["surface-own-properties"],
+      "body": "return Object.getOwnPropertyNames(Error).join(\",\") + \"|\" + Object.getOwnPropertyNames(EvalError).join(\",\") + \"|\" + Object.getOwnPropertyNames(AggregateError).join(\",\") + \"|\" + Object.getOwnPropertyNames(InternalError).join(\",\") + \"|\" + Object.getOwnPropertyNames(Error.prototype).join(\",\") + \"|\" + Object.getOwnPropertyNames(AggregateError.prototype).join(\",\");",
+      "expect": {"kind": "string", "value": "length,name,isError,prototype|length,name,prototype|length,name,prototype|length,name,prototype|toString,name,message,constructor|name,message,constructor"}
+    },
+    {
+      "id": "aggregate-acquisition-errors-do-not-close",
+      "covers": ["aggregate-acquisition-abrupt", "aggregate-missing-errors"],
+      "body": "let missing;\ntry { AggregateError(); } catch (error) { missing = error.name + \":\" + error.message; }\nlet iteratorLog = \"\";\nlet iteratorError;\ntry { AggregateError({get [Symbol.iterator]() { throw \"ITERATOR\"; }}); } catch (error) { iteratorError = error; }\nlet nextLog = \"\";\nlet nextError;\nlet errors = {[Symbol.iterator]() { nextLog = nextLog + \"i\"; return {get next() { nextLog = nextLog + \"g\"; throw \"NEXTGET\"; }, return() { nextLog = nextLog + \"r\"; return {}; }}; }};\ntry { AggregateError(errors); } catch (error) { nextError = error; }\nreturn missing + \"|\" + iteratorError + \":\" + iteratorLog + \"|\" + nextError + \":\" + nextLog;",
+      "expect": {"kind": "string", "value": "TypeError:cannot read property 'Symbol.iterator' of undefined|ITERATOR:|NEXTGET:ig"}
+    },
+    {
+      "id": "aggregate-done-and-value-errors-close",
+      "covers": ["aggregate-step-abrupt-close"],
+      "body": "let doneLog = \"\";\nlet doneError;\nlet doneErrors = {[Symbol.iterator]() { doneLog = doneLog + \"i\"; return {next() { doneLog = doneLog + \"n\"; return {get done() { doneLog = doneLog + \"d\"; throw \"DONE\"; }}; }, return() { doneLog = doneLog + \"r\"; return {}; }}; }};\ntry { AggregateError(doneErrors); } catch (error) { doneError = error; }\nlet valueLog = \"\";\nlet valueError;\nlet valueErrors = {[Symbol.iterator]() { valueLog = valueLog + \"i\"; return {next() { valueLog = valueLog + \"n\"; return {done: false, get value() { valueLog = valueLog + \"v\"; throw \"VALUE\"; }}; }, return() { valueLog = valueLog + \"r\"; return {}; }}; }};\ntry { AggregateError(valueErrors); } catch (error) { valueError = error; }\nreturn doneError + \":\" + doneLog + \"|\" + valueError + \":\" + valueLog;",
+      "expect": {"kind": "string", "value": "DONE:indr|VALUE:invr"}
+    },
+    {
+      "id": "aggregate-exceptional-close-preserves-original",
+      "covers": ["aggregate-close-original-wins"],
+      "body": "function run(primitive) {\n  let log = \"\";\n  let errors = {[Symbol.iterator]() { log = log + \"i\"; return {next() { log = log + \"n\"; return {get done() { log = log + \"d\"; throw \"ORIGINAL\"; }}; }, return() { log = log + \"r\"; if (primitive) return 1; throw \"CLOSE\"; }}; }};\n  try { AggregateError(errors); } catch (error) { return error + \":\" + log; }\n}\nreturn run(false) + \"|\" + run(true);",
+      "expect": {"kind": "string", "value": "ORIGINAL:indr|ORIGINAL:indr"}
+    }
+  ]
+}

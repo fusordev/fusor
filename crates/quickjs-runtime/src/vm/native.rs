@@ -142,7 +142,9 @@ pub(super) fn take_iterator_abrupt_handler(
     let index = continuations.iter().rposition(|continuation| {
         matches!(
             continuation,
-            NativeContinuation::IteratorAppend(_) | NativeContinuation::IteratorClose(_)
+            NativeContinuation::AggregateError(_)
+                | NativeContinuation::IteratorAppend(_)
+                | NativeContinuation::IteratorClose(_)
         )
     })?;
     let handler = continuations.remove(index);
@@ -161,7 +163,15 @@ pub(super) fn resume_iterator_abrupt_continuations(
         let Some(handler) = take_iterator_abrupt_handler(&mut continuations) else {
             return Err(NativeFailure::Abrupt(pending));
         };
-        match resume_iterator_abrupt(runtime, handler, pending, return_to, execution_budget) {
+        let resumed = match handler {
+            NativeContinuation::AggregateError(state) => {
+                resume_aggregate_error_abrupt(runtime, state, pending, return_to, execution_budget)
+            }
+            handler => {
+                resume_iterator_abrupt(runtime, handler, pending, return_to, execution_budget)
+            }
+        };
+        match resumed {
             Ok(mut dispatch) => {
                 match &mut dispatch {
                     NativeDispatch::Frame(frame) => {
@@ -274,6 +284,19 @@ pub(super) fn resume_native_continuations(
             )?,
             NativeContinuation::IntrinsicGet(state) => {
                 finish_intrinsic_get(runtime, state, value, active_root_frames, &continuations)?
+            }
+            NativeContinuation::AggregateError(state) => advance_aggregate_error_collection(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::ErrorConstructor(state) => {
+                advance_error_constructor(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::ErrorToString(state) => {
+                advance_error_to_string(runtime, state, value, return_to, execution_budget)?
             }
             NativeContinuation::ArrayIteratorNext(state) => {
                 advance_array_iterator_next(runtime, state, value, return_to, execution_budget)?
@@ -409,7 +432,7 @@ fn resolve_native_dispatch_inner(
             .copied();
         if let Some(native) = native {
             apply_native_pre_call(runtime, call.pre_call.as_ref())?;
-            let outcome = dispatch_native_call(
+            let outcome = dispatch_native_call_with_frames(
                 runtime,
                 call.function,
                 native,
@@ -420,6 +443,7 @@ fn resolve_native_dispatch_inner(
                 },
                 call.return_to,
                 Some(call.origin),
+                active_root_frames,
                 suspended_frames,
                 suspended_values,
                 compiler,
@@ -538,13 +562,14 @@ pub(super) fn execute_native_entry(
         arguments: CallArguments::from_values(arguments),
         new_target: None,
     };
-    let dispatch = dispatch_native_call(
+    let dispatch = dispatch_native_call_with_frames(
         runtime,
         function,
         native,
         inputs,
         None,
         None,
+        &prepared_frames,
         0,
         0,
         compiler,
@@ -615,13 +640,47 @@ pub(super) fn execute_native_entry(
     clippy::too_many_lines,
     reason = "native invocation, compilation, installation, and rollback remain one explicit audited boundary"
 )]
+#[cfg(test)]
 pub(super) fn dispatch_native_call(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    native: NativeFunction,
+    inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+    active_frames: usize,
+    active_frame_values: u64,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    dispatch_native_call_with_frames(
+        runtime,
+        function,
+        native,
+        inputs,
+        return_to,
+        origin,
+        &[],
+        active_frames,
+        active_frame_values,
+        compiler,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "native invocation, compilation, installation, and rollback remain one explicit audited boundary"
+)]
+pub(super) fn dispatch_native_call_with_frames(
     runtime: &mut Runtime,
     function: FunctionId,
     native: NativeFunction,
     mut inputs: CallInputs,
     return_to: Option<CallReturn>,
     origin: Option<JsStackFrame>,
+    active_root_frames: &[Frame],
     active_frames: usize,
     active_frame_values: u64,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
@@ -713,6 +772,40 @@ pub(super) fn dispatch_native_call(
                 compiler,
                 execution_budget,
             )
+        }
+        NativeFunctionKind::ErrorConstructor(kind) => begin_error_constructor(
+            runtime,
+            function,
+            kind,
+            inputs.arguments,
+            inputs.new_target,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            active_root_frames,
+            execution_budget,
+        ),
+        NativeFunctionKind::ErrorPrototypeToString => begin_error_to_string(
+            runtime,
+            native.realm,
+            inputs.receiver,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::ErrorIsError => {
+            let value = inputs.arguments.take_first_or_undefined();
+            let is_error = match value {
+                StoredValue::Object(object) => runtime.is_error_object(object)?,
+                StoredValue::Undefined
+                | StoredValue::Null
+                | StoredValue::Boolean(_)
+                | StoredValue::Number(_)
+                | StoredValue::String(_)
+                | StoredValue::Symbol(_)
+                | StoredValue::Function(_) => false,
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(is_error)))
         }
         NativeFunctionKind::ObjectPrototypeToString => begin_object_prototype_to_string(
             runtime,

@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub(crate) const DEFAULT_CONTROL_FLOW_CORPUS: &str = "tests/control-flow/manifest.json";
+pub(crate) const DEFAULT_ERROR_CORPUS: &str = "tests/error/manifest.json";
 pub(crate) const DEFAULT_FUNCTION_APPLY_CORPUS: &str = "tests/function-apply/manifest.json";
 pub(crate) const DEFAULT_ITERATOR_CORPUS: &str = "tests/iterator/manifest.json";
 pub(crate) const MAX_CONTROL_FLOW_TIMEOUT_MS: u64 = 60_000;
@@ -177,6 +178,68 @@ const FUNCTION_APPLY_REQUIRED_COVERAGE: &[&str] = &[
     "target-validation-order",
 ];
 
+const ERROR_REQUIRED_COVERAGE: &[&str] = &[
+    "aggregate-call",
+    "aggregate-acquisition-abrupt",
+    "aggregate-close-original-wins",
+    "aggregate-construct",
+    "aggregate-errors-descriptor",
+    "aggregate-iteration",
+    "aggregate-iteration-abrupt",
+    "aggregate-missing-errors",
+    "aggregate-order",
+    "aggregate-step-abrupt-close",
+    "caught-error",
+    "cause-absent",
+    "cause-abrupt",
+    "cause-descriptor",
+    "cause-getter-order",
+    "cause-inherited",
+    "cause-present",
+    "constructor-metadata",
+    "error-brand",
+    "error-call",
+    "error-call-ignores-this",
+    "error-construct",
+    "error-families",
+    "error-is-error",
+    "error-is-error-descriptor",
+    "family-cause",
+    "family-prototype-metadata",
+    "internal-error",
+    "message-absent",
+    "message-abrupt",
+    "message-coercion",
+    "message-descriptor",
+    "message-empty",
+    "new-target-aggregate",
+    "new-target-intrinsic-fallback",
+    "new-target-prototype",
+    "own-property-order",
+    "prototype-chain",
+    "prototype-descriptors",
+    "realm-isolation",
+    "realm-owned-prototype",
+    "stack-descriptor",
+    "stack-format",
+    "stack-snapshot",
+    "surface-own-properties",
+    "thrown-error",
+    "tostring-coercion-abrupt",
+    "tostring-default-message",
+    "tostring-default-name",
+    "tostring-descriptor",
+    "tostring-empty-message",
+    "tostring-empty-name",
+    "tostring-generic",
+    "tostring-getter-order",
+    "tostring-message-abrupt",
+    "tostring-message-coercion",
+    "tostring-name-abrupt",
+    "tostring-name-coercion",
+    "tostring-primitive-receiver",
+];
+
 // `for await` and destructuring `for-of` heads are separate fail-closed milestones.
 const ITERATOR_REQUIRED_COVERAGE: &[&str] = &[
     "array-spread",
@@ -235,6 +298,7 @@ const ITERATOR_REQUIRED_COVERAGE: &[&str] = &[
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeDifferentialSuite {
     ControlFlow,
+    Error,
     FunctionApply,
     Iterator,
 }
@@ -243,6 +307,7 @@ impl RuntimeDifferentialSuite {
     const fn label(self) -> &'static str {
         match self {
             Self::ControlFlow => "control-flow",
+            Self::Error => "error",
             Self::FunctionApply => "function-apply",
             Self::Iterator => "iterator",
         }
@@ -251,6 +316,7 @@ impl RuntimeDifferentialSuite {
     const fn required_coverage(self) -> &'static [&'static str] {
         match self {
             Self::ControlFlow => REQUIRED_COVERAGE,
+            Self::Error => ERROR_REQUIRED_COVERAGE,
             Self::FunctionApply => FUNCTION_APPLY_REQUIRED_COVERAGE,
             Self::Iterator => ITERATOR_REQUIRED_COVERAGE,
         }
@@ -259,6 +325,13 @@ impl RuntimeDifferentialSuite {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ControlFlowDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct ErrorDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -315,6 +388,15 @@ pub(crate) fn run_control_flow_differential(
         &options.corpus,
         options.timeout,
         RuntimeDifferentialSuite::ControlFlow,
+    )
+}
+
+pub(crate) fn run_error_differential(options: &ErrorDifferentialOptions) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::Error,
     )
 }
 
@@ -607,6 +689,13 @@ fn parse_case(
 
     let body = required_string_with_label(object, "body", &label)?;
     validate_candidate_body(body, &format!("{label} field `body`"))?;
+    if suite == RuntimeDifferentialSuite::Error
+        && (body.contains("async") || body.contains("await"))
+    {
+        return Err(format!(
+            "{label} field `body` contains forbidden asynchronous syntax text"
+        ));
+    }
 
     let expected = parse_observation(
         object
@@ -1547,6 +1636,26 @@ mod tests {
         })
     }
 
+    fn complete_error_manifest() -> Value {
+        let cases = super::ERROR_REQUIRED_COVERAGE
+            .iter()
+            .enumerate()
+            .map(|(index, feature)| {
+                json!({
+                    "id": format!("error-case-{index}"),
+                    "covers": [feature],
+                    "body": "return \"ok\";",
+                    "expect": {"kind": "string", "value": "ok"}
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "schema": 1,
+            "quickjs_release": EXPECTED_MANIFEST_RELEASE,
+            "cases": cases
+        })
+    }
+
     fn complete_iterator_manifest() -> Value {
         let cases = super::ITERATOR_REQUIRED_COVERAGE
             .iter()
@@ -1599,6 +1708,65 @@ mod tests {
             super::FUNCTION_APPLY_REQUIRED_COVERAGE.len()
         );
         assert_eq!(corpus.cases[0].id, "apply-case-0");
+    }
+
+    #[test]
+    fn accepts_a_complete_error_manifest_with_its_own_coverage_contract() {
+        let manifest = complete_error_manifest();
+        let corpus = parse_corpus_for_suite(
+            &serde_json::to_vec(&manifest).expect("serialize manifest"),
+            "error.json",
+            RuntimeDifferentialSuite::Error,
+        )
+        .expect("valid Error manifest");
+        assert_eq!(corpus.cases.len(), super::ERROR_REQUIRED_COVERAGE.len());
+        assert_eq!(corpus.cases[0].id, "error-case-0");
+    }
+
+    #[test]
+    fn error_manifest_rejects_cross_suite_coverage_and_async_text() {
+        let mut manifest = complete_error_manifest();
+        manifest["cases"][0]["covers"][0] = Value::String("labeled-break".to_owned());
+        assert!(
+            parse_corpus_for_suite(
+                &serde_json::to_vec(&manifest).expect("serialize manifest"),
+                "error.json",
+                RuntimeDifferentialSuite::Error,
+            )
+            .expect_err("cross-suite coverage tag")
+            .contains("unknown feature")
+        );
+
+        for body in [
+            "async function unsupported() {}",
+            "return await unsupported;",
+        ] {
+            let mut manifest = complete_error_manifest();
+            manifest["cases"][0]["body"] = Value::String(body.to_owned());
+            assert!(
+                parse_corpus_for_suite(
+                    &serde_json::to_vec(&manifest).expect("serialize manifest"),
+                    "error.json",
+                    RuntimeDifferentialSuite::Error,
+                )
+                .expect_err("asynchronous source")
+                .contains("forbidden asynchronous syntax text")
+            );
+        }
+    }
+
+    #[test]
+    fn checked_in_error_manifest_satisfies_the_strict_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/error/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in Error manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::Error,
+        )
+        .expect("checked-in Error manifest");
+        assert_eq!(super::ERROR_REQUIRED_COVERAGE.len(), 59);
+        assert_eq!(corpus.cases.len(), 35);
     }
 
     #[test]

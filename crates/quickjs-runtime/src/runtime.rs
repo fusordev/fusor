@@ -81,25 +81,102 @@ enum RealmIntrinsics {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ErrorIntrinsicKind {
+    Error,
+    EvalError,
+    RangeError,
+    ReferenceError,
+    SyntaxError,
+    TypeError,
+    UriError,
+    InternalError,
+    AggregateError,
+}
+
+impl ErrorIntrinsicKind {
+    pub(crate) const ALL: [Self; 9] = [
+        Self::Error,
+        Self::EvalError,
+        Self::RangeError,
+        Self::ReferenceError,
+        Self::SyntaxError,
+        Self::TypeError,
+        Self::UriError,
+        Self::InternalError,
+        Self::AggregateError,
+    ];
+
+    #[cfg(test)]
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Error => "Error",
+            Self::EvalError => "EvalError",
+            Self::RangeError => "RangeError",
+            Self::ReferenceError => "ReferenceError",
+            Self::SyntaxError => "SyntaxError",
+            Self::TypeError => "TypeError",
+            Self::UriError => "URIError",
+            Self::InternalError => "InternalError",
+            Self::AggregateError => "AggregateError",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Error => 0,
+            Self::EvalError => 1,
+            Self::RangeError => 2,
+            Self::ReferenceError => 3,
+            Self::SyntaxError => 4,
+            Self::TypeError => 5,
+            Self::UriError => 6,
+            Self::InternalError => 7,
+            Self::AggregateError => 8,
+        }
+    }
+
+    const fn predefined_atom(self) -> PredefinedAtom {
+        match self {
+            Self::Error => PredefinedAtom::Error,
+            Self::EvalError => PredefinedAtom::EvalError,
+            Self::RangeError => PredefinedAtom::RangeError,
+            Self::ReferenceError => PredefinedAtom::ReferenceError,
+            Self::SyntaxError => PredefinedAtom::SyntaxError,
+            Self::TypeError => PredefinedAtom::TypeError,
+            Self::UriError => PredefinedAtom::UriError,
+            Self::InternalError => PredefinedAtom::InternalError,
+            Self::AggregateError => PredefinedAtom::AggregateError,
+        }
+    }
+
+    const fn from_exception_kind(kind: ExceptionKind) -> Self {
+        match kind {
+            ExceptionKind::InternalError => Self::InternalError,
+            ExceptionKind::RangeError => Self::RangeError,
+            ExceptionKind::ReferenceError => Self::ReferenceError,
+            ExceptionKind::SyntaxError => Self::SyntaxError,
+            ExceptionKind::TypeError => Self::TypeError,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ErrorIntrinsic {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ErrorIntrinsics {
-    error: ObjectId,
-    internal_error: ObjectId,
-    range_error: ObjectId,
-    reference_error: ObjectId,
-    syntax_error: ObjectId,
-    type_error: ObjectId,
+    entries: [ErrorIntrinsic; ErrorIntrinsicKind::ALL.len()],
+    to_string: FunctionId,
+    is_error: FunctionId,
 }
 
 impl ErrorIntrinsics {
-    const fn prototype(self, kind: ExceptionKind) -> ObjectId {
-        match kind {
-            ExceptionKind::InternalError => self.internal_error,
-            ExceptionKind::RangeError => self.range_error,
-            ExceptionKind::ReferenceError => self.reference_error,
-            ExceptionKind::SyntaxError => self.syntax_error,
-            ExceptionKind::TypeError => self.type_error,
-        }
+    const fn intrinsic(self, kind: ErrorIntrinsicKind) -> ErrorIntrinsic {
+        self.entries[kind.index()]
     }
 }
 
@@ -260,6 +337,9 @@ pub(crate) enum NativeFunctionKind {
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
     FunctionPrototypeToString,
+    ErrorConstructor(ErrorIntrinsicKind),
+    ErrorPrototypeToString,
+    ErrorIsError,
     BooleanConstructor,
     BooleanPrototypeToString,
     BooleanPrototypeValueOf,
@@ -291,6 +371,7 @@ impl NativeFunctionKind {
         matches!(
             self,
             Self::OrdinaryFunctionConstructor
+                | Self::ErrorConstructor(_)
                 | Self::BooleanConstructor
                 | Self::NumberConstructor
                 | Self::StringConstructor

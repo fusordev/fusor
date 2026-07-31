@@ -594,6 +594,38 @@ A milestone is complete only when all of its checked items pass in CI.
 ### M4 — built-ins and asynchronous semantics
 
 - [ ] Fundamental objects, functions, errors, reflection, and proxies.
+  - [x] Land the first realm-owned Error vertical for `Error`, `EvalError`,
+        `RangeError`, `ReferenceError`, `SyntaxError`, `TypeError`, `URIError`,
+        `InternalError`, and `AggregateError`. Realm creation installs the
+        failure-atomic 19-object/42-function/192-property graph with pinned
+        constructor and prototype inheritance, descriptors, names, lengths,
+        own-property order, and unbranded prototype objects. All nine
+        constructors are callable and constructable, select an observable
+        `newTarget.prototype` with the new-target-realm intrinsic fallback,
+        and allocate an internally branded Error. Resumable construction
+        preserves `message` conversion and `cause` presence/Get ordering;
+        generic `Error.prototype.toString` preserves getter and conversion
+        order; and `Error.isError` tests only the internal brand.
+        `AggregateError` finishes message and cause before one iterator
+        acquisition, retains `next`, allocates the result Array afterward,
+        reads `done` before `value`, and performs exceptional
+        `IteratorClose` after `next` acquisition with original-error
+        precedence. Constructor errors receive a snapshotted, own writable,
+        non-enumerable, configurable, headerless stack rendered from retained
+        verified-bytecode frames.
+  - [ ] Close the remaining Error compatibility gaps. Synthetic
+        `call (native)`/`apply (native)` frames are not represented, and
+        explicitly thrown branded Errors do not yet rebuild a deleted own
+        stack. Engine-created errors do freeze a stack before unwinding and
+        install it after `message` when catch materializes the object. The
+        strict 35-case, 59-feature-tag Error differential currently matches 18
+        candidate cases; the other observations require the pending
+        `Object`/`Reflect` surface, the global `undefined` binding, or
+        normalization of an escaping explicitly thrown Error object. Snapshot
+        storage is also reserved at constructor entry, so only uncatchable host
+        allocation-failure ordering differs from QuickJS's end-of-constructor
+        backtrace build. Direct eval remains deferred and outside this
+        checkpoint.
 - [ ] Number, BigInt, String, RegExp, Date, JSON, and structured data.
 - [ ] Collections, ArrayBuffer, TypedArray, DataView, Atomics, and shared data.
 - [ ] Resizable/transferable ArrayBuffer, iterator helpers, Set methods,

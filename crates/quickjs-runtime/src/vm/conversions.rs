@@ -1531,6 +1531,18 @@ fn finish_operator_primitive_target(
                 runtime.allocate_string_iterator(realm, string)?,
             )))
         }
+        OperatorPrimitiveTarget::ErrorConstructorMessage(state) => {
+            let message = operator_primitive_to_string(value, realm, origin)?;
+            finish_error_constructor_message(runtime, state, message, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::ErrorToStringName(state) => {
+            let name = operator_primitive_to_string(value, realm, origin)?;
+            finish_error_to_string_name(runtime, state, name, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::ErrorToStringMessage(state) => {
+            let message = operator_primitive_to_string(value, realm, origin)?;
+            finish_error_to_string_message(state, message)
+        }
         OperatorPrimitiveTarget::ArrayIteratorLength(state) => {
             finish_array_iterator_length(runtime, state, value, return_to, execution_budget)
         }
@@ -2025,7 +2037,7 @@ pub(super) fn operator_to_number(
     }
 }
 
-fn operator_primitive_to_string(
+pub(super) fn operator_primitive_to_string(
     value: StoredValue,
     realm: RealmId,
     origin: &JsStackFrame,

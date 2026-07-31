@@ -51,9 +51,12 @@ use crate::{
     value::{HeapReference, SlotValue, StoredValue},
 };
 
+mod aggregate_error;
 mod bindings;
 mod conversions;
 mod dynamic;
+mod error_stack;
+mod errors;
 mod exceptions;
 mod execution;
 mod iterators;
@@ -66,8 +69,8 @@ mod stack;
     reason = "private VM sibling modules share one interpreter implementation namespace"
 )]
 use {
-    bindings::*, conversions::*, dynamic::*, exceptions::*, execution::*, iterators::*, native::*,
-    properties::*, stack::*,
+    aggregate_error::*, bindings::*, conversions::*, dynamic::*, error_stack::*, errors::*,
+    exceptions::*, execution::*, iterators::*, native::*, properties::*, stack::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -228,6 +231,9 @@ enum NativeContinuation {
     PropertyKey(PropertyKeyContinuation),
     OperatorPrimitive(OperatorPrimitiveContinuation),
     IntrinsicGet(IntrinsicGetContinuation),
+    AggregateError(AggregateErrorContinuation),
+    ErrorConstructor(ErrorConstructorContinuation),
+    ErrorToString(ErrorToStringContinuation),
     ArrayIteratorNext(ArrayIteratorNextContinuation),
     ForOfStart(ForOfStartContinuation),
     ForOfNext(ForOfNextContinuation),
@@ -246,6 +252,9 @@ impl NativeContinuation {
             Self::PropertyKey(state) => state.retained_values(),
             Self::OperatorPrimitive(state) => state.retained_values(),
             Self::IntrinsicGet(state) => state.retained_values(),
+            Self::AggregateError(state) => state.retained_values(),
+            Self::ErrorConstructor(state) => state.retained_values(),
+            Self::ErrorToString(state) => state.retained_values(),
             Self::ArrayIteratorNext(state) => state.retained_values(),
             Self::ForOfStart(state) => state.retained_values(),
             Self::ForOfNext(state) => state.retained_values(),
@@ -664,6 +673,9 @@ enum OperatorPrimitiveTarget {
         global_registry: bool,
     },
     StringIteratorIntrinsic,
+    ErrorConstructorMessage(ErrorConstructorContinuation),
+    ErrorToStringName(ErrorToStringContinuation),
+    ErrorToStringMessage(ErrorToStringContinuation),
     ArrayIteratorLength(ArrayIteratorNextContinuation),
     FunctionApplyLength(FunctionApplyContinuation),
     ArrayLengthWrite(ArrayLengthWriteState),
@@ -687,6 +699,10 @@ impl OperatorPrimitiveTarget {
             | Self::StringIntrinsic {
                 new_target: Some(_),
             } => 1,
+            Self::ErrorConstructorMessage(state) => state.retained_values(),
+            Self::ErrorToStringName(state) | Self::ErrorToStringMessage(state) => {
+                state.retained_values()
+            }
             Self::ArrayIteratorLength(state) => state.retained_values(),
             Self::FunctionApplyLength(state) => state.retained_values(),
             Self::ArrayLengthWrite(state) => {
@@ -830,6 +846,9 @@ fn trace_operator_primitive_target_roots(
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }
         }
+        OperatorPrimitiveTarget::ErrorConstructorMessage(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::ErrorToStringName(state)
+        | OperatorPrimitiveTarget::ErrorToStringMessage(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayIteratorLength(state) => {
             mark(CollectionRoot::Heap(HeapReference::Object(state.iterator)));
             trace_stored_value_root(&state.iterated, mark);
@@ -906,6 +925,9 @@ fn trace_native_continuation_roots(
                 }
             }
         },
+        NativeContinuation::AggregateError(state) => state.trace_roots(mark),
+        NativeContinuation::ErrorConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::ErrorToString(state) => state.trace_roots(mark),
         NativeContinuation::ArrayIteratorNext(state) => {
             mark(CollectionRoot::Heap(HeapReference::Object(state.iterator)));
             trace_stored_value_root(&state.iterated, mark);
@@ -1612,13 +1634,14 @@ fn execute_frame_loop(
                         function,
                         inputs,
                     )?;
-                    let dispatch = dispatch_native_call(
+                    let dispatch = dispatch_native_call_with_frames(
                         runtime,
                         function,
                         native,
                         inputs,
                         Some(return_to),
                         Some(origin),
+                        frames,
                         active_frames,
                         *active_frame_values,
                         compiler,

@@ -816,17 +816,63 @@ exception shares that `Arc` root header, and dropping its last clone schedules
 the normal deferred release. `StoredValue` crosses the public-handle boundary
 through an exhaustive primitive-versus-`HeapReference` split covering both
 functions and ordinary objects, and the release mailbox carries the typed heap
-reference. Realm-owned branded Error objects cover InternalError, RangeError,
-ReferenceError, SyntaxError, and TypeError with inherited `name` and an own
-`message`; public Error constructors, `Error.prototype.toString`, and stack
-materialization remain pending. Synchronous finally completions run through
-verified frame-local `gosub`/`ret` continuations; exception unwind discards
-crossed continuations, while return and control-flow overrides remove only
-certified pending-value/address pairs. Ordinary host/resource/engine failures
-are not mislabeled as JavaScript throws. Synthetic native-frame provenance,
-including one visible frame for each nested `Function.prototype.call`, remains
-part of the pending JavaScript Error/stack model. Miette remains presentation,
-not semantic truth.
+reference.
+
+The first M4 Error checkpoint installs nine realm-owned constructor/prototype
+pairs: `Error`, `EvalError`, `RangeError`, `ReferenceError`, `SyntaxError`,
+`TypeError`, `URIError`, `InternalError`, and `AggregateError`. The complete
+current realm graph has an exact resource shape of 19 objects, 42 functions,
+and 192 properties. `Error` inherits `Function.prototype`, every native Error
+constructor inherits `Error`, `Error.prototype` inherits `Object.prototype`,
+and every native Error prototype inherits `Error.prototype`; prototype objects
+remain unbranded. Globals, constructor metadata and `prototype`, prototype
+`name`/`message`/`constructor`, `Error.prototype.toString`, and
+`Error.isError` use the pinned own-property order. Global bindings are
+writable, non-enumerable, and configurable. Constructor `length` and `name`
+are non-writable, non-enumerable, and configurable, while constructor
+`prototype` is non-writable, non-enumerable, and non-configurable. Prototype
+members and the two Error methods are writable, non-enumerable, and
+configurable.
+
+All nine constructors share one resumable allocation path. Call and construct
+both create a fresh branded object, while construction observes
+`newTarget.prototype` and falls back to the matching intrinsic in the new
+target's realm. Message conversion precedes the options `cause` presence test
+and Get; only a present cause becomes an own property. The generic
+`Error.prototype.toString` performs the observable `name` Get and conversion
+before `message`, and `Error.isError` recognizes only the internal brand rather
+than a prototype forgery. `AggregateError` completes message and cause before
+acquiring `Symbol.iterator`, obtains and retains `next` once, allocates its
+realm-owned Array afterward, and reads each result's `done` before `value`.
+Acquisition failures do not close; failures after `next` acquisition perform
+exceptional `IteratorClose`, preserving the original error when close also
+fails.
+
+Constructor-created errors append an own writable, non-enumerable,
+configurable `stack` after `message`, optional `cause`, and optional `errors`.
+The snapshot is headerless and contains only retained verified-bytecode frames
+in `    at name (file:line:column)` form. Locations are captured without Rust
+stack recursion, while function data names are read when the property is
+rendered. Snapshot site storage is reserved on constructor entry, so an
+uncatchable host allocation failure can precede the observable prototype,
+message, cause, or Aggregate iterator work that QuickJS performs before its
+backtrace allocation. Synthetic native-frame provenance, including intervening
+`Function.prototype.call` and `apply` frames, is still absent. Engine-created
+errors freeze a headerless stack at the first exception-dispatch boundary,
+before iterator or finally unwinding, then materialize the matching realm-owned
+brand with own `message` and `stack` properties when caught. An escaping
+explicitly thrown Error still lacks the host-side name/message normalization
+used by the differential observation. Synchronous
+finally completions run through verified frame-local `gosub`/`ret`
+continuations; exception unwind discards crossed continuations, while return
+and control-flow overrides remove only certified pending-value/address pairs.
+Ordinary host/resource/engine failures are not mislabeled as JavaScript
+throws. The bounded Error differential has 35 cases and 59 strict feature
+tags; this checkpoint matches 18 candidate cases. The remaining observations
+are blocked on the pending `Object`/`Reflect` surface, the global `undefined`
+binding, or escaping-Error normalization, so neither the Error family nor M4
+is declared complete. Direct eval remains deferred and fail closed. Miette
+remains presentation, not semantic truth.
 
 The leaf compiler maps instruction-local verifier failures back through its
 strictly ordered final-PC table with exact `BytecodePc` lookup. It never treats
@@ -864,10 +910,10 @@ The target stack-trace resolver will follow:
 bytecode PC → generated source span → incoming source-map chain → original
 ```
 
-Source-map chaining, its depth/cycle guards, error-object stack formatting,
-and the compressed serialized `pc2line` representation remain pending. The
-current TDZ, non-callable, and explicit-throw exceptions use retained generated
-bytecode PCs and source spans directly; nested direct calls also retain each
+Source-map chaining, its depth/cycle guards, and the compressed serialized
+`pc2line` representation remain pending. Constructor-created Error objects and
+caught engine errors now format headerless snapshots directly from retained
+generated bytecode PCs and source spans; nested direct calls retain each
 parked caller call site without consulting the Rust stack.
 
 ## Planned Tokio host loop
@@ -918,10 +964,13 @@ and static data properties, identifier/String/Number/BigInt literal-named
 synchronous object methods/getters/setters, strict receiver-aware calls,
 iterative accessor dispatch, and safe-point collection of transient/cyclic
 function, cell, and object graphs. General descriptor mutation, computed
-properties, `super`/home-object semantics, coercive `+`, public Error
-constructors, and `Error.prototype.toString` remain later slices. Synchronous
-`try`/`catch`/`finally` and internal branded engine Error objects are part of
-the current slice.
+properties, `super`/home-object semantics, and complete reflection remain
+later slices. Synchronous `try`/`catch`/`finally`, realm-owned Error
+constructors, `Error.prototype.toString`, `Error.isError`, `AggregateError`
+iterator collection, constructor and engine-error stack snapshots, and branded
+engine Error objects are part of the current cumulative slice. Synthetic
+native stack frames, deleted-stack rebuild for explicitly thrown Errors, and
+escaping-Error host normalization remain open.
 
 The planned asynchronous slice creates a host timer Promise. A Tokio wakeup
 must be observed on the runtime owner, the FIFO job queue must drain

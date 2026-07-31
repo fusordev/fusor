@@ -9,9 +9,10 @@ mod parser_differential;
 
 use control_flow_differential::{
     CANDIDATE_WORKER_COMMAND, ControlFlowDifferentialOptions, DEFAULT_CONTROL_FLOW_CORPUS,
-    DEFAULT_FUNCTION_APPLY_CORPUS, DEFAULT_ITERATOR_CORPUS, FunctionApplyDifferentialOptions,
-    IteratorDifferentialOptions, MAX_CONTROL_FLOW_TIMEOUT_MS, run_control_flow_candidate_worker,
-    run_control_flow_differential, run_function_apply_differential, run_iterator_differential,
+    DEFAULT_ERROR_CORPUS, DEFAULT_FUNCTION_APPLY_CORPUS, DEFAULT_ITERATOR_CORPUS,
+    ErrorDifferentialOptions, FunctionApplyDifferentialOptions, IteratorDifferentialOptions,
+    MAX_CONTROL_FLOW_TIMEOUT_MS, run_control_flow_candidate_worker, run_control_flow_differential,
+    run_error_differential, run_function_apply_differential, run_iterator_differential,
 };
 use dynamic_function_differential::{
     DynamicFunctionDifferentialOptions, run_dynamic_function_differential,
@@ -87,6 +88,14 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Ok(Args::ErrorDifferential(options)) => match run_error_differential(&options) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(error) => {
+                eprintln!("xtask: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Ok(Args::FunctionApplyDifferential(options)) => {
             match run_function_apply_differential(&options) {
                 Ok(true) => ExitCode::SUCCESS,
@@ -129,6 +138,7 @@ Usage:
   cargo xtask dynamic-function-differential --oracle QJSC_PATH [OPTIONS]
   cargo xtask number-radix-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask control-flow-differential --oracle QJS_PATH [OPTIONS]
+  cargo xtask error-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask function-apply-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask iterator-differential --oracle QJS_PATH [OPTIONS]
 
@@ -138,6 +148,7 @@ Options:
                       dynamic Function default: {DEFAULT_DYNAMIC_FUNCTION_CORPUS};
                       Number radix manifest default: {DEFAULT_NUMBER_RADIX_CORPUS};
                       control-flow manifest default: {DEFAULT_CONTROL_FLOW_CORPUS};
+                      Error manifest default: {DEFAULT_ERROR_CORPUS};
                       Function.prototype.apply manifest default: {DEFAULT_FUNCTION_APPLY_CORPUS};
                       iterator manifest default: {DEFAULT_ITERATOR_CORPUS})
   --timeout-ms N      Per-process timeout (default: {DEFAULT_TIMEOUT_MS})
@@ -147,6 +158,8 @@ Dynamic Function --oracle must be the pinned QuickJS 2026-06-04 qjsc compiler.
 It is invoked with -c only; generated code is never compiled or executed.
 Number radix --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter.
 Control flow --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
+its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
+Error --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
 its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
 Function.prototype.apply --oracle must be the pinned QuickJS 2026-06-04 qjs
 interpreter; its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
@@ -164,6 +177,7 @@ enum Args {
     DynamicFunctionDifferential(DynamicFunctionDifferentialOptions),
     NumberRadixDifferential(NumberRadixDifferentialOptions),
     ControlFlowDifferential(ControlFlowDifferentialOptions),
+    ErrorDifferential(ErrorDifferentialOptions),
     FunctionApplyDifferential(FunctionApplyDifferentialOptions),
     IteratorDifferential(IteratorDifferentialOptions),
     ControlFlowCandidateWorker,
@@ -212,6 +226,9 @@ impl Args {
             "control-flow-differential" => {
                 parse_control_flow_differential_options(arguments.into_iter())
                     .map(Self::ControlFlowDifferential)
+            }
+            "error-differential" => {
+                parse_error_differential_options(arguments.into_iter()).map(Self::ErrorDifferential)
             }
             "function-apply-differential" => {
                 parse_function_apply_differential_options(arguments.into_iter())
@@ -358,6 +375,39 @@ fn parse_control_flow_differential_options(
     }
 
     Ok(ControlFlowDifferentialOptions {
+        oracle: oracle.ok_or("missing required --oracle PATH")?,
+        corpus,
+        timeout,
+    })
+}
+
+fn parse_error_differential_options(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<ErrorDifferentialOptions, String> {
+    let mut oracle = None;
+    let mut corpus = PathBuf::from(DEFAULT_ERROR_CORPUS);
+    let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    while let Some(option) = arguments.next() {
+        match option.to_string_lossy().as_ref() {
+            "--oracle" => oracle = Some(required_path(&mut arguments, "--oracle")?),
+            "--corpus" => corpus = required_path(&mut arguments, "--corpus")?,
+            "--timeout-ms" => {
+                timeout = required_timeout(&mut arguments)?;
+                let milliseconds = timeout.as_millis();
+                if milliseconds == 0 || milliseconds > u128::from(MAX_CONTROL_FLOW_TIMEOUT_MS) {
+                    return Err(format!(
+                        "error --timeout-ms must be between 1 and {MAX_CONTROL_FLOW_TIMEOUT_MS}"
+                    ));
+                }
+            }
+            unknown => {
+                return Err(format!("unknown error-differential option `{unknown}`"));
+            }
+        }
+    }
+
+    Ok(ErrorDifferentialOptions {
         oracle: oracle.ok_or("missing required --oracle PATH")?,
         corpus,
         timeout,
@@ -768,6 +818,7 @@ mod tests {
         run_program_with_arguments_bounded_input, wait_with_timeout,
     };
     use crate::control_flow_differential::ControlFlowDifferentialOptions;
+    use crate::control_flow_differential::ErrorDifferentialOptions;
     use crate::control_flow_differential::FunctionApplyDifferentialOptions;
     use crate::control_flow_differential::IteratorDifferentialOptions;
     use crate::dynamic_function_differential::DynamicFunctionDifferentialOptions;
@@ -908,6 +959,66 @@ mod tests {
                 }
             ))
         );
+    }
+
+    #[test]
+    fn parses_error_differential_options() {
+        let arguments = [
+            "error-differential",
+            "--oracle",
+            "/tmp/qjs",
+            "--corpus",
+            "tests/error/custom.json",
+            "--timeout-ms",
+            "440",
+        ]
+        .into_iter()
+        .map(OsString::from);
+
+        assert_eq!(
+            Args::parse(arguments),
+            Ok(Args::ErrorDifferential(ErrorDifferentialOptions {
+                oracle: PathBuf::from("/tmp/qjs"),
+                corpus: PathBuf::from("tests/error/custom.json"),
+                timeout: Duration::from_millis(440),
+            }))
+        );
+    }
+
+    #[test]
+    fn error_differential_uses_the_pinned_corpus_by_default() {
+        let arguments = ["error-differential", "--oracle", "/tmp/qjs"]
+            .into_iter()
+            .map(OsString::from);
+
+        assert_eq!(
+            Args::parse(arguments),
+            Ok(Args::ErrorDifferential(ErrorDifferentialOptions {
+                oracle: PathBuf::from("/tmp/qjs"),
+                corpus: PathBuf::from("tests/error/manifest.json"),
+                timeout: Duration::from_secs(5),
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_unbounded_error_timeouts() {
+        for timeout in ["0", "60001"] {
+            let arguments = [
+                "error-differential",
+                "--oracle",
+                "/tmp/qjs",
+                "--timeout-ms",
+                timeout,
+            ]
+            .into_iter()
+            .map(OsString::from);
+
+            assert_eq!(
+                Args::parse(arguments),
+                Err("error --timeout-ms must be between 1 and 60000".to_owned())
+            );
+        }
     }
 
     #[test]

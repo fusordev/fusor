@@ -351,6 +351,15 @@ pub(super) fn dispatch_pending_exception(
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<(), ExecutionError> {
+    let frozen_engine_stack = if matches!(
+        &pending.payload,
+        PendingExceptionPayload::EngineError { .. }
+    ) {
+        let snapshot = capture_error_stack(runtime, frames, &pending.origin)?;
+        Some(render_error_stack(runtime, &snapshot)?)
+    } else {
+        None
+    };
     loop {
         #[derive(Clone, Copy)]
         enum Handler {
@@ -390,7 +399,9 @@ pub(super) fn dispatch_pending_exception(
             if frame.native_returns.iter().any(|continuation| {
                 matches!(
                     continuation,
-                    NativeContinuation::IteratorAppend(_) | NativeContinuation::IteratorClose(_)
+                    NativeContinuation::AggregateError(_)
+                        | NativeContinuation::IteratorAppend(_)
+                        | NativeContinuation::IteratorClose(_)
                 )
             }) {
                 handler = Some(Handler::Native(index));
@@ -629,7 +640,17 @@ pub(super) fn dispatch_pending_exception(
         let caught = match payload {
             PendingExceptionPayload::ThrownValue(value) => value,
             PendingExceptionPayload::EngineError { kind, message } => {
-                StoredValue::Object(runtime.materialize_error_object(realm, kind, message)?)
+                let stack = frozen_engine_stack
+                    .clone()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "caught engine error has no frozen stack snapshot",
+                    })?;
+                StoredValue::Object(runtime.materialize_error_object(
+                    realm,
+                    kind,
+                    message,
+                    Some(stack),
+                )?)
             }
         };
 

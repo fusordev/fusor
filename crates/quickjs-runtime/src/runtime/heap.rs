@@ -26,12 +26,12 @@
 //! Realm-owned objects, prototypes, boxed primitives, and ordinary properties.
 
 use super::{
-    Arc, Atom, AtomError, BoxedPrimitive, ExceptionKind, FunctionId, FunctionImplementation,
-    HandleError, HandleKind, HeapObject, HeapReference, JsNumber, JsString, NativeFunctionKind,
-    ObjectId, ObjectRecord, OwnProperty, PredefinedAtom, PropertyKey, PropertyLayout,
-    PropertyLayoutKind, RealmId, RealmIntrinsics, ReleaseMailbox, Runtime, RuntimeResource,
-    StoredValue, array_length_from_number, check_execution_limit, stale_heap_reference,
-    usize_to_u64,
+    Arc, Atom, AtomError, BoxedPrimitive, ErrorIntrinsicKind, ExceptionKind, FunctionId,
+    FunctionImplementation, HandleError, HandleKind, HeapObject, HeapReference, JsNumber, JsString,
+    NativeFunctionKind, ObjectId, ObjectRecord, OwnProperty, PredefinedAtom, PropertyKey,
+    PropertyLayout, PropertyLayoutKind, RealmId, RealmIntrinsics, ReleaseMailbox, Runtime,
+    RuntimeResource, StoredValue, array_length_from_number, check_execution_limit,
+    stale_heap_reference, usize_to_u64,
 };
 
 impl Runtime {
@@ -307,10 +307,10 @@ impl Runtime {
         Ok(array.prototype)
     }
 
-    pub(crate) fn realm_error_prototype(
+    pub(crate) fn realm_error_intrinsic_prototype(
         &self,
         realm: RealmId,
-        kind: ExceptionKind,
+        kind: ErrorIntrinsicKind,
     ) -> Result<ObjectId, crate::EngineFault> {
         let state = self
             .realms
@@ -325,13 +325,14 @@ impl Runtime {
                 message: "realm Error intrinsics are not initialized",
             });
         };
+        let error = errors.intrinsic(ErrorIntrinsicKind::Error);
         let error_prototype =
             self.objects
-                .get(errors.error)
+                .get(error.prototype)
                 .ok_or(crate::EngineFault::StaleHeapEdge {
                     edge: "Error.prototype intrinsic",
-                    index: errors.error.index(),
-                    generation: errors.error.generation(),
+                    index: error.prototype.index(),
+                    generation: error.prototype.generation(),
                 })?;
         if error_prototype.record.prototype() != Some(HeapReference::Object(state.object_prototype))
         {
@@ -339,21 +340,116 @@ impl Runtime {
                 message: "Error.prototype intrinsic has the wrong prototype",
             });
         }
-        let prototype = errors.prototype(kind);
-        let native_error =
+        let intrinsic = errors.intrinsic(kind);
+        let prototype =
             self.objects
-                .get(prototype)
+                .get(intrinsic.prototype)
                 .ok_or(crate::EngineFault::StaleHeapEdge {
                     edge: "native Error prototype intrinsic",
-                    index: prototype.index(),
-                    generation: prototype.generation(),
+                    index: intrinsic.prototype.index(),
+                    generation: intrinsic.prototype.generation(),
                 })?;
-        if native_error.record.prototype() != Some(HeapReference::Object(errors.error)) {
+        let expected_parent = if kind == ErrorIntrinsicKind::Error {
+            HeapReference::Object(state.object_prototype)
+        } else {
+            HeapReference::Object(error.prototype)
+        };
+        if prototype.record.prototype() != Some(expected_parent) {
             return Err(crate::EngineFault::RuntimeInvariant {
                 message: "native Error prototype intrinsic has the wrong prototype",
             });
         }
-        Ok(prototype)
+        Ok(intrinsic.prototype)
+    }
+
+    pub(crate) fn realm_error_prototype(
+        &self,
+        realm: RealmId,
+        kind: ExceptionKind,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        self.realm_error_intrinsic_prototype(realm, ErrorIntrinsicKind::from_exception_kind(kind))
+    }
+
+    pub(crate) fn allocate_error_with_prototype(
+        &mut self,
+        prototype: HeapReference,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.heap_reference_is_live(prototype) {
+            return Err(stale_heap_reference(prototype).into());
+        }
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let object = self
+            .objects
+            .try_insert(HeapObject::error(ObjectRecord::empty(Some(prototype))))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    pub(crate) fn define_error_data_property(
+        &mut self,
+        object: ObjectId,
+        atom: PredefinedAtom,
+        value: StoredValue,
+    ) -> Result<(), crate::ExecutionError> {
+        if !matches!(
+            atom,
+            PredefinedAtom::Message
+                | PredefinedAtom::Cause
+                | PredefinedAtom::Errors
+                | PredefinedAtom::Stack
+        ) {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "Error construction received an unsupported own data property",
+            }
+            .into());
+        }
+        if !self.is_error_object(object)? {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "Error data property target is not an Error object",
+            }
+            .into());
+        }
+        let key = self.predefined_property_key(atom);
+        if self
+            .object_record(HeapReference::Object(object))?
+            .own_property(&key)
+            .is_some()
+        {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "Error data property already exists",
+            }
+            .into());
+        }
+        self.append_data_property(
+            HeapReference::Object(object),
+            key,
+            PropertyLayout::data(true, false, true),
+            value,
+        )
+    }
+
+    pub(crate) fn is_error_object(&self, object: ObjectId) -> Result<bool, crate::EngineFault> {
+        self.objects.get(object).map(HeapObject::is_error).ok_or(
+            crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            },
+        )
     }
 
     pub(crate) fn materialize_error_object(
@@ -361,8 +457,10 @@ impl Runtime {
         realm: RealmId,
         kind: ExceptionKind,
         message: JsString,
+        stack: Option<JsString>,
     ) -> Result<ObjectId, crate::ExecutionError> {
         let prototype = self.realm_error_prototype(realm, kind)?;
+        let property_count = 1_usize.saturating_add(usize::from(stack.is_some()));
         check_execution_limit(
             RuntimeResource::HeapObjects,
             self.limits.max_heap_objects,
@@ -371,7 +469,8 @@ impl Runtime {
         check_execution_limit(
             RuntimeResource::ObjectProperties,
             self.limits.max_object_properties,
-            self.object_properties.saturating_add(1),
+            self.object_properties
+                .saturating_add(usize_to_u64(property_count)),
         )?;
         self.objects
             .try_reserve(1)
@@ -380,12 +479,12 @@ impl Runtime {
                 additional: 1,
             })?;
         let mut record = ObjectRecord::empty(Some(HeapReference::Object(prototype)));
-        record
-            .try_reserve_data(1)
-            .map_err(|_| crate::ExecutionError::AllocationFailed {
+        record.try_reserve_data(property_count).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
-                additional: 1,
-            })?;
+                additional: property_count,
+            }
+        })?;
         record
             .append_data(
                 self.predefined_property_key(PredefinedAtom::Message),
@@ -396,6 +495,18 @@ impl Runtime {
                 resource: RuntimeResource::ObjectProperties,
                 additional: 1,
             })?;
+        if let Some(stack) = stack {
+            record
+                .append_data(
+                    self.predefined_property_key(PredefinedAtom::Stack),
+                    PropertyLayout::data(true, false, true),
+                    StoredValue::String(stack),
+                )
+                .map_err(|_| crate::ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::ObjectProperties,
+                    additional: 1,
+                })?;
+        }
         let object = self
             .objects
             .try_insert(HeapObject::error(record))
@@ -403,7 +514,9 @@ impl Runtime {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
             })?;
-        self.object_properties += 1;
+        self.object_properties = self
+            .object_properties
+            .saturating_add(usize_to_u64(property_count));
         self.collection_pending = true;
         Ok(object)
     }

@@ -29,23 +29,24 @@ use std::collections::TryReserveError;
 
 use super::{
     Arc, Arena, ArrayIntrinsics, ArrayState, Atom, AtomError, AtomTable, BooleanIntrinsics,
-    BoxedPrimitive, Context, ErrorIntrinsics, FunctionId, FunctionImplementation, HandleError,
-    HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, IteratorIntrinsics, JsNumber,
-    JsString, NativeFunction, NativeFunctionKind, NumberIntrinsics, ObjectId, ObjectRecord,
-    PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics,
-    RealmState, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
-    RuntimeResource, StoredValue, StringIntrinsics, SymbolIntrinsics, check_limit,
-    predefined_string, usize_to_u64,
+    BoxedPrimitive, Context, ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId,
+    FunctionImplementation, HandleError, HandleKind, HashMap, HeapFunction, HeapObject,
+    HeapReference, IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind,
+    NumberIntrinsics, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey, PropertyLayout, Realm,
+    RealmHandle, RealmId, RealmIntrinsics, RealmState, ReleaseMailbox, Runtime, RuntimeError,
+    RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringIntrinsics,
+    SymbolIntrinsics, check_limit, predefined_string, usize_to_u64,
 };
 
-const REALM_OBJECT_COUNT: usize = 16;
-const REALM_FUNCTION_COUNT: usize = 31;
-const REALM_PROPERTY_COUNT: u64 = 135;
+const REALM_OBJECT_COUNT: usize = 19;
+const REALM_FUNCTION_COUNT: usize = 42;
+const REALM_PROPERTY_COUNT: u64 = 192;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
 const DESCRIPTION_ATOM_INDEX: usize = 3;
-const SYMBOL_STATIC_ATOM_START: usize = 4;
+const IS_ERROR_ATOM_INDEX: usize = 4;
+const SYMBOL_STATIC_ATOM_START: usize = 5;
 
 const DYNAMIC_SYMBOL_STATIC_PROPERTIES: [(&str, PredefinedAtom); 12] = [
     ("toPrimitive", PredefinedAtom::SymbolToPrimitive),
@@ -72,6 +73,7 @@ const CONSTRUCTOR_PROTOTYPE_PROPERTY: PropertyLayout = PropertyLayout::data(fals
 const ARRAY_LENGTH_PROPERTY: PropertyLayout = PropertyLayout::data(true, false, false);
 
 struct RealmKeys {
+    errors: [PropertyKey; ErrorIntrinsicKind::ALL.len()],
     function: PropertyKey,
     boolean: PropertyKey,
     number: PropertyKey,
@@ -100,6 +102,7 @@ impl RealmKeys {
     fn new(atoms: &AtomTable) -> Self {
         let key = |atom| PropertyKey::from_validated_atom(atoms.predefined(atom));
         Self {
+            errors: ErrorIntrinsicKind::ALL.map(|kind| key(kind.predefined_atom())),
             function: key(PredefinedAtom::Function),
             boolean: key(PredefinedAtom::Boolean),
             number: key(PredefinedAtom::Number),
@@ -133,6 +136,7 @@ impl RealmKeys {
 }
 
 struct RealmNames {
+    errors: [JsString; ErrorIntrinsicKind::ALL.len()],
     function: JsString,
     boolean: JsString,
     number: JsString,
@@ -143,12 +147,6 @@ struct RealmNames {
     to_string: JsString,
     value_of: JsString,
     apply: JsString,
-    error: JsString,
-    internal_error: JsString,
-    range_error: JsString,
-    reference_error: JsString,
-    syntax_error: JsString,
-    type_error: JsString,
     call: JsString,
     values: JsString,
     keys: JsString,
@@ -157,6 +155,7 @@ struct RealmNames {
     key_for: JsString,
     symbol_for: JsString,
     description: JsString,
+    is_error: JsString,
     array_iterator: JsString,
     string_iterator: JsString,
     symbol_iterator_name: JsString,
@@ -167,6 +166,8 @@ struct RealmNames {
 impl RealmNames {
     fn try_new(atoms: &AtomTable) -> Result<Self, RuntimeError> {
         Ok(Self {
+            errors: ErrorIntrinsicKind::ALL
+                .map(|kind| predefined_string(atoms, kind.predefined_atom())),
             function: predefined_string(atoms, PredefinedAtom::Function),
             boolean: predefined_string(atoms, PredefinedAtom::Boolean),
             number: predefined_string(atoms, PredefinedAtom::Number),
@@ -177,12 +178,6 @@ impl RealmNames {
             to_string: predefined_string(atoms, PredefinedAtom::ToString),
             value_of: predefined_string(atoms, PredefinedAtom::ValueOf),
             apply: predefined_string(atoms, PredefinedAtom::Apply),
-            error: predefined_string(atoms, PredefinedAtom::Error),
-            internal_error: predefined_string(atoms, PredefinedAtom::InternalError),
-            range_error: predefined_string(atoms, PredefinedAtom::RangeError),
-            reference_error: predefined_string(atoms, PredefinedAtom::ReferenceError),
-            syntax_error: predefined_string(atoms, PredefinedAtom::SyntaxError),
-            type_error: predefined_string(atoms, PredefinedAtom::TypeError),
             call: JsString::from_utf8("call").map_err(AtomError::from)?,
             values: predefined_string(atoms, PredefinedAtom::Values),
             keys: predefined_string(atoms, PredefinedAtom::Keys),
@@ -191,6 +186,7 @@ impl RealmNames {
             key_for: JsString::from_utf8("keyFor").map_err(AtomError::from)?,
             symbol_for: predefined_string(atoms, PredefinedAtom::For),
             description: JsString::from_utf8("description").map_err(AtomError::from)?,
+            is_error: JsString::from_utf8("isError").map_err(AtomError::from)?,
             array_iterator: predefined_string(atoms, PredefinedAtom::ArrayIterator),
             string_iterator: predefined_string(atoms, PredefinedAtom::StringIterator),
             symbol_iterator_name: JsString::from_utf8("[Symbol.iterator]")
@@ -214,13 +210,15 @@ struct RealmBaseRecords {
     function_apply: ObjectRecord,
 }
 
-struct ErrorPrototypeRecords {
-    error: ObjectRecord,
-    internal_error: ObjectRecord,
-    range_error: ObjectRecord,
-    reference_error: ObjectRecord,
-    syntax_error: ObjectRecord,
-    type_error: ObjectRecord,
+struct ErrorIntrinsicRecords {
+    prototype: ObjectRecord,
+    constructor: ObjectRecord,
+}
+
+struct ErrorRecords {
+    entries: [ErrorIntrinsicRecords; ErrorIntrinsicKind::ALL.len()],
+    to_string: ObjectRecord,
+    is_error: ObjectRecord,
 }
 
 struct PrimitiveIntrinsicRecords {
@@ -261,7 +259,7 @@ struct SymbolIntrinsicRecords {
 
 struct RealmRecords {
     base: RealmBaseRecords,
-    errors: ErrorPrototypeRecords,
+    errors: ErrorRecords,
     boolean: PrimitiveIntrinsicRecords,
     number: PrimitiveIntrinsicRecords,
     string: PrimitiveIntrinsicRecords,
@@ -275,7 +273,7 @@ impl RealmRecords {
         // Keep these reservations in the original transaction order so a
         // recoverable allocation failure reports the same `additional` value.
         let base = RealmBaseRecords {
-            global: reserved_record(6)?,
+            global: reserved_record(15)?,
             object_prototype: reserved_record(2)?,
             function_prototype: reserved_record(6)?,
             function_constructor: reserved_record(3)?,
@@ -285,13 +283,26 @@ impl RealmRecords {
             function_call: reserved_record(2)?,
             function_apply: reserved_record(2)?,
         };
-        let errors = ErrorPrototypeRecords {
-            error: reserved_record(2)?,
-            internal_error: reserved_record(2)?,
-            range_error: reserved_record(2)?,
-            reference_error: reserved_record(2)?,
-            syntax_error: reserved_record(2)?,
-            type_error: reserved_record(2)?,
+        let error_records = |prototype_properties, constructor_properties| {
+            Ok::<_, RuntimeError>(ErrorIntrinsicRecords {
+                prototype: reserved_record(prototype_properties)?,
+                constructor: reserved_record(constructor_properties)?,
+            })
+        };
+        let errors = ErrorRecords {
+            entries: [
+                error_records(4, 4)?,
+                error_records(3, 3)?,
+                error_records(3, 3)?,
+                error_records(3, 3)?,
+                error_records(3, 3)?,
+                error_records(3, 3)?,
+                error_records(3, 3)?,
+                error_records(3, 3)?,
+                error_records(3, 3)?,
+            ],
+            to_string: reserved_record(2)?,
+            is_error: reserved_record(2)?,
         };
         let boolean = PrimitiveIntrinsicRecords {
             prototype: reserved_record(3)?,
@@ -371,15 +382,6 @@ struct RealmBase {
     function_apply: FunctionId,
 }
 
-struct ErrorPrototypeGraph {
-    error: ObjectId,
-    internal_error: ObjectId,
-    range_error: ObjectId,
-    reference_error: ObjectId,
-    syntax_error: ObjectId,
-    type_error: ObjectId,
-}
-
 struct PrimitiveIntrinsicGraph {
     prototype: ObjectId,
     constructor: FunctionId,
@@ -452,7 +454,7 @@ impl RealmBase {
 struct RealmGraph {
     base: RealmBase,
     dynamic_atoms: Vec<Atom>,
-    errors: ErrorPrototypeGraph,
+    errors: ErrorIntrinsics,
     boolean: PrimitiveIntrinsicGraph,
     number: PrimitiveIntrinsicGraph,
     string: PrimitiveIntrinsicGraph,
@@ -463,6 +465,12 @@ struct RealmGraph {
 
 impl RealmGraph {
     fn rollback(self, runtime: &mut Runtime) {
+        for intrinsic in self.errors.entries.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(intrinsic.constructor).is_some());
+        }
+        for function in [self.errors.is_error, self.errors.to_string] {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
         for function in [
             self.symbol.key_for,
             self.symbol.symbol_for,
@@ -491,6 +499,9 @@ impl RealmGraph {
         ] {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
+        for intrinsic in self.errors.entries.into_iter().rev() {
+            debug_assert!(runtime.objects.remove(intrinsic.prototype).is_some());
+        }
         for object in [
             self.symbol.prototype,
             self.iterators.string_iterator_prototype,
@@ -500,12 +511,6 @@ impl RealmGraph {
             self.string.prototype,
             self.number.prototype,
             self.boolean.prototype,
-            self.errors.type_error,
-            self.errors.syntax_error,
-            self.errors.reference_error,
-            self.errors.range_error,
-            self.errors.internal_error,
-            self.errors.error,
         ] {
             debug_assert!(runtime.objects.remove(object).is_some());
         }
@@ -585,14 +590,7 @@ impl Runtime {
             .intrinsics = RealmIntrinsics::Ready {
             function_prototype: graph.base.function_prototype,
             function_constructor: graph.base.function_constructor,
-            errors: ErrorIntrinsics {
-                error: graph.errors.error,
-                internal_error: graph.errors.internal_error,
-                range_error: graph.errors.range_error,
-                reference_error: graph.errors.reference_error,
-                syntax_error: graph.errors.syntax_error,
-                type_error: graph.errors.type_error,
-            },
+            errors: graph.errors,
             boolean: BooleanIntrinsics {
                 prototype: graph.boolean.prototype,
                 constructor: graph.boolean.constructor,
@@ -665,13 +663,14 @@ impl Runtime {
     ) -> Result<RealmGraph, RuntimeError> {
         let mut dynamic_atoms = Vec::new();
         dynamic_atoms
-            .try_reserve_exact(4 + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len())
-            .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, 16))?;
+            .try_reserve_exact(5 + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len())
+            .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, 17))?;
         for name in [
             &names.call,
             &names.entries,
             &names.key_for,
             &names.description,
+            &names.is_error,
         ] {
             match self.atoms.intern_string(name) {
                 Ok(atom) => dynamic_atoms.push(atom),
@@ -705,7 +704,7 @@ impl Runtime {
         }
         let base = self.insert_realm_base(records.base);
 
-        let errors = self.insert_error_prototypes(&base, records.errors);
+        let errors = self.insert_error_intrinsics(&base, records.errors);
         let boolean = self.insert_primitive_intrinsics(
             &base,
             records.boolean,
@@ -826,42 +825,90 @@ impl Runtime {
         }
     }
 
-    fn insert_error_prototypes(
+    fn insert_error_intrinsics(
         &mut self,
         base: &RealmBase,
-        records: ErrorPrototypeRecords,
-    ) -> ErrorPrototypeGraph {
-        let error = self.insert_reserved_object_with_prototype(
-            records.error,
+        records: ErrorRecords,
+    ) -> ErrorIntrinsics {
+        let [
+            error_records,
+            eval_error_records,
+            range_error_records,
+            reference_error_records,
+            syntax_error_records,
+            type_error_records,
+            uri_error_records,
+            internal_error_records,
+            aggregate_error_records,
+        ] = records.entries;
+        let error_prototype = self.insert_reserved_object_with_prototype(
+            error_records.prototype,
             HeapReference::Object(base.object_prototype),
         );
-        let internal_error = self.insert_reserved_object_with_prototype(
-            records.internal_error,
-            HeapReference::Object(error),
+        let error_constructor = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ErrorConstructor(ErrorIntrinsicKind::Error),
+            error_records.constructor,
         );
-        let range_error = self.insert_reserved_object_with_prototype(
-            records.range_error,
-            HeapReference::Object(error),
+        let to_string = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ErrorPrototypeToString,
+            records.to_string,
         );
-        let reference_error = self.insert_reserved_object_with_prototype(
-            records.reference_error,
-            HeapReference::Object(error),
+        let is_error = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ErrorIsError,
+            records.is_error,
         );
-        let syntax_error = self.insert_reserved_object_with_prototype(
-            records.syntax_error,
-            HeapReference::Object(error),
-        );
-        let type_error = self.insert_reserved_object_with_prototype(
-            records.type_error,
-            HeapReference::Object(error),
-        );
-        ErrorPrototypeGraph {
-            error,
-            internal_error,
-            range_error,
-            reference_error,
-            syntax_error,
-            type_error,
+        let insert_native =
+            |runtime: &mut Self, kind: ErrorIntrinsicKind, records: ErrorIntrinsicRecords| {
+                let prototype = runtime.insert_reserved_object_with_prototype(
+                    records.prototype,
+                    HeapReference::Object(error_prototype),
+                );
+                let constructor = runtime.insert_reserved_native(
+                    base.realm,
+                    HeapReference::Function(error_constructor),
+                    NativeFunctionKind::ErrorConstructor(kind),
+                    records.constructor,
+                );
+                ErrorIntrinsic {
+                    prototype,
+                    constructor,
+                }
+            };
+        ErrorIntrinsics {
+            entries: [
+                ErrorIntrinsic {
+                    prototype: error_prototype,
+                    constructor: error_constructor,
+                },
+                insert_native(self, ErrorIntrinsicKind::EvalError, eval_error_records),
+                insert_native(self, ErrorIntrinsicKind::RangeError, range_error_records),
+                insert_native(
+                    self,
+                    ErrorIntrinsicKind::ReferenceError,
+                    reference_error_records,
+                ),
+                insert_native(self, ErrorIntrinsicKind::SyntaxError, syntax_error_records),
+                insert_native(self, ErrorIntrinsicKind::TypeError, type_error_records),
+                insert_native(self, ErrorIntrinsicKind::UriError, uri_error_records),
+                insert_native(
+                    self,
+                    ErrorIntrinsicKind::InternalError,
+                    internal_error_records,
+                ),
+                insert_native(
+                    self,
+                    ErrorIntrinsicKind::AggregateError,
+                    aggregate_error_records,
+                ),
+            ],
+            to_string,
+            is_error,
         }
     }
 
@@ -1114,7 +1161,7 @@ impl Runtime {
                 (&keys.value_of, graph.base.object_value_of),
             ],
         )?;
-        self.publish_error_prototype_properties(&graph.errors, keys, names)?;
+        self.publish_error_intrinsic_properties(graph, keys, names)?;
         self.publish_function_intrinsic_properties(graph, keys, names)?;
         self.publish_primitive_intrinsic_properties(
             &graph.boolean,
@@ -1162,37 +1209,85 @@ impl Runtime {
         )
     }
 
-    fn publish_error_prototype_properties(
+    fn publish_error_intrinsic_properties(
         &mut self,
-        errors: &ErrorPrototypeGraph,
+        graph: &RealmGraph,
         keys: &RealmKeys,
         names: &RealmNames,
     ) -> Result<(), TryReserveError> {
-        for (prototype, name) in [
-            (errors.error, &names.error),
-            (errors.internal_error, &names.internal_error),
-            (errors.range_error, &names.range_error),
-            (errors.reference_error, &names.reference_error),
-            (errors.syntax_error, &names.syntax_error),
-            (errors.type_error, &names.type_error),
-        ] {
+        let errors = graph.errors;
+        for kind in ErrorIntrinsicKind::ALL {
+            let intrinsic = errors.intrinsic(kind);
             let record = &mut self
                 .objects
-                .get_mut(prototype)
+                .get_mut(intrinsic.prototype)
                 .expect("new Error prototype remains live")
                 .record;
+            if kind == ErrorIntrinsicKind::Error {
+                record.append_data(
+                    keys.to_string.clone(),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(errors.to_string),
+                )?;
+            }
             record.append_data(
                 keys.name.clone(),
                 METHOD_PROPERTY,
-                StoredValue::String(name.clone()),
+                StoredValue::String(names.errors[kind.index()].clone()),
             )?;
             record.append_data(
                 keys.message.clone(),
                 METHOD_PROPERTY,
                 StoredValue::String(JsString::empty()),
             )?;
+            record.append_data(
+                keys.constructor.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(intrinsic.constructor),
+            )?;
         }
-        Ok(())
+
+        self.append_function_identity(errors.to_string, &names.to_string, 0, keys)?;
+        self.append_function_identity(errors.is_error, &names.is_error, 1, keys)?;
+
+        let is_error_key =
+            PropertyKey::from_validated_atom(graph.dynamic_atoms[IS_ERROR_ATOM_INDEX].clone());
+        for kind in ErrorIntrinsicKind::ALL {
+            let intrinsic = errors.intrinsic(kind);
+            let length = if kind == ErrorIntrinsicKind::AggregateError {
+                2
+            } else {
+                1
+            };
+            self.append_function_identity(
+                intrinsic.constructor,
+                &names.errors[kind.index()],
+                length,
+                keys,
+            )?;
+            let constructor = &mut self
+                .functions
+                .get_mut(intrinsic.constructor)
+                .expect("new Error constructor remains live")
+                .object;
+            if kind == ErrorIntrinsicKind::Error {
+                constructor.append_data(
+                    is_error_key.clone(),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(errors.is_error),
+                )?;
+            }
+            constructor.append_data(
+                keys.prototype.clone(),
+                CONSTRUCTOR_PROTOTYPE_PROPERTY,
+                StoredValue::Object(intrinsic.prototype),
+            )?;
+        }
+
+        self.append_object_methods::<9>(
+            graph.base.global_object,
+            std::array::from_fn(|index| (&keys.errors[index], errors.entries[index].constructor)),
+        )
     }
 
     fn publish_function_intrinsic_properties(
