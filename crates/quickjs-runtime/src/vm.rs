@@ -59,7 +59,11 @@ pub struct ExecutionLimits {
 }
 
 impl ExecutionLimits {
-    /// Replaces the maximum number of completed bytecode instructions.
+    /// Replaces the maximum interpreter work units in one execution session.
+    ///
+    /// Every completed bytecode instruction costs one unit. Bounded internal
+    /// scans, such as `for-in` advancement and `Function.prototype.apply`
+    /// argument collection, debit additional units from the same budget.
     #[must_use]
     pub const fn with_instruction_fuel(mut self, instruction_fuel: u64) -> Self {
         self.instruction_fuel = instruction_fuel;
@@ -93,16 +97,20 @@ impl Default for ExecutionLimits {
     }
 }
 
-struct DynamicCompilationBudget {
+struct ExecutionBudget {
+    instruction_limit: u64,
+    executed_instructions: u64,
     compilation_limit: u64,
     source_code_unit_limit: u64,
     compilations: u64,
     source_code_units: u64,
 }
 
-impl DynamicCompilationBudget {
+impl ExecutionBudget {
     const fn new(limits: ExecutionLimits) -> Self {
         Self {
+            instruction_limit: limits.instruction_fuel,
+            executed_instructions: 0,
             compilation_limit: limits.dynamic_compilations,
             source_code_unit_limit: limits.dynamic_source_code_units,
             compilations: 0,
@@ -110,7 +118,26 @@ impl DynamicCompilationBudget {
         }
     }
 
-    fn charge(&mut self, source: &OrdinaryDynamicFunctionSource) -> Result<(), ExecutionError> {
+    fn charge_instructions(&mut self, additional: u64) -> Result<(), ExecutionError> {
+        if additional
+            > self
+                .instruction_limit
+                .saturating_sub(self.executed_instructions)
+        {
+            self.executed_instructions = self.instruction_limit;
+            return Err(ExecutionError::InstructionLimitExceeded {
+                limit: self.instruction_limit,
+                executed: self.executed_instructions,
+            });
+        }
+        self.executed_instructions = self.executed_instructions.saturating_add(additional);
+        Ok(())
+    }
+
+    fn charge_dynamic_compilation(
+        &mut self,
+        source: &OrdinaryDynamicFunctionSource,
+    ) -> Result<(), ExecutionError> {
         let compilations = self.compilations.saturating_add(1);
         if compilations > self.compilation_limit {
             return Err(ExecutionError::LimitExceeded {
@@ -169,6 +196,7 @@ struct DynamicFunctionReturn {
 
 enum NativeContinuation {
     FunctionSource(FunctionSourceContinuation),
+    FunctionApply(FunctionApplyContinuation),
     PropertyKey(PropertyKeyContinuation),
     OperatorPrimitive(OperatorPrimitiveContinuation),
     IntrinsicGet(IntrinsicGetContinuation),
@@ -180,6 +208,7 @@ impl NativeContinuation {
         match self {
             Self::FunctionSource(state) => usize_to_u64(state.arguments.len())
                 .saturating_add(u64::from(state.construction.is_some())),
+            Self::FunctionApply(state) => state.retained_values(),
             Self::PropertyKey(state) => state.retained_values(),
             Self::OperatorPrimitive(state) => state.retained_values(),
             Self::IntrinsicGet(state) => state.retained_values(),
@@ -370,6 +399,31 @@ enum OperatorPrimitiveStage {
     AwaitToString,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FunctionApplyStage {
+    AwaitLength,
+    AwaitIndex,
+}
+
+struct FunctionApplyContinuation {
+    target: FunctionId,
+    receiver: StoredValue,
+    array_like: StoredValue,
+    realm: RealmId,
+    length: Option<u32>,
+    next_index: u32,
+    arguments: Vec<StoredValue>,
+    stage: FunctionApplyStage,
+    active_frame_values: u64,
+    origin: JsStackFrame,
+}
+
+impl FunctionApplyContinuation {
+    fn retained_values(&self) -> u64 {
+        3_u64.saturating_add(usize_to_u64(self.arguments.len()))
+    }
+}
+
 enum OperatorPrimitiveTarget {
     Unary {
         opcode: FinalOpcode,
@@ -396,10 +450,11 @@ enum OperatorPrimitiveTarget {
     StringIntrinsic {
         new_target: Option<FunctionId>,
     },
+    FunctionApplyLength(FunctionApplyContinuation),
 }
 
 impl OperatorPrimitiveTarget {
-    const fn retained_values(&self) -> u64 {
+    fn retained_values(&self) -> u64 {
         match self {
             Self::Unary { .. }
             | Self::NumberIntrinsic { new_target: None }
@@ -414,6 +469,7 @@ impl OperatorPrimitiveTarget {
             | Self::StringIntrinsic {
                 new_target: Some(_),
             } => 1,
+            Self::FunctionApplyLength(state) => state.retained_values(),
         }
     }
 }
@@ -427,7 +483,7 @@ struct OperatorPrimitiveContinuation {
 }
 
 impl OperatorPrimitiveContinuation {
-    const fn retained_values(&self) -> u64 {
+    fn retained_values(&self) -> u64 {
         1_u64.saturating_add(self.target.retained_values())
     }
 }
@@ -543,6 +599,21 @@ fn trace_operator_primitive_target_roots(
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }
         }
+        OperatorPrimitiveTarget::FunctionApplyLength(state) => {
+            trace_function_apply_roots(state, mark);
+        }
+    }
+}
+
+fn trace_function_apply_roots(
+    state: &FunctionApplyContinuation,
+    mark: &mut dyn FnMut(CollectionRoot),
+) {
+    mark(CollectionRoot::Heap(HeapReference::Function(state.target)));
+    trace_stored_value_root(&state.receiver, mark);
+    trace_stored_value_root(&state.array_like, mark);
+    for argument in &state.arguments {
+        trace_stored_value_root(argument, mark);
     }
 }
 
@@ -558,6 +629,9 @@ fn trace_native_continuation_roots(
             if let Some(construction) = state.construction {
                 mark(CollectionRoot::Heap(HeapReference::Function(construction)));
             }
+        }
+        NativeContinuation::FunctionApply(state) => {
+            trace_function_apply_roots(state, mark);
         }
         NativeContinuation::PropertyKey(state) => {
             trace_stored_value_root(&state.receiver, mark);
@@ -1062,24 +1136,22 @@ fn execute_frames(
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     unstarted_dynamic_root: Option<&mut InstalledRoot>,
 ) -> Result<StoredValue, ExecutionError> {
-    let mut dynamic_budget = DynamicCompilationBudget::new(limits);
-    execute_frames_with_dynamic_budget(
+    let mut execution_budget = ExecutionBudget::new(limits);
+    execute_frames_with_budget(
         runtime,
         initial,
-        limits,
         compiler,
         unstarted_dynamic_root,
-        &mut dynamic_budget,
+        &mut execution_budget,
     )
 }
 
-fn execute_frames_with_dynamic_budget(
+fn execute_frames_with_budget(
     runtime: &mut Runtime,
     initial: Frame,
-    limits: ExecutionLimits,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     unstarted_dynamic_root: Option<&mut InstalledRoot>,
-    dynamic_budget: &mut DynamicCompilationBudget,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<StoredValue, ExecutionError> {
     let mut frames = Vec::new();
     frames
@@ -1089,23 +1161,21 @@ fn execute_frames_with_dynamic_budget(
             additional: 1,
         })?;
     frames.push(initial);
-    execute_prepared_frames_with_dynamic_budget(
+    execute_prepared_frames_with_budget(
         runtime,
         frames,
-        limits,
         compiler,
         unstarted_dynamic_root,
-        dynamic_budget,
+        execution_budget,
     )
 }
 
-fn execute_prepared_frames_with_dynamic_budget(
+fn execute_prepared_frames_with_budget(
     runtime: &mut Runtime,
     mut frames: Vec<Frame>,
-    limits: ExecutionLimits,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     unstarted_dynamic_root: Option<&mut InstalledRoot>,
-    dynamic_budget: &mut DynamicCompilationBudget,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<StoredValue, ExecutionError> {
     let mut active_frame_values = frames.iter().fold(0_u64, |total, frame| {
         total.saturating_add(frame.reserved_values)
@@ -1118,9 +1188,8 @@ fn execute_prepared_frames_with_dynamic_budget(
         runtime,
         &mut frames,
         &mut active_frame_values,
-        limits,
         compiler,
-        dynamic_budget,
+        execution_budget,
     );
     let reclaim_temporary_receivers = frames_have_temporary_receiver(&frames);
     let cleanup = retire_active_dynamic_roots(runtime, &mut frames);
@@ -1163,24 +1232,16 @@ fn execute_frame_loop(
     runtime: &mut Runtime,
     frames: &mut Vec<Frame>,
     active_frame_values: &mut u64,
-    limits: ExecutionLimits,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
-    dynamic_budget: &mut DynamicCompilationBudget,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<StoredValue, ExecutionError> {
-    let mut executed = 0_u64;
     loop {
-        if executed == limits.instruction_fuel {
-            return Err(ExecutionError::InstructionLimitExceeded {
-                limit: limits.instruction_fuel,
-                executed,
-            });
-        }
+        execution_budget.charge_instructions(1)?;
         let frame = frames.last_mut().ok_or(EngineFault::MissingInstruction {
             function: FunctionTemplateId::new(0),
             instruction: 0,
         })?;
-        executed += 1;
-        let step = execute_one(runtime, frame, &mut executed, limits.instruction_fuel)?;
+        let step = execute_one(runtime, frame, execution_budget)?;
         match step {
             Step::Continue => {}
             Step::Call {
@@ -1234,7 +1295,7 @@ fn execute_frame_loop(
                         active_frames,
                         *active_frame_values,
                         compiler,
-                        dynamic_budget,
+                        execution_budget,
                     );
                     let dispatch = match dispatch {
                         Ok(dispatch) => resolve_native_dispatch(
@@ -1244,7 +1305,7 @@ fn execute_frame_loop(
                             active_frames,
                             *active_frame_values,
                             compiler,
-                            dynamic_budget,
+                            execution_budget,
                         ),
                         Err(error) => Err(error),
                     };
@@ -1370,7 +1431,7 @@ fn execute_frame_loop(
                     active_frames,
                     *active_frame_values,
                     compiler,
-                    dynamic_budget,
+                    execution_budget,
                 );
                 match dispatch {
                     Ok(NativeDispatch::Immediate(value)) => {
@@ -1472,7 +1533,7 @@ fn execute_frame_loop(
                         active_frames,
                         *active_frame_values,
                         compiler,
-                        dynamic_budget,
+                        execution_budget,
                     );
                     let dispatch = match dispatch {
                         Ok(dispatch) => resolve_native_dispatch(
@@ -1482,7 +1543,7 @@ fn execute_frame_loop(
                             active_frames,
                             *active_frame_values,
                             compiler,
-                            dynamic_budget,
+                            execution_budget,
                         ),
                         Err(error) => Err(error),
                     };
@@ -1656,7 +1717,7 @@ fn resume_native_continuations(
     active_frames: usize,
     active_frame_values: u64,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
-    dynamic_budget: &mut DynamicCompilationBudget,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     while let Some(continuation) = continuations.pop() {
         let suspended_frames = active_frames.saturating_add(continuations.len());
@@ -1680,15 +1741,22 @@ fn resume_native_continuations(
                     suspended_frames,
                     suspended_values,
                     compiler,
-                    dynamic_budget,
+                    execution_budget,
                 )?
+            }
+            NativeContinuation::FunctionApply(state) => {
+                advance_function_apply(runtime, state, Some(value), return_to, execution_budget)?
             }
             NativeContinuation::PropertyKey(state) => {
                 advance_property_key_conversion(runtime, state, Some(value), return_to)?
             }
-            NativeContinuation::OperatorPrimitive(state) => {
-                advance_operator_primitive_conversion(runtime, state, Some(value), return_to)?
-            }
+            NativeContinuation::OperatorPrimitive(state) => advance_operator_primitive_conversion(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::IntrinsicGet(state) => {
                 finish_intrinsic_get(runtime, state, value, active_root_frames, &continuations)?
             }
@@ -1729,7 +1797,7 @@ fn resolve_native_dispatch(
     active_frames: usize,
     active_frame_values: u64,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
-    dynamic_budget: &mut DynamicCompilationBudget,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut saw_temporary_receiver = false;
     let result = resolve_native_dispatch_inner(
@@ -1739,7 +1807,7 @@ fn resolve_native_dispatch(
         active_frames,
         active_frame_values,
         compiler,
-        dynamic_budget,
+        execution_budget,
         &mut saw_temporary_receiver,
     );
     match result {
@@ -1767,7 +1835,7 @@ fn resolve_native_dispatch_inner(
     active_frames: usize,
     active_frame_values: u64,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
-    dynamic_budget: &mut DynamicCompilationBudget,
+    execution_budget: &mut ExecutionBudget,
     saw_temporary_receiver: &mut bool,
 ) -> Result<NativeDispatch, NativeFailure> {
     loop {
@@ -1777,6 +1845,9 @@ fn resolve_native_dispatch_inner(
         *saw_temporary_receiver |=
             native_continuations_have_temporary_receiver(&call.continuations);
         let suspended_frames = active_frames.saturating_add(call.continuations.len());
+        // Call inputs are a synchronous transfer buffer, not values reserved
+        // by an active frame. Persistent native state lives in continuations
+        // and is charged here; a bytecode callee is charged by `plan_frame`.
         let suspended_values =
             active_frame_values.saturating_add(native_continuation_values(&call.continuations));
         check_execution_limit(
@@ -1814,7 +1885,7 @@ fn resolve_native_dispatch_inner(
                 suspended_frames,
                 suspended_values,
                 compiler,
-                dynamic_budget,
+                execution_budget,
             )?;
             dispatch = match outcome {
                 NativeDispatch::Immediate(value) => resume_native_continuations(
@@ -1826,7 +1897,7 @@ fn resolve_native_dispatch_inner(
                     active_frames,
                     active_frame_values,
                     compiler,
-                    dynamic_budget,
+                    execution_budget,
                 )?,
                 NativeDispatch::Pair(_, _) => {
                     return Err(EngineFault::RuntimeInvariant {
@@ -1881,7 +1952,7 @@ fn execute_native_entry(
     limits: ExecutionLimits,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
 ) -> Result<StoredValue, ExecutionError> {
-    let mut dynamic_budget = DynamicCompilationBudget::new(limits);
+    let mut execution_budget = ExecutionBudget::new(limits);
     let mut prepared_frames = Vec::new();
     prepared_frames
         .try_reserve_exact(1)
@@ -1904,7 +1975,7 @@ fn execute_native_entry(
         0,
         0,
         compiler,
-        &mut dynamic_budget,
+        &mut execution_budget,
     );
     let dispatch = match dispatch {
         Ok(dispatch) => resolve_native_dispatch(
@@ -1914,7 +1985,7 @@ fn execute_native_entry(
             0,
             0,
             compiler,
-            &mut dynamic_budget,
+            &mut execution_budget,
         ),
         Err(error) => Err(error),
     };
@@ -1926,13 +1997,12 @@ fn execute_native_entry(
         .into()),
         Ok(NativeDispatch::Frame(frame)) => {
             prepared_frames.push(frame);
-            execute_prepared_frames_with_dynamic_budget(
+            execute_prepared_frames_with_budget(
                 runtime,
                 prepared_frames,
-                limits,
                 compiler,
                 None,
-                &mut dynamic_budget,
+                &mut execution_budget,
             )
         }
         Ok(NativeDispatch::Call(_)) => Err(EngineFault::RuntimeInvariant {
@@ -1977,7 +2047,7 @@ fn dispatch_native_call(
     active_frames: usize,
     active_frame_values: u64,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
-    dynamic_budget: &mut DynamicCompilationBudget,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if inputs.new_target.is_some() && !native.kind.is_constructor() {
         let Some(origin) = origin else {
@@ -2000,6 +2070,16 @@ fn dispatch_native_call(
         NativeFunctionKind::FunctionPrototype => {
             Ok(NativeDispatch::Immediate(StoredValue::Undefined))
         }
+        NativeFunctionKind::FunctionPrototypeApply => begin_function_apply(
+            runtime,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            active_frames,
+            active_frame_values,
+            execution_budget,
+        ),
         NativeFunctionKind::FunctionPrototypeCall => {
             let origin = origin.unwrap_or_else(native_function_host_origin);
             let StoredValue::Function(function) = inputs.receiver else {
@@ -2050,7 +2130,7 @@ fn dispatch_native_call(
                 active_frames,
                 active_frame_values,
                 compiler,
-                dynamic_budget,
+                execution_budget,
             )
         }
         NativeFunctionKind::ObjectPrototypeToString => begin_object_prototype_to_string(
@@ -2140,6 +2220,7 @@ fn dispatch_native_call(
                 },
                 return_to,
                 origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
             )
         }
         NativeFunctionKind::NumberPrototypeToString => {
@@ -2156,6 +2237,7 @@ fn dispatch_native_call(
                     OperatorPrimitiveTarget::NumberToString { number },
                     return_to,
                     origin.unwrap_or_else(native_function_host_origin),
+                    execution_budget,
                 ),
             }
         }
@@ -2189,6 +2271,7 @@ fn dispatch_native_call(
                 },
                 return_to,
                 origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
             )
         }
         NativeFunctionKind::StringPrototypeToString
@@ -2219,6 +2302,335 @@ fn dispatch_native_call(
             )))
         }
     }
+}
+
+const MAX_FUNCTION_APPLY_ARGUMENTS: u32 = 65_534;
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "apply admission keeps callable validation, retained-value preflight, and native work budget explicit"
+)]
+fn begin_function_apply(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    active_frames: usize,
+    active_frame_values: u64,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(target) = inputs.receiver else {
+        return Err(function_apply_exception(
+            ExceptionKind::TypeError,
+            "not a function",
+            origin,
+        )?);
+    };
+    let mut supplied = inputs.arguments;
+    let receiver = supplied.take_first_or_undefined();
+    let array_like = supplied.take_first_or_undefined();
+    if matches!(array_like, StoredValue::Undefined | StoredValue::Null) {
+        return function_apply_target_call(target, receiver, Vec::new(), return_to, origin);
+    }
+    if !matches!(
+        array_like,
+        StoredValue::Function(_) | StoredValue::Object(_)
+    ) {
+        return Err(function_apply_exception(
+            ExceptionKind::TypeError,
+            "not a object",
+            origin,
+        )?);
+    }
+
+    check_execution_limit(
+        RuntimeResource::Frames,
+        u64::from(runtime.limits.max_active_frames),
+        usize_to_u64(active_frames).saturating_add(1),
+    )?;
+    // The fourth retained slot covers an object-valued length while its
+    // Number-hint ToPrimitive state is suspended.
+    check_execution_limit(
+        RuntimeResource::FrameValues,
+        runtime.limits.max_active_frame_values,
+        active_frame_values.saturating_add(4),
+    )?;
+    let state = FunctionApplyContinuation {
+        target,
+        receiver,
+        array_like,
+        realm,
+        length: None,
+        next_index: 0,
+        arguments: Vec::new(),
+        stage: FunctionApplyStage::AwaitLength,
+        active_frame_values,
+        origin,
+    };
+    let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
+    charge_function_apply_property_lookup(runtime, &state.array_like, execution_budget)?;
+    match read_static_property(runtime, realm, &state.array_like, &length_key)? {
+        PropertyReadOutcome::Value(value) => begin_function_apply_length_conversion(
+            runtime,
+            state,
+            value,
+            return_to,
+            execution_budget,
+        ),
+        PropertyReadOutcome::Getter { function, receiver } => {
+            function_apply_getter_call(state, function, receiver, return_to)
+        }
+        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
+            message: "object-valued apply argument list failed its length read",
+        }
+        .into()),
+    }
+}
+
+fn advance_function_apply(
+    runtime: &mut Runtime,
+    mut state: FunctionApplyContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(value) = completion else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "apply continuation resumed without a getter completion",
+        }
+        .into());
+    };
+    match state.stage {
+        FunctionApplyStage::AwaitLength => begin_function_apply_length_conversion(
+            runtime,
+            state,
+            value,
+            return_to,
+            execution_budget,
+        ),
+        FunctionApplyStage::AwaitIndex => {
+            let length = state.length.ok_or(EngineFault::RuntimeInvariant {
+                message: "apply index continuation has no fixed length",
+            })?;
+            if state.next_index >= length {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "apply index continuation resumed after its fixed length",
+                }
+                .into());
+            }
+            state.arguments.push(value);
+            state.next_index = state.next_index.saturating_add(1);
+            advance_function_apply_indices(runtime, state, return_to, execution_budget)
+        }
+    }
+}
+
+fn begin_function_apply_length_conversion(
+    runtime: &mut Runtime,
+    state: FunctionApplyContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::FunctionApplyLength(state),
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "ToLength is clamped and checked against the 65,534 QuickJS call-argument ceiling before conversion"
+)]
+fn finish_function_apply_length(
+    runtime: &mut Runtime,
+    mut state: FunctionApplyContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let number = operator_to_number(value, &state.origin)?.as_f64();
+    let integer = if number.is_nan() || number <= 0.0 {
+        0.0
+    } else if number.is_infinite() {
+        number
+    } else {
+        number.floor()
+    };
+    if integer > f64::from(MAX_FUNCTION_APPLY_ARGUMENTS) {
+        return Err(function_apply_exception(
+            ExceptionKind::RangeError,
+            "too many arguments in function call (only 65534 allowed)",
+            state.origin,
+        )?);
+    }
+    let length = integer as u32;
+    check_execution_limit(
+        RuntimeResource::FrameValues,
+        runtime.limits.max_active_frame_values,
+        state
+            .active_frame_values
+            .saturating_add(3)
+            .saturating_add(u64::from(length)),
+    )?;
+    state
+        .arguments
+        .try_reserve_exact(length as usize)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: length as usize,
+        })?;
+    // Charge the complete fixed scan before the first observable indexed Get.
+    execution_budget.charge_instructions(u64::from(length))?;
+    state.length = Some(length);
+    state.stage = FunctionApplyStage::AwaitIndex;
+    advance_function_apply_indices(runtime, state, return_to, execution_budget)
+}
+
+fn advance_function_apply_indices(
+    runtime: &mut Runtime,
+    mut state: FunctionApplyContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let length = state.length.ok_or(EngineFault::RuntimeInvariant {
+        message: "apply argument scan has no fixed length",
+    })?;
+    while state.next_index < length {
+        let index = ArrayIndex::new(state.next_index).ok_or(EngineFault::RuntimeInvariant {
+            message: "apply argument index exceeds the array-index domain",
+        })?;
+        let key = PropertyKey::from_index(index);
+        charge_function_apply_property_lookup(runtime, &state.array_like, execution_budget)?;
+        match read_static_property(runtime, state.realm, &state.array_like, &key)? {
+            PropertyReadOutcome::Value(value) => {
+                state.arguments.push(value);
+                state.next_index = state.next_index.saturating_add(1);
+            }
+            PropertyReadOutcome::Getter { function, receiver } => {
+                state.stage = FunctionApplyStage::AwaitIndex;
+                return function_apply_getter_call(state, function, receiver, return_to);
+            }
+            PropertyReadOutcome::Failed(_) => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "object-valued apply argument list failed an indexed read",
+                }
+                .into());
+            }
+        }
+    }
+    function_apply_target_call(
+        state.target,
+        state.receiver,
+        state.arguments,
+        return_to,
+        state.origin,
+    )
+}
+
+fn charge_function_apply_property_lookup(
+    runtime: &Runtime,
+    base: &StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    let mut current = Some(base.heap_reference().ok_or(EngineFault::RuntimeInvariant {
+        message: "apply property lookup base has no heap reference",
+    })?);
+    let mut remaining = runtime
+        .functions
+        .len()
+        .saturating_add(runtime.objects.len())
+        .saturating_add(1);
+    while let Some(reference) = current {
+        if remaining == 0 {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ordinary prototype chain contains a cycle",
+            }
+            .into());
+        }
+        remaining -= 1;
+        let record = runtime.object_record(reference)?;
+        // `ObjectRecord::own_property` is a linear shape scan. Charge its
+        // complete upper bound, plus the prototype transition, before the
+        // observable Get so a hostile dense array-like cannot hide O(n²)
+        // native work behind O(n) fuel.
+        execution_budget
+            .charge_instructions(usize_to_u64(record.property_count()).saturating_add(1))?;
+        current = record.prototype();
+    }
+    Ok(())
+}
+
+fn function_apply_getter_call(
+    state: FunctionApplyContinuation,
+    function: FunctionId,
+    receiver: StoredValue,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::FunctionApply(state));
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::empty(),
+        return_to,
+        origin,
+        continuations,
+    }))
+}
+
+fn function_apply_target_call(
+    function: FunctionId,
+    receiver: StoredValue,
+    arguments: Vec<StoredValue>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::FunctionCall);
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::from_values(arguments),
+        return_to,
+        origin,
+        continuations,
+    }))
+}
+
+fn function_apply_exception(
+    kind: ExceptionKind,
+    message: &str,
+    origin: JsStackFrame,
+) -> Result<NativeFailure, JsStringError> {
+    Ok(NativeFailure::Abrupt(PendingException {
+        payload: PendingExceptionPayload::EngineError {
+            kind,
+            message: JsString::from_utf8(message)?,
+        },
+        origin,
+    }))
 }
 
 fn symbol_descriptive_string(symbol: &crate::Atom) -> Result<JsString, NativeFailure> {
@@ -2598,7 +3010,7 @@ fn begin_function_source_conversion(
     active_frames: usize,
     active_frame_values: u64,
     compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
-    dynamic_budget: &mut DynamicCompilationBudget,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     advance_function_source_conversion(
         runtime,
@@ -2615,7 +3027,7 @@ fn begin_function_source_conversion(
         active_frames,
         active_frame_values,
         compiler,
-        dynamic_budget,
+        execution_budget,
     )
 }
 
@@ -2632,7 +3044,7 @@ fn advance_function_source_conversion(
     active_frames: usize,
     active_frame_values: u64,
     compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
-    dynamic_budget: &mut DynamicCompilationBudget,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if let Some(value) = completion {
         match state.stage {
@@ -2728,7 +3140,7 @@ fn advance_function_source_conversion(
                 active_frames,
                 active_frame_values,
                 compiler,
-                dynamic_budget,
+                execution_budget,
             );
         }
 
@@ -3139,6 +3551,7 @@ fn begin_operator_primitive_conversion(
     target: OperatorPrimitiveTarget,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
         return advance_operator_primitive_conversion(
@@ -3152,9 +3565,10 @@ fn begin_operator_primitive_conversion(
             },
             None,
             return_to,
+            execution_budget,
         );
     }
-    finish_operator_primitive_target(runtime, value, target, return_to, &origin)
+    finish_operator_primitive_target(runtime, value, target, return_to, &origin, execution_budget)
 }
 
 #[allow(
@@ -3166,6 +3580,7 @@ fn advance_operator_primitive_conversion(
     mut state: OperatorPrimitiveContinuation,
     completion: Option<StoredValue>,
     return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if let Some(value) = completion {
         match state.stage {
@@ -3240,6 +3655,7 @@ fn advance_operator_primitive_conversion(
                     state.target,
                     return_to,
                     &state.origin,
+                    execution_budget,
                 );
             }
             OperatorPrimitiveStage::Start
@@ -3416,6 +3832,7 @@ fn finish_operator_primitive_target(
     target: OperatorPrimitiveTarget,
     return_to: Option<CallReturn>,
     origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match target {
         OperatorPrimitiveTarget::Unary { opcode } => apply_unary_operator(opcode, value, origin),
@@ -3436,14 +3853,21 @@ fn finish_operator_primitive_target(
                 OperatorPrimitiveTarget::BinaryFinish { opcode, left },
                 return_to,
                 origin.clone(),
+                execution_budget,
             )
         }
         OperatorPrimitiveTarget::BinaryFinish { opcode, left } => {
             apply_binary_operator(opcode, left, value, origin)
         }
-        OperatorPrimitiveTarget::EqualityFinish { opcode, other } => {
-            begin_abstract_equality(runtime, value, other, opcode, return_to, origin.clone())
-        }
+        OperatorPrimitiveTarget::EqualityFinish { opcode, other } => begin_abstract_equality(
+            runtime,
+            value,
+            other,
+            opcode,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         OperatorPrimitiveTarget::NumberIntrinsic { new_target } => {
             let value = operator_to_number(value, origin)?;
             new_target.map_or_else(
@@ -3476,6 +3900,9 @@ fn finish_operator_primitive_target(
             } else {
                 Ok(NativeDispatch::Immediate(StoredValue::String(value)))
             }
+        }
+        OperatorPrimitiveTarget::FunctionApplyLength(state) => {
+            finish_function_apply_length(runtime, state, value, return_to, execution_budget)
         }
     }
 }
@@ -3736,6 +4163,7 @@ fn begin_abstract_equality(
     opcode: FinalOpcode,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let invert = match opcode {
         FinalOpcode::Eq => false,
@@ -3793,6 +4221,7 @@ fn begin_abstract_equality(
                 },
                 return_to,
                 origin,
+                execution_budget,
             );
         }
         if is_object_value(&right) && is_equality_conversion_primitive(&left) {
@@ -3806,6 +4235,7 @@ fn begin_abstract_equality(
                 },
                 return_to,
                 origin,
+                execution_budget,
             );
         }
 
@@ -4098,9 +4528,9 @@ fn finish_ordinary_function_constructor(
     active_frames: usize,
     active_frame_values: u64,
     compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
-    dynamic_budget: &mut DynamicCompilationBudget,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    dynamic_budget.charge(&source)?;
+    execution_budget.charge_dynamic_compilation(&source)?;
     let authority = match compiler.compile(source) {
         Ok(authority) => authority,
         Err(DynamicFunctionCompileFailure::Syntax { message }) => {
@@ -5126,8 +5556,7 @@ fn create_frame(
 fn execute_one(
     runtime: &mut Runtime,
     frame: &mut Frame,
-    executed: &mut u64,
-    instruction_limit: u64,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<Step, ExecutionError> {
     let (verified_instruction, source_pc) = {
         let code = code(runtime, frame.code)?;
@@ -5903,7 +6332,7 @@ fn execute_one(
         }
         FinalOpcode::ForInStart => {
             let work = runtime.preview_for_in_iterator_work(peek(frame)?)?;
-            charge_internal_instruction_fuel(executed, instruction_limit, work)?;
+            execution_budget.charge_instructions(work)?;
             let value = pop(frame)?;
             let realm = code(runtime, frame.code)?.realm;
             let (iterator, actual_work) = runtime.allocate_for_in_iterator(realm, value)?;
@@ -5942,7 +6371,7 @@ fn execute_one(
             };
             loop {
                 let work = runtime.preview_for_in_advance_work(iterator)?;
-                charge_internal_instruction_fuel(executed, instruction_limit, work)?;
+                execution_budget.charge_instructions(work)?;
                 let advance = runtime.advance_for_in_iterator(iterator)?;
                 debug_assert!(advance.work() <= work);
                 match advance {
@@ -6005,6 +6434,7 @@ fn execute_one(
                     OperatorPrimitiveTarget::Unary { opcode },
                     Some(return_to),
                     origin,
+                    execution_budget,
                 ),
                 return_to,
             );
@@ -6038,7 +6468,15 @@ fn execute_one(
                 )?);
             let origin = instruction_location(runtime, frame, source_pc)?;
             let dispatch = if matches!(opcode, FinalOpcode::Eq | FinalOpcode::Neq) {
-                begin_abstract_equality(runtime, left, right, opcode, Some(return_to), origin)
+                begin_abstract_equality(
+                    runtime,
+                    left,
+                    right,
+                    opcode,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                )
             } else {
                 let hint = if opcode == FinalOpcode::Add {
                     OperatorPrimitiveHint::Default
@@ -6056,6 +6494,7 @@ fn execute_one(
                     },
                     Some(return_to),
                     origin,
+                    execution_budget,
                 )
             };
             return native_step(dispatch, return_to);
@@ -8564,22 +9003,6 @@ fn copy_addresses(
         })?;
     copied.extend_from_slice(values);
     Ok(copied)
-}
-
-fn charge_internal_instruction_fuel(
-    executed: &mut u64,
-    limit: u64,
-    additional: u64,
-) -> Result<(), ExecutionError> {
-    if additional > limit.saturating_sub(*executed) {
-        *executed = limit;
-        return Err(ExecutionError::InstructionLimitExceeded {
-            limit,
-            executed: *executed,
-        });
-    }
-    *executed = executed.saturating_add(additional);
-    Ok(())
 }
 
 fn for_in_key_value(key: &PropertyKey) -> Result<StoredValue, ExecutionError> {

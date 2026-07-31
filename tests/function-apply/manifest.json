@@ -1,0 +1,139 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "metadata-writable-and-nonenumerable",
+      "covers": ["metadata-writable-enumerable"],
+      "body": "let prototype = Function.prototype;\nlet apply = prototype.apply;\nlet listed = false;\nfor (let key in prototype) if (key === \"apply\") listed = true;\nlet metadata = apply.name + \":\" + apply.length + \":\" + listed;\nprototype.apply = 1;\nlet writable = prototype.apply === 1;\nprototype.apply = apply;\nreturn metadata + \":\" + writable;",
+      "expect": {"kind": "string", "value": "apply:2:false:true"}
+    },
+    {
+      "id": "native-source-text",
+      "covers": ["native-source"],
+      "body": "return Function.prototype.apply.toString() === \"function apply() {\\n    [native code]\\n}\";",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "apply-is-not-constructable",
+      "covers": ["nonconstructable"],
+      "body": "return new Function.prototype.apply();",
+      "expect": {
+        "kind": "throw",
+        "name": "TypeError",
+        "message": "apply is not a constructor"
+      }
+    },
+    {
+      "id": "target-callability-precedes-list-access",
+      "covers": ["target-validation-order"],
+      "body": "return Function.prototype.apply.call({}, null, { get length() { throw new RangeError(\"wrong order\"); } });",
+      "expect": {
+        "kind": "throw",
+        "name": "TypeError",
+        "message": "not a function"
+      }
+    },
+    {
+      "id": "nullish-list-means-no-arguments",
+      "covers": ["nullish-argument-list", "receiver-forwarding"],
+      "body": "function target(value) { return this.tag + \":\" + (value === void 0); }\nreturn target.apply({tag: \"null\"}, null) + \"|\" + target.apply({tag: \"undefined\"}, void 0);",
+      "expect": {"kind": "string", "value": "null:true|undefined:true"}
+    },
+    {
+      "id": "boolean-list-is-rejected",
+      "covers": ["primitive-argument-list-rejection"],
+      "body": "return (function target() {}).apply(null, true);",
+      "expect": {
+        "kind": "throw",
+        "name": "TypeError",
+        "message": "not a object"
+      }
+    },
+    {
+      "id": "number-list-is-rejected",
+      "covers": ["primitive-argument-list-rejection"],
+      "body": "return (function target() {}).apply(null, 1);",
+      "expect": {
+        "kind": "throw",
+        "name": "TypeError",
+        "message": "not a object"
+      }
+    },
+    {
+      "id": "string-list-is-rejected",
+      "covers": ["primitive-argument-list-rejection"],
+      "body": "return (function target() {}).apply(null, \"ab\");",
+      "expect": {
+        "kind": "throw",
+        "name": "TypeError",
+        "message": "not a object"
+      }
+    },
+    {
+      "id": "ordinary-list-reads-own-inherited-and-missing-indices",
+      "covers": [
+        "ordinary-array-like",
+        "inherited-index",
+        "missing-index-undefined",
+        "receiver-forwarding"
+      ],
+      "body": "function List() {}\nList.prototype[1] = \"inherited\";\nlet list = new List();\nlist.length = 3;\nlist[0] = \"own\";\nfunction target(first, second, third) { return this.tag + \":\" + first + \":\" + second + \":\" + (third === void 0); }\nreturn target.apply({tag: \"ctx\"}, list);",
+      "expect": {"kind": "string", "value": "ctx:own:inherited:true"}
+    },
+    {
+      "id": "function-object-is-an-array-like-list",
+      "covers": ["function-array-like", "receiver-forwarding"],
+      "body": "function list(first, second) {}\nlist[0] = \"x\";\nlist[1] = \"y\";\nfunction target(first, second) { return this.tag + \":\" + first + \":\" + second; }\nreturn target.apply({tag: \"ctx\"}, list);",
+      "expect": {"kind": "string", "value": "ctx:x:y"}
+    },
+    {
+      "id": "boxed-string-is-an-array-like-list",
+      "covers": ["boxed-string-array-like"],
+      "body": "function target(first, second) { return first + \":\" + second; }\nreturn target.apply(null, new String(\"ab\"));",
+      "expect": {"kind": "string", "value": "a:b"}
+    },
+    {
+      "id": "length-and-index-effects-are-ordered",
+      "covers": [
+        "length-get-order",
+        "length-to-length-coercion",
+        "indexed-get-order",
+        "mutation-between-indexed-gets",
+        "receiver-forwarding"
+      ],
+      "body": "let log = \"\";\nlet list = {\n  get length() {\n    log = log + \"L\";\n    return { valueOf() { log = log + \"V\"; return 2.9; } };\n  },\n  get 0() {\n    log = log + \"0\";\n    list[1] = \"late\";\n    return \"first\";\n  }\n};\nfunction target(first, second) {\n  log = log + \"C\";\n  return log + \":\" + this.tag + \":\" + first + \":\" + second;\n}\nreturn target.apply({tag: \"T\"}, list);",
+      "expect": {"kind": "string", "value": "LV0C:T:first:late"}
+    },
+    {
+      "id": "indexed-get-abrupt-completion-stops-apply",
+      "covers": ["indexed-get-abrupt"],
+      "body": "function target() { throw new RangeError(\"target reached\"); }\nlet list = {\n  length: 2,\n  get 0() { return Function.prototype.apply.call({}, null, null); },\n  get 1() { throw new RangeError(\"later getter reached\"); }\n};\nreturn target.apply(null, list);",
+      "expect": {
+        "kind": "throw",
+        "name": "TypeError",
+        "message": "not a function"
+      }
+    },
+    {
+      "id": "length-does-not-wrap-to-uint32",
+      "covers": ["length-does-not-wrap", "length-to-length-coercion"],
+      "body": "return (function target(value) { return value; }).apply(null, {length: 4294967297, 0: \"wrong\"});",
+      "expect": {
+        "kind": "throw",
+        "name": "RangeError",
+        "message": "too many arguments in function call (only 65534 allowed)"
+      }
+    },
+    {
+      "id": "argument-count-above-quickjs-limit-is-rejected",
+      "covers": ["argument-limit"],
+      "body": "function target() {}\nlet touched = false;\nlet legal = {length: 65534, get 65533() { touched = true; }};\ntarget.apply(null, legal);\nif (!touched) throw new RangeError(\"legal apply boundary was not scanned\");\nreturn target.apply(null, {length: 65535});",
+      "expect": {
+        "kind": "throw",
+        "name": "RangeError",
+        "message": "too many arguments in function call (only 65534 allowed)"
+      }
+    }
+  ]
+}

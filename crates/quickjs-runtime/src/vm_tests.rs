@@ -133,8 +133,8 @@ fn for_in_next_rejects_a_non_iterator_cursor_after_verified_admission() {
     frame.instruction = for_in_next;
     frame.stack.push(StoredValue::Undefined);
 
-    let mut executed = 1;
-    let Err(error) = execute_one(&mut runtime, &mut frame, &mut executed, u64::MAX) else {
+    let mut budget = execution_budget_with_consumed(u64::MAX, 1);
+    let Err(error) = execute_one(&mut runtime, &mut frame, &mut budget) else {
         panic!("a forged non-iterator cursor must fail closed");
     };
     assert!(matches!(
@@ -200,8 +200,8 @@ fn for_in_next_fuel_exhaustion_preserves_the_unvisited_candidate_for_retry() {
     assert_eq!(runtime.usage().for_in_entries(), 1);
     frame.stack.push(StoredValue::Object(iterator));
 
-    let mut exhausted = 1;
-    let Err(error) = execute_one(&mut runtime, &mut frame, &mut exhausted, 1) else {
+    let mut budget = execution_budget_with_consumed(1, 1);
+    let Err(error) = execute_one(&mut runtime, &mut frame, &mut budget) else {
         panic!("candidate scan must be precharged");
     };
     assert!(
@@ -220,8 +220,8 @@ fn for_in_next_fuel_exhaustion_preserves_the_unvisited_candidate_for_retry() {
         [StoredValue::Object(actual)] if *actual == iterator
     ));
 
-    let mut executed = 1;
-    execute_one(&mut runtime, &mut frame, &mut executed, u64::MAX)
+    let mut budget = execution_budget_with_consumed(u64::MAX, 1);
+    execute_one(&mut runtime, &mut frame, &mut budget)
         .expect("the untouched candidate remains available");
     assert_eq!(runtime.usage().for_in_entries(), 2);
     assert!(matches!(
@@ -300,8 +300,8 @@ fn for_in_next_precharges_snapshot_release_before_prototype_transition() {
         .stack
         .push(StoredValue::Object(prototype_iterator));
 
-    let mut exhausted = 1;
-    let Err(error) = execute_one(&mut runtime, &mut prototype_frame, &mut exhausted, 7) else {
+    let mut budget = execution_budget_with_consumed(7, 1);
+    let Err(error) = execute_one(&mut runtime, &mut prototype_frame, &mut budget) else {
         panic!("prototype snapshot replacement must include old-snapshot release work");
     };
     assert!(matches!(
@@ -321,8 +321,8 @@ fn for_in_next_precharges_snapshot_release_before_prototype_transition() {
     assert!(state.candidate().is_none());
     assert_eq!(runtime.usage().for_in_entries(), usage_before_prototype);
 
-    let mut executed = 1;
-    execute_one(&mut runtime, &mut prototype_frame, &mut executed, u64::MAX)
+    let mut budget = execution_budget_with_consumed(u64::MAX, 1);
+    execute_one(&mut runtime, &mut prototype_frame, &mut budget)
         .expect("prototype transition retry");
     let state = runtime
         .objects
@@ -400,8 +400,8 @@ fn for_in_next_precharges_snapshot_release_before_terminal_transition() {
         .stack
         .push(StoredValue::Object(terminal_iterator));
 
-    let mut exhausted = 1;
-    let Err(error) = execute_one(&mut runtime, &mut terminal_frame, &mut exhausted, 2) else {
+    let mut budget = execution_budget_with_consumed(2, 1);
+    let Err(error) = execute_one(&mut runtime, &mut terminal_frame, &mut budget) else {
         panic!("terminal snapshot release must be precharged");
     };
     assert!(matches!(
@@ -423,9 +423,8 @@ fn for_in_next_precharges_snapshot_release_before_terminal_transition() {
     assert_eq!(state.snapshot_len(), terminal_snapshot_len);
     assert_eq!(runtime.usage().for_in_entries(), usage_before_terminal);
 
-    let mut executed = 1;
-    execute_one(&mut runtime, &mut terminal_frame, &mut executed, u64::MAX)
-        .expect("terminal transition retry");
+    let mut budget = execution_budget_with_consumed(u64::MAX, 1);
+    execute_one(&mut runtime, &mut terminal_frame, &mut budget).expect("terminal transition retry");
     let state = runtime
         .objects
         .get(terminal_iterator)
@@ -445,6 +444,14 @@ fn for_in_next_precharges_snapshot_release_before_terminal_transition() {
             StoredValue::Boolean(true),
         ] if *actual == terminal_iterator
     ));
+}
+
+fn execution_budget_with_consumed(limit: u64, consumed: u64) -> ExecutionBudget {
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default().with_instruction_fuel(limit));
+    budget
+        .charge_instructions(consumed)
+        .expect("test setup remains within its instruction budget");
+    budget
 }
 
 fn for_in_transition_test_runtime() -> (Runtime, RealmId, FunctionId, InstructionIndex) {
@@ -491,7 +498,7 @@ fn symbol_to_primitive_precedes_ordinary_methods_and_receives_string_hint() {
         )
         .expect("symbol method");
     let compiler: Arc<dyn OrdinaryDynamicFunctionCompiler> = Arc::new(NeverCompiler);
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
 
     let Ok(dispatch) = begin_function_source_conversion(
         &mut runtime,
@@ -535,7 +542,7 @@ fn noncallable_symbol_to_primitive_throws_exact_type_error() {
         )
         .expect("symbol value");
     let compiler: Arc<dyn OrdinaryDynamicFunctionCompiler> = Arc::new(NeverCompiler);
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
 
     let Err(error) = begin_function_source_conversion(
         &mut runtime,
@@ -611,7 +618,7 @@ fn object_symbol_to_primitive_result_throws_before_ordinary_fallback() {
         )
         .expect("symbol method");
     let compiler: Arc<dyn OrdinaryDynamicFunctionCompiler> = Arc::new(NeverCompiler);
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Ok(dispatch) = begin_function_source_conversion(
         &mut runtime,
         native,
@@ -820,7 +827,7 @@ fn boolean_constructor_suspends_for_accessor_backed_new_target_prototype() {
         .expect("newTarget receiver marker");
 
     let heap_objects_before_get = runtime.usage().heap_objects();
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Ok(dispatch) = dispatch_native_call(
         &mut runtime,
         boolean_constructor,
@@ -871,15 +878,9 @@ fn boolean_constructor_suspends_for_accessor_backed_new_target_prototype() {
     let NativeDispatch::Frame(frame) = dispatch else {
         panic!("bytecode getter must produce an execution frame");
     };
-    let result = execute_prepared_frames_with_dynamic_budget(
-        &mut runtime,
-        vec![frame],
-        ExecutionLimits::default(),
-        None,
-        None,
-        &mut budget,
-    )
-    .expect("resumed Boolean construction");
+    let result =
+        execute_prepared_frames_with_budget(&mut runtime, vec![frame], None, None, &mut budget)
+            .expect("resumed Boolean construction");
     let StoredValue::Object(wrapper) = result else {
         panic!("Boolean construction must return a wrapper");
     };
@@ -916,7 +917,7 @@ fn number_constructor_suspends_for_accessor_backed_new_target_prototype() {
 
     let heap_objects_before_get = runtime.usage().heap_objects();
     let negative_zero = JsNumber::from_f64(-0.0);
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Ok(dispatch) = dispatch_native_call(
         &mut runtime,
         number_constructor,
@@ -964,15 +965,9 @@ fn number_constructor_suspends_for_accessor_backed_new_target_prototype() {
     let NativeDispatch::Frame(frame) = dispatch else {
         panic!("bytecode getter must produce an execution frame");
     };
-    let result = execute_prepared_frames_with_dynamic_budget(
-        &mut runtime,
-        vec![frame],
-        ExecutionLimits::default(),
-        None,
-        None,
-        &mut budget,
-    )
-    .expect("resumed Number construction");
+    let result =
+        execute_prepared_frames_with_budget(&mut runtime, vec![frame], None, None, &mut budget)
+            .expect("resumed Number construction");
     let StoredValue::Object(wrapper) = result else {
         panic!("Number construction must return a wrapper");
     };
@@ -999,7 +994,7 @@ fn boolean_constructor_getter_throw_precedes_wrapper_allocation() {
         runtime_with_boolean_constructor_prototype_getter("function getter(){throw 41;}");
 
     let heap_objects_before_get = runtime.usage().heap_objects();
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Ok(dispatch) = dispatch_native_call(
         &mut runtime,
         boolean_constructor,
@@ -1027,15 +1022,9 @@ fn boolean_constructor_getter_throw_precedes_wrapper_allocation() {
     let NativeDispatch::Frame(frame) = dispatch else {
         panic!("bytecode getter must produce an execution frame");
     };
-    let error = execute_prepared_frames_with_dynamic_budget(
-        &mut runtime,
-        vec![frame],
-        ExecutionLimits::default(),
-        None,
-        None,
-        &mut budget,
-    )
-    .expect_err("prototype getter throw must escape");
+    let error =
+        execute_prepared_frames_with_budget(&mut runtime, vec![frame], None, None, &mut budget)
+            .expect_err("prototype getter throw must escape");
     assert_eq!(runtime.usage().heap_objects(), heap_objects_before_get);
     let ExecutionError::Exception(exception) = error else {
         panic!("getter throw must remain a JavaScript exception");
@@ -1056,7 +1045,7 @@ fn boolean_constructor_accessor_continuation_obeys_frame_and_value_limits() {
             "function getter(){\"use strict\";return this;}",
         );
     runtime.limits.max_active_frames = 1;
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let dispatch =
         begin_test_boolean_construction(&mut runtime, constructor, native, new_target, &mut budget);
     let Err(error) = resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
@@ -1077,7 +1066,7 @@ fn boolean_constructor_accessor_continuation_obeys_frame_and_value_limits() {
             "function getter(){\"use strict\";return this;}",
         );
     runtime.limits.max_active_frame_values = 2;
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let dispatch =
         begin_test_boolean_construction(&mut runtime, constructor, native, new_target, &mut budget);
     let Err(error) = resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
@@ -1124,7 +1113,7 @@ fn object_prototype_to_string_boxes_boolean_before_symbol_tag_getter() {
         )
         .expect("Boolean @@toStringTag getter");
 
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Ok(dispatch) = dispatch_native_call(
         &mut runtime,
         to_string,
@@ -1187,15 +1176,9 @@ fn object_prototype_to_string_boxes_boolean_before_symbol_tag_getter() {
     let NativeDispatch::Frame(frame) = dispatch else {
         panic!("bytecode tag getter must produce an execution frame");
     };
-    let result = execute_prepared_frames_with_dynamic_budget(
-        &mut runtime,
-        vec![frame],
-        ExecutionLimits::default(),
-        None,
-        None,
-        &mut budget,
-    )
-    .expect("resumed Object.prototype.toString");
+    let result =
+        execute_prepared_frames_with_budget(&mut runtime, vec![frame], None, None, &mut budget)
+            .expect("resumed Object.prototype.toString");
     let StoredValue::String(result) = result else {
         panic!("Object.prototype.toString must return a string");
     };
@@ -1210,7 +1193,7 @@ fn object_prototype_to_string_boolean_boxing_is_limit_checked_and_transient() {
     let (to_string, native) = object_prototype_to_string_native(&limited, realm);
     let usage_before = limited.usage();
     limited.limits.max_heap_objects = usage_before.heap_objects();
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Err(error) = dispatch_native_call(
         &mut limited,
         to_string,
@@ -1248,7 +1231,7 @@ fn object_prototype_to_string_boolean_boxing_is_limit_checked_and_transient() {
     let (to_string, native) = object_prototype_to_string_native(&runtime, realm);
     let usage_before = runtime.usage();
     runtime.limits.max_heap_objects = usage_before.heap_objects() + 1;
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Ok(NativeDispatch::Immediate(StoredValue::String(result))) = dispatch_native_call(
         &mut runtime,
         to_string,
@@ -1279,7 +1262,7 @@ fn object_prototype_to_string_string_boxing_charges_and_releases_the_length_prop
     let (to_string, native) = object_prototype_to_string_native(&limited, realm);
     let usage_before = limited.usage();
     limited.limits.max_object_properties = usage_before.object_properties();
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Err(error) = dispatch_native_call(
         &mut limited,
         to_string,
@@ -1318,7 +1301,7 @@ fn object_prototype_to_string_string_boxing_charges_and_releases_the_length_prop
     let usage_before = runtime.usage();
     runtime.limits.max_heap_objects = usage_before.heap_objects() + 1;
     runtime.limits.max_object_properties = usage_before.object_properties() + 1;
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Ok(NativeDispatch::Immediate(StoredValue::String(result))) = dispatch_native_call(
         &mut runtime,
         to_string,
@@ -1776,7 +1759,7 @@ fn object_prototype_to_string_reclaims_boolean_receiver_after_getter_frame_limit
     runtime.limits.max_heap_objects = baseline.heap_objects() + 1;
 
     for _ in 0..2 {
-        let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+        let mut budget = ExecutionBudget::new(ExecutionLimits::default());
         let Ok(dispatch) = dispatch_native_call(
             &mut runtime,
             to_string,
@@ -1841,7 +1824,7 @@ fn object_prototype_to_string_reclaims_boolean_receiver_after_getter_value_limit
         .expect("Boolean @@toStringTag getter");
     let baseline = runtime.usage();
     runtime.limits.max_heap_objects = baseline.heap_objects() + 1;
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Ok(dispatch) = dispatch_native_call(
         &mut runtime,
         to_string,
@@ -2040,7 +2023,7 @@ fn number_to_string_radix_conversion_obeys_frame_and_value_limits() {
         runtime_with_number_to_string_radix_method(RuntimeLimits::default());
     runtime.limits.max_active_frames = 1;
     let baseline = runtime.usage();
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let dispatch = begin_test_number_to_string(&mut runtime, to_string, native, radix, &mut budget);
     let NativeDispatch::Call(call) = &dispatch else {
         panic!("radix valueOf must suspend Number.prototype.toString");
@@ -2073,7 +2056,7 @@ fn number_to_string_radix_conversion_obeys_frame_and_value_limits() {
         runtime_with_number_to_string_radix_method(RuntimeLimits::default());
     runtime.limits.max_active_frame_values = 2;
     let baseline = runtime.usage();
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let dispatch = begin_test_number_to_string(&mut runtime, to_string, native, radix, &mut budget);
     let Err(error) = resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
     else {
@@ -3166,7 +3149,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         "make",
     );
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(55)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(58)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
         .context(&realm)
@@ -3187,8 +3170,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 55,
-            observed: 56,
+            limit: 58,
+            observed: 59,
         }
     ));
     let failed = runtime.usage();
@@ -3235,7 +3218,7 @@ fn dynamic_function_calls_an_accessor_before_using_its_to_string_value() {
         )
         .expect("accessor");
     let compiler: Arc<dyn OrdinaryDynamicFunctionCompiler> = Arc::new(NeverCompiler);
-    let mut budget = DynamicCompilationBudget::new(ExecutionLimits::default());
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
 
     let Ok(dispatch) = begin_function_source_conversion(
         &mut runtime,
@@ -3406,6 +3389,1055 @@ fn global_function_accessor_throw_prevents_dynamic_compilation() {
         .expect("number throw");
 
     assert!(thrown.strict_equals(JsNumber::from_i32(53)));
+}
+
+#[test]
+fn function_prototype_apply_checks_callable_before_touching_the_list_and_preserves_abrupt_getters()
+{
+    let getter_authority =
+        compile_test_function("function lengthGetter(){throw 73;}", "lengthGetter");
+    let target_authority = compile_test_function("function target(){return 1;}", "target");
+    let (mut runtime, realm, invoke, apply) = runtime_with_apply_invoker();
+    let (getter, target) = {
+        let mut context = runtime.context(&realm).expect("context");
+        (
+            context
+                .instantiate(getter_authority)
+                .expect("throwing length getter"),
+            context.instantiate(target_authority).expect("target"),
+        )
+    };
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let list = source_object(&mut runtime, realm_id);
+    runtime
+        .append_accessor_property(
+            HeapReference::Object(list),
+            runtime.predefined_property_key(PredefinedAtom::Length),
+            PropertyLayout::accessor(false, true),
+            Some(getter.id().expect("getter id")),
+            None,
+        )
+        .expect("length accessor");
+    let non_callable = source_object(&mut runtime, realm_id);
+    let list = runtime
+        .public_value(StoredValue::Object(list))
+        .expect("list root");
+    let non_callable = runtime
+        .public_value(StoredValue::Object(non_callable))
+        .expect("non-callable root");
+    let receiver = runtime
+        .public_value(StoredValue::Null)
+        .expect("receiver root");
+
+    let error = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &invoke,
+            &[apply.as_value(), non_callable, receiver, list.clone()],
+            ExecutionLimits::default(),
+        )
+        .expect_err("non-callable target");
+    assert_execution_engine_error(error, ExceptionKind::TypeError, "not a function");
+
+    let receiver = runtime
+        .public_value(StoredValue::Null)
+        .expect("receiver root");
+    let error = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &invoke,
+            &[apply.as_value(), target.as_value(), receiver, list],
+            ExecutionLimits::default(),
+        )
+        .expect_err("length getter throw");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("length getter throw must remain a JavaScript exception");
+    };
+    let thrown = exception
+        .thrown_value()
+        .expect("explicit getter throw")
+        .as_number()
+        .expect("live throw")
+        .expect("number throw");
+    assert!(thrown.strict_equals(JsNumber::from_i32(73)));
+}
+
+#[test]
+fn function_prototype_apply_treats_null_and_undefined_lists_as_zero_arguments() {
+    let (mut runtime, realm, invoke, apply) = runtime_with_apply_invoker();
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let global = runtime
+        .realm_global_object(realm_id)
+        .expect("global object");
+    let StoredValue::Function(target) = read_heap_property(
+        &runtime,
+        HeapReference::Object(global),
+        &runtime.predefined_property_key(PredefinedAtom::String),
+    )
+    .expect("global String") else {
+        panic!("global String must be callable");
+    };
+    let target = runtime
+        .public_value(StoredValue::Function(target))
+        .expect("String root")
+        .into_function()
+        .expect("String function");
+
+    for list in [StoredValue::Null, StoredValue::Undefined] {
+        let receiver = runtime
+            .public_value(StoredValue::Undefined)
+            .expect("receiver root");
+        let list = runtime.public_value(list).expect("list root");
+        let result = runtime
+            .context(&realm)
+            .expect("context")
+            .call(
+                &invoke,
+                &[apply.as_value(), target.as_value(), receiver, list],
+                ExecutionLimits::default(),
+            )
+            .expect("zero-argument apply");
+
+        assert_eq!(
+            result
+                .as_string()
+                .expect("live result")
+                .expect("string result")
+                .to_utf8_lossy()
+                .expect("UTF-8 result"),
+            "",
+            "zero arguments must remain distinguishable from one undefined argument"
+        );
+    }
+}
+
+#[test]
+fn function_prototype_apply_observes_length_conversion_and_index_mutation_in_order() {
+    let authority = compile_test_function(
+        "function run(){\
+             let trace={name:''};\
+             let list={\
+                 get length(){\
+                     trace.name=trace.name+'L';\
+                     return {valueOf(){trace.name=trace.name+'V';return 2;}};\
+                 },\
+                 get 0(){trace.name=trace.name+'0';list[1]=9;return 5;},\
+                 1:7\
+             };\
+             function target(first,second){\
+                 'use strict';\
+                 this.name=this.name+'T';\
+                 return first*100+second;\
+             }\
+             let result=target.apply(trace,list);\
+             return trace.name+':'+result;\
+         }",
+        "run",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let run = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(authority)
+        .expect("run");
+
+    let result = runtime
+        .context(&realm)
+        .expect("context")
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("getter-backed apply");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string result")
+            .to_utf8_lossy()
+            .expect("UTF-8 result"),
+        "LV0T:509"
+    );
+}
+
+#[test]
+fn function_prototype_apply_rejects_every_non_nullish_primitive_list_exactly() {
+    let target_authority = compile_test_function("function target(){return 1;}", "target");
+    let (mut runtime, realm, invoke, apply) = runtime_with_apply_invoker();
+    let target = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(target_authority)
+        .expect("target");
+    let primitives = {
+        let mut context = runtime.context(&realm).expect("context");
+        vec![
+            context.boolean(false),
+            context.number(JsNumber::from_i32(7)),
+            context.string(JsString::from_utf8("xy").expect("string")),
+            context.symbol(None).expect("symbol"),
+        ]
+    };
+
+    for primitive in primitives {
+        let receiver = runtime
+            .public_value(StoredValue::Undefined)
+            .expect("receiver root");
+        let error = runtime
+            .context(&realm)
+            .expect("context")
+            .call(
+                &invoke,
+                &[apply.as_value(), target.as_value(), receiver, primitive],
+                ExecutionLimits::default(),
+            )
+            .expect_err("primitive argument list");
+        assert_execution_engine_error(error, ExceptionKind::TypeError, "not a object");
+    }
+}
+
+#[test]
+fn function_prototype_apply_uses_to_length_and_enforces_quickjs_argument_limit() {
+    let target_authority = compile_test_function(
+        "function target(first,second,third){\
+             if(first===void 0)return 0;\
+             if(third===void 0)return first*10+second;\
+             return 999;\
+         }",
+        "target",
+    );
+    let (mut runtime, realm, invoke, apply) = runtime_with_apply_invoker();
+    let target = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(target_authority)
+        .expect("target");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+
+    for (length, expected) in [
+        (JsNumber::from_i32(-1), 0),
+        (JsNumber::from_f64(f64::NAN), 0),
+        (JsNumber::from_f64(2.9), 46),
+    ] {
+        let list = source_object(&mut runtime, realm_id);
+        append_apply_list_data(&mut runtime, list, length);
+        let list = runtime
+            .public_value(StoredValue::Object(list))
+            .expect("list root");
+        let receiver = runtime
+            .public_value(StoredValue::Undefined)
+            .expect("receiver root");
+        let result = runtime
+            .context(&realm)
+            .expect("context")
+            .call(
+                &invoke,
+                &[apply.as_value(), target.as_value(), receiver, list],
+                ExecutionLimits::default(),
+            )
+            .expect("ToLength apply");
+        let result = result
+            .as_number()
+            .expect("live result")
+            .expect("number result");
+        assert!(result.strict_equals(JsNumber::from_i32(expected)));
+    }
+
+    let oversized = source_object(&mut runtime, realm_id);
+    runtime
+        .append_data_property(
+            HeapReference::Object(oversized),
+            runtime.predefined_property_key(PredefinedAtom::Length),
+            PropertyLayout::data(true, true, true),
+            StoredValue::Number(JsNumber::from_i32(65_535)),
+        )
+        .expect("oversized length");
+    let oversized = runtime
+        .public_value(StoredValue::Object(oversized))
+        .expect("oversized list root");
+    let receiver = runtime
+        .public_value(StoredValue::Undefined)
+        .expect("receiver root");
+    let error = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &invoke,
+            &[apply.as_value(), target.as_value(), receiver, oversized],
+            ExecutionLimits::default(),
+        )
+        .expect_err("argument limit");
+    assert_execution_engine_error(
+        error,
+        ExceptionKind::RangeError,
+        "too many arguments in function call (only 65534 allowed)",
+    );
+}
+
+#[test]
+fn function_prototype_apply_precharges_the_index_scan_before_the_first_getter() {
+    let getter_authority = compile_test_function("function first(){throw 91;}", "first");
+    let target_authority = compile_test_function("function target(){return 1;}", "target");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let (getter, target) = {
+        let mut context = runtime.context(&realm).expect("context");
+        (
+            context.instantiate(getter_authority).expect("getter"),
+            context.instantiate(target_authority).expect("target"),
+        )
+    };
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let list = source_object(&mut runtime, realm_id);
+    runtime
+        .append_data_property(
+            HeapReference::Object(list),
+            runtime.predefined_property_key(PredefinedAtom::Length),
+            PropertyLayout::data(true, true, true),
+            StoredValue::Number(JsNumber::from_i32(1)),
+        )
+        .expect("list length");
+    runtime
+        .append_accessor_property(
+            HeapReference::Object(list),
+            PropertyKey::from_index(ArrayIndex::new(0).expect("array index")),
+            PropertyLayout::accessor(true, true),
+            Some(getter.id().expect("getter id")),
+            None,
+        )
+        .expect("first index getter");
+    let (apply, native) = function_prototype_apply_native(&runtime, realm_id);
+    let length_lookup_work = {
+        let mut preview = ExecutionBudget::new(ExecutionLimits::default());
+        charge_function_apply_property_lookup(&runtime, &StoredValue::Object(list), &mut preview)
+            .unwrap_or_else(|_| panic!("preview length lookup"));
+        preview.executed_instructions
+    };
+    let fuel = length_lookup_work.saturating_add(1);
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default().with_instruction_fuel(fuel));
+
+    let Err(error) = begin_test_function_apply(
+        &mut runtime,
+        apply,
+        native,
+        target.id().expect("target id"),
+        StoredValue::Undefined,
+        list,
+        0,
+        0,
+        &mut budget,
+    ) else {
+        panic!("the fixed index scan must exhaust fuel before dispatching its first getter");
+    };
+    assert!(matches!(
+        error,
+        NativeFailure::Execution(ExecutionError::InstructionLimitExceeded {
+            limit,
+            executed,
+        }) if limit == fuel && executed == fuel
+    ));
+    assert_eq!(
+        budget.executed_instructions, fuel,
+        "the failed all-or-nothing scan charge must not exceed its fixed limit"
+    );
+}
+
+#[test]
+fn function_prototype_apply_native_preprocessing_and_target_share_one_fuel_budget() {
+    let target_authority = compile_test_function("function target(){return 19;}", "target");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let target = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(target_authority)
+        .expect("target");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let list = source_object(&mut runtime, realm_id);
+    runtime
+        .append_data_property(
+            HeapReference::Object(list),
+            runtime.predefined_property_key(PredefinedAtom::Length),
+            PropertyLayout::data(true, true, true),
+            StoredValue::Number(JsNumber::from_i32(0)),
+        )
+        .expect("empty list length");
+    let (apply, native) = function_prototype_apply_native(&runtime, realm_id);
+    let length_lookup_work = {
+        let mut preview = ExecutionBudget::new(ExecutionLimits::default());
+        charge_function_apply_property_lookup(&runtime, &StoredValue::Object(list), &mut preview)
+            .unwrap_or_else(|_| panic!("preview length lookup"));
+        preview.executed_instructions
+    };
+    let mut budget =
+        ExecutionBudget::new(ExecutionLimits::default().with_instruction_fuel(length_lookup_work));
+    let Ok(dispatch) = begin_test_function_apply(
+        &mut runtime,
+        apply,
+        native,
+        target.id().expect("target id"),
+        StoredValue::Undefined,
+        list,
+        0,
+        0,
+        &mut budget,
+    ) else {
+        panic!("native preprocessing must succeed");
+    };
+    let Ok(dispatch) =
+        resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+    else {
+        panic!("target frame admission must succeed");
+    };
+    let NativeDispatch::Frame(target_frame) = dispatch else {
+        panic!("a bytecode target must produce a frame");
+    };
+    assert_eq!(
+        budget.executed_instructions, length_lookup_work,
+        "apply preprocessing must debit the execution's shared budget"
+    );
+
+    let error = execute_prepared_frames_with_budget(
+        &mut runtime,
+        vec![target_frame],
+        None,
+        None,
+        &mut budget,
+    )
+    .expect_err("the target must receive only the fuel left after native preprocessing");
+    assert!(matches!(
+        error,
+        ExecutionError::InstructionLimitExceeded {
+            limit,
+            executed,
+        } if limit == length_lookup_work && executed == length_lookup_work
+    ));
+}
+
+#[test]
+fn function_prototype_apply_forwarded_through_call_does_not_charge_transient_call_values() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_active_frame_values(4))
+        .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let function_prototype = runtime
+        .realm_function_prototype(realm_id)
+        .expect("Function.prototype");
+    let (apply, _) = function_prototype_apply_native(&runtime, realm_id);
+    let expected_call = NativeFunction {
+        realm: realm_id,
+        kind: NativeFunctionKind::FunctionPrototypeCall,
+    };
+    let call = runtime
+        .functions
+        .iter()
+        .find_map(|(id, function)| {
+            (function.native().copied() == Some(expected_call)).then_some(id)
+        })
+        .expect("Function.prototype.call");
+    let list = source_object(&mut runtime, realm_id);
+    runtime
+        .append_data_property(
+            HeapReference::Object(list),
+            runtime.predefined_property_key(PredefinedAtom::Length),
+            PropertyLayout::data(true, true, true),
+            StoredValue::Number(JsNumber::from_i32(0)),
+        )
+        .expect("empty list length");
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
+
+    let dispatch = dispatch_native_call(
+        &mut runtime,
+        call,
+        expected_call,
+        CallInputs {
+            receiver: StoredValue::Function(apply),
+            arguments: CallArguments::from_values(vec![
+                StoredValue::Function(function_prototype),
+                StoredValue::Undefined,
+                StoredValue::Object(list),
+            ]),
+            new_target: None,
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    )
+    .unwrap_or_else(|_| panic!("begin call forwarding"));
+    let dispatch = resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+        .unwrap_or_else(|_| panic!("resolve call forwarding"));
+    assert!(
+        matches!(dispatch, NativeDispatch::Immediate(StoredValue::Undefined)),
+        "the forwarding buffer must not be charged as values reserved by active frames"
+    );
+}
+
+#[test]
+fn function_prototype_apply_preflights_frame_and_value_limits_before_the_length_getter() {
+    for (limits, active_frames, active_values, expected_resource, expected_limit, expected) in [
+        (
+            RuntimeLimits::default().with_max_active_frames(1),
+            1,
+            0,
+            RuntimeResource::Frames,
+            1,
+            2,
+        ),
+        (
+            RuntimeLimits::default().with_max_active_frame_values(3),
+            0,
+            0,
+            RuntimeResource::FrameValues,
+            3,
+            4,
+        ),
+    ] {
+        let getter_authority =
+            compile_test_function("function lengthGetter(){throw 67;}", "lengthGetter");
+        let target_authority = compile_test_function("function target(){return 1;}", "target");
+        let mut runtime = Runtime::try_new(limits).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let (getter, target) = {
+            let mut context = runtime.context(&realm).expect("context");
+            (
+                context
+                    .instantiate(getter_authority)
+                    .expect("length getter"),
+                context.instantiate(target_authority).expect("target"),
+            )
+        };
+        let realm_id = runtime.context(&realm).expect("context").realm;
+        let list = source_object(&mut runtime, realm_id);
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(list),
+                runtime.predefined_property_key(PredefinedAtom::Length),
+                PropertyLayout::accessor(false, true),
+                Some(getter.id().expect("getter id")),
+                None,
+            )
+            .expect("length accessor");
+        let (apply, native) = function_prototype_apply_native(&runtime, realm_id);
+        let mut budget = ExecutionBudget::new(ExecutionLimits::default());
+
+        let Err(error) = begin_test_function_apply(
+            &mut runtime,
+            apply,
+            native,
+            target.id().expect("target id"),
+            StoredValue::Undefined,
+            list,
+            active_frames,
+            active_values,
+            &mut budget,
+        ) else {
+            panic!("apply admission must reject the suspended state before reading length");
+        };
+        assert!(matches!(
+            error,
+            NativeFailure::Execution(ExecutionError::LimitExceeded {
+                resource,
+                limit,
+                observed,
+            }) if resource == expected_resource
+                && limit == expected_limit
+                && observed == expected
+        ));
+        assert_eq!(
+            budget.executed_instructions, 0,
+            "limit admission must precede both the length getter and native work"
+        );
+    }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the GC regression keeps construction, collection, resumption, and final reclamation in one lifecycle"
+)]
+fn function_prototype_apply_traces_gathered_heap_arguments_across_a_later_getter() {
+    let getter_authority = compile_test_function("function second(){return 9;}", "second");
+    let target_authority =
+        compile_test_function("function target(first){return first.value;}", "target");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let (getter, target) = {
+        let mut context = runtime.context(&realm).expect("context");
+        (
+            context.instantiate(getter_authority).expect("getter"),
+            context.instantiate(target_authority).expect("target"),
+        )
+    };
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let gathered = source_object(&mut runtime, realm_id);
+    runtime
+        .append_data_property(
+            HeapReference::Object(gathered),
+            runtime.predefined_property_key(PredefinedAtom::Value),
+            PropertyLayout::data(true, true, true),
+            StoredValue::Number(JsNumber::from_i32(91)),
+        )
+        .expect("gathered value");
+    let list = source_object(&mut runtime, realm_id);
+    runtime
+        .append_data_property(
+            HeapReference::Object(list),
+            runtime.predefined_property_key(PredefinedAtom::Length),
+            PropertyLayout::data(true, true, true),
+            StoredValue::Number(JsNumber::from_i32(2)),
+        )
+        .expect("list length");
+    let first_key = PropertyKey::from_index(ArrayIndex::new(0).expect("first index"));
+    runtime
+        .append_data_property(
+            HeapReference::Object(list),
+            first_key.clone(),
+            PropertyLayout::data(true, true, true),
+            StoredValue::Object(gathered),
+        )
+        .expect("first argument");
+    runtime
+        .append_accessor_property(
+            HeapReference::Object(list),
+            PropertyKey::from_index(ArrayIndex::new(1).expect("second index")),
+            PropertyLayout::accessor(true, true),
+            Some(getter.id().expect("getter id")),
+            None,
+        )
+        .expect("second argument getter");
+    let _list_root = runtime
+        .public_value(StoredValue::Object(list))
+        .expect("list root");
+    let (apply, native) = function_prototype_apply_native(&runtime, realm_id);
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
+    let Ok(dispatch) = begin_test_function_apply(
+        &mut runtime,
+        apply,
+        native,
+        target.id().expect("target id"),
+        StoredValue::Undefined,
+        list,
+        0,
+        0,
+        &mut budget,
+    ) else {
+        panic!("apply scan must reach the later getter");
+    };
+    let Ok(dispatch) =
+        resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+    else {
+        panic!("later getter frame admission must succeed");
+    };
+    let NativeDispatch::Frame(getter_frame) = dispatch else {
+        panic!("the later indexed getter must suspend apply");
+    };
+
+    assert!(
+        runtime
+            .object_record_mut(HeapReference::Object(list))
+            .expect("list")
+            .replace_existing_data(&first_key, StoredValue::Undefined),
+        "test setup must remove the list's original edge"
+    );
+    runtime.collection_pending = true;
+    collect_cycles_with_execution_roots(
+        &mut runtime,
+        std::slice::from_ref(&getter_frame),
+        &[],
+        &[],
+    )
+    .expect("collection with suspended apply roots");
+    assert!(
+        runtime.heap_reference_is_live(HeapReference::Object(gathered)),
+        "the gathered argument must remain rooted only by the apply continuation"
+    );
+
+    let result = execute_prepared_frames_with_budget(
+        &mut runtime,
+        vec![getter_frame],
+        None,
+        None,
+        &mut budget,
+    )
+    .expect("resume apply after collection");
+    let StoredValue::Number(result) = result else {
+        panic!("target must return the gathered object's value");
+    };
+    assert!(result.strict_equals(JsNumber::from_i32(91)));
+
+    runtime.collect_cycles().expect("release gathered argument");
+    assert!(
+        !runtime.heap_reference_is_live(HeapReference::Object(gathered)),
+        "the gathered argument must stop being a root after apply completes"
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the abrupt-completion regression keeps getter ordering and continuation cleanup in one lifecycle"
+)]
+fn function_prototype_apply_getter_throw_stops_later_gets_and_target_then_releases_arguments() {
+    let throwing_authority = compile_test_function("function throwing(){throw 77;}", "throwing");
+    let later_authority = compile_test_function("function later(){throw 88;}", "later");
+    let target_authority = compile_test_function("function target(){throw 99;}", "target");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let (throwing, later, target) = {
+        let mut context = runtime.context(&realm).expect("context");
+        (
+            context
+                .instantiate(throwing_authority)
+                .expect("throwing getter"),
+            context.instantiate(later_authority).expect("later getter"),
+            context.instantiate(target_authority).expect("target"),
+        )
+    };
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let gathered = source_object(&mut runtime, realm_id);
+    let list = source_object(&mut runtime, realm_id);
+    runtime
+        .append_data_property(
+            HeapReference::Object(list),
+            runtime.predefined_property_key(PredefinedAtom::Length),
+            PropertyLayout::data(true, true, true),
+            StoredValue::Number(JsNumber::from_i32(3)),
+        )
+        .expect("list length");
+    let first_key = PropertyKey::from_index(ArrayIndex::new(0).expect("first index"));
+    runtime
+        .append_data_property(
+            HeapReference::Object(list),
+            first_key.clone(),
+            PropertyLayout::data(true, true, true),
+            StoredValue::Object(gathered),
+        )
+        .expect("gathered first argument");
+    runtime
+        .append_accessor_property(
+            HeapReference::Object(list),
+            PropertyKey::from_index(ArrayIndex::new(1).expect("throwing index")),
+            PropertyLayout::accessor(true, true),
+            Some(throwing.id().expect("throwing getter id")),
+            None,
+        )
+        .expect("throwing indexed getter");
+    runtime
+        .append_accessor_property(
+            HeapReference::Object(list),
+            PropertyKey::from_index(ArrayIndex::new(2).expect("later index")),
+            PropertyLayout::accessor(true, true),
+            Some(later.id().expect("later getter id")),
+            None,
+        )
+        .expect("later indexed getter");
+    let _list_root = runtime
+        .public_value(StoredValue::Object(list))
+        .expect("list root");
+    let usage_before_call = runtime.usage();
+    let (apply, native) = function_prototype_apply_native(&runtime, realm_id);
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
+    let Ok(dispatch) = begin_test_function_apply(
+        &mut runtime,
+        apply,
+        native,
+        target.id().expect("target id"),
+        StoredValue::Object(list),
+        list,
+        0,
+        0,
+        &mut budget,
+    ) else {
+        panic!("apply scan must reach the throwing getter");
+    };
+    let Ok(dispatch) =
+        resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+    else {
+        panic!("throwing getter frame admission must succeed");
+    };
+    let NativeDispatch::Frame(getter_frame) = dispatch else {
+        panic!("the throwing indexed getter must suspend apply");
+    };
+    let error = execute_prepared_frames_with_budget(
+        &mut runtime,
+        vec![getter_frame],
+        None,
+        None,
+        &mut budget,
+    )
+    .expect_err("the indexed getter throw must escape apply");
+    let ExecutionError::Exception(exception) = error else {
+        panic!("the getter throw must remain a JavaScript exception");
+    };
+    let thrown = exception
+        .thrown_value()
+        .expect("explicit getter throw")
+        .as_number()
+        .expect("live throw")
+        .expect("numeric throw");
+    assert!(thrown.strict_equals(JsNumber::from_i32(77)));
+    assert!(matches!(
+        read_heap_property(&runtime, HeapReference::Object(list), &first_key)
+            .expect("first argument"),
+        StoredValue::Object(object) if object == gathered
+    ));
+
+    assert!(
+        runtime
+            .object_record_mut(HeapReference::Object(list))
+            .expect("list")
+            .replace_existing_data(&first_key, StoredValue::Undefined),
+        "test cleanup must remove the list's source edge"
+    );
+    runtime.collection_pending = true;
+    let report = runtime
+        .collect_cycles()
+        .expect("release the abandoned gathered argument");
+    assert_eq!(
+        report.objects(),
+        1,
+        "only the gathered argument abandoned by the abrupt continuation is unreachable"
+    );
+    assert!(
+        !runtime.heap_reference_is_live(HeapReference::Object(gathered)),
+        "the abrupt path must release gathered arguments"
+    );
+    assert_eq!(
+        runtime.usage().heap_objects() + 1,
+        usage_before_call.heap_objects()
+    );
+    assert_eq!(
+        runtime.usage().object_properties(),
+        usage_before_call.object_properties(),
+        "clearing an indexed slot must not leak property charges"
+    );
+}
+
+#[test]
+fn function_prototype_apply_calls_a_dynamic_function_across_realms() {
+    let invoke_authority = compile_test_function(
+        "function invoke(apply,target,receiver,list){\
+             return apply.call(target,receiver,list);\
+         }",
+        "invoke",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let target_realm = runtime.create_realm().expect("target realm");
+    let caller_realm = runtime.create_realm().expect("caller realm");
+    let target_realm_id = runtime
+        .context(&target_realm)
+        .expect("target context")
+        .realm;
+    let caller_realm_id = runtime
+        .context(&caller_realm)
+        .expect("caller context")
+        .realm;
+    let constructor = {
+        let global = runtime
+            .realm_global_object(target_realm_id)
+            .expect("target global");
+        let StoredValue::Function(constructor) = read_heap_property(
+            &runtime,
+            HeapReference::Object(global),
+            &runtime.predefined_property_key(PredefinedAtom::Function),
+        )
+        .expect("global Function") else {
+            panic!("global Function must be callable");
+        };
+        runtime
+            .public_value(StoredValue::Function(constructor))
+            .expect("Function root")
+            .into_function()
+            .expect("Function value")
+    };
+    let dynamic_arguments = {
+        let context = runtime.context(&target_realm).expect("target context");
+        [
+            context.string(JsString::from_utf8("a").expect("parameter a")),
+            context.string(JsString::from_utf8("b").expect("parameter b")),
+            context.string(JsString::from_utf8("return a*10+b;").expect("body")),
+        ]
+    };
+    let compiler: Arc<dyn OrdinaryDynamicFunctionCompiler> = Arc::new(OxcDynamicCompiler);
+    let target = runtime
+        .context(&target_realm)
+        .expect("target context")
+        .call_with_dynamic_function_compiler(
+            &constructor,
+            &dynamic_arguments,
+            ExecutionLimits::default(),
+            &compiler,
+        )
+        .expect("dynamic target")
+        .into_function()
+        .expect("dynamic function");
+    let invoke = runtime
+        .context(&caller_realm)
+        .expect("caller context")
+        .instantiate(invoke_authority)
+        .expect("apply invoker");
+    let apply = public_function_prototype_apply(&mut runtime, caller_realm_id);
+    let list = source_object(&mut runtime, caller_realm_id);
+    append_apply_list_data(&mut runtime, list, JsNumber::from_i32(2));
+    let list = runtime
+        .public_value(StoredValue::Object(list))
+        .expect("cross-realm list root");
+    let receiver = runtime
+        .public_value(StoredValue::Undefined)
+        .expect("receiver root");
+
+    let result = runtime
+        .context(&caller_realm)
+        .expect("caller context")
+        .call(
+            &invoke,
+            &[apply.as_value(), target.as_value(), receiver, list],
+            ExecutionLimits::default(),
+        )
+        .expect("cross-realm dynamic apply");
+    let result = result
+        .as_number()
+        .expect("live result")
+        .expect("number result");
+    assert!(result.strict_equals(JsNumber::from_i32(46)));
+}
+
+fn runtime_with_apply_invoker() -> (Runtime, crate::Realm, Function, Function) {
+    let invoke_authority = compile_test_function(
+        "function invoke(apply,target,receiver,list){\
+             return apply.call(target,receiver,list);\
+         }",
+        "invoke",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let invoke = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(invoke_authority)
+        .expect("apply invoker");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let apply = public_function_prototype_apply(&mut runtime, realm_id);
+    (runtime, realm, invoke, apply)
+}
+
+fn public_function_prototype_apply(runtime: &mut Runtime, realm: RealmId) -> Function {
+    let function_prototype = runtime
+        .realm_function_prototype(realm)
+        .expect("Function.prototype");
+    let StoredValue::Function(apply) = read_heap_property(
+        runtime,
+        HeapReference::Function(function_prototype),
+        &runtime.predefined_property_key(PredefinedAtom::Apply),
+    )
+    .expect("Function.prototype.apply") else {
+        panic!("Function.prototype.apply must be callable");
+    };
+    runtime
+        .public_value(StoredValue::Function(apply))
+        .expect("apply root")
+        .into_function()
+        .expect("apply function")
+}
+
+fn function_prototype_apply_native(
+    runtime: &Runtime,
+    realm: RealmId,
+) -> (FunctionId, NativeFunction) {
+    let function_prototype = runtime
+        .realm_function_prototype(realm)
+        .expect("Function.prototype");
+    let StoredValue::Function(apply) = read_heap_property(
+        runtime,
+        HeapReference::Function(function_prototype),
+        &runtime.predefined_property_key(PredefinedAtom::Apply),
+    )
+    .expect("Function.prototype.apply") else {
+        panic!("Function.prototype.apply must be callable");
+    };
+    let native = runtime
+        .functions
+        .get(apply)
+        .and_then(HeapFunction::native)
+        .copied()
+        .expect("native Function.prototype.apply");
+    (apply, native)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the apply admission tests provide every explicit execution-limit input"
+)]
+fn begin_test_function_apply(
+    runtime: &mut Runtime,
+    apply: FunctionId,
+    native: NativeFunction,
+    target: FunctionId,
+    receiver: StoredValue,
+    list: ObjectId,
+    active_frames: usize,
+    active_frame_values: u64,
+    budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    dispatch_native_call(
+        runtime,
+        apply,
+        native,
+        CallInputs {
+            receiver: StoredValue::Function(target),
+            arguments: CallArguments::from_values(vec![receiver, StoredValue::Object(list)]),
+            new_target: None,
+        },
+        None,
+        Some(native_function_host_origin()),
+        active_frames,
+        active_frame_values,
+        None,
+        budget,
+    )
+}
+
+fn append_apply_list_data(runtime: &mut Runtime, list: ObjectId, length: JsNumber) {
+    runtime
+        .append_data_property(
+            HeapReference::Object(list),
+            runtime.predefined_property_key(PredefinedAtom::Length),
+            PropertyLayout::data(true, true, true),
+            StoredValue::Number(length),
+        )
+        .expect("list length");
+    for (index, value) in [(0, 4), (1, 6), (2, 8)] {
+        runtime
+            .append_data_property(
+                HeapReference::Object(list),
+                PropertyKey::from_index(ArrayIndex::new(index).expect("array index")),
+                PropertyLayout::data(true, true, true),
+                StoredValue::Number(JsNumber::from_i32(value)),
+            )
+            .expect("list element");
+    }
+}
+
+fn assert_execution_engine_error(
+    error: ExecutionError,
+    expected_kind: ExceptionKind,
+    expected_message: &str,
+) {
+    let ExecutionError::Exception(exception) = error else {
+        panic!("expected JavaScript exception");
+    };
+    assert_eq!(exception.kind(), Some(expected_kind));
+    assert_eq!(
+        exception
+            .message()
+            .expect("engine error message")
+            .to_utf8_lossy()
+            .expect("UTF-8 message"),
+        expected_message
+    );
 }
 
 fn assert_method_function_shape(
@@ -3627,7 +4659,7 @@ fn begin_test_boolean_construction(
     constructor: FunctionId,
     native: NativeFunction,
     new_target: FunctionId,
-    budget: &mut DynamicCompilationBudget,
+    budget: &mut ExecutionBudget,
 ) -> NativeDispatch {
     let Ok(dispatch) = dispatch_native_call(
         runtime,
@@ -3724,7 +4756,7 @@ fn begin_test_number_to_string(
     to_string: FunctionId,
     native: NativeFunction,
     radix: ObjectId,
-    budget: &mut DynamicCompilationBudget,
+    budget: &mut ExecutionBudget,
 ) -> NativeDispatch {
     let Ok(dispatch) = dispatch_native_call(
         runtime,

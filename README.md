@@ -93,11 +93,16 @@ undefined/null/Boolean/Number/String source coercions are implemented.
 Realm-owned `Object.prototype.toString`, `Object.prototype.valueOf`, and
 `Function.prototype.toString` cover the currently representable object and
 function values with exact intrinsic descriptors and retained function source.
-Realm-owned `Function.prototype.call` has its exact descriptor, name, length,
-prototype, native source, and nonconstructability. It forwards the raw target
-receiver and remaining arguments through an O(1) owned argument window, and
-zero-value native continuations keep nested `.call` dispatch iterative and
-frame-bounded.
+Realm-owned `Function.prototype.call` and `Function.prototype.apply` have exact
+descriptors, names, lengths, prototypes, native source, and
+nonconstructability. `call` forwards the raw target receiver and remaining
+arguments through an O(1) owned argument window. `apply` validates callability
+before touching its list, performs one observable `length` Get and Number-hint
+`ToLength`, then reads ordinary/function object indices left-to-right through a
+GC-traced resumable continuation. Its 65,534-argument ceiling, frame/value
+preflights, and indexed-scan work share the target bytecode's execution budget.
+Bytecode `Apply`, spread calls, arrays/arguments objects, and `Reflect.apply`
+remain fail-closed.
 Function source arguments now run resumable `ToPrimitive` with the string hint:
 `Symbol.toPrimitive`, `toString`, and `valueOf` are observed in exact order,
 data or accessor-backed lookup preserves the original receiver, native or
@@ -106,7 +111,7 @@ vector, and throws stop conversion before parsing. `call` preserves the target
 realm's strict/sloppy receiver rules and forwards the Oxc compiler service when
 its target is the ordinary `Function` constructor. Sloppy Boolean, Number, and
 String boxing is implemented; Symbol boxing, persistent global lexical
-collisions, and `Function.prototype.apply`/`bind`/`Symbol.hasInstance` remain
+collisions, `Function.prototype.bind`, and `Symbol.hasInstance` remain
 fail-closed.
 Per-session compilation-count and generated-source limits bound nested
 construction. No dynamic-Function path uses eval or captures a caller lexical
@@ -171,6 +176,7 @@ cargo xtask parser-differential --oracle /path/to/quickjs-2026-06-04/qjs
 cargo xtask dynamic-function-differential --oracle /path/to/quickjs-2026-06-04/qjsc
 cargo xtask number-radix-differential --oracle /path/to/quickjs-2026-06-04/qjs
 cargo xtask control-flow-differential --oracle /path/to/quickjs-2026-06-04/qjs
+cargo xtask function-apply-differential --oracle /path/to/quickjs-2026-06-04/qjs
 ```
 
 The upstream C engine may be built separately as a development oracle for

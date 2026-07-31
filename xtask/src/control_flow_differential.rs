@@ -1,4 +1,4 @@
-//! Bounded runtime differential gate for labeled control flow, `switch`, and `for-in`.
+//! Shared bounded runtime differential gate for executable language milestones.
 
 use crate::{
     ProgramOutput, Status, run_program_with_arguments_bounded,
@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub(crate) const DEFAULT_CONTROL_FLOW_CORPUS: &str = "tests/control-flow/manifest.json";
+pub(crate) const DEFAULT_FUNCTION_APPLY_CORPUS: &str = "tests/function-apply/manifest.json";
 pub(crate) const MAX_CONTROL_FLOW_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const CANDIDATE_WORKER_COMMAND: &str = "__control-flow-candidate-worker";
 
@@ -104,8 +105,59 @@ const REQUIRED_COVERAGE: &[&str] = &[
     "switch-no-match",
 ];
 
+const FUNCTION_APPLY_REQUIRED_COVERAGE: &[&str] = &[
+    "argument-limit",
+    "boxed-string-array-like",
+    "metadata-writable-enumerable",
+    "function-array-like",
+    "indexed-get-abrupt",
+    "indexed-get-order",
+    "inherited-index",
+    "length-get-order",
+    "length-does-not-wrap",
+    "length-to-length-coercion",
+    "missing-index-undefined",
+    "mutation-between-indexed-gets",
+    "native-source",
+    "nonconstructable",
+    "nullish-argument-list",
+    "ordinary-array-like",
+    "primitive-argument-list-rejection",
+    "receiver-forwarding",
+    "target-validation-order",
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeDifferentialSuite {
+    ControlFlow,
+    FunctionApply,
+}
+
+impl RuntimeDifferentialSuite {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ControlFlow => "control-flow",
+            Self::FunctionApply => "function-apply",
+        }
+    }
+
+    const fn required_coverage(self) -> &'static [&'static str] {
+        match self {
+            Self::ControlFlow => REQUIRED_COVERAGE,
+            Self::FunctionApply => FUNCTION_APPLY_REQUIRED_COVERAGE,
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ControlFlowDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct FunctionApplyDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -143,16 +195,42 @@ enum CandidateObservation {
 pub(crate) fn run_control_flow_differential(
     options: &ControlFlowDifferentialOptions,
 ) -> Result<bool, String> {
-    validate_options(options)?;
-    validate_executable(&options.oracle, "control-flow oracle")?;
-    validate_oracle_release(&options.oracle, options.timeout)?;
-    let corpus = load_corpus(&options.corpus)?;
-    let oracle = observe_oracle(&options.oracle, &corpus.cases, options.timeout)?;
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::ControlFlow,
+    )
+}
+
+pub(crate) fn run_function_apply_differential(
+    options: &FunctionApplyDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::FunctionApply,
+    )
+}
+
+fn run_runtime_differential(
+    oracle_path: &Path,
+    corpus_path: &Path,
+    timeout: Duration,
+    suite: RuntimeDifferentialSuite,
+) -> Result<bool, String> {
+    validate_options(timeout, suite)?;
+    validate_executable(oracle_path, &format!("{} oracle", suite.label()))?;
+    validate_oracle_release(oracle_path, timeout)?;
+    let corpus = load_corpus(corpus_path, suite)?;
+    let oracle = observe_oracle(oracle_path, &corpus.cases, timeout)?;
 
     for ((case, observed), index) in corpus.cases.iter().zip(&oracle).zip(0_usize..) {
         if observed != &case.expected {
             return Err(format!(
-                "control-flow oracle result for case {index} `{}` disagrees with the pinned manifest:\n  manifest={}\n  oracle={}",
+                "{} oracle result for case {index} `{}` disagrees with the pinned manifest:\n  manifest={}\n  oracle={}",
+                suite.label(),
                 case.id,
                 format_observation(&case.expected),
                 format_observation(observed)
@@ -160,7 +238,7 @@ pub(crate) fn run_control_flow_differential(
         }
     }
 
-    let candidate = observe_candidate(&corpus.cases, options.timeout)?;
+    let candidate = observe_candidate(&corpus.cases, timeout)?;
     let mut mismatch_count = 0_usize;
     let mut reported = Vec::new();
     for (((case, expected), actual), index) in corpus
@@ -175,9 +253,9 @@ pub(crate) fn run_control_flow_differential(
         }
         mismatch_count = mismatch_count
             .checked_add(1)
-            .ok_or_else(|| "control-flow mismatch count overflowed".to_owned())?;
+            .ok_or_else(|| format!("{} mismatch count overflowed", suite.label()))?;
         if reported.len() < MAX_REPORTED_MISMATCHES {
-            reported.push(format_mismatch(index, case, expected, actual));
+            reported.push(format_mismatch(index, case, expected, actual, suite));
         }
     }
 
@@ -185,12 +263,13 @@ pub(crate) fn run_control_flow_differential(
         .cases
         .len()
         .checked_sub(mismatch_count)
-        .ok_or_else(|| "control-flow pass count underflowed".to_owned())?;
+        .ok_or_else(|| format!("{} pass count underflowed", suite.label()))?;
     if mismatch_count == 0 {
         println!(
-            "control-flow differential: {passed}/{} cases match ({} required feature tags)",
+            "{} differential: {passed}/{} cases match ({} required feature tags)",
+            suite.label(),
             corpus.cases.len(),
-            REQUIRED_COVERAGE.len()
+            suite.required_coverage().len()
         );
         return Ok(true);
     }
@@ -200,43 +279,43 @@ pub(crate) fn run_control_flow_differential(
     }
     if mismatch_count > MAX_REPORTED_MISMATCHES {
         eprintln!(
-            "control-flow differential: omitted {} additional mismatch(es)",
+            "{} differential: omitted {} additional mismatch(es)",
+            suite.label(),
             mismatch_count - MAX_REPORTED_MISMATCHES
         );
     }
     eprintln!(
-        "control-flow differential: {passed}/{} cases match; {mismatch_count} mismatch(es)",
+        "{} differential: {passed}/{} cases match; {mismatch_count} mismatch(es)",
+        suite.label(),
         corpus.cases.len()
     );
     Ok(false)
 }
 
-fn validate_options(options: &ControlFlowDifferentialOptions) -> Result<(), String> {
-    let milliseconds = options.timeout.as_millis();
+fn validate_options(timeout: Duration, suite: RuntimeDifferentialSuite) -> Result<(), String> {
+    let milliseconds = timeout.as_millis();
     if milliseconds == 0 || milliseconds > u128::from(MAX_CONTROL_FLOW_TIMEOUT_MS) {
         return Err(format!(
-            "control-flow timeout must be between 1 and {MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds"
+            "{} timeout must be between 1 and {MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds",
+            suite.label()
         ));
     }
     Ok(())
 }
 
-fn load_corpus(path: &Path) -> Result<ControlFlowCorpus, String> {
-    let metadata = fs::metadata(path).map_err(|error| {
-        format!(
-            "cannot inspect control-flow corpus {}: {error}",
-            path.display()
-        )
-    })?;
+fn load_corpus(path: &Path, suite: RuntimeDifferentialSuite) -> Result<ControlFlowCorpus, String> {
+    let label = suite.label();
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("cannot inspect {label} corpus {}: {error}", path.display()))?;
     if !metadata.is_file() {
         return Err(format!(
-            "control-flow corpus {} is not a regular file",
+            "{label} corpus {} is not a regular file",
             path.display()
         ));
     }
     if metadata.len() > MAX_MANIFEST_BYTES as u64 {
         return Err(format!(
-            "control-flow corpus {} contains {} bytes; the limit is {MAX_MANIFEST_BYTES}",
+            "{label} corpus {} contains {} bytes; the limit is {MAX_MANIFEST_BYTES}",
             path.display(),
             metadata.len()
         ));
@@ -244,73 +323,68 @@ fn load_corpus(path: &Path) -> Result<ControlFlowCorpus, String> {
 
     let requested = MAX_MANIFEST_BYTES
         .checked_add(1)
-        .ok_or_else(|| "control-flow manifest read limit overflowed".to_owned())?;
+        .ok_or_else(|| format!("{label} manifest read limit overflowed"))?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(requested)
-        .map_err(|_| format!("cannot reserve {requested} control-flow manifest bytes"))?;
+        .map_err(|_| format!("cannot reserve {requested} {label} manifest bytes"))?;
     File::open(path)
-        .map_err(|error| {
-            format!(
-                "cannot open control-flow corpus {}: {error}",
-                path.display()
-            )
-        })?
+        .map_err(|error| format!("cannot open {label} corpus {}: {error}", path.display()))?
         .take(
             u64::try_from(requested)
-                .map_err(|_| "control-flow manifest read limit does not fit u64".to_owned())?,
+                .map_err(|_| format!("{label} manifest read limit does not fit u64"))?,
         )
         .read_to_end(&mut bytes)
-        .map_err(|error| {
-            format!(
-                "cannot read control-flow corpus {}: {error}",
-                path.display()
-            )
-        })?;
+        .map_err(|error| format!("cannot read {label} corpus {}: {error}", path.display()))?;
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Err(format!(
-            "control-flow corpus {} grew beyond the {MAX_MANIFEST_BYTES}-byte limit while reading",
+            "{label} corpus {} grew beyond the {MAX_MANIFEST_BYTES}-byte limit while reading",
             path.display()
         ));
     }
-    parse_corpus(&bytes, &path.display().to_string())
+    parse_corpus_for_suite(&bytes, &path.display().to_string(), suite)
 }
 
+#[cfg(test)]
 fn parse_corpus(bytes: &[u8], location: &str) -> Result<ControlFlowCorpus, String> {
+    parse_corpus_for_suite(bytes, location, RuntimeDifferentialSuite::ControlFlow)
+}
+
+fn parse_corpus_for_suite(
+    bytes: &[u8],
+    location: &str,
+    suite: RuntimeDifferentialSuite,
+) -> Result<ControlFlowCorpus, String> {
+    let suite_label = suite.label();
+    let corpus_label = format!("{suite_label} corpus {location}");
     let value: Value = serde_json::from_slice(bytes)
-        .map_err(|error| format!("invalid control-flow corpus {location}: {error}"))?;
+        .map_err(|error| format!("invalid {corpus_label}: {error}"))?;
     let root = value
         .as_object()
-        .ok_or_else(|| format!("control-flow corpus {location} must be a JSON object"))?;
-    require_exact_keys(
-        root,
-        &["cases", "quickjs_release", "schema"],
-        &format!("control-flow corpus {location}"),
-    )?;
-    let schema = required_u64(root, "schema", location)?;
+        .ok_or_else(|| format!("{corpus_label} must be a JSON object"))?;
+    require_exact_keys(root, &["cases", "quickjs_release", "schema"], &corpus_label)?;
+    let schema = required_u64(root, "schema", &corpus_label)?;
     if schema != MANIFEST_SCHEMA_VERSION {
         return Err(format!(
-            "control-flow corpus {location} schema is {schema}; expected {MANIFEST_SCHEMA_VERSION}"
+            "{corpus_label} schema is {schema}; expected {MANIFEST_SCHEMA_VERSION}"
         ));
     }
-    let release = required_string(root, "quickjs_release", location)?;
+    let release = required_string(root, "quickjs_release", &corpus_label)?;
     if release != EXPECTED_MANIFEST_RELEASE {
         return Err(format!(
-            "control-flow corpus {location} release is `{release}`; expected `{EXPECTED_MANIFEST_RELEASE}`"
+            "{corpus_label} release is `{release}`; expected `{EXPECTED_MANIFEST_RELEASE}`"
         ));
     }
     let cases = root
         .get("cases")
         .and_then(Value::as_array)
-        .ok_or_else(|| format!("control-flow corpus {location} field `cases` must be an array"))?;
+        .ok_or_else(|| format!("{corpus_label} field `cases` must be an array"))?;
     if cases.is_empty() {
-        return Err(format!(
-            "control-flow corpus {location} field `cases` must not be empty"
-        ));
+        return Err(format!("{corpus_label} field `cases` must not be empty"));
     }
     if cases.len() > MAX_CASES {
         return Err(format!(
-            "control-flow corpus {location} contains {} cases; the limit is {MAX_CASES}",
+            "{corpus_label} contains {} cases; the limit is {MAX_CASES}",
             cases.len()
         ));
     }
@@ -318,36 +392,39 @@ fn parse_corpus(bytes: &[u8], location: &str) -> Result<ControlFlowCorpus, Strin
     let mut parsed = Vec::new();
     parsed
         .try_reserve_exact(cases.len())
-        .map_err(|_| format!("cannot reserve {} control-flow cases", cases.len()))?;
+        .map_err(|_| format!("cannot reserve {} {suite_label} cases", cases.len()))?;
     let mut ids = BTreeSet::new();
     let mut covered = BTreeSet::new();
     for (index, value) in cases.iter().enumerate() {
-        let case = parse_case(value, location, index)?;
+        let case = parse_case(value, location, index, suite)?;
         if !ids.insert(case.id.clone()) {
-            return Err(format!(
-                "control-flow corpus {location} repeats case id `{}`",
-                case.id
-            ));
+            return Err(format!("{corpus_label} repeats case id `{}`", case.id));
         }
         covered.extend(case.coverage.iter().cloned());
         parsed.push(case);
     }
 
-    let missing = REQUIRED_COVERAGE
+    let missing = suite
+        .required_coverage()
         .iter()
         .copied()
         .filter(|feature| !covered.contains(*feature))
         .collect::<Vec<_>>();
     if !missing.is_empty() {
         return Err(format!(
-            "control-flow corpus {location} is missing required coverage {missing:?}"
+            "{corpus_label} is missing required coverage {missing:?}"
         ));
     }
     Ok(ControlFlowCorpus { cases: parsed })
 }
 
-fn parse_case(value: &Value, location: &str, index: usize) -> Result<ControlFlowCase, String> {
-    let label = format!("control-flow corpus {location} case {index}");
+fn parse_case(
+    value: &Value,
+    location: &str,
+    index: usize,
+    suite: RuntimeDifferentialSuite,
+) -> Result<ControlFlowCase, String> {
+    let label = format!("{} corpus {location} case {index}", suite.label());
     let object = value
         .as_object()
         .ok_or_else(|| format!("{label} must be a JSON object"))?;
@@ -371,13 +448,17 @@ fn parse_case(value: &Value, location: &str, index: usize) -> Result<ControlFlow
         .get("covers")
         .and_then(Value::as_array)
         .ok_or_else(|| format!("{label} field `covers` must be an array"))?;
-    if coverage_values.is_empty() || coverage_values.len() > REQUIRED_COVERAGE.len() {
+    if coverage_values.is_empty() || coverage_values.len() > suite.required_coverage().len() {
         return Err(format!(
             "{label} field `covers` must contain 1..={} feature tags",
-            REQUIRED_COVERAGE.len()
+            suite.required_coverage().len()
         ));
     }
-    let allowed = REQUIRED_COVERAGE.iter().copied().collect::<BTreeSet<_>>();
+    let allowed = suite
+        .required_coverage()
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
     let mut coverage = Vec::new();
     coverage
         .try_reserve_exact(coverage_values.len())
@@ -430,18 +511,19 @@ fn require_exact_keys(
     ))
 }
 
-fn required_u64(object: &Map<String, Value>, field: &str, location: &str) -> Result<u64, String> {
-    object.get(field).and_then(Value::as_u64).ok_or_else(|| {
-        format!("control-flow corpus {location} field `{field}` must be an unsigned integer")
-    })
+fn required_u64(object: &Map<String, Value>, field: &str, label: &str) -> Result<u64, String> {
+    object
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{label} field `{field}` must be an unsigned integer"))
 }
 
 fn required_string<'a>(
     object: &'a Map<String, Value>,
     field: &str,
-    location: &str,
+    label: &str,
 ) -> Result<&'a str, String> {
-    required_string_with_label(object, field, &format!("control-flow corpus {location}"))
+    required_string_with_label(object, field, label)
 }
 
 fn required_string_with_label<'a>(
@@ -574,7 +656,7 @@ fn validate_oracle_release(executable: &Path, timeout: Duration) -> Result<(), S
     )?;
     if !matches!(output.status, Status::Exited(Some(0 | 1))) {
         return Err(format!(
-            "control-flow oracle {} could not report its version: status={:?}",
+            "runtime differential oracle {} could not report its version: status={:?}",
             executable.display(),
             output.status
         ));
@@ -589,7 +671,7 @@ fn validate_oracle_release(executable: &Path, timeout: Duration) -> Result<(), S
         return Ok(());
     }
     Err(format!(
-        "control-flow oracle {} is not the pinned release; expected banner `{EXPECTED_ORACLE_BANNER}`",
+        "runtime differential oracle {} is not the pinned release; expected banner `{EXPECTED_ORACLE_BANNER}`",
         executable.display()
     ))
 }
@@ -601,18 +683,21 @@ fn observe_oracle(
 ) -> Result<Vec<Observation>, String> {
     if cases.is_empty() || cases.len() > MAX_CASES {
         return Err(format!(
-            "control-flow oracle received {} cases; expected 1..={MAX_CASES}",
+            "runtime differential oracle received {} cases; expected 1..={MAX_CASES}",
             cases.len()
         ));
     }
     let mut observations = Vec::new();
-    observations
-        .try_reserve_exact(cases.len())
-        .map_err(|_| format!("cannot reserve {} control-flow oracle results", cases.len()))?;
+    observations.try_reserve_exact(cases.len()).map_err(|_| {
+        format!(
+            "cannot reserve {} runtime differential oracle results",
+            cases.len()
+        )
+    })?;
     for (index, case) in cases.iter().enumerate() {
         let observation = observe_oracle_case(executable, case, timeout).map_err(|error| {
             format!(
-                "control-flow oracle case {index} `{}` failed: {error}",
+                "runtime differential oracle case {index} `{}` failed: {error}",
                 case.id
             )
         })?;
@@ -640,7 +725,7 @@ fn observe_oracle_case(
         classify_oracle_output(executable, 1, &output)?
             .into_iter()
             .next()
-            .ok_or_else(|| "control-flow oracle returned no observation".to_owned())
+            .ok_or_else(|| "runtime differential oracle returned no observation".to_owned())
     })();
     let cleanup = temporary.cleanup();
     match (result, cleanup) {
@@ -685,10 +770,10 @@ fn build_oracle_source(case: &ControlFlowCase) -> Result<String, String> {
     );
     let body = js_string_literal(&case.body)?;
     writeln!(source, "__run(0,{body});}})();")
-        .map_err(|_| "cannot write generated control-flow oracle source".to_owned())?;
+        .map_err(|_| "cannot write generated runtime differential oracle source".to_owned())?;
     if source.len() > MAX_GENERATED_ORACLE_SOURCE_BYTES {
         return Err(format!(
-            "generated control-flow oracle source contains {} bytes; the limit is {MAX_GENERATED_ORACLE_SOURCE_BYTES}",
+            "generated runtime differential oracle source contains {} bytes; the limit is {MAX_GENERATED_ORACLE_SOURCE_BYTES}",
             source.len()
         ));
     }
@@ -697,7 +782,7 @@ fn build_oracle_source(case: &ControlFlowCase) -> Result<String, String> {
 
 fn js_string_literal(value: &str) -> Result<String, String> {
     let literal = serde_json::to_string(value)
-        .map_err(|error| format!("cannot encode control-flow body for oracle: {error}"))?;
+        .map_err(|error| format!("cannot encode runtime differential body for oracle: {error}"))?;
     Ok(literal
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029"))
@@ -715,7 +800,7 @@ impl TempOracleScript {
         for _ in 0..MAX_TEMP_DIRECTORY_ATTEMPTS {
             let counter = TEMP_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
             let directory = root.join(format!(
-                "quickjs-control-flow-qjs-{}-{counter}",
+                "quickjs-runtime-differential-qjs-{}-{counter}",
                 std::process::id()
             ));
             match fs::create_dir(&directory) {
@@ -729,14 +814,14 @@ impl TempOracleScript {
                 Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
                 Err(error) => {
                     return Err(format!(
-                        "cannot create control-flow oracle temporary directory {}: {error}",
+                        "cannot create runtime differential oracle temporary directory {}: {error}",
                         directory.display()
                     ));
                 }
             }
         }
         Err(format!(
-            "cannot create a unique control-flow oracle temporary directory after {MAX_TEMP_DIRECTORY_ATTEMPTS} attempts"
+            "cannot create a unique runtime differential oracle temporary directory after {MAX_TEMP_DIRECTORY_ATTEMPTS} attempts"
         ))
     }
 
@@ -747,7 +832,7 @@ impl TempOracleScript {
     fn write_source(&self, source: &str) -> Result<(), String> {
         if source.len() > MAX_GENERATED_ORACLE_SOURCE_BYTES {
             return Err(format!(
-                "generated control-flow oracle source contains {} bytes; the limit is {MAX_GENERATED_ORACLE_SOURCE_BYTES}",
+                "generated runtime differential oracle source contains {} bytes; the limit is {MAX_GENERATED_ORACLE_SOURCE_BYTES}",
                 source.len()
             ));
         }
@@ -757,13 +842,13 @@ impl TempOracleScript {
             .open(&self.input)
             .map_err(|error| {
                 format!(
-                    "cannot create control-flow oracle input {}: {error}",
+                    "cannot create runtime differential oracle input {}: {error}",
                     self.input.display()
                 )
             })?;
         input.write_all(source.as_bytes()).map_err(|error| {
             format!(
-                "cannot write control-flow oracle input {}: {error}",
+                "cannot write runtime differential oracle input {}: {error}",
                 self.input.display()
             )
         })
@@ -790,7 +875,7 @@ fn cleanup_temp_script(directory: &Path, input: &Path) -> Result<(), String> {
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => {
             return Err(format!(
-                "cannot delete control-flow oracle input {}: {error}",
+                "cannot delete runtime differential oracle input {}: {error}",
                 input.display()
             ));
         }
@@ -799,7 +884,7 @@ fn cleanup_temp_script(directory: &Path, input: &Path) -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!(
-            "cannot delete control-flow oracle temporary directory {}: {error}",
+            "cannot delete runtime differential oracle temporary directory {}: {error}",
             directory.display()
         )),
     }
@@ -812,7 +897,7 @@ fn classify_oracle_output(
 ) -> Result<Vec<Observation>, String> {
     if output.status != Status::Exited(Some(0)) {
         return Err(format!(
-            "control-flow oracle {} failed: status={:?}; stdout={}; stderr={}",
+            "runtime differential oracle {} failed: status={:?}; stdout={}; stderr={}",
             executable.display(),
             output.status,
             stream_preview(&output.stdout),
@@ -821,7 +906,7 @@ fn classify_oracle_output(
     }
     if !output.stderr.is_empty() {
         return Err(format!(
-            "control-flow oracle {} wrote unexpected stderr: {}",
+            "runtime differential oracle {} wrote unexpected stderr: {}",
             executable.display(),
             stream_preview(&output.stderr)
         ));
@@ -831,22 +916,23 @@ fn classify_oracle_output(
 
 fn parse_oracle_stdout(stdout: &[u8], expected_count: usize) -> Result<Vec<Observation>, String> {
     if expected_count == 0 {
-        return Err("control-flow oracle expected count must not be zero".to_owned());
+        return Err("runtime differential oracle expected count must not be zero".to_owned());
     }
     let text = std::str::from_utf8(stdout)
-        .map_err(|error| format!("control-flow oracle stdout is not UTF-8: {error}"))?;
+        .map_err(|error| format!("runtime differential oracle stdout is not UTF-8: {error}"))?;
     let text = text.strip_suffix('\n').ok_or_else(|| {
-        "control-flow oracle stdout must end with exactly one complete result line".to_owned()
+        "runtime differential oracle stdout must end with exactly one complete result line"
+            .to_owned()
     })?;
     if text.ends_with('\n') || text.contains('\r') {
         return Err(
-            "control-flow oracle stdout contains an unexpected blank or CR line".to_owned(),
+            "runtime differential oracle stdout contains an unexpected blank or CR line".to_owned(),
         );
     }
     let lines = text.split('\n').collect::<Vec<_>>();
     if lines.len() != expected_count {
         return Err(format!(
-            "control-flow oracle emitted {} result lines; expected {expected_count}",
+            "runtime differential oracle emitted {} result lines; expected {expected_count}",
             lines.len()
         ));
     }
@@ -854,28 +940,30 @@ fn parse_oracle_stdout(stdout: &[u8], expected_count: usize) -> Result<Vec<Obser
     let mut observations = Vec::new();
     observations
         .try_reserve_exact(expected_count)
-        .map_err(|_| format!("cannot reserve {expected_count} control-flow oracle results"))?;
+        .map_err(|_| {
+            format!("cannot reserve {expected_count} runtime differential oracle results")
+        })?;
     for (expected_index, line) in lines.into_iter().enumerate() {
         if line.len() > MAX_ORACLE_RESULT_LINE_BYTES {
             return Err(format!(
-                "control-flow oracle line {expected_index} contains {} bytes; the limit is {MAX_ORACLE_RESULT_LINE_BYTES}",
+                "runtime differential oracle line {expected_index} contains {} bytes; the limit is {MAX_ORACLE_RESULT_LINE_BYTES}",
                 line.len()
             ));
         }
         let (index, encoded) = line.split_once('\t').ok_or_else(|| {
-            format!("control-flow oracle line {expected_index} has no tab separator")
+            format!("runtime differential oracle line {expected_index} has no tab separator")
         })?;
         if index != expected_index.to_string() {
             return Err(format!(
-                "control-flow oracle line {expected_index} reports non-canonical index `{index}`"
+                "runtime differential oracle line {expected_index} reports non-canonical index `{index}`"
             ));
         }
         let value: Value = serde_json::from_str(encoded).map_err(|error| {
-            format!("control-flow oracle line {expected_index} has invalid JSON: {error}")
+            format!("runtime differential oracle line {expected_index} has invalid JSON: {error}")
         })?;
         observations.push(parse_observation(
             &value,
-            &format!("control-flow oracle line {expected_index}"),
+            &format!("runtime differential oracle line {expected_index}"),
         )?);
     }
     Ok(observations)
@@ -887,12 +975,13 @@ fn observe_candidate(
 ) -> Result<Vec<CandidateObservation>, String> {
     if cases.is_empty() || cases.len() > MAX_CASES {
         return Err(format!(
-            "control-flow candidate received {} cases; expected 1..={MAX_CASES}",
+            "runtime differential candidate received {} cases; expected 1..={MAX_CASES}",
             cases.len()
         ));
     }
-    let worker = env::current_exe()
-        .map_err(|error| format!("cannot locate the control-flow candidate worker: {error}"))?;
+    let worker = env::current_exe().map_err(|error| {
+        format!("cannot locate the runtime differential candidate worker: {error}")
+    })?;
     let mut observations = Vec::new();
     observations
         .try_reserve_exact(cases.len())
@@ -1067,7 +1156,7 @@ fn observe_candidate_body(body: &str) -> Result<Observation, String> {
         .with_max_realm_global_bindings(1_024)
         .with_max_public_roots(4_096)
         .with_max_active_frames(128)
-        .with_max_active_frame_values(65_536);
+        .with_max_active_frame_values(131_072);
     let mut runtime = Runtime::try_new(runtime_limits)
         .map_err(|error| format!("cannot create candidate runtime: {error}"))?;
     let realm = runtime
@@ -1162,7 +1251,7 @@ fn normalize_candidate_value(value: &JsValue) -> Result<Observation, String> {
             .map(Observation::String)
         }
         kind @ (ValueKind::Symbol | ValueKind::Function | ValueKind::Object) => Err(format!(
-            "candidate returned unsupported result kind {kind}; the control-flow corpus must use primitive observations"
+            "candidate returned unsupported result kind {kind}; the runtime differential corpus must use primitive observations"
         )),
     }
 }
@@ -1224,6 +1313,7 @@ fn format_mismatch(
     case: &ControlFlowCase,
     expected: &Observation,
     actual: &CandidateObservation,
+    suite: RuntimeDifferentialSuite,
 ) -> String {
     let actual = match actual {
         CandidateObservation::JavaScript(observation) => format_observation(observation),
@@ -1232,7 +1322,8 @@ fn format_mismatch(
         }
     };
     format!(
-        "control-flow mismatch: case {index} `{}` covers {:?}\n  expected={}\n  actual={actual}",
+        "{} mismatch: case {index} `{}` covers {:?}\n  expected={}\n  actual={actual}",
+        suite.label(),
         case.id,
         case.coverage,
         format_observation(expected)
@@ -1276,10 +1367,10 @@ mod tests {
         MAX_CANDIDATE_WORKER_STREAM_BYTES, MAX_EXPECTED_ERROR_MESSAGE_BYTES,
         MAX_EXPECTED_ERROR_NAME_BYTES, MAX_EXPECTED_STRING_BYTES, MAX_ORACLE_CASE_STREAM_BYTES,
         MAX_ORACLE_RESULT_LINE_BYTES, ORACLE_MEMORY_LIMIT_BYTES, ORACLE_STACK_SIZE_BYTES,
-        Observation, REQUIRED_COVERAGE, TempOracleScript, build_oracle_source,
-        classify_candidate_worker_output, decode_bounded_candidate_ascii, encode_observation,
-        oracle_case_arguments, parse_candidate_worker_stdout, parse_corpus, parse_oracle_stdout,
-        read_candidate_worker_body,
+        Observation, REQUIRED_COVERAGE, RuntimeDifferentialSuite, TempOracleScript,
+        build_oracle_source, classify_candidate_worker_output, decode_bounded_candidate_ascii,
+        encode_observation, oracle_case_arguments, parse_candidate_worker_stdout, parse_corpus,
+        parse_corpus_for_suite, parse_oracle_stdout, read_candidate_worker_body,
     };
     use crate::{ProgramOutput, Status};
     use quickjs_runtime::JsString;
@@ -1310,6 +1401,26 @@ mod tests {
         })
     }
 
+    fn complete_function_apply_manifest() -> Value {
+        let cases = super::FUNCTION_APPLY_REQUIRED_COVERAGE
+            .iter()
+            .enumerate()
+            .map(|(index, feature)| {
+                json!({
+                    "id": format!("apply-case-{index}"),
+                    "covers": [feature],
+                    "body": "return \"ok\";",
+                    "expect": {"kind": "string", "value": "ok"}
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "schema": 1,
+            "quickjs_release": EXPECTED_MANIFEST_RELEASE,
+            "cases": cases
+        })
+    }
+
     fn parse(value: &Value) -> Result<super::ControlFlowCorpus, String> {
         parse_corpus(
             &serde_json::to_vec(value).expect("serialize manifest"),
@@ -1326,6 +1437,51 @@ mod tests {
             corpus.cases[0].expected,
             Observation::String("ok".to_owned())
         );
+    }
+
+    #[test]
+    fn accepts_a_complete_function_apply_manifest_with_its_own_coverage_contract() {
+        let manifest = complete_function_apply_manifest();
+        let corpus = parse_corpus_for_suite(
+            &serde_json::to_vec(&manifest).expect("serialize manifest"),
+            "function-apply.json",
+            RuntimeDifferentialSuite::FunctionApply,
+        )
+        .expect("valid Function.prototype.apply manifest");
+        assert_eq!(
+            corpus.cases.len(),
+            super::FUNCTION_APPLY_REQUIRED_COVERAGE.len()
+        );
+        assert_eq!(corpus.cases[0].id, "apply-case-0");
+    }
+
+    #[test]
+    fn function_apply_manifest_rejects_control_flow_coverage_tags() {
+        let mut manifest = complete_function_apply_manifest();
+        manifest["cases"][0]["covers"][0] = Value::String("labeled-break".to_owned());
+        assert!(
+            parse_corpus_for_suite(
+                &serde_json::to_vec(&manifest).expect("serialize manifest"),
+                "function-apply.json",
+                RuntimeDifferentialSuite::FunctionApply,
+            )
+            .expect_err("cross-suite coverage tag")
+            .contains("unknown feature")
+        );
+    }
+
+    #[test]
+    fn checked_in_function_apply_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/function-apply/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in function-apply manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::FunctionApply,
+        )
+        .expect("checked-in function-apply manifest");
+        assert_eq!(corpus.cases.len(), 15);
     }
 
     #[test]

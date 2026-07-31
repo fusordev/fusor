@@ -415,8 +415,15 @@ A milestone is complete only when all of its checked items pass in CI.
           Zero-value identity continuations charge every nested call boundary
           against frame limits, preserve target throws and bytecode callers,
           and carry the dynamic-Function compiler service unchanged.
+    - [x] Add realm-owned `Function.prototype.apply` with exact descriptors,
+          native source, nonconstructability, target-first validation,
+          nullish-list handling, ordinary/function/boxed-String array-like
+          reads, Number-hint `ToLength`, the 65,534-argument ceiling, and
+          left-to-right accessor/prototype/mutation behavior. Keep the
+          collector iterative, GC-traced, frame/value bounded, and charged
+          against the same execution budget as its target.
     - [ ] Add persistent global lexical collision checks and
-          `Function.prototype.apply`/`bind`/`Symbol.hasInstance`.
+          `Function.prototype.bind`/`Symbol.hasInstance`.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
       stack traces, iterator-protocol execution, and generators.
   - [x] First escaping exception path: local/captured TDZ access returns a
@@ -431,9 +438,10 @@ A milestone is complete only when all of its checked items pass in CI.
         precedes publication of an escaping heap root; cloned exceptions share
         one `Arc` root header; and handler/finally opcodes remain fail-closed.
   - [ ] Represent synthetic native caller frames. In particular, each
-        `Function.prototype.call` continuation is frame-accounted but cannot
-        yet render QuickJS's intervening `call (native)` entry through the
-        current verified-source-only `JsStackFrame`.
+        `Function.prototype.call`/`apply` continuation is frame-accounted but
+        cannot yet render QuickJS's intervening `call (native)` or
+        `apply (native)` entry through the current verified-source-only
+        `JsStackFrame`.
 - [ ] Deterministic debug/line tables.
 
 ### M3 — values and object model
