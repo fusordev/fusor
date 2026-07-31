@@ -386,6 +386,7 @@ struct StringIntrinsics {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ArrayIntrinsics {
     prototype: ObjectId,
+    constructor: FunctionId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -513,6 +514,7 @@ pub(crate) enum NativeFunctionKind {
     StringConstructor,
     StringPrototypeToString,
     StringPrototypeValueOf,
+    ArrayConstructor,
 }
 
 impl NativeFunctionKind {
@@ -523,6 +525,7 @@ impl NativeFunctionKind {
                 | Self::BooleanConstructor
                 | Self::NumberConstructor
                 | Self::StringConstructor
+                | Self::ArrayConstructor
         )
     }
 }
@@ -845,12 +848,12 @@ impl Runtime {
         check_limit(
             RuntimeResource::HeapFunctions,
             self.limits.max_heap_functions,
-            usize_to_u64(self.functions.len()).saturating_add(16),
+            usize_to_u64(self.functions.len()).saturating_add(17),
         )?;
         check_limit(
             RuntimeResource::ObjectProperties,
             self.limits.max_object_properties,
-            self.object_properties.saturating_add(69),
+            self.object_properties.saturating_add(74),
         )?;
         self.realms
             .try_reserve(1)
@@ -865,10 +868,10 @@ impl Runtime {
                 additional: 12,
             })?;
         self.functions
-            .try_reserve(16)
+            .try_reserve(17)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::HeapFunctions,
-                additional: 16,
+                additional: 17,
             })?;
 
         let function_key =
@@ -879,6 +882,8 @@ impl Runtime {
             PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Number));
         let string_key =
             PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::String));
+        let array_key =
+            PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Array));
         let prototype_key =
             PropertyKey::from_validated_atom(self.atoms.predefined(PredefinedAtom::Prototype));
         let constructor_key =
@@ -899,6 +904,7 @@ impl Runtime {
         let boolean_name = predefined_string(&self.atoms, PredefinedAtom::Boolean);
         let number_name = predefined_string(&self.atoms, PredefinedAtom::Number);
         let string_name = predefined_string(&self.atoms, PredefinedAtom::String);
+        let array_name = predefined_string(&self.atoms, PredefinedAtom::Array);
         let empty_name = predefined_string(&self.atoms, PredefinedAtom::EmptyString);
         let to_string_name = predefined_string(&self.atoms, PredefinedAtom::ToString);
         let value_of_name = predefined_string(&self.atoms, PredefinedAtom::ValueOf);
@@ -913,10 +919,10 @@ impl Runtime {
 
         let mut global_record = ObjectRecord::empty(None);
         global_record
-            .try_reserve_data(4)
+            .try_reserve_data(5)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
-                additional: 4,
+                additional: 5,
             })?;
         let mut object_prototype_record = ObjectRecord::empty(None);
         object_prototype_record.try_reserve_data(2).map_err(|_| {
@@ -1102,11 +1108,18 @@ impl Runtime {
             })?;
         let mut array_prototype_record = ObjectRecord::empty(None);
         array_prototype_record
-            .try_reserve_data(1)
+            .try_reserve_data(2)
             .map_err(|_| RuntimeError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
-                additional: 1,
+                additional: 2,
             })?;
+        let mut array_constructor_record = ObjectRecord::empty(None);
+        array_constructor_record.try_reserve_data(3).map_err(|_| {
+            RuntimeError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 3,
+            }
+        })?;
         array_prototype_record
             .append_data(
                 length_key.clone(),
@@ -1472,6 +1485,19 @@ impl Runtime {
                 ArrayState::new(0),
             ))
             .expect("the realm transaction reserved all intrinsic object slots");
+        array_constructor_record
+            .replace_prototype(Some(HeapReference::Function(function_prototype)));
+        let array_constructor = self
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm: id,
+                    kind: NativeFunctionKind::ArrayConstructor,
+                }),
+                object: array_constructor_record,
+                public_roots: 0,
+            })
+            .expect("the realm transaction reserved all intrinsic function slots");
 
         let property_result = (|| {
             let object_prototype_node = self
@@ -1721,7 +1747,7 @@ impl Runtime {
                 StoredValue::Number(JsNumber::from_i32(0)),
             )?;
             string_prototype_node.record.append_data(
-                constructor_key,
+                constructor_key.clone(),
                 PropertyLayout::data(true, false, true),
                 StoredValue::Function(string_constructor),
             )?;
@@ -1741,7 +1767,7 @@ impl Runtime {
                 .get_mut(string_constructor)
                 .expect("new String constructor remains live");
             string_constructor_node.object.append_data(
-                prototype_key,
+                prototype_key.clone(),
                 PropertyLayout::data(false, false, false),
                 StoredValue::Object(string_prototype),
             )?;
@@ -1775,6 +1801,36 @@ impl Runtime {
                     StoredValue::String(name),
                 )?;
             }
+
+            let array_prototype_node = self
+                .objects
+                .get_mut(array_prototype)
+                .expect("new Array.prototype remains live");
+            array_prototype_node.record.append_data(
+                constructor_key,
+                PropertyLayout::data(true, false, true),
+                StoredValue::Function(array_constructor),
+            )?;
+
+            let array_constructor_node = self
+                .functions
+                .get_mut(array_constructor)
+                .expect("new Array constructor remains live");
+            array_constructor_node.object.append_data(
+                prototype_key,
+                PropertyLayout::data(false, false, false),
+                StoredValue::Object(array_prototype),
+            )?;
+            array_constructor_node.object.append_data(
+                length_key.clone(),
+                PropertyLayout::data(false, false, true),
+                StoredValue::Number(JsNumber::from_i32(1)),
+            )?;
+            array_constructor_node.object.append_data(
+                name_key,
+                PropertyLayout::data(false, false, true),
+                StoredValue::String(array_name),
+            )?;
 
             self.objects
                 .get_mut(global_object)
@@ -1811,9 +1867,20 @@ impl Runtime {
                     string_key,
                     PropertyLayout::data(true, false, true),
                     StoredValue::Function(string_constructor),
+                )?;
+            self.objects
+                .get_mut(global_object)
+                .expect("new global object remains live")
+                .record
+                .append_data(
+                    array_key,
+                    PropertyLayout::data(true, false, true),
+                    StoredValue::Function(array_constructor),
                 )
         })();
         if property_result.is_err() {
+            let removed = self.functions.remove(array_constructor);
+            debug_assert!(removed.is_some());
             let removed = self.objects.remove(array_prototype);
             debug_assert!(removed.is_some());
             let removed = self.functions.remove(string_value_of);
@@ -1907,9 +1974,10 @@ impl Runtime {
             },
             array: ArrayIntrinsics {
                 prototype: array_prototype,
+                constructor: array_constructor,
             },
         };
-        self.object_properties += 69;
+        self.object_properties += 74;
         Ok(Realm(Arc::new(RealmHandle {
             owner: Arc::downgrade(&self.mailbox),
             id,
@@ -2144,6 +2212,12 @@ impl Runtime {
                 );
                 mark_heap_reference(
                     HeapReference::Object(array.prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(array.constructor),
                     &mut marked_functions,
                     &mut marked_objects,
                     &mut work,
@@ -2929,6 +3003,60 @@ impl Runtime {
         self.object_properties = self
             .object_properties
             .saturating_add(usize_to_u64(property_count));
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    pub(crate) fn allocate_sparse_array_with_prototype(
+        &mut self,
+        prototype: HeapReference,
+        length: u32,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.heap_reference_is_live(prototype) {
+            return Err(stale_heap_reference(prototype).into());
+        }
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties.saturating_add(1),
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+
+        let mut record = ObjectRecord::empty(Some(prototype));
+        record
+            .try_reserve_data(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::Length),
+                PropertyLayout::data(true, false, false),
+                StoredValue::Number(JsNumber::from_f64(f64::from(length))),
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        let object = self
+            .objects
+            .try_insert(HeapObject::array(record, ArrayState::new(length)))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.object_properties = self.object_properties.saturating_add(1);
         self.collection_pending = true;
         Ok(object)
     }
@@ -5555,7 +5683,7 @@ mod tests {
         FunctionImplementation, HeapFunction, NativeFunction, NativeFunctionKind, RealmIntrinsics,
         RootEnvironment, Runtime, RuntimeLimits, RuntimeUsage, array_length_from_number,
         dynamic_function_declaration_property_layout, global_function_replacement_layout,
-        is_supported_opcode,
+        is_supported_opcode, usize_to_u64,
     };
 
     #[test]
@@ -5592,10 +5720,237 @@ mod tests {
                 && value.strict_equals(JsNumber::from_i32(0))
         ));
         assert_eq!(runtime.usage().heap_objects(), 12);
-        assert_eq!(runtime.usage().object_properties(), 69);
+        assert_eq!(runtime.usage().object_properties(), 74);
 
         assert_eq!(runtime.collect_cycles().expect("collection").objects(), 0);
         assert!(runtime.objects.contains(prototype));
+    }
+
+    #[test]
+    fn realm_installs_a_realm_owned_array_constructor_with_exact_descriptors() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let state = runtime.realms.get(realm_id).expect("realm state");
+        let RealmIntrinsics::Ready {
+            function_prototype,
+            array,
+            ..
+        } = state.intrinsics
+        else {
+            panic!("realm intrinsics remained uninitialized");
+        };
+
+        let prototype = runtime
+            .objects
+            .get(array.prototype)
+            .expect("Array.prototype");
+        assert_data_property(
+            &prototype.record,
+            &runtime,
+            PredefinedAtom::Constructor,
+            PropertyLayout::data(true, false, true),
+            |value| matches!(value, StoredValue::Function(id) if id == array.constructor),
+        );
+
+        let constructor = runtime
+            .functions
+            .get(array.constructor)
+            .expect("Array constructor");
+        assert_eq!(
+            constructor.object.prototype(),
+            Some(HeapReference::Function(function_prototype))
+        );
+        let native = constructor.native().expect("native Array constructor");
+        assert_eq!(native.realm, realm_id);
+        assert_eq!(native.kind, NativeFunctionKind::ArrayConstructor);
+        assert!(native.kind.is_constructor());
+        assert_data_property(
+            &constructor.object,
+            &runtime,
+            PredefinedAtom::Prototype,
+            PropertyLayout::data(false, false, false),
+            |value| matches!(value, StoredValue::Object(id) if id == array.prototype),
+        );
+        assert_data_property(
+            &constructor.object,
+            &runtime,
+            PredefinedAtom::Length,
+            PropertyLayout::data(false, false, true),
+            |value| matches!(value, StoredValue::Number(number) if number.strict_equals(JsNumber::from_i32(1))),
+        );
+        assert_data_property(
+            &constructor.object,
+            &runtime,
+            PredefinedAtom::Name,
+            PropertyLayout::data(false, false, true),
+            |value| matches!(value, StoredValue::String(name) if name == JsString::from_utf8("Array").expect("name")),
+        );
+
+        let global = runtime
+            .objects
+            .get(state.global_object)
+            .expect("global object");
+        assert_data_property(
+            &global.record,
+            &runtime,
+            PredefinedAtom::Array,
+            PropertyLayout::data(true, false, true),
+            |value| matches!(value, StoredValue::Function(id) if id == array.constructor),
+        );
+        assert_eq!(runtime.usage().heap_objects(), 12);
+        assert_eq!(runtime.usage().heap_functions(), 17);
+        assert_eq!(runtime.usage().object_properties(), 74);
+    }
+
+    #[test]
+    fn array_intrinsics_are_realm_unique_and_direct_collection_roots() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let first = runtime.create_realm().expect("first realm");
+        let second = runtime.create_realm().expect("second realm");
+        let first_state = runtime.realms.get(first.0.id).expect("first realm");
+        let first_global = first_state.global_object;
+        let first_array = match first_state.intrinsics {
+            RealmIntrinsics::Ready { array, .. } => array,
+            RealmIntrinsics::Initializing => {
+                panic!("first realm intrinsics remained uninitialized")
+            }
+        };
+        let second_array = match runtime
+            .realms
+            .get(second.0.id)
+            .expect("second realm")
+            .intrinsics
+        {
+            RealmIntrinsics::Ready { array, .. } => array,
+            RealmIntrinsics::Initializing => {
+                panic!("second realm intrinsics remained uninitialized")
+            }
+        };
+        assert_ne!(first_array.prototype, second_array.prototype);
+        assert_ne!(first_array.constructor, second_array.constructor);
+
+        let array_key = runtime.predefined_property_key(PredefinedAtom::Array);
+        let constructor_key = runtime.predefined_property_key(PredefinedAtom::Constructor);
+        assert!(
+            runtime
+                .objects
+                .get_mut(first_global)
+                .expect("first global")
+                .record
+                .replace_existing_data(&array_key, StoredValue::Undefined)
+        );
+        assert!(
+            runtime
+                .objects
+                .get_mut(first_array.prototype)
+                .expect("first Array.prototype")
+                .record
+                .replace_existing_data(&constructor_key, StoredValue::Undefined)
+        );
+
+        let report = runtime.collect_cycles().expect("collection");
+
+        assert_eq!(report.functions(), 0);
+        assert!(runtime.functions.contains(first_array.constructor));
+        assert!(runtime.objects.contains(first_array.prototype));
+        assert!(runtime.functions.contains(second_array.constructor));
+        assert!(runtime.objects.contains(second_array.prototype));
+    }
+
+    #[test]
+    fn sparse_array_allocation_is_constant_size_and_exactly_charged() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let prototype = runtime
+            .realm_array_prototype(realm.0.id)
+            .expect("Array.prototype");
+        let baseline = runtime.usage();
+
+        for (offset, length) in [0, 3, u32::MAX].into_iter().enumerate() {
+            let array = runtime
+                .allocate_sparse_array_with_prototype(HeapReference::Object(prototype), length)
+                .expect("sparse array");
+            let object = runtime.objects.get(array).expect("sparse array object");
+
+            assert_eq!(
+                runtime.array_length(array).expect("array length"),
+                Some(length)
+            );
+            assert_eq!(object.record.property_count(), 1);
+            assert_eq!(
+                object.record.prototype(),
+                Some(HeapReference::Object(prototype))
+            );
+            assert!(
+                runtime
+                    .array_own_property(
+                        array,
+                        &PropertyKey::from_index(ArrayIndex::new(0).expect("index")),
+                    )
+                    .expect("array property")
+                    .is_none()
+            );
+            assert_data_property(
+                &object.record,
+                &runtime,
+                PredefinedAtom::Length,
+                PropertyLayout::data(true, false, false),
+                |value| matches!(value, StoredValue::Number(number) if number.strict_equals(JsNumber::from_f64(f64::from(length)))),
+            );
+            assert_eq!(
+                runtime.usage().heap_objects(),
+                baseline.heap_objects() + usize_to_u64(offset + 1)
+            );
+            assert_eq!(
+                runtime.usage().object_properties(),
+                baseline.object_properties() + usize_to_u64(offset + 1)
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_array_allocation_preflights_each_resource_before_mutation() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let prototype = runtime
+            .realm_array_prototype(realm.0.id)
+            .expect("Array.prototype");
+        let baseline = runtime.usage();
+        let collection_pending = runtime.collection_pending;
+
+        runtime.limits.max_heap_objects = baseline.heap_objects();
+        assert!(matches!(
+            runtime.allocate_sparse_array_with_prototype(
+                HeapReference::Object(prototype),
+                u32::MAX,
+            ),
+            Err(ExecutionError::LimitExceeded {
+                resource: RuntimeResource::HeapObjects,
+                limit,
+                observed,
+            }) if limit == baseline.heap_objects()
+                && observed == baseline.heap_objects() + 1
+        ));
+        assert_eq!(runtime.usage(), baseline);
+        assert_eq!(runtime.collection_pending, collection_pending);
+
+        runtime.limits.max_heap_objects = baseline.heap_objects() + 1;
+        runtime.limits.max_object_properties = baseline.object_properties();
+        assert!(matches!(
+            runtime.allocate_sparse_array_with_prototype(
+                HeapReference::Object(prototype),
+                u32::MAX,
+            ),
+            Err(ExecutionError::LimitExceeded {
+                resource: RuntimeResource::ObjectProperties,
+                limit,
+                observed,
+            }) if limit == baseline.object_properties()
+                && observed == baseline.object_properties() + 1
+        ));
+        assert_eq!(runtime.usage(), baseline);
+        assert_eq!(runtime.collection_pending, collection_pending);
     }
 
     #[test]
@@ -5865,8 +6220,8 @@ mod tests {
 
         assert_eq!(runtime.usage().realms(), 1);
         assert_eq!(runtime.usage().heap_objects(), 12);
-        assert_eq!(runtime.usage().heap_functions(), 16);
-        assert_eq!(runtime.usage().object_properties(), 69);
+        assert_eq!(runtime.usage().heap_functions(), 17);
+        assert_eq!(runtime.usage().object_properties(), 74);
         assert_eq!(runtime.usage().installed_code(), 0);
         assert_eq!(
             runtime.atom_usage(),
@@ -6559,8 +6914,8 @@ mod tests {
         };
 
         assert_eq!(runtime.usage().heap_objects(), 12);
-        assert_eq!(runtime.usage().heap_functions(), 16);
-        assert_eq!(runtime.usage().object_properties(), 69);
+        assert_eq!(runtime.usage().heap_functions(), 17);
+        assert_eq!(runtime.usage().object_properties(), 74);
 
         let error_prototype = runtime.objects.get(errors.error).expect("Error.prototype");
         assert_eq!(
@@ -6748,10 +7103,10 @@ mod tests {
                 13,
             ),
             (
-                RuntimeLimits::default().with_max_object_properties(69),
+                RuntimeLimits::default().with_max_object_properties(74),
                 RuntimeResource::ObjectProperties,
-                69,
-                70,
+                74,
+                75,
             ),
         ] {
             let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -6804,7 +7159,7 @@ mod tests {
         assert!(runtime.objects.get(error).is_none());
         assert!(runtime.objects.get(prototype).is_some());
         assert_eq!(runtime.usage().heap_objects(), 12);
-        assert_eq!(runtime.usage().object_properties(), 69);
+        assert_eq!(runtime.usage().object_properties(), 74);
     }
 
     #[test]
@@ -6817,16 +7172,16 @@ mod tests {
                 12,
             ),
             (
-                RuntimeLimits::default().with_max_heap_functions(15),
+                RuntimeLimits::default().with_max_heap_functions(16),
                 RuntimeResource::HeapFunctions,
-                15,
                 16,
+                17,
             ),
             (
-                RuntimeLimits::default().with_max_object_properties(68),
+                RuntimeLimits::default().with_max_object_properties(73),
                 RuntimeResource::ObjectProperties,
-                68,
-                69,
+                73,
+                74,
             ),
         ] {
             let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -6886,7 +7241,7 @@ mod tests {
             .expect("one boxed Boolean fits the exact limit");
 
         assert_eq!(runtime.usage().heap_objects(), 13);
-        assert_eq!(runtime.usage().object_properties(), 69);
+        assert_eq!(runtime.usage().object_properties(), 74);
         assert_eq!(
             runtime.boxed_boolean(object).expect("live wrapper"),
             Some(true)
@@ -6974,7 +7329,7 @@ mod tests {
             .expect("one boxed Number fits the exact limit");
 
         assert_eq!(runtime.usage().heap_objects(), 13);
-        assert_eq!(runtime.usage().object_properties(), 69);
+        assert_eq!(runtime.usage().object_properties(), 74);
         assert!(
             runtime
                 .boxed_number(object)
@@ -7027,10 +7382,10 @@ mod tests {
                 13,
             ),
             (
-                RuntimeLimits::default().with_max_object_properties(69),
+                RuntimeLimits::default().with_max_object_properties(74),
                 RuntimeResource::ObjectProperties,
-                69,
-                70,
+                74,
+                75,
             ),
         ] {
             let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -7062,7 +7417,7 @@ mod tests {
     fn boxed_string_allocation_preserves_payload_prototype_and_exact_length_property() {
         let limits = RuntimeLimits::default()
             .with_max_heap_objects(13)
-            .with_max_object_properties(70);
+            .with_max_object_properties(75);
         let mut runtime = Runtime::try_new(limits).expect("runtime");
         let realm = runtime.create_realm().expect("realm");
         let realm_id = realm.0.id;
@@ -7076,7 +7431,7 @@ mod tests {
             .expect("one boxed String fits the exact limits");
 
         assert_eq!(runtime.usage().heap_objects(), 13);
-        assert_eq!(runtime.usage().object_properties(), 70);
+        assert_eq!(runtime.usage().object_properties(), 75);
         assert_eq!(
             runtime.boxed_string(object).expect("live wrapper"),
             Some(&text)
@@ -7129,14 +7484,14 @@ mod tests {
                 .expect("live wrapper")
                 .is_some()
         );
-        assert_eq!(runtime.usage().object_properties(), 70);
+        assert_eq!(runtime.usage().object_properties(), 75);
 
         let report = runtime.collect_cycles().expect("collection");
 
         assert_eq!(report.objects(), 2);
         assert!(runtime.objects.get(fake).is_none());
         assert!(runtime.objects.get(wrapper).is_none());
-        assert_eq!(runtime.usage().object_properties(), 69);
+        assert_eq!(runtime.usage().object_properties(), 74);
     }
 
     #[test]
@@ -7180,7 +7535,7 @@ mod tests {
         let report = runtime.collect_cycles().expect("collection");
 
         assert_eq!(report.functions(), 0);
-        assert_eq!(runtime.usage().heap_functions(), 16);
+        assert_eq!(runtime.usage().heap_functions(), 17);
         assert_eq!(runtime.usage().installed_code(), 0);
         assert_eq!(
             runtime
@@ -7250,8 +7605,8 @@ mod tests {
         assert_eq!(report.functions(), 2);
         assert!(runtime.functions.get(function_call).is_none());
         assert!(runtime.functions.get(function_apply).is_none());
-        assert_eq!(runtime.usage().heap_functions(), 14);
-        assert_eq!(runtime.usage().object_properties(), 65);
+        assert_eq!(runtime.usage().heap_functions(), 15);
+        assert_eq!(runtime.usage().object_properties(), 70);
     }
 
     #[test]
@@ -7348,7 +7703,7 @@ mod tests {
         assert!(runtime.functions.get(getter).is_some());
         assert!(runtime.functions.get(setter).is_some());
         assert!(runtime.functions.get(orphan).is_none());
-        assert_eq!(runtime.usage().object_properties(), 70);
+        assert_eq!(runtime.usage().object_properties(), 75);
     }
 
     #[test]
@@ -7455,7 +7810,7 @@ mod tests {
 
         runtime.rollback_root_environment(realm_id, &environment);
 
-        assert_eq!(runtime.usage().object_properties(), 70);
+        assert_eq!(runtime.usage().object_properties(), 75);
         assert!(matches!(
             runtime
                 .objects

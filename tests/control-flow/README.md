@@ -2,10 +2,11 @@
 
 `manifest.json` is a bounded runtime corpus for the labeled-statement,
 `switch`, dense-array/exotic, synchronous `for-in`, and synchronous
-`try`/`catch`/`finally` milestones. Array cases cover dense construction,
-evaluation order, indexed reads and writes, length extension/coercion/
-truncation, QuickJS's observable two-pass length conversion, the uint32
-boundary, enumeration, `apply`, and default object tagging. Catch cases cover
+`try`/`catch`/`finally` milestones. Array cases cover realm-owned call and
+construction, numeric-length validation, dense and elided literals, evaluation
+order, indexed reads and writes, length extension/coercion/truncation,
+QuickJS's observable two-pass length conversion, the uint32 boundary,
+enumeration, `apply`, and default object tagging. Catch cases cover
 explicit and engine-created errors, cross-frame
 unwind, rethrow, captured bindings, iterator cleanup, Error branding, and
 ordinary dynamic `Function` syntax failures. Finally cases cover normal,

@@ -69,6 +69,14 @@ fn source_slice_at<'source>(
     &source[span.start as usize..span.end as usize]
 }
 
+fn atom_text(tree: &CompiledFunctionTree, index: u32) -> String {
+    tree.root().atoms()[index as usize]
+        .string()
+        .code_units()
+        .map(|unit| char::from_u32(u32::from(unit)).expect("ASCII test atom"))
+        .collect()
+}
+
 #[test]
 fn empty_array_uses_array_from_zero_and_gains_array_authority() {
     let tree = compile("function make(){return [];}");
@@ -146,10 +154,132 @@ fn array_from_retains_counts_wider_than_u8() {
 }
 
 #[test]
+fn sparse_array_uses_static_indices_and_sets_length_only_for_a_trailing_elision() {
+    let source = "function make(){return [1,,3,,];}";
+    let tree = compile(source);
+
+    assert_eq!(
+        instructions(&tree),
+        [
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 1 },),
+            (FinalOpcode::Push3, Operands::NoneInt),
+            (
+                FinalOpcode::DefineField,
+                Operands::Atom(quickjs_bytecode::AtomPoolIndex::new(0)),
+            ),
+            (FinalOpcode::Dup, Operands::None),
+            (FinalOpcode::Push4, Operands::NoneInt),
+            (
+                FinalOpcode::PutField,
+                Operands::Atom(quickjs_bytecode::AtomPoolIndex::new(1)),
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(atom_text(&tree, 0), "2");
+    assert_eq!(atom_text(&tree, 1), "length");
+    assert!(tree.root().atoms()[0].is_static_property_only());
+    assert!(!tree.root().atoms()[1].is_static_property_only());
+
+    let sites = tree
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let decoded = instruction.decoded();
+            (
+                decoded.instruction().opcode(),
+                source_slice_at(&tree, source, decoded.pc()),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sites[1], (FinalOpcode::ArrayFrom, "[1,,3,,]"));
+    assert_eq!(sites[3], (FinalOpcode::DefineField, "3"));
+    assert_eq!(sites[4], (FinalOpcode::Dup, ","));
+    assert_eq!(sites[5], (FinalOpcode::Push4, ","));
+    assert_eq!(sites[6], (FinalOpcode::PutField, ","));
+}
+
+#[test]
+fn holes_only_allocate_no_element_properties_and_preserve_the_final_length() {
+    let source = "function make(){return [,,,];}";
+    let tree = compile(source);
+
+    assert_eq!(
+        instructions(&tree),
+        [
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 },),
+            (FinalOpcode::Dup, Operands::None),
+            (FinalOpcode::Push3, Operands::NoneInt),
+            (
+                FinalOpcode::PutField,
+                Operands::Atom(quickjs_bytecode::AtomPoolIndex::new(0)),
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(atom_text(&tree, 0), "length");
+    assert!(
+        instructions(&tree)
+            .iter()
+            .all(|(opcode, _)| *opcode != FinalOpcode::Undefined)
+    );
+}
+
+#[test]
+fn sparse_array_property_sites_share_content_interned_atoms_without_sharing_lookup_identity() {
+    let tree = compile("function make(){return [[,1],[,2],{1:3},[,,]];}");
+    let definitions = instructions(&tree)
+        .into_iter()
+        .filter_map(|(opcode, operands)| (opcode == FinalOpcode::DefineField).then_some(operands))
+        .collect::<Vec<_>>();
+
+    assert_eq!(definitions.len(), 3);
+    assert!(
+        definitions.iter().all(|operands| {
+            *operands == Operands::Atom(quickjs_bytecode::AtomPoolIndex::new(0))
+        })
+    );
+    assert_eq!(atom_text(&tree, 0), "1");
+    assert_eq!(atom_text(&tree, 1), "length");
+    assert_eq!(atom_text(&tree, 2), "make");
+    assert_eq!(tree.root().atoms().len(), 3);
+}
+
+#[test]
+fn sparse_array_expressions_remain_left_to_right_around_initial_allocation() {
+    let tree = compile("function make(first,second){return [first(),,second()];}");
+    let opcodes = instructions(&tree)
+        .into_iter()
+        .map(|(opcode, _)| opcode)
+        .collect::<Vec<_>>();
+    let calls = opcodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, opcode)| matches!(opcode, FinalOpcode::Call0).then_some(index))
+        .collect::<Vec<_>>();
+    let array = opcodes
+        .iter()
+        .position(|opcode| *opcode == FinalOpcode::ArrayFrom)
+        .expect("sparse array allocation");
+    let definition = opcodes
+        .iter()
+        .position(|opcode| *opcode == FinalOpcode::DefineField)
+        .expect("post-hole element definition");
+
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0] < array);
+    assert!(array < calls[1]);
+    assert!(calls[1] < definition);
+}
+
+#[test]
 fn elisions_and_spread_fail_closed_at_the_exact_element_span() {
     for (source, expected) in [
-        ("function make(){return [1,,3];}", ","),
         ("function make(items){return [1,...items,3];}", "...items"),
+        ("function make(items){return [,...items,,];}", "...items"),
     ] {
         let error = compile_error(source);
         let LeafCompilationError::Unsupported { feature, span } = error else {
@@ -169,6 +299,40 @@ fn array_element_count_beyond_u16_fails_before_encoding() {
         compile_error(&source),
         LeafCompilationError::CapacityExceeded {
             domain: "array literal elements",
+        }
+    );
+}
+
+#[test]
+fn sparse_total_length_is_not_limited_by_the_dense_array_from_operand() {
+    let holes = ",".repeat(usize::from(u16::MAX) + 1);
+    let source = format!("function make(){{return [{holes}];}}");
+    let tree = compile(&source);
+
+    assert_eq!(
+        instructions(&tree),
+        [
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 },),
+            (FinalOpcode::Dup, Operands::None),
+            (FinalOpcode::PushI32, Operands::I32(65_536)),
+            (
+                FinalOpcode::PutField,
+                Operands::Atom(quickjs_bytecode::AtomPoolIndex::new(0)),
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+}
+
+#[test]
+fn sparse_dense_prefix_beyond_u16_has_its_own_capacity_domain() {
+    let elements = (0..=u16::MAX).map(|_| "0").collect::<Vec<_>>().join(",");
+    let source = format!("function make(){{return [{elements},,];}}");
+
+    assert_eq!(
+        compile_error(&source),
+        LeafCompilationError::CapacityExceeded {
+            domain: "array literal dense prefix",
         }
     );
 }

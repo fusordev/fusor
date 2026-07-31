@@ -35,7 +35,7 @@ const EXPECTED_ORACLE_BANNER: &str = "QuickJS version 2026-06-04";
 const EXPECTED_MANIFEST_RELEASE: &str = "2026-06-04";
 const MANIFEST_SCHEMA_VERSION: u64 = 1;
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
-const MAX_CASES: usize = 64;
+const MAX_CASES: usize = 128;
 const MAX_CASE_ID_BYTES: usize = 64;
 const MAX_BODY_BYTES: usize = 16 * 1024;
 const MAX_EXPECTED_STRING_BYTES: usize = 4 * 1024;
@@ -82,7 +82,16 @@ const fn decimal_digits(mut value: usize) -> usize {
 
 const REQUIRED_COVERAGE: &[&str] = &[
     "array-apply",
+    "array-constructor-call",
+    "array-constructor-construct",
+    "array-constructor-elements",
+    "array-constructor-intrinsics",
+    "array-constructor-length",
+    "array-constructor-range-error",
     "array-dense-literal",
+    "array-elision",
+    "array-elision-enumeration",
+    "array-elision-evaluation-order",
     "array-evaluation-order",
     "array-for-in",
     "array-index-boundary",

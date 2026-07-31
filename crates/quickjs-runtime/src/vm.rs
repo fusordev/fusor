@@ -225,7 +225,6 @@ impl NativeContinuation {
     }
 }
 
-#[derive(Clone)]
 enum IntrinsicGetContinuation {
     BooleanConstructor {
         new_target: FunctionId,
@@ -239,6 +238,12 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         value: JsString,
     },
+    ArrayConstructor {
+        realm: RealmId,
+        new_target: FunctionId,
+        arguments: Vec<StoredValue>,
+        origin: JsStackFrame,
+    },
     ObjectPrototypeToString {
         default_tag: ObjectPrototypeTag,
         temporary_receiver: Option<ObjectId>,
@@ -246,20 +251,17 @@ enum IntrinsicGetContinuation {
 }
 
 impl IntrinsicGetContinuation {
-    const fn retained_values(&self) -> u64 {
+    fn retained_values(&self) -> u64 {
         match self {
             Self::BooleanConstructor { .. }
             | Self::NumberConstructor { .. }
             | Self::StringConstructor { .. } => 1,
+            Self::ArrayConstructor { arguments, .. } => {
+                1_u64.saturating_add(usize_to_u64(arguments.len()))
+            }
             Self::ObjectPrototypeToString {
                 temporary_receiver, ..
-            } => {
-                if temporary_receiver.is_some() {
-                    1
-                } else {
-                    0
-                }
-            }
+            } => u64::from(temporary_receiver.is_some()),
         }
     }
 }
@@ -679,6 +681,16 @@ fn trace_native_continuation_roots(
             | IntrinsicGetContinuation::NumberConstructor { new_target, .. }
             | IntrinsicGetContinuation::StringConstructor { new_target, .. } => {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
+            }
+            IntrinsicGetContinuation::ArrayConstructor {
+                new_target,
+                arguments,
+                ..
+            } => {
+                mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
+                for argument in arguments {
+                    trace_stored_value_root(argument, mark);
+                }
             }
             IntrinsicGetContinuation::ObjectPrototypeToString {
                 temporary_receiver, ..
@@ -1839,6 +1851,20 @@ fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::IntrinsicGet(IntrinsicGetContinuation::ArrayConstructor {
+                realm,
+                new_target,
+                arguments,
+                origin,
+            }) => finish_array_constructor_after_prototype_get(
+                runtime,
+                realm,
+                new_target,
+                arguments,
+                origin,
+                &value,
+                execution_budget,
+            )?,
             NativeContinuation::IntrinsicGet(state) => {
                 finish_intrinsic_get(runtime, state, value, active_root_frames, &continuations)?
             }
@@ -2372,6 +2398,31 @@ fn dispatch_native_call(
                 string_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
             Ok(NativeDispatch::Immediate(StoredValue::String(value)))
         }
+        NativeFunctionKind::ArrayConstructor => {
+            let arguments = inputs.arguments.into_remaining_values();
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            if let Some(new_target) = inputs.new_target {
+                begin_array_constructor_prototype_get(
+                    runtime,
+                    native.realm,
+                    new_target,
+                    arguments,
+                    return_to,
+                    origin,
+                    execution_budget,
+                )
+            } else {
+                let prototype = HeapReference::Object(runtime.realm_array_prototype(native.realm)?);
+                finish_array_constructor(
+                    runtime,
+                    native.realm,
+                    prototype,
+                    arguments,
+                    origin,
+                    execution_budget,
+                )
+            }
+        }
         NativeFunctionKind::FunctionPrototypeToString => {
             let StoredValue::Function(function) = inputs.receiver else {
                 let Some(origin) = origin else {
@@ -2465,7 +2516,7 @@ fn begin_function_apply(
         origin,
     };
     let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
-    charge_function_apply_property_lookup(runtime, &state.array_like, execution_budget)?;
+    charge_heap_property_lookup(runtime, &state.array_like, execution_budget)?;
     match read_static_property(runtime, realm, &state.array_like, &length_key)? {
         PropertyReadOutcome::Value(value) => begin_function_apply_length_conversion(
             runtime,
@@ -2608,7 +2659,7 @@ fn advance_function_apply_indices(
             message: "apply argument index exceeds the array-index domain",
         })?;
         let key = PropertyKey::from_index(index);
-        charge_function_apply_property_lookup(runtime, &state.array_like, execution_budget)?;
+        charge_heap_property_lookup(runtime, &state.array_like, execution_budget)?;
         match read_static_property(runtime, state.realm, &state.array_like, &key)? {
             PropertyReadOutcome::Value(value) => {
                 state.arguments.push(value);
@@ -2635,7 +2686,7 @@ fn advance_function_apply_indices(
     )
 }
 
-fn charge_function_apply_property_lookup(
+fn charge_heap_property_lookup(
     runtime: &Runtime,
     base: &StoredValue,
     execution_budget: &mut ExecutionBudget,
@@ -2891,6 +2942,127 @@ fn begin_string_constructor_wrapper(
     )
 }
 
+fn precharge_array_constructor_work(
+    arguments: &[StoredValue],
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    if matches!(arguments, [StoredValue::Number(_)]) {
+        return Ok(());
+    }
+    execution_budget.charge_instructions(usize_to_u64(arguments.len()))?;
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Array construction retains its realm, newTarget, arguments, source origin, and caller continuation across an observable prototype Get"
+)]
+fn begin_array_constructor_prototype_get(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    new_target: FunctionId,
+    arguments: Vec<StoredValue>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let receiver = StoredValue::Function(new_target);
+    charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    match read_heap_property_for_receiver(
+        runtime,
+        HeapReference::Function(new_target),
+        receiver,
+        &prototype_key,
+    )? {
+        PropertyReadOutcome::Value(value) => finish_array_constructor_after_prototype_get(
+            runtime,
+            realm,
+            new_target,
+            arguments,
+            origin,
+            &value,
+            execution_budget,
+        ),
+        PropertyReadOutcome::Getter { function, receiver } => intrinsic_getter_call(
+            function,
+            receiver,
+            IntrinsicGetContinuation::ArrayConstructor {
+                realm,
+                new_target,
+                arguments,
+                origin: origin.clone(),
+            },
+            return_to,
+            Some(origin),
+        ),
+        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
+            message: "function-valued Array newTarget prototype Get failed as a primitive",
+        }
+        .into()),
+    }
+}
+
+fn finish_array_constructor_after_prototype_get(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    new_target: FunctionId,
+    arguments: Vec<StoredValue>,
+    origin: JsStackFrame,
+    requested: &StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = match requested {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            let target_realm = runtime.function_realm(new_target)?;
+            HeapReference::Object(runtime.realm_array_prototype(target_realm)?)
+        }
+    };
+    finish_array_constructor(
+        runtime,
+        realm,
+        prototype,
+        arguments,
+        origin,
+        execution_budget,
+    )
+}
+
+fn finish_array_constructor(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    prototype: HeapReference,
+    arguments: Vec<StoredValue>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    precharge_array_constructor_work(&arguments, execution_budget)?;
+    let object = match arguments.as_slice() {
+        [StoredValue::Number(value)] => {
+            let Some(length) = array_length_from_number(*value) else {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::RangeError,
+                        message: JsString::from_utf8("invalid array length")?,
+                    },
+                    origin,
+                }));
+            };
+            runtime.allocate_sparse_array_with_prototype(prototype, length)?
+        }
+        _ => runtime.allocate_array_with_prototype(prototype, arguments)?,
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the generic resumable Get boundary preserves its receiver, continuation target, caller continuation, and source origin"
@@ -2987,6 +3159,10 @@ fn finish_intrinsic_get(
             new_target,
             value: string_value,
         } => finish_string_constructor_wrapper(runtime, new_target, string_value, &value),
+        IntrinsicGetContinuation::ArrayConstructor { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Array prototype getter resumed without an execution budget",
+        }
+        .into()),
         IntrinsicGetContinuation::ObjectPrototypeToString {
             default_tag,
             temporary_receiver,

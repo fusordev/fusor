@@ -1505,6 +1505,438 @@ fn number_constructor_suspends_for_accessor_backed_new_target_prototype() {
 }
 
 #[test]
+fn array_constructor_suspends_before_allocation_and_retains_every_argument() {
+    let (mut runtime, realm, array_constructor, native, new_target) =
+        runtime_with_array_constructor_prototype_getter(
+            "function getter(){\"use strict\";return this.valueOf;}",
+        );
+    let custom_prototype = source_object(&mut runtime, realm);
+    let retained_argument = source_object(&mut runtime, realm);
+    let value_of_key = runtime.predefined_property_key(PredefinedAtom::ValueOf);
+    runtime
+        .append_data_property(
+            HeapReference::Function(new_target),
+            value_of_key,
+            PropertyLayout::data(true, true, true),
+            StoredValue::Object(custom_prototype),
+        )
+        .expect("newTarget receiver marker");
+
+    let usage_before_get = runtime.usage();
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
+    let Ok(dispatch) = dispatch_native_call(
+        &mut runtime,
+        array_constructor,
+        native,
+        CallInputs {
+            receiver: StoredValue::Undefined,
+            arguments: CallArguments::from_values(vec![
+                StoredValue::Object(retained_argument),
+                StoredValue::Boolean(true),
+            ]),
+            new_target: Some(new_target),
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("accessor-backed Array construction must start");
+    };
+    let NativeDispatch::Call(call) = dispatch else {
+        panic!("newTarget.prototype getter must suspend Array construction");
+    };
+    assert!(matches!(
+        call.receiver,
+        StoredValue::Function(function) if function == new_target
+    ));
+    assert!(matches!(
+        call.continuations.as_slice(),
+        [NativeContinuation::IntrinsicGet(
+            IntrinsicGetContinuation::ArrayConstructor {
+                new_target: retained_target,
+                arguments,
+                ..
+            }
+        )] if *retained_target == new_target
+            && matches!(arguments.as_slice(), [
+                StoredValue::Object(object),
+                StoredValue::Boolean(true),
+            ] if *object == retained_argument)
+    ));
+    assert_eq!(native_continuation_values(&call.continuations), 3);
+    assert_eq!(runtime.usage(), usage_before_get);
+
+    collect_cycles_with_execution_roots(&mut runtime, &[], &call.continuations, &[])
+        .expect("continuation-rooted collection");
+    assert!(runtime.objects.contains(retained_argument));
+
+    let Ok(dispatch) = resolve_native_dispatch(
+        &mut runtime,
+        NativeDispatch::Call(call),
+        &[],
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("getter dispatch must resolve");
+    };
+    let NativeDispatch::Frame(frame) = dispatch else {
+        panic!("bytecode getter must produce an execution frame");
+    };
+    let result =
+        execute_prepared_frames_with_budget(&mut runtime, vec![frame], None, None, &mut budget)
+            .expect("resumed Array construction");
+    let StoredValue::Object(array) = result else {
+        panic!("Array construction must return an object");
+    };
+
+    assert_eq!(runtime.array_length(array).expect("array length"), Some(2));
+    assert_eq!(
+        runtime
+            .object_record(HeapReference::Object(array))
+            .expect("array")
+            .prototype(),
+        Some(HeapReference::Object(custom_prototype))
+    );
+    assert_array_object_index(&runtime, array, 0, retained_argument);
+}
+
+#[test]
+fn array_constructor_primitive_prototype_falls_back_to_the_new_target_realm() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let constructor_realm = runtime.create_realm().expect("constructor realm");
+    let target_realm = runtime.create_realm().expect("target realm");
+    let constructor_realm = runtime
+        .context(&constructor_realm)
+        .expect("constructor context")
+        .realm;
+    let target_realm = runtime
+        .context(&target_realm)
+        .expect("target context")
+        .realm;
+    let constructor = global_native_function(&runtime, constructor_realm, PredefinedAtom::Array);
+    let native = runtime
+        .functions
+        .get(constructor)
+        .and_then(HeapFunction::native)
+        .copied()
+        .expect("native Array");
+    let new_target = global_native_function(&runtime, target_realm, PredefinedAtom::Function);
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    runtime
+        .functions
+        .get_mut(new_target)
+        .expect("new target")
+        .object
+        .replace_existing_with_data(
+            &prototype_key,
+            PropertyLayout::data(false, false, false),
+            StoredValue::Null,
+        )
+        .expect("replace newTarget.prototype");
+
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
+    let Ok(NativeDispatch::Immediate(StoredValue::Object(array))) = dispatch_native_call(
+        &mut runtime,
+        constructor,
+        native,
+        CallInputs {
+            receiver: StoredValue::Undefined,
+            arguments: CallArguments::empty(),
+            new_target: Some(new_target),
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("primitive newTarget.prototype must construct immediately");
+    };
+
+    assert_eq!(
+        runtime
+            .object_record(HeapReference::Object(array))
+            .expect("array")
+            .prototype(),
+        Some(HeapReference::Object(
+            runtime
+                .realm_array_prototype(target_realm)
+                .expect("target-realm Array.prototype"),
+        ))
+    );
+}
+
+#[test]
+fn array_constructor_prototype_get_precedes_invalid_length_validation() {
+    let (mut runtime, _realm, array_constructor, native, new_target) =
+        runtime_with_array_constructor_prototype_getter("function getter(){throw 41;}");
+    let usage_before_get = runtime.usage();
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
+    let Ok(dispatch) = dispatch_native_call(
+        &mut runtime,
+        array_constructor,
+        native,
+        CallInputs {
+            receiver: StoredValue::Undefined,
+            arguments: CallArguments::from_values(vec![StoredValue::Number(JsNumber::from_f64(
+                1.5,
+            ))]),
+            new_target: Some(new_target),
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("throwing prototype getter must start");
+    };
+    assert_eq!(runtime.usage(), usage_before_get);
+    let Ok(dispatch) =
+        resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+    else {
+        panic!("throwing getter dispatch must resolve");
+    };
+    let NativeDispatch::Frame(frame) = dispatch else {
+        panic!("bytecode getter must produce an execution frame");
+    };
+    let error =
+        execute_prepared_frames_with_budget(&mut runtime, vec![frame], None, None, &mut budget)
+            .expect_err("prototype getter throw must beat the invalid-length RangeError");
+    assert_eq!(runtime.usage(), usage_before_get);
+    let ExecutionError::Exception(exception) = error else {
+        panic!("getter throw must remain a JavaScript exception");
+    };
+    assert_eq!(exception.kind(), None);
+    let thrown = exception.thrown_value().expect("explicit getter throw");
+    let number = thrown
+        .as_number()
+        .expect("live thrown value")
+        .expect("number throw");
+    assert!(number.strict_equals(JsNumber::from_i32(41)));
+}
+
+#[test]
+fn array_constructor_prototype_get_precedes_dense_work_fuel_charge() {
+    let (mut runtime, _realm, array_constructor, native, new_target) =
+        runtime_with_array_constructor_prototype_getter("function getter(){throw 41;}");
+    let usage_before_get = runtime.usage();
+    let arguments = (0..64)
+        .map(|_| StoredValue::Boolean(true))
+        .collect::<Vec<_>>();
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default().with_instruction_fuel(20));
+    let Ok(dispatch) = dispatch_native_call(
+        &mut runtime,
+        array_constructor,
+        native,
+        CallInputs {
+            receiver: StoredValue::Undefined,
+            arguments: CallArguments::from_values(arguments),
+            new_target: Some(new_target),
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("prototype Get must start before charging 64 dense elements");
+    };
+    let Ok(dispatch) =
+        resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+    else {
+        panic!("throwing getter dispatch must resolve within the tight budget");
+    };
+    let NativeDispatch::Frame(frame) = dispatch else {
+        panic!("bytecode getter must produce an execution frame");
+    };
+    let error =
+        execute_prepared_frames_with_budget(&mut runtime, vec![frame], None, None, &mut budget)
+            .expect_err("getter throw must beat the dense-work fuel charge");
+    assert_eq!(runtime.usage(), usage_before_get);
+    let ExecutionError::Exception(exception) = error else {
+        panic!("getter throw must remain a JavaScript exception");
+    };
+    let thrown = exception.thrown_value().expect("explicit getter throw");
+    let number = thrown
+        .as_number()
+        .expect("live thrown value")
+        .expect("number throw");
+    assert!(number.strict_equals(JsNumber::from_i32(41)));
+}
+
+#[test]
+fn array_constructor_accessor_continuation_obeys_frame_and_value_limits() {
+    let (mut runtime, _realm, constructor, native, new_target) =
+        runtime_with_array_constructor_prototype_getter(
+            "function getter(){\"use strict\";return this;}",
+        );
+    runtime.limits.max_active_frames = 1;
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
+    let dispatch = begin_test_array_construction(
+        &mut runtime,
+        constructor,
+        native,
+        new_target,
+        vec![StoredValue::Boolean(true)],
+        &mut budget,
+    );
+    let Err(error) = resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+    else {
+        panic!("getter plus intrinsic continuation must exceed one active frame");
+    };
+    assert!(matches!(
+        error,
+        NativeFailure::Execution(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::Frames,
+            limit: 1,
+            observed: 2,
+        })
+    ));
+
+    let (mut runtime, _realm, constructor, native, new_target) =
+        runtime_with_array_constructor_prototype_getter(
+            "function getter(){\"use strict\";return this;}",
+        );
+    runtime.limits.max_active_frame_values = 2;
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
+    let dispatch = begin_test_array_construction(
+        &mut runtime,
+        constructor,
+        native,
+        new_target,
+        vec![StoredValue::Boolean(true), StoredValue::Boolean(false)],
+        &mut budget,
+    );
+    let Err(error) = resolve_native_dispatch(&mut runtime, dispatch, &[], 0, 0, None, &mut budget)
+    else {
+        panic!("newTarget and both arguments must exceed two retained values");
+    };
+    assert!(matches!(
+        error,
+        NativeFailure::Execution(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::FrameValues,
+            limit: 2,
+            observed: 3,
+        })
+    ));
+}
+
+#[test]
+fn array_constructor_precharges_dense_work_and_rolls_back_allocation_limits() {
+    let (mut runtime, _realm, constructor, native) = runtime_with_array_constructor();
+    let baseline = runtime.usage();
+    runtime.limits.max_heap_objects = baseline.heap_objects();
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
+    let Err(error) = dispatch_native_call(
+        &mut runtime,
+        constructor,
+        native,
+        CallInputs {
+            receiver: StoredValue::Undefined,
+            arguments: CallArguments::from_values(vec![
+                StoredValue::Boolean(true),
+                StoredValue::Boolean(false),
+            ]),
+            new_target: None,
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("dense Array allocation must exceed the heap-object limit");
+    };
+    assert!(matches!(
+        error,
+        NativeFailure::Execution(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::HeapObjects,
+            limit,
+            observed,
+        }) if limit == baseline.heap_objects() && observed == baseline.heap_objects() + 1
+    ));
+    assert_eq!(runtime.usage(), baseline);
+
+    let (mut runtime, _realm, constructor, native) = runtime_with_array_constructor();
+    let baseline = runtime.usage();
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default().with_instruction_fuel(1));
+    let Err(error) = dispatch_native_call(
+        &mut runtime,
+        constructor,
+        native,
+        CallInputs {
+            receiver: StoredValue::Undefined,
+            arguments: CallArguments::from_values(vec![
+                StoredValue::Boolean(true),
+                StoredValue::Boolean(false),
+            ]),
+            new_target: None,
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("dense Array work must exceed one instruction of fuel");
+    };
+    assert!(matches!(
+        error,
+        NativeFailure::Execution(ExecutionError::InstructionLimitExceeded {
+            limit: 1,
+            executed: 1,
+        })
+    ));
+    assert_eq!(runtime.usage(), baseline);
+
+    let (mut runtime, _realm, constructor, native) = runtime_with_array_constructor();
+    let baseline = runtime.usage();
+    runtime.limits.max_object_properties = baseline.object_properties();
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
+    let Err(error) = dispatch_native_call(
+        &mut runtime,
+        constructor,
+        native,
+        CallInputs {
+            receiver: StoredValue::Undefined,
+            arguments: CallArguments::from_values(vec![StoredValue::Number(JsNumber::from_u32(
+                u32::MAX,
+            ))]),
+            new_target: None,
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) else {
+        panic!("sparse Array allocation must exceed the length-property limit");
+    };
+    assert!(matches!(
+        error,
+        NativeFailure::Execution(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::ObjectProperties,
+            limit,
+            observed,
+        }) if limit == baseline.object_properties()
+            && observed == baseline.object_properties() + 1
+    ));
+    assert_eq!(runtime.usage(), baseline);
+}
+
+#[test]
 fn boolean_constructor_getter_throw_precedes_wrapper_allocation() {
     let (mut runtime, _realm, boolean_constructor, native, new_target) =
         runtime_with_boolean_constructor_prototype_getter("function getter(){throw 41;}");
@@ -3753,7 +4185,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         "make",
     );
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(71)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(76)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
         .context(&realm)
@@ -3774,8 +4206,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 71,
-            observed: 72,
+            limit: 76,
+            observed: 77,
         }
     ));
     let failed = runtime.usage();
@@ -4313,7 +4745,7 @@ fn function_prototype_apply_precharges_the_index_scan_before_the_first_getter() 
     let (apply, native) = function_prototype_apply_native(&runtime, realm_id);
     let length_lookup_work = {
         let mut preview = ExecutionBudget::new(ExecutionLimits::default());
-        charge_function_apply_property_lookup(&runtime, &StoredValue::Object(list), &mut preview)
+        charge_heap_property_lookup(&runtime, &StoredValue::Object(list), &mut preview)
             .unwrap_or_else(|_| panic!("preview length lookup"));
         preview.executed_instructions
     };
@@ -4369,7 +4801,7 @@ fn function_prototype_apply_native_preprocessing_and_target_share_one_fuel_budge
     let (apply, native) = function_prototype_apply_native(&runtime, realm_id);
     let length_lookup_work = {
         let mut preview = ExecutionBudget::new(ExecutionLimits::default());
-        charge_function_apply_property_lookup(&runtime, &StoredValue::Object(list), &mut preview)
+        charge_heap_property_lookup(&runtime, &StoredValue::Object(list), &mut preview)
             .unwrap_or_else(|_| panic!("preview length lookup"));
         preview.executed_instructions
     };
@@ -5243,6 +5675,43 @@ fn runtime_with_number_constructor_prototype_getter(
     runtime_with_primitive_constructor_prototype_getter(getter_source, PredefinedAtom::Number)
 }
 
+fn runtime_with_array_constructor_prototype_getter(
+    getter_source: &str,
+) -> (Runtime, RealmId, FunctionId, NativeFunction, FunctionId) {
+    runtime_with_primitive_constructor_prototype_getter(getter_source, PredefinedAtom::Array)
+}
+
+fn runtime_with_array_constructor() -> (Runtime, RealmId, FunctionId, NativeFunction) {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm = runtime.context(&realm).expect("context").realm;
+    let global = runtime.realm_global_object(realm).expect("global object");
+    let key = runtime.predefined_property_key(PredefinedAtom::Array);
+    let StoredValue::Function(constructor) =
+        read_heap_property(&runtime, HeapReference::Object(global), &key).expect("Array property")
+    else {
+        panic!("global Array is not callable");
+    };
+    let native = runtime
+        .functions
+        .get(constructor)
+        .and_then(HeapFunction::native)
+        .copied()
+        .expect("native Array");
+    (runtime, realm, constructor, native)
+}
+
+fn global_native_function(runtime: &Runtime, realm: RealmId, atom: PredefinedAtom) -> FunctionId {
+    let global = runtime.realm_global_object(realm).expect("global object");
+    let key = runtime.predefined_property_key(atom);
+    let StoredValue::Function(function) =
+        read_heap_property(runtime, HeapReference::Object(global), &key).expect("global function")
+    else {
+        panic!("global intrinsic is not callable");
+    };
+    function
+}
+
 fn runtime_with_primitive_constructor_prototype_getter(
     getter_source: &str,
     constructor_atom: PredefinedAtom,
@@ -5366,6 +5835,50 @@ fn begin_test_boolean_construction(
         panic!("accessor-backed Boolean construction must start");
     };
     dispatch
+}
+
+fn begin_test_array_construction(
+    runtime: &mut Runtime,
+    constructor: FunctionId,
+    native: NativeFunction,
+    new_target: FunctionId,
+    arguments: Vec<StoredValue>,
+    budget: &mut ExecutionBudget,
+) -> NativeDispatch {
+    let Ok(dispatch) = dispatch_native_call(
+        runtime,
+        constructor,
+        native,
+        CallInputs {
+            receiver: StoredValue::Undefined,
+            arguments: CallArguments::from_values(arguments),
+            new_target: Some(new_target),
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        budget,
+    ) else {
+        panic!("accessor-backed Array construction must start");
+    };
+    dispatch
+}
+
+fn assert_array_object_index(runtime: &Runtime, array: ObjectId, index: u32, expected: ObjectId) {
+    assert!(matches!(
+        runtime
+            .array_own_property(
+                array,
+                &PropertyKey::from_index(ArrayIndex::new(index).expect("index")),
+            )
+            .expect("array index"),
+        Some(OwnProperty::Data {
+            value: StoredValue::Object(object),
+            ..
+        }) if object == expected
+    ));
 }
 
 fn object_prototype_to_string_native(

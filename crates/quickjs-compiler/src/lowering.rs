@@ -3,10 +3,10 @@ use std::{collections::HashMap, error::Error, fmt, ops::Range, sync::Arc};
 use oxc_ast::{
     AstKind,
     ast::{
-        ArrayExpression, AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement,
-        CallExpression, CatchClause, ComputedMemberExpression, ConditionalExpression,
-        DoWhileStatement, Expression, ExpressionStatement, ForInStatement, ForStatement,
-        ForStatementInit, ForStatementLeft, Function, FunctionBody, FunctionType,
+        ArrayExpression, ArrayExpressionElement, AssignmentExpression, AssignmentTarget,
+        BindingPattern, BlockStatement, CallExpression, CatchClause, ComputedMemberExpression,
+        ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForInStatement,
+        ForStatement, ForStatementInit, ForStatementLeft, Function, FunctionBody, FunctionType,
         IdentifierReference, IfStatement, LabelIdentifier, LabeledStatement, LogicalExpression,
         NewExpression, ObjectExpression, ObjectProperty, ObjectPropertyKind, Program,
         PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement, SequenceExpression,
@@ -1448,7 +1448,63 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     atom_candidates,
                 )?;
             }
+            AstKind::ArrayExpression(array)
+                if !array.elements.iter().any(ArrayExpressionElement::is_spread) =>
+            {
+                Self::record_sparse_array_property_candidates(owner, array, atom_candidates)?;
+            }
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn record_sparse_array_property_candidates(
+        owner: ExecutableId,
+        array: &ArrayExpression<'arena>,
+        atom_candidates: &mut [Vec<CompiledAtomCandidate>],
+    ) -> Result<(), LeafCompilationError> {
+        let Some(first_elision) = array
+            .elements
+            .iter()
+            .position(ArrayExpressionElement::is_elision)
+        else {
+            return Ok(());
+        };
+        for (index, element) in array.elements.iter().enumerate().skip(first_elision + 1) {
+            if element.is_elision() {
+                continue;
+            }
+            let expression =
+                element
+                    .as_expression()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "non-spread array element is an expression or elision",
+                        span: Some(element.span()),
+                    })?;
+            let index =
+                u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "array literal element indices",
+                })?;
+            let span = expression.span();
+            record_property_candidate_for(
+                owner,
+                compiler_identifier_string(&index.to_string(), span)?,
+                span,
+                CompiledPropertyAtomKey::ArrayIndex {
+                    array: array.span,
+                    index,
+                },
+                atom_candidates,
+            )?;
+        }
+        if let Some(last) = array.elements.last().filter(|element| element.is_elision()) {
+            record_property_candidate_for(
+                owner,
+                compiler_identifier_string("length", last.span())?,
+                last.span(),
+                CompiledPropertyAtomKey::ArrayLength { array: array.span },
+                atom_candidates,
+            )?;
         }
         Ok(())
     }
@@ -4259,7 +4315,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                             )?;
                         }
                         Expression::ArrayExpression(array) => {
-                            Self::plan_array_expression(array, &mut work)?;
+                            Self::plan_array_expression(array, constants, &mut work)?;
                         }
                         Expression::StaticMemberExpression(member) => {
                             Self::plan_static_member_read(member, constants, &mut work)?;
@@ -4481,22 +4537,32 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     fn plan_array_expression<'expression>(
         array: &'expression ArrayExpression<'arena>,
+        constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
-        for element in &array.elements {
-            if element.as_expression().is_none() {
-                return unsupported(
-                    UnsupportedLeafFeature::UnsupportedExpression,
-                    element.span(),
-                );
-            }
+        if let Some(spread) = array.elements.iter().find(|element| element.is_spread()) {
+            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, spread.span());
         }
+        let Some(first_elision) = array
+            .elements
+            .iter()
+            .position(ArrayExpressionElement::is_elision)
+        else {
+            return Self::plan_dense_array_expression(array, work);
+        };
+
+        Self::plan_sparse_array_expression(array, first_elision, constants, work)
+    }
+
+    fn plan_dense_array_expression<'expression>(
+        array: &'expression ArrayExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
         let argument_count = u16::try_from(array.elements.len()).map_err(|_| {
             LeafCompilationError::CapacityExceeded {
                 domain: "array literal elements",
             }
         })?;
-
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::ArrayFrom,
             Operands::NPop { argument_count },
@@ -4508,6 +4574,96 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     .as_expression()
                     .ok_or(LeafCompilationError::SemanticInvariant {
                         invariant: "prevalidated dense array element is an expression",
+                        span: Some(element.span()),
+                    })?;
+            work.push(ExpressionWork::Visit(expression));
+        }
+        Ok(())
+    }
+
+    fn plan_sparse_array_expression<'expression>(
+        array: &'expression ArrayExpression<'arena>,
+        first_elision: usize,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let sparse_length = i32::try_from(array.elements.len()).map_err(|_| {
+            LeafCompilationError::CapacityExceeded {
+                domain: "sparse array literal length",
+            }
+        })?;
+
+        if let Some(trailing_elision) = array.elements.last().filter(|element| element.is_elision())
+        {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PutField,
+                Operands::Atom(
+                    constants.array_length_atom_index(array.span, trailing_elision.span())?,
+                ),
+                trailing_elision.span(),
+            )));
+            work.push(ExpressionWork::Emit(plan_push_integer(
+                sparse_length,
+                trailing_elision.span(),
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Dup,
+                Operands::None,
+                trailing_elision.span(),
+            )));
+        }
+
+        for (index, element) in array
+            .elements
+            .iter()
+            .enumerate()
+            .skip(first_elision + 1)
+            .rev()
+        {
+            if element.is_elision() {
+                continue;
+            }
+            let expression =
+                element
+                    .as_expression()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "non-spread array element is an expression or elision",
+                        span: Some(element.span()),
+                    })?;
+            let index =
+                u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "array literal element indices",
+                })?;
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::DefineField,
+                Operands::Atom(constants.array_index_atom_index(
+                    array.span,
+                    index,
+                    expression.span(),
+                )?),
+                expression.span(),
+            )));
+            work.push(ExpressionWork::Visit(expression));
+        }
+
+        let dense_prefix =
+            u16::try_from(first_elision).map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "array literal dense prefix",
+            })?;
+
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ArrayFrom,
+            Operands::NPop {
+                argument_count: dense_prefix,
+            },
+            array.span,
+        )));
+        for element in array.elements.iter().take(first_elision).rev() {
+            let expression =
+                element
+                    .as_expression()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "pre-elision array element is an expression",
                         span: Some(element.span()),
                     })?;
             work.push(ExpressionWork::Visit(expression));
@@ -7894,7 +8050,7 @@ struct CompiledConstantPool {
     function_indices: Box<[(ExecutableId, u32)]>,
     number_indices: Box<[(Span, u32)]>,
     string_indices: Box<[(Span, CompiledStringLocation)]>,
-    property_atom_indices: Box<[(Span, u32)]>,
+    property_atom_indices: Box<[(CompiledPropertyAtomKey, u32)]>,
     metadata_atom_indices: Box<[(CompiledMetadataAtomKey, u32)]>,
 }
 
@@ -7927,6 +8083,7 @@ struct CompiledAtomCandidate {
     value: CompilerString,
     span: Span,
     purpose: CompiledAtomPurpose,
+    property_key: Option<CompiledPropertyAtomKey>,
 }
 
 struct CompiledStaticPropertyKey {
@@ -7934,9 +8091,33 @@ struct CompiledStaticPropertyKey {
     span: Span,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CompiledAtomCandidateOrderKey {
+    start: u32,
+    end: u32,
+    purpose: CompiledAtomPurpose,
+    property: Option<CompiledPropertyAtomOrderKey>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CompiledPropertyAtomOrderKey {
+    kind: u8,
+    array_start: u32,
+    array_end: u32,
+    index: u32,
+}
+
 impl CompiledAtomCandidate {
-    const fn order_key(&self) -> (u32, u32, CompiledAtomPurpose) {
-        (self.span.start, self.span.end, self.purpose)
+    const fn order_key(&self) -> CompiledAtomCandidateOrderKey {
+        CompiledAtomCandidateOrderKey {
+            start: self.span.start,
+            end: self.span.end,
+            purpose: self.purpose,
+            property: match self.property_key {
+                Some(key) => Some(key.order_key()),
+                None => None,
+            },
+        }
     }
 }
 
@@ -7944,6 +8125,45 @@ impl CompiledAtomCandidate {
 enum CompiledAtomPurpose {
     RuntimeString,
     Property,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompiledPropertyAtomKey {
+    Source(Span),
+    ArrayIndex { array: Span, index: u32 },
+    ArrayLength { array: Span },
+}
+
+impl CompiledPropertyAtomKey {
+    const fn order_key(self) -> CompiledPropertyAtomOrderKey {
+        match self {
+            Self::Source(span) => CompiledPropertyAtomOrderKey {
+                kind: 0,
+                array_start: span.start,
+                array_end: span.end,
+                index: 0,
+            },
+            Self::ArrayIndex { array, index } => CompiledPropertyAtomOrderKey {
+                kind: 1,
+                array_start: array.start,
+                array_end: array.end,
+                index,
+            },
+            Self::ArrayLength { array } => CompiledPropertyAtomOrderKey {
+                kind: 2,
+                array_start: array.start,
+                array_end: array.end,
+                index: 0,
+            },
+        }
+    }
+
+    const fn span(self) -> Span {
+        match self {
+            Self::Source(span) => span,
+            Self::ArrayIndex { array, .. } | Self::ArrayLength { array } => array,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -7977,7 +8197,7 @@ struct FrozenConstantCandidates {
     function_indices: Vec<(ExecutableId, u32)>,
     number_indices: Vec<(Span, u32)>,
     string_indices: Vec<(Span, CompiledStringLocation)>,
-    property_atom_indices: Vec<(Span, u32)>,
+    property_atom_indices: Vec<(CompiledPropertyAtomKey, u32)>,
 }
 
 fn freeze_constant_candidates(
@@ -8048,7 +8268,7 @@ fn freeze_constant_candidates(
 fn freeze_atom_candidates(
     candidates: Vec<CompiledAtomCandidate>,
     string_indices: &mut Vec<(Span, CompiledStringLocation)>,
-    property_atom_indices: &mut Vec<(Span, u32)>,
+    property_atom_indices: &mut Vec<(CompiledPropertyAtomKey, u32)>,
 ) -> Result<(Vec<CompilerAtom>, HashMap<CompilerString, u32>), LeafCompilationError> {
     let mut atoms = Vec::with_capacity(candidates.len());
     let mut interner = HashMap::with_capacity(candidates.len());
@@ -8088,10 +8308,23 @@ fn freeze_atom_candidates(
         };
         match candidate.purpose {
             CompiledAtomPurpose::RuntimeString => {
+                if candidate.property_key.is_some() {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "runtime string atom has no property lookup key",
+                        span: Some(candidate.span),
+                    });
+                }
                 string_indices.push((candidate.span, CompiledStringLocation::Atom(atom_index)));
             }
             CompiledAtomPurpose::Property => {
-                property_atom_indices.push((candidate.span, atom_index));
+                let property_key =
+                    candidate
+                        .property_key
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "property atom has one typed lookup key",
+                            span: Some(candidate.span),
+                        })?;
+                property_atom_indices.push((property_key, atom_index));
             }
         }
     }
@@ -8183,15 +8416,15 @@ fn validate_frozen_constant_candidates(
     }
     frozen
         .property_atom_indices
-        .sort_unstable_by_key(|(span, _)| (span.start, span.end));
-    if let Some(span) = frozen
+        .sort_unstable_by_key(|(key, _)| key.order_key());
+    if let Some(key) = frozen
         .property_atom_indices
         .windows(2)
         .find_map(|pair| (pair[0].0 == pair[1].0).then_some(pair[0].0))
     {
         return Err(LeafCompilationError::SemanticInvariant {
-            invariant: "static property spans are unique within a function",
-            span: Some(span),
+            invariant: "static property lookup keys are unique within a function",
+            span: Some(key.span()),
         });
     }
     Ok(())
@@ -8350,11 +8583,34 @@ impl CompiledConstantPool {
     }
 
     fn property_atom_index(&self, span: Span) -> Result<AtomPoolIndex, LeafCompilationError> {
+        self.property_atom_index_for(CompiledPropertyAtomKey::Source(span), span)
+    }
+
+    fn array_index_atom_index(
+        &self,
+        array: Span,
+        index: u32,
+        span: Span,
+    ) -> Result<AtomPoolIndex, LeafCompilationError> {
+        self.property_atom_index_for(CompiledPropertyAtomKey::ArrayIndex { array, index }, span)
+    }
+
+    fn array_length_atom_index(
+        &self,
+        array: Span,
+        span: Span,
+    ) -> Result<AtomPoolIndex, LeafCompilationError> {
+        self.property_atom_index_for(CompiledPropertyAtomKey::ArrayLength { array }, span)
+    }
+
+    fn property_atom_index_for(
+        &self,
+        key: CompiledPropertyAtomKey,
+        span: Span,
+    ) -> Result<AtomPoolIndex, LeafCompilationError> {
         let position = self
             .property_atom_indices
-            .binary_search_by_key(&(span.start, span.end), |(candidate, _)| {
-                (candidate.start, candidate.end)
-            })
+            .binary_search_by_key(&key.order_key(), |(candidate, _)| candidate.order_key())
             .map_err(|_| LeafCompilationError::SemanticInvariant {
                 invariant: "static property has one function-local atom",
                 span: Some(span),
@@ -8463,6 +8719,7 @@ fn record_string_candidate(
                 value,
                 span,
                 purpose: CompiledAtomPurpose::RuntimeString,
+                property_key: None,
             });
     }
     Ok(())
@@ -8474,6 +8731,22 @@ fn record_property_candidate(
     span: Span,
     atoms: &mut [Vec<CompiledAtomCandidate>],
 ) -> Result<(), LeafCompilationError> {
+    record_property_candidate_for(
+        owner,
+        value,
+        span,
+        CompiledPropertyAtomKey::Source(span),
+        atoms,
+    )
+}
+
+fn record_property_candidate_for(
+    owner: ExecutableId,
+    value: CompilerString,
+    span: Span,
+    property_key: CompiledPropertyAtomKey,
+    atoms: &mut [Vec<CompiledAtomCandidate>],
+) -> Result<(), LeafCompilationError> {
     atoms
         .get_mut(owner.index())
         .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
@@ -8481,6 +8754,7 @@ fn record_property_candidate(
             value,
             span,
             purpose: CompiledAtomPurpose::Property,
+            property_key: Some(property_key),
         });
     Ok(())
 }
