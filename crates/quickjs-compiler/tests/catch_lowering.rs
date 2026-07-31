@@ -122,18 +122,7 @@ fn catch_only_accepts_optional_and_simple_identifier_bindings() {
 }
 
 #[test]
-fn catch_only_rejects_finalizers_and_destructuring_at_the_exact_form() {
-    let finalizer_source = "function f(){try{}catch{}finally{}}";
-    let LeafCompilationError::Unsupported { feature, span } = compile_error(finalizer_source, "f")
-    else {
-        panic!("finally must remain typed fail-closed");
-    };
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedBody);
-    assert_eq!(
-        &finalizer_source[span.start as usize..span.end as usize],
-        "{}"
-    );
-
+fn catch_only_rejects_destructuring_at_the_exact_form() {
     let destructuring_source = "function f(){try{}catch({message}){return message;}}";
     let LeafCompilationError::Unsupported { feature, span } =
         compile_error(destructuring_source, "f")

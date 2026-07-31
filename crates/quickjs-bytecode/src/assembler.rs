@@ -46,6 +46,8 @@ pub enum BranchKind {
     Goto,
     /// Install an exception handler at the symbolic target.
     Catch,
+    /// Enter a finally subroutine at the symbolic target.
+    Gosub,
 }
 
 impl BranchKind {
@@ -55,6 +57,7 @@ impl BranchKind {
             Self::IfTrue => FinalOpcode::IfTrue,
             Self::Goto => FinalOpcode::Goto,
             Self::Catch => FinalOpcode::Catch,
+            Self::Gosub => FinalOpcode::Gosub,
         }
     }
 
@@ -62,14 +65,14 @@ impl BranchKind {
         match self {
             Self::IfFalse | Self::IfTrue => matches!(instruction_size, 2 | 5),
             Self::Goto => matches!(instruction_size, 2 | 3 | 5),
-            Self::Catch => instruction_size == 5,
+            Self::Catch | Self::Gosub => instruction_size == 5,
         }
     }
 
     const fn minimum_size(self) -> u8 {
         match self {
             Self::IfFalse | Self::IfTrue | Self::Goto => 2,
-            Self::Catch => 5,
+            Self::Catch | Self::Gosub => 5,
         }
     }
 }
@@ -945,6 +948,12 @@ fn branch_instruction(
             ),
             (BranchKind::Catch, 5) => (
                 FinalOpcode::Catch,
+                Operands::Label(i32::try_from(displacement).map_err(|_| {
+                    displacement_error(instruction_index, label_index, displacement)
+                })?),
+            ),
+            (BranchKind::Gosub, 5) => (
+                FinalOpcode::Gosub,
                 Operands::Label(i32::try_from(displacement).map_err(|_| {
                     displacement_error(instruction_index, label_index, displacement)
                 })?),

@@ -191,6 +191,90 @@
       "covers": ["catch-dynamic-function-syntax", "catch-engine-error"],
       "body": "try {\n  Function(\"return )\");\n} catch (error) {\n  return error.name;\n}",
       "expect": {"kind": "string", "value": "SyntaxError"}
+    },
+    {
+      "id": "finally-normal-completion",
+      "covers": ["finally-normal"],
+      "body": "var out = \"\";\ntry {\n  out += \"t\";\n} finally {\n  out += \"f\";\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "tf"}
+    },
+    {
+      "id": "finally-preserves-return-value",
+      "covers": ["finally-preserved-return"],
+      "body": "var out = \"\";\nfunction finish() {\n  try {\n    out += \"t\";\n    return out;\n  } finally {\n    out += \"f\";\n  }\n}\nreturn finish() + \"|\" + out;",
+      "expect": {"kind": "string", "value": "t|tf"}
+    },
+    {
+      "id": "finally-runs-before-rethrow",
+      "covers": ["finally-rethrow"],
+      "body": "var out = \"\";\ntry {\n  try {\n    throw \"x\";\n  } finally {\n    out += \"f\";\n  }\n} catch (error) {\n  return error + \"|\" + out;\n}",
+      "expect": {"kind": "string", "value": "x|f"}
+    },
+    {
+      "id": "break-crosses-finally",
+      "covers": ["finally-break"],
+      "body": "var out = \"\";\nwhile (true) {\n  try {\n    out += \"t\";\n    break;\n  } finally {\n    out += \"f\";\n  }\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "tf"}
+    },
+    {
+      "id": "continue-crosses-finally",
+      "covers": ["finally-continue"],
+      "body": "var out = \"\";\nfor (var index = 1; index <= 2; index++) {\n  try {\n    out += index;\n    continue;\n  } finally {\n    out += \"f\";\n  }\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "1f2f"}
+    },
+    {
+      "id": "catch-body-is-protected-by-finally",
+      "covers": ["finally-catch"],
+      "body": "var out = \"\";\ntry {\n  throw \"x\";\n} catch (error) {\n  out += error;\n} finally {\n  out += \"f\";\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "xf"}
+    },
+    {
+      "id": "nested-finalizers-run-inner-first",
+      "covers": ["finally-nested-order"],
+      "body": "var out = \"\";\nfunction finish() {\n  try {\n    try {\n      return \"r\";\n    } finally {\n      out += \"i\";\n    }\n  } finally {\n    out += \"o\";\n  }\n}\nreturn finish() + \"|\" + out;",
+      "expect": {"kind": "string", "value": "r|io"}
+    },
+    {
+      "id": "finalizer-return-overrides-return",
+      "covers": ["finally-override-return"],
+      "body": "function finish() {\n  try {\n    return 1;\n  } finally {\n    return 2;\n  }\n}\nreturn finish();",
+      "expect": {"kind": "number", "bits": "0x4000000000000000"}
+    },
+    {
+      "id": "finalizer-throw-overrides-return",
+      "covers": ["finally-override-throw"],
+      "body": "try {\n  (function finish() {\n    try {\n      return \"x\";\n    } finally {\n      throw \"y\";\n    }\n  })();\n} catch (error) {\n  return error;\n}",
+      "expect": {"kind": "string", "value": "y"}
+    },
+    {
+      "id": "finalizer-throw-overrides-return-inside-for-in",
+      "covers": ["finally-override-throw-for-in"],
+      "body": "try {\n  for (const key in {a: 1}) {\n    try {\n      return key;\n    } finally {\n      throw \"y\";\n    }\n  }\n} catch (error) {\n  return error;\n}",
+      "expect": {"kind": "string", "value": "y"}
+    },
+    {
+      "id": "finalizer-break-overrides-normal-completion",
+      "covers": ["finally-override-break"],
+      "body": "var out = \"\";\nwhile (true) {\n  try {\n    out += \"t\";\n  } finally {\n    out += \"f\";\n    break;\n  }\n  out += \"wrong\";\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "tf"}
+    },
+    {
+      "id": "finalizer-continue-overrides-normal-completion",
+      "covers": ["finally-override-continue"],
+      "body": "var out = \"\";\nfor (var index = 0; index < 2; index++) {\n  try {\n    if (index === 0) continue;\n    out += \"b\";\n  } finally {\n    out += \"f\";\n    continue;\n  }\n  out += \"wrong\";\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "fbf"}
+    },
+    {
+      "id": "finally-closes-captured-protected-cell",
+      "covers": ["finally-captured-protected-cell"],
+      "body": "let saved;\ntarget: {\n  try {\n    let cell = \"p\";\n    saved = function capture() { return cell; };\n    break target;\n  } finally {}\n}\nreturn saved();",
+      "expect": {"kind": "string", "value": "p"}
+    },
+    {
+      "id": "finally-closes-captured-finalizer-cell",
+      "covers": ["finally-captured-finalizer-cell"],
+      "body": "let saved;\ntry {} finally {\n  let cell = \"f\";\n  saved = function capture() { return cell; };\n}\nreturn saved();",
+      "expect": {"kind": "string", "value": "f"}
     }
   ]
 }

@@ -172,6 +172,51 @@ fn symbolic_catch_uses_the_fixed_long_encoding_and_pc_plus_one_base() {
 }
 
 #[test]
+fn symbolic_gosub_uses_the_fixed_long_encoding_and_pc_plus_one_base() {
+    let mut assembler = BytecodeAssembler::new();
+    let finalizer = assembler.new_label().expect("finalizer label");
+
+    assembler
+        .push(FinalOpcode::Undefined, Operands::None)
+        .expect("pending completion");
+    assembler
+        .branch(BranchKind::Gosub, &finalizer)
+        .expect("gosub branch");
+    assembler
+        .push(FinalOpcode::Drop, Operands::None)
+        .expect("consume pending completion");
+    assembler
+        .push(FinalOpcode::ReturnUndef, Operands::None)
+        .expect("normal completion");
+    assembler.bind(&finalizer).expect("finalizer target");
+    assembler
+        .push(FinalOpcode::Ret, Operands::None)
+        .expect("return from finalizer");
+
+    let output = assembler.finish().expect("assembly");
+    assert_eq!(
+        decoded(output.bytecode()),
+        [
+            (BytecodePc::new(0), FinalOpcode::Undefined, Operands::None),
+            (BytecodePc::new(1), FinalOpcode::Gosub, Operands::Label(6)),
+            (BytecodePc::new(6), FinalOpcode::Drop, Operands::None),
+            (BytecodePc::new(7), FinalOpcode::ReturnUndef, Operands::None),
+            (BytecodePc::new(8), FinalOpcode::Ret, Operands::None),
+        ]
+    );
+    assert_eq!(
+        output.instruction_pcs(),
+        [
+            BytecodePc::new(0),
+            BytecodePc::new(1),
+            BytecodePc::new(6),
+            BytecodePc::new(7),
+            BytecodePc::new(8),
+        ]
+    );
+}
+
+#[test]
 fn compiler_verification_still_rejects_unequal_reachable_join_depths() {
     let mut builder = BytecodeAssembler::new();
     let join = builder.new_label().expect("join label");

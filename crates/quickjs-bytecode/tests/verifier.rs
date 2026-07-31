@@ -927,36 +927,115 @@ fn compiler_throw_may_leave_only_a_structural_catch_marker_for_final_verificatio
 }
 
 #[test]
-fn finally_return_address_capabilities_remain_fail_closed_with_typed_reasons() {
-    let gosub_error = reject(
-        encode(&[
-            (FinalOpcode::Gosub, Operands::Label(4)),
-            (FinalOpcode::ReturnUndef, Operands::None),
-        ]),
-        0,
-        FunctionIndexDomains::default(),
+fn gosub_and_ret_have_structural_successors_and_stack_depths() {
+    let bytecode = encode(&[
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ]);
+    let verified = verify(bytecode.clone(), 2, FunctionIndexDomains::default());
+
+    assert_eq!(verified.computed_stack_size(), 2);
+    assert_eq!(
+        verified
+            .instructions()
+            .iter()
+            .map(|instruction| instruction.entry_stack_depth())
+            .collect::<Vec<_>>(),
+        [Some(0), Some(1), Some(1), Some(0), Some(2)]
     );
     assert_eq!(
-        gosub_error.kind(),
-        &VerificationErrorKind::UnsupportedOpcodeSemantics {
-            feature: UnsupportedVerifierFeature::FinallyReturnAddresses,
-        }
+        verified.instructions()[1].successors().kind(),
+        VerifiedSuccessorKind::Branch
+    );
+    assert_eq!(
+        verified.instructions()[1]
+            .successors()
+            .fallthrough()
+            .expect("finally continuation")
+            .get(),
+        2
+    );
+    assert_eq!(
+        verified.instructions()[1]
+            .successors()
+            .branch_target()
+            .expect("finally subroutine")
+            .get(),
+        4
+    );
+    assert_eq!(
+        verified.instructions()[4].successors().kind(),
+        VerifiedSuccessorKind::Terminate
     );
 
-    let ret_error = reject(
-        encode(&[
-            (FinalOpcode::Undefined, Operands::None),
-            (FinalOpcode::Ret, Operands::None),
-        ]),
+    verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode,
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect("ret returns the pending completion to the synthetic continuation");
+}
+
+#[test]
+fn gosub_return_address_counts_toward_the_structural_stack_limit() {
+    let bytecode = encode(&[
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ]);
+    let defaults = VerificationLimits::default();
+    let limits = VerificationLimits::new(
+        defaults.max_bytecode_bytes_per_function(),
+        defaults.max_instructions_per_function(),
+        defaults.max_constants_per_function(),
+        defaults.max_atom_pool_entries(),
+        defaults.max_transfer_evaluations(),
         1,
-        FunctionIndexDomains::default(),
     );
+    let error = verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode,
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        limits,
+    )
+    .expect_err("gosub must reserve one structural return-address slot");
+
     assert_eq!(
-        ret_error.kind(),
-        &VerificationErrorKind::UnsupportedOpcodeSemantics {
-            feature: UnsupportedVerifierFeature::FinallyReturnAddresses,
-        }
+        error.kind(),
+        &VerificationErrorKind::StackLimitExceeded { depth: 2, limit: 1 }
     );
+}
+
+#[test]
+fn compiler_finally_abrupt_exits_defer_nonempty_stack_proof_to_final_authority() {
+    let bytecode = encode(&[
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Return, Operands::None),
+    ]);
+
+    verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode,
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect("typed final authority will prove whether the return is inside the finalizer");
 }
 
 #[test]

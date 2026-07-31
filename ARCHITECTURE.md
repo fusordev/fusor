@@ -273,10 +273,13 @@ without a lock. `Context::instantiate` binds one installation to a validated
 same-runtime realm; the selected root must have an empty external closure
 environment. Child environments are subsequently derived only from verified
 parent capture metadata. The ordinary compiler profile owns a bounded typed
-catch-marker certificate and supports catch-only `try` statements with an
-optional or simple identifier binding. Serialized bytecode, finally return
-addresses, destructuring catch bindings, direct eval, and the remaining
-compiler profiles still fail closed.
+catch/finally operand-stack certificate and supports synchronous `try`,
+optional or simple identifier catch bindings, shared finalizer subroutines,
+and nested abrupt completion. The certificate keeps pending JavaScript values,
+catch markers, and finalizer return addresses in disjoint types and feeds
+effective `gosub`/`ret` edges into binding and object-provenance analysis.
+Serialized bytecode, destructuring catch bindings, direct eval, and the
+remaining compiler profiles still fail closed.
 
 `BytecodeAssembler` keeps symbolic label handles provenance-bound to one
 assembler through immutable `Arc` identity. Labels never enter final operands.
@@ -564,9 +567,9 @@ dispatch, prototype mutation, proxies and other exotics, derived/class and
 nonordinary constructor forms, optional/spread/apply/tail calls, the remaining
 Number built-ins, the remaining String built-ins, Symbol sloppy-`this` boxing
 and wrapper/prototype conversions, `for-in` Symbol boxing and destructuring
-heads, serialized input, raw function slots, finally return addresses,
-destructuring catch bindings, `for-of`/async iterator markers, and packed
-exceptional stack values remain fail closed. Ordinary
+heads, serialized input, raw function slots, destructuring catch bindings,
+`for-of`/async iterator markers, and packed exceptional stack values remain
+fail closed. Ordinary
 accessors are typed slots: `GetField`
 and `GetField2` stop at the first own or inherited accessor, execute native or
 verified-bytecode getters through the same frame vector, preserve the original
@@ -790,11 +793,14 @@ functions and ordinary objects, and the release mailbox carries the typed heap
 reference. Realm-owned branded Error objects cover InternalError, RangeError,
 ReferenceError, SyntaxError, and TypeError with inherited `name` and an own
 `message`; public Error constructors, `Error.prototype.toString`, and stack
-materialization remain pending. Finally completions remain fail closed.
-Ordinary host/resource/engine failures are not mislabeled as JavaScript
-throws. Synthetic native-frame provenance, including one visible frame for
-each nested `Function.prototype.call`, remains part of the pending JavaScript
-Error/stack model. Miette remains presentation, not semantic truth.
+materialization remain pending. Synchronous finally completions run through
+verified frame-local `gosub`/`ret` continuations; exception unwind discards
+crossed continuations, while return and control-flow overrides remove only
+certified pending-value/address pairs. Ordinary host/resource/engine failures
+are not mislabeled as JavaScript throws. Synthetic native-frame provenance,
+including one visible frame for each nested `Function.prototype.call`, remains
+part of the pending JavaScript Error/stack model. Miette remains presentation,
+not semantic truth.
 
 The leaf compiler maps instruction-local verifier failures back through its
 strictly ordered final-PC table with exact `BytecodePc` lookup. It never treats
@@ -886,10 +892,10 @@ and static data properties, identifier/String/Number/BigInt literal-named
 synchronous object methods/getters/setters, strict receiver-aware calls,
 iterative accessor dispatch, and safe-point collection of transient/cyclic
 function, cell, and object graphs. General descriptor mutation, computed
-properties, `super`/home-object semantics, coercive `+`, finally, public Error
-constructors, and `Error.prototype.toString` remain later slices. Catch-only
-`try` statements and internal branded engine Error objects are part of the
-current slice.
+properties, `super`/home-object semantics, coercive `+`, public Error
+constructors, and `Error.prototype.toString` remain later slices. Synchronous
+`try`/`catch`/`finally` and internal branded engine Error objects are part of
+the current slice.
 
 The planned asynchronous slice creates a host timer Promise. A Tokio wakeup
 must be observed on the runtime owner, the FIFO job queue must drain

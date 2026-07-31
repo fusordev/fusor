@@ -1619,7 +1619,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 control.abrupt_marker_depth = Some(abrupt_marker_depth);
                 state.controls.push(control, body_span)?;
                 if owns_for_in_marker {
-                    state.abrupt_markers.push(AbruptMarker::ForIn);
+                    state.abrupt_markers.push(AbruptMarker::new(
+                        AbruptMarkerKind::ForIn,
+                        state.active_scopes.len(),
+                    ));
                 }
             }
             StatementWork::PopControl => {
@@ -1638,7 +1641,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     });
                 }
                 if control.owns_for_in_marker
-                    && state.abrupt_markers.pop() != Some(AbruptMarker::ForIn)
+                    && state.abrupt_markers.pop().map(|marker| marker.tag())
+                        != Some(AbruptMarkerTag::ForIn)
                 {
                     return Err(LeafCompilationError::SemanticInvariant {
                         invariant: "for-in control owns the innermost abrupt marker",
@@ -1646,21 +1650,26 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     });
                 }
             }
-            StatementWork::PushAbruptMarker(marker) => {
+            StatementWork::PushAbruptMarker(kind) => {
                 state.abrupt_markers.try_reserve(1).map_err(|_| {
                     LeafCompilationError::CapacityExceeded {
                         domain: "statement abrupt-marker stack",
                     }
                 })?;
-                state.abrupt_markers.push(marker);
+                state
+                    .abrupt_markers
+                    .push(AbruptMarker::new(kind, state.active_scopes.len()));
             }
             StatementWork::PopAbruptMarker(expected) => {
-                if state.abrupt_markers.pop() != Some(expected) {
+                if state.abrupt_markers.pop().map(|marker| marker.tag()) != Some(expected) {
                     return Err(LeafCompilationError::SemanticInvariant {
                         invariant: "statement abrupt markers exit in last-in-first-out order",
                         span: Some(body_span),
                     });
                 }
+            }
+            StatementWork::SetCompletion(completion) => {
+                state.completion = completion;
             }
             StatementWork::ForInHead(left) => self.plan_for_in_head(
                 left,
@@ -1907,34 +1916,52 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         flow: &mut PlannedControlFlow,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
+        let crosses_finalizer = abrupt_markers
+            .iter()
+            .any(|marker| matches!(&marker.kind, AbruptMarkerKind::Catch { finalizer: Some(_) }));
+        let has_pending_finally_subroutine = abrupt_markers
+            .iter()
+            .any(|marker| matches!(&marker.kind, AbruptMarkerKind::FinallySubroutine));
+        let has_physical_marker = abrupt_markers.iter().any(|marker| {
+            matches!(
+                &marker.kind,
+                AbruptMarkerKind::Catch { .. } | AbruptMarkerKind::ForIn
+            )
+        });
         if let Some(argument) = &statement.argument {
-            work.try_reserve(abrupt_markers.len().saturating_add(2))
-                .map_err(|_| LeafCompilationError::CapacityExceeded {
-                    domain: "statement work stack",
-                })?;
+            Self::reserve_return_work(abrupt_markers, work)?;
             work.push(StatementWork::Emit(PlannedInstruction::new(
                 FinalOpcode::Return,
                 Operands::None,
                 statement.span,
             )));
-            for marker in abrupt_markers {
-                work.push(StatementWork::Emit(PlannedInstruction::new(
-                    match marker {
-                        AbruptMarker::Catch => FinalOpcode::NipCatch,
-                        AbruptMarker::ForIn => FinalOpcode::Nip,
-                    },
-                    Operands::None,
-                    statement.span,
-                )));
-            }
+            Self::schedule_value_return_cleanup(abrupt_markers, statement.span, work);
             work.push(StatementWork::Expression(argument));
+        } else if crosses_finalizer || (has_pending_finally_subroutine && has_physical_marker) {
+            Self::reserve_return_work(abrupt_markers, work)?;
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Return,
+                Operands::None,
+                statement.span,
+            )));
+            Self::schedule_value_return_cleanup(abrupt_markers, statement.span, work);
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                statement.span,
+            )));
         } else {
-            for _ in abrupt_markers.iter().rev() {
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::Drop,
-                    Operands::None,
-                    statement.span,
-                ))?;
+            for marker in abrupt_markers.iter().rev() {
+                match &marker.kind {
+                    AbruptMarkerKind::Catch { .. } | AbruptMarkerKind::ForIn => {
+                        flow.emit(PlannedInstruction::new(
+                            FinalOpcode::Drop,
+                            Operands::None,
+                            statement.span,
+                        ))?;
+                    }
+                    AbruptMarkerKind::FinallySubroutine => {}
+                }
             }
             flow.emit(PlannedInstruction::new(
                 FinalOpcode::ReturnUndef,
@@ -1945,6 +1972,57 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    fn reserve_return_work<'statement>(
+        abrupt_markers: &[AbruptMarker],
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        work.try_reserve(abrupt_markers.len().saturating_mul(3).saturating_add(2))
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement work stack",
+            })
+    }
+
+    fn schedule_value_return_cleanup<'statement>(
+        abrupt_markers: &[AbruptMarker],
+        span: Span,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) {
+        for marker in abrupt_markers {
+            match &marker.kind {
+                AbruptMarkerKind::Catch { finalizer } => {
+                    if let Some(finalizer) = finalizer {
+                        work.push(StatementWork::Branch {
+                            kind: BranchKind::Gosub,
+                            target: finalizer.clone(),
+                            span,
+                        });
+                    }
+                    work.push(StatementWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::NipCatch,
+                        Operands::None,
+                        span,
+                    )));
+                }
+                AbruptMarkerKind::ForIn => {
+                    work.push(StatementWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Nip,
+                        Operands::None,
+                        span,
+                    )));
+                }
+                AbruptMarkerKind::FinallySubroutine => {
+                    for _ in 0..2 {
+                        work.push(StatementWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::Nip,
+                            Operands::None,
+                            span,
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
     fn schedule_throw_statement<'statement>(
         statement: &'statement ThrowStatement<'arena>,
         abrupt_markers: &[AbruptMarker],
@@ -1952,13 +2030,21 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     ) -> Result<(), LeafCompilationError> {
         let removable_markers = abrupt_markers
             .iter()
-            .rposition(|marker| *marker == AbruptMarker::Catch)
+            .rposition(|marker| marker.tag() == AbruptMarkerTag::Catch)
             .map_or(abrupt_markers, |catch| &abrupt_markers[catch + 1..]);
-        let for_in_markers = removable_markers
+        let cleanup_instructions = removable_markers
             .iter()
-            .filter(|marker| **marker == AbruptMarker::ForIn)
-            .count();
-        work.try_reserve(for_in_markers.saturating_add(2))
+            .try_fold(0_usize, |count, marker| {
+                count.checked_add(match marker.tag() {
+                    AbruptMarkerTag::ForIn => 1,
+                    AbruptMarkerTag::FinallySubroutine => 2,
+                    AbruptMarkerTag::Catch => 0,
+                })
+            })
+            .ok_or(LeafCompilationError::CapacityExceeded {
+                domain: "statement throw cleanup",
+            })?;
+        work.try_reserve(cleanup_instructions.saturating_add(2))
             .map_err(|_| LeafCompilationError::CapacityExceeded {
                 domain: "statement work stack",
             })?;
@@ -1967,12 +2053,19 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Operands::None,
             statement.span,
         )));
-        for _ in 0..for_in_markers {
-            work.push(StatementWork::Emit(PlannedInstruction::new(
-                FinalOpcode::Nip,
-                Operands::None,
-                statement.span,
-            )));
+        for marker in removable_markers {
+            let nips = match marker.tag() {
+                AbruptMarkerTag::ForIn => 1,
+                AbruptMarkerTag::FinallySubroutine => 2,
+                AbruptMarkerTag::Catch => 0,
+            };
+            for _ in 0..nips {
+                work.push(StatementWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Nip,
+                    Operands::None,
+                    statement.span,
+                )));
+            }
         }
         work.push(StatementWork::Expression(&statement.argument));
         Ok(())
@@ -1986,8 +2079,18 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         state: &mut StatementPlanningState<'statement, 'arena>,
     ) -> Result<(), LeafCompilationError> {
         if let Some(finalizer) = &statement.finalizer {
-            return unsupported(UnsupportedLeafFeature::UnsupportedBody, finalizer.span);
+            return self.plan_try_finally_statement(statement, finalizer, layout, flow, state);
         }
+        self.plan_catch_only_statement(statement, layout, flow, state)
+    }
+
+    fn plan_catch_only_statement<'statement>(
+        &self,
+        statement: &'statement TryStatement<'arena>,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+        state: &mut StatementPlanningState<'statement, 'arena>,
+    ) -> Result<(), LeafCompilationError> {
         let handler = statement
             .handler
             .as_ref()
@@ -2034,14 +2137,16 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         )));
         state
             .work
-            .push(StatementWork::PopAbruptMarker(AbruptMarker::Catch));
+            .push(StatementWork::PopAbruptMarker(AbruptMarkerTag::Catch));
         state.work.push(StatementWork::PopStatementStackBase {
             span: statement.span,
         });
         state.work.push(StatementWork::VisitBlock(&statement.block));
         state
             .work
-            .push(StatementWork::PushAbruptMarker(AbruptMarker::Catch));
+            .push(StatementWork::PushAbruptMarker(AbruptMarkerKind::Catch {
+                finalizer: None,
+            }));
         state.work.push(StatementWork::PushStatementStackBase {
             span: statement.span,
         });
@@ -2051,6 +2156,220 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             span: statement.span,
         });
         Ok(())
+    }
+
+    fn plan_try_finally_statement<'statement>(
+        &self,
+        statement: &'statement TryStatement<'arena>,
+        finalizer: &'statement BlockStatement<'arena>,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+        state: &mut StatementPlanningState<'statement, 'arena>,
+    ) -> Result<(), LeafCompilationError> {
+        let labels = TryFinallyLabels {
+            handler: flow.new_statement_label_with_offset(statement.span, 1)?,
+            finalizer: flow.new_statement_label_with_offset(finalizer.span, 2)?,
+            done: flow.new_statement_label(statement.span)?,
+        };
+        let catch_plan = self.create_try_finally_catch_plan(statement, layout, flow)?;
+
+        state
+            .work
+            .try_reserve(if catch_plan.is_some() { 48 } else { 32 })
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement work stack",
+            })?;
+
+        Self::push_finalizer_subroutine(&mut state.work, finalizer, &labels, state.completion);
+        Self::push_try_finally_handler_path(&mut state.work, statement, catch_plan, &labels);
+        Self::push_try_finally_body(&mut state.work, statement, &labels);
+        Ok(())
+    }
+
+    fn create_try_finally_catch_plan<'statement>(
+        &self,
+        statement: &'statement TryStatement<'arena>,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<Option<TryFinallyCatchPlan<'statement, 'arena>>, LeafCompilationError> {
+        let Some(handler) = &statement.handler else {
+            return Ok(None);
+        };
+        let scope =
+            self.created_scope(handler.scope_id.get(), handler.node_id.get(), handler.span)?;
+        let body_scope = self.created_scope(
+            handler.body.scope_id.get(),
+            handler.body.node_id.get(),
+            handler.body.span,
+        )?;
+        let binding = self.plan_catch_binding(handler, body_scope, layout)?;
+        let rethrow = flow.new_statement_label_with_offset(handler.body.span, 1)?;
+        Ok(Some(TryFinallyCatchPlan {
+            handler,
+            scope,
+            binding,
+            rethrow,
+        }))
+    }
+
+    fn push_finalizer_subroutine<'statement>(
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+        finalizer: &'statement BlockStatement<'arena>,
+        labels: &TryFinallyLabels,
+        completion: StatementCompletion,
+    ) {
+        work.push(StatementWork::Bind(labels.done.clone()));
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Ret,
+            Operands::None,
+            finalizer.span,
+        )));
+        for _ in 0..2 {
+            work.push(StatementWork::PopStatementStackBase {
+                span: finalizer.span,
+            });
+        }
+        work.push(StatementWork::PopAbruptMarker(
+            AbruptMarkerTag::FinallySubroutine,
+        ));
+        work.push(StatementWork::SetCompletion(completion));
+        work.push(StatementWork::VisitBlock(finalizer));
+        work.push(StatementWork::SetCompletion(StatementCompletion::Discard));
+        work.push(StatementWork::PushAbruptMarker(
+            AbruptMarkerKind::FinallySubroutine,
+        ));
+        for _ in 0..2 {
+            work.push(StatementWork::PushStatementStackBase {
+                span: finalizer.span,
+            });
+        }
+        work.push(StatementWork::Bind(labels.finalizer.clone()));
+    }
+
+    fn push_try_finally_handler_path<'statement>(
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+        statement: &'statement TryStatement<'arena>,
+        catch_plan: Option<TryFinallyCatchPlan<'statement, 'arena>>,
+        labels: &TryFinallyLabels,
+    ) {
+        if let Some(catch) = catch_plan {
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Throw,
+                Operands::None,
+                catch.handler.body.span,
+            )));
+            work.push(StatementWork::Branch {
+                kind: BranchKind::Gosub,
+                target: labels.finalizer.clone(),
+                span: catch.handler.body.span,
+            });
+            work.push(StatementWork::Bind(catch.rethrow.clone()));
+
+            Self::push_normal_finalizer_path(
+                work,
+                &labels.finalizer,
+                &labels.done,
+                catch.handler.body.span,
+            );
+            work.push(StatementWork::PopScope(catch.scope));
+            work.push(StatementWork::PopAbruptMarker(AbruptMarkerTag::Catch));
+            work.push(StatementWork::PopStatementStackBase {
+                span: catch.handler.body.span,
+            });
+            work.push(StatementWork::VisitBlock(&catch.handler.body));
+            work.push(StatementWork::PushAbruptMarker(AbruptMarkerKind::Catch {
+                finalizer: Some(labels.finalizer.clone()),
+            }));
+            work.push(StatementWork::PushStatementStackBase {
+                span: catch.handler.body.span,
+            });
+            work.push(StatementWork::Branch {
+                kind: BranchKind::Catch,
+                target: catch.rethrow,
+                span: catch.handler.body.span,
+            });
+            work.push(StatementWork::Emit(catch.binding));
+            work.push(StatementWork::PushScope {
+                scope: catch.scope,
+                creator: catch.handler.node_id.get(),
+                span: catch.handler.span,
+            });
+            work.push(StatementWork::Bind(labels.handler.clone()));
+        } else {
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Throw,
+                Operands::None,
+                statement.span,
+            )));
+            work.push(StatementWork::Branch {
+                kind: BranchKind::Gosub,
+                target: labels.finalizer.clone(),
+                span: statement.span,
+            });
+            work.push(StatementWork::Bind(labels.handler.clone()));
+        }
+    }
+
+    fn push_try_finally_body<'statement>(
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+        statement: &'statement TryStatement<'arena>,
+        labels: &TryFinallyLabels,
+    ) {
+        Self::push_normal_finalizer_path(
+            work,
+            &labels.finalizer,
+            &labels.done,
+            statement.block.span,
+        );
+        work.push(StatementWork::PopAbruptMarker(AbruptMarkerTag::Catch));
+        work.push(StatementWork::PopStatementStackBase {
+            span: statement.block.span,
+        });
+        work.push(StatementWork::VisitBlock(&statement.block));
+        work.push(StatementWork::PushAbruptMarker(AbruptMarkerKind::Catch {
+            finalizer: Some(labels.finalizer.clone()),
+        }));
+        work.push(StatementWork::PushStatementStackBase {
+            span: statement.block.span,
+        });
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Catch,
+            target: labels.handler.clone(),
+            span: statement.span,
+        });
+    }
+
+    fn push_normal_finalizer_path<'statement>(
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+        finalizer: &CompilerLabel,
+        done: &CompilerLabel,
+        span: Span,
+    ) {
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Goto,
+            target: done.clone(),
+            span,
+        });
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            span,
+        )));
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Gosub,
+            target: finalizer.clone(),
+            span,
+        });
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Undefined,
+            Operands::None,
+            span,
+        )));
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            span,
+        )));
     }
 
     fn plan_catch_binding(
@@ -2853,9 +3172,6 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 span: Some(statement_span),
             });
         }
-        for scope in state.active_scopes[control.scope_depth..].iter().rev() {
-            self.plan_scope_exit(layout.executable, *scope, layout, flow)?;
-        }
         let abrupt_marker_depth =
             control
                 .abrupt_marker_depth
@@ -2869,14 +3185,100 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 span: Some(statement_span),
             },
         )?;
-        for _ in crossed_markers.iter().rev() {
-            flow.emit(PlannedInstruction::new(
-                FinalOpcode::Drop,
-                Operands::None,
-                statement_span,
-            ))?;
+        let open_scope_depth = self.plan_crossed_abrupt_marker_exits(
+            crossed_markers,
+            &state.active_scopes,
+            statement_span,
+            layout,
+            flow,
+        )?;
+        if control.scope_depth > open_scope_depth {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: jump.scope_invariant(),
+                span: Some(statement_span),
+            });
+        }
+        for scope in state.active_scopes[control.scope_depth..open_scope_depth]
+            .iter()
+            .rev()
+        {
+            self.plan_scope_exit(layout.executable, *scope, layout, flow)?;
         }
         flow.branch(BranchKind::Goto, target, statement_span)
+    }
+
+    fn plan_crossed_abrupt_marker_exits(
+        &self,
+        crossed_markers: &[AbruptMarker],
+        active_scopes: &[ScopeId],
+        statement_span: Span,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<usize, LeafCompilationError> {
+        let mut open_scope_depth = active_scopes.len();
+        for marker in crossed_markers.iter().rev() {
+            if marker.scope_depth > open_scope_depth {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "abrupt marker scope depth remains active",
+                    span: Some(statement_span),
+                });
+            }
+            for scope in active_scopes[marker.scope_depth..open_scope_depth]
+                .iter()
+                .rev()
+            {
+                self.plan_scope_exit(layout.executable, *scope, layout, flow)?;
+            }
+            open_scope_depth = marker.scope_depth;
+            Self::emit_abrupt_marker_cleanup(&marker.kind, statement_span, flow)?;
+        }
+        Ok(open_scope_depth)
+    }
+
+    fn emit_abrupt_marker_cleanup(
+        marker: &AbruptMarkerKind,
+        span: Span,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        match marker {
+            AbruptMarkerKind::Catch { finalizer: None } | AbruptMarkerKind::ForIn => {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    span,
+                ))?;
+            }
+            AbruptMarkerKind::Catch {
+                finalizer: Some(finalizer),
+            } => {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    span,
+                ))?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Undefined,
+                    Operands::None,
+                    span,
+                ))?;
+                flow.branch(BranchKind::Gosub, finalizer, span)?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    span,
+                ))?;
+            }
+            AbruptMarkerKind::FinallySubroutine => {
+                for _ in 0..2 {
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::Drop,
+                        Operands::None,
+                        span,
+                    ))?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn created_scope(
@@ -6155,8 +6557,9 @@ enum StatementWork<'statement, 'arena> {
     },
     PushControl(ControlRegion<'statement>),
     PopControl,
-    PushAbruptMarker(AbruptMarker),
-    PopAbruptMarker(AbruptMarker),
+    PushAbruptMarker(AbruptMarkerKind),
+    PopAbruptMarker(AbruptMarkerTag),
+    SetCompletion(StatementCompletion),
     ForInHead(&'statement ForStatementLeft<'arena>),
     ForInAssignment(&'statement ForStatementLeft<'arena>),
     Declaration(&'statement VariableDeclaration<'arena>),
@@ -6198,10 +6601,51 @@ struct StatementPlanningState<'statement, 'arena> {
     completion: StatementCompletion,
 }
 
+struct TryFinallyLabels {
+    handler: CompilerLabel,
+    finalizer: CompilerLabel,
+    done: CompilerLabel,
+}
+
+struct TryFinallyCatchPlan<'statement, 'arena> {
+    handler: &'statement CatchClause<'arena>,
+    scope: ScopeId,
+    binding: PlannedInstruction,
+    rethrow: CompilerLabel,
+}
+
+#[derive(Clone)]
+struct AbruptMarker {
+    kind: AbruptMarkerKind,
+    scope_depth: usize,
+}
+
+impl AbruptMarker {
+    const fn new(kind: AbruptMarkerKind, scope_depth: usize) -> Self {
+        Self { kind, scope_depth }
+    }
+
+    const fn tag(&self) -> AbruptMarkerTag {
+        match self.kind {
+            AbruptMarkerKind::Catch { .. } => AbruptMarkerTag::Catch,
+            AbruptMarkerKind::ForIn => AbruptMarkerTag::ForIn,
+            AbruptMarkerKind::FinallySubroutine => AbruptMarkerTag::FinallySubroutine,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum AbruptMarkerKind {
+    Catch { finalizer: Option<CompilerLabel> },
+    ForIn,
+    FinallySubroutine,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AbruptMarker {
+enum AbruptMarkerTag {
     Catch,
     ForIn,
+    FinallySubroutine,
 }
 
 #[derive(Clone, Copy)]
@@ -8062,7 +8506,7 @@ impl PlannedControlFlow {
         self.instruction_spans.push(instruction.span);
         self.last_instruction_can_fall_through = Some(!matches!(
             instruction.opcode,
-            FinalOpcode::Return | FinalOpcode::ReturnUndef | FinalOpcode::Throw
+            FinalOpcode::Ret | FinalOpcode::Return | FinalOpcode::ReturnUndef | FinalOpcode::Throw
         ));
         self.label_bound_after_last_instruction = false;
         Ok(())

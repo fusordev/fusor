@@ -26,6 +26,10 @@ const DEFAULT_MAX_SOURCE_MAPPINGS: u64 = 8_388_608;
 const DEFAULT_MAX_FRAME_STATE_ENTRIES: u64 = 33_554_432;
 const DEFAULT_MAX_POLICY_TRANSFERS: u64 = 33_554_432;
 
+/// Maximum `gosub` sites accepted in one function by the pinned compatibility
+/// profile.
+pub const MAX_GOSUB_SITES_PER_FUNCTION: u32 = 65_534;
+
 /// Source declaration category retained by executable compiler metadata.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CompilerBindingKind {
@@ -647,6 +651,7 @@ pub struct VerifiedFunctionMetadata {
     variables: Arc<[VariableDefinition]>,
     closures: Arc<[ClosureVariableDefinition]>,
     source: VerifiedCompilerSource,
+    internal_stack: InternalStackCertificate,
 }
 
 impl VerifiedFunctionMetadata {
@@ -1401,6 +1406,35 @@ pub enum BytecodeVerificationErrorKind {
         /// Rejected opcode.
         opcode: FinalOpcode,
     },
+    /// A function contains more `gosub` sites than the pinned compatibility
+    /// profile permits.
+    GosubSiteCountOutOfRange {
+        /// Observed `gosub` sites in the function.
+        sites: u64,
+        /// Inclusive compatibility maximum.
+        maximum: u32,
+    },
+    /// An opcode forged, consumed, copied, stored, called, returned, or
+    /// reordered an internal finally return-address marker.
+    FinallyReturnStackMismatch {
+        /// Final bytecode position.
+        pc: BytecodePc,
+        /// Opcode whose typed inputs were invalid.
+        opcode: FinalOpcode,
+    },
+    /// Control flow entered a finalizer ordinarily, merged distinct finalizer
+    /// identities, or mixed a finally return marker with a JavaScript value.
+    FinallyReturnJoinMismatch {
+        /// Join target.
+        target: BytecodePc,
+        /// Incoming edge that disagreed with the established typed stack.
+        incoming_from: BytecodePc,
+    },
+    /// A terminal path retained a malformed internal finally return marker.
+    FinallyReturnMarkerAtExit {
+        /// Terminal bytecode position.
+        pc: BytecodePc,
+    },
     /// An opcode forged, consumed, copied, stored, called, returned, or
     /// reordered an internal `for-in` iterator marker.
     ForInIteratorStackMismatch {
@@ -1697,6 +1731,25 @@ impl fmt::Display for BytecodeVerificationErrorKind {
                     "opcode {opcode:?} at PC {pc} is outside compiler profile"
                 )
             }
+            Self::GosubSiteCountOutOfRange { sites, maximum } => write!(
+                formatter,
+                "gosub site count {sites} exceeds compatibility maximum {maximum}"
+            ),
+            Self::FinallyReturnStackMismatch { pc, opcode } => write!(
+                formatter,
+                "opcode {opcode:?} at PC {pc} violates the typed finally return-address stack"
+            ),
+            Self::FinallyReturnJoinMismatch {
+                target,
+                incoming_from,
+            } => write!(
+                formatter,
+                "typed finally return-address stack at PC {target} disagrees with the edge from PC {incoming_from}"
+            ),
+            Self::FinallyReturnMarkerAtExit { pc } => write!(
+                formatter,
+                "terminal at PC {pc} retains a malformed finally return-address marker"
+            ),
             Self::ForInIteratorStackMismatch { pc, opcode } => write!(
                 formatter,
                 "opcode {opcode:?} at PC {pc} violates the typed for-in iterator stack"
@@ -2091,21 +2144,23 @@ fn verify_function_metadata(
         function,
         &metadata.closures,
     )?;
+    verify_source(id, flow, metadata)?;
+    verify_supported_opcodes(id, flow, metadata.executable_kind, authority_kind)?;
+    let mut internal_stack = verify_internal_operand_stack(id, function, limits, usage)?;
     let realm_global_initializer_prefix = verify_realm_global_function_initializers(
         id,
         graph.root_id(),
         function,
         &metadata.closures,
+        &internal_stack,
     )?;
     let initializer_sites = verify_function_initializers(
         id,
         function,
         &metadata.variables,
         realm_global_initializer_prefix,
+        &internal_stack,
     )?;
-    verify_source(id, flow, metadata)?;
-    verify_supported_opcodes(id, flow, metadata.executable_kind, authority_kind)?;
-    let mut internal_stack = verify_internal_operand_stack(id, function, limits, usage)?;
     classify_for_in_declarative_local_puts(
         id,
         flow,
@@ -2150,6 +2205,7 @@ fn verify_function_metadata(
             name_span: metadata.source.name_span,
             mappings: Arc::clone(&metadata.source.mappings),
         },
+        internal_stack,
     })
 }
 
@@ -2500,6 +2556,7 @@ fn verify_function_initializers(
     function: &VerifiedCompilerFunction,
     variables: &[VariableDefinition],
     entry_prefix: usize,
+    internal_stack: &InternalStackCertificate,
 ) -> Result<VerifiedFunctionInitializers, BytecodeVerificationError> {
     let flow = function.control_flow();
     let instructions = flow.instructions();
@@ -2509,16 +2566,9 @@ fn verify_function_initializers(
         0_u32,
         BytecodeGraphResource::SourceMappings,
     )?;
-    for verified in instructions {
-        let successors = verified.successors();
-        for successor in [
-            successors.fallthrough(),
-            successors.branch_target(),
-            successors.jump_target(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+    for index in 0..instructions.len() {
+        for edge in internal_stack.effective_successors(instructions, index) {
+            let successor = edge.target;
             let count = &mut predecessor_counts[successor.get() as usize];
             *count = count.saturating_add(1);
         }
@@ -2565,11 +2615,7 @@ fn verify_function_initializers(
             continue;
         };
         if definition.function_initializer != Some(constant)
-            || instructions[index]
-                .successors()
-                .fallthrough()
-                .map(InstructionIndex::get)
-                != Some(usize_to_u32(index + 1))
+            || !internal_stack.has_effective_successor(instructions, index, usize_to_u32(index + 1))
             || predecessor_counts[index + 1] != 1
         {
             continue;
@@ -2595,6 +2641,7 @@ fn verify_function_initializers(
         &closure_definitions,
         &put_definitions,
         argument_count,
+        internal_stack,
     )?;
 
     let first_instantiation_definition =
@@ -2616,11 +2663,11 @@ fn verify_function_initializers(
             }
             let expected_predecessors = u32::from(prefix_index != 0);
             if predecessor_counts[prefix_index] != expected_predecessors
-                || verified
-                    .successors()
-                    .fallthrough()
-                    .map(InstructionIndex::get)
-                    != Some(usize_to_u32(prefix_index + 1))
+                || !internal_stack.has_effective_successor(
+                    instructions,
+                    prefix_index,
+                    usize_to_u32(prefix_index + 1),
+                )
             {
                 if let Some(first_definition) = first_instantiation_definition {
                     return Err(BytecodeVerificationError::function(
@@ -2698,7 +2745,11 @@ fn verify_function_initializers(
     })
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 fn verify_scope_function_initializer_groups(
     id: FunctionTemplateId,
     variables: &[VariableDefinition],
@@ -2707,6 +2758,7 @@ fn verify_scope_function_initializer_groups(
     closure_definitions: &[Option<usize>],
     put_definitions: &[Option<usize>],
     argument_count: usize,
+    internal_stack: &InternalStackCertificate,
 ) -> Result<(), BytecodeVerificationError> {
     let mut activation_epoch = try_filled_vec(
         id,
@@ -2802,11 +2854,11 @@ fn verify_scope_function_initializer_groups(
                 ));
             }
             if edge + 1 < pair_end
-                && instructions[edge]
-                    .successors()
-                    .fallthrough()
-                    .map(InstructionIndex::get)
-                    != Some(usize_to_u32(edge + 1))
+                && !internal_stack.has_effective_successor(
+                    instructions,
+                    edge,
+                    usize_to_u32(edge + 1),
+                )
             {
                 return Err(function_initializer_placement_error(
                     id,
@@ -3008,6 +3060,7 @@ fn verify_realm_global_function_initializers(
     root: FunctionTemplateId,
     function: &VerifiedCompilerFunction,
     closures: &[ClosureVariableDefinition],
+    internal_stack: &InternalStackCertificate,
 ) -> Result<usize, BytecodeVerificationError> {
     if !closures
         .iter()
@@ -3038,16 +3091,9 @@ fn verify_realm_global_function_initializers(
         0_u32,
         BytecodeGraphResource::SourceMappings,
     )?;
-    for instruction in instructions {
-        let successors = instruction.successors();
-        for successor in [
-            successors.fallthrough(),
-            successors.branch_target(),
-            successors.jump_target(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+    for index in 0..instructions.len() {
+        for edge in internal_stack.effective_successors(instructions, index) {
+            let successor = edge.target;
             predecessor_counts[successor.get() as usize] =
                 predecessor_counts[successor.get() as usize].saturating_add(1);
         }
@@ -3082,11 +3128,7 @@ fn verify_realm_global_function_initializers(
             continue;
         };
         if definition.function_initializer != Some(constant)
-            || instructions[index]
-                .successors()
-                .fallthrough()
-                .map(InstructionIndex::get)
-                != Some(usize_to_u32(index + 1))
+            || !internal_stack.has_effective_successor(instructions, index, usize_to_u32(index + 1))
             || predecessor_counts[index + 1] != 1
         {
             continue;
@@ -3588,22 +3630,16 @@ fn verify_method_definitions(
     for (parent_index, parent) in graph.functions().iter().enumerate() {
         let parent_id = function_id(parent_index)?;
         let instructions = parent.control_flow().instructions();
+        let internal_stack = &metadata[parent_index].internal_stack;
         let mut predecessor_counts = try_filled_vec(
             parent_id,
             instructions.len(),
             0_u32,
             BytecodeGraphResource::SourceMappings,
         )?;
-        for instruction in instructions {
-            let successors = instruction.successors();
-            for successor in [
-                successors.fallthrough(),
-                successors.branch_target(),
-                successors.jump_target(),
-            ]
-            .into_iter()
-            .flatten()
-            {
+        for index in 0..instructions.len() {
+            for edge in internal_stack.effective_successors(instructions, index) {
+                let successor = edge.target;
                 predecessor_counts[successor.get() as usize] =
                     predecessor_counts[successor.get() as usize].saturating_add(1);
             }
@@ -3619,6 +3655,7 @@ fn verify_method_definitions(
                     metadata,
                     instructions,
                     &predecessor_counts,
+                    internal_stack,
                     index,
                 )
                 .is_none()
@@ -3656,6 +3693,7 @@ fn verify_method_definitions(
                     metadata,
                     instructions,
                     &predecessor_counts,
+                    internal_stack,
                     definition_index,
                 )
             });
@@ -3688,7 +3726,7 @@ fn verify_method_definitions(
                     | FinalOpcode::DefineArrayEl
             )
         }) {
-            verify_object_definition_provenance(parent_id, parent, limits, usage)?;
+            verify_object_definition_provenance(parent_id, parent, internal_stack, limits, usage)?;
         }
     }
 
@@ -3716,6 +3754,7 @@ fn method_definition_pair(
     metadata: &[VerifiedFunctionMetadata],
     instructions: &[VerifiedInstruction],
     predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
     definition_index: usize,
 ) -> Option<(FunctionTemplateId, u8)> {
     let definition = instructions.get(definition_index)?;
@@ -3733,12 +3772,11 @@ fn method_definition_pair(
     }
     let closure_index = definition_index.checked_sub(1)?;
     let closure = instructions.get(closure_index)?;
-    if closure
-        .successors()
-        .fallthrough()
-        .map(InstructionIndex::get)
-        != Some(usize_to_u32(definition_index))
-    {
+    if !internal_stack.has_effective_successor(
+        instructions,
+        closure_index,
+        usize_to_u32(definition_index),
+    ) {
         return None;
     }
     let closure_instruction = closure.decoded().instruction();
@@ -3784,6 +3822,7 @@ enum ObjectDefinitionProvenance {
 fn verify_object_definition_provenance(
     id: FunctionTemplateId,
     function: &VerifiedCompilerFunction,
+    internal_stack: &InternalStackCertificate,
     limits: BytecodeGraphVerificationLimits,
     usage: &mut BytecodeGraphUsage,
 ) -> Result<(), BytecodeVerificationError> {
@@ -3815,7 +3854,9 @@ fn verify_object_definition_provenance(
     let mut evaluations = 0_u64;
     loop {
         if work.is_empty() {
-            while entries.get(next_seed).is_some_and(Option::is_some) {
+            while entries.get(next_seed).is_some_and(Option::is_some)
+                || internal_stack.is_finally_target(next_seed)
+            {
                 next_seed = next_seed.saturating_add(1);
             }
             if next_seed == entries.len() {
@@ -3874,19 +3915,30 @@ fn verify_object_definition_provenance(
             }
             _ => {}
         }
-        if !transfer_object_definition_provenance(id, index, decoded, &mut state)? {
+        if !transfer_object_definition_provenance(
+            id,
+            index,
+            decoded,
+            internal_stack.nip_catch_transform(index),
+            &mut state,
+        )? {
             continue;
         }
 
-        let successors = instructions[index].successors();
-        for successor in [
-            successors.fallthrough(),
-            successors.branch_target(),
-            successors.jump_target(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for edge in internal_stack.effective_successors(instructions, index) {
+            let successor = edge.target;
+            if edge.enters_finally {
+                state.try_reserve(1).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::AllocationFailed {
+                            resource: BytecodeGraphResource::FrameStateEntries,
+                            requested: 1,
+                        },
+                    )
+                })?;
+                state.push(ObjectDefinitionProvenance::Unknown);
+            }
             charge_policy_transfers(
                 id,
                 &mut evaluations,
@@ -3905,6 +3957,9 @@ fn verify_object_definition_provenance(
                 limits.max_frame_state_entries,
                 usage,
             )?;
+            if edge.enters_finally {
+                state.pop();
+            }
         }
     }
     charge(
@@ -3919,9 +3974,14 @@ fn transfer_object_definition_provenance(
     id: FunctionTemplateId,
     instruction_index: usize,
     decoded: crate::DecodedInstruction,
+    nip_catch_transform: Option<CertifiedNipCatchTransform>,
     state: &mut Vec<ObjectDefinitionProvenance>,
 ) -> Result<bool, BytecodeVerificationError> {
     let instruction = decoded.instruction();
+    if instruction.opcode() == FinalOpcode::NipCatch {
+        apply_nip_catch_provenance(id, decoded.pc(), nip_catch_transform, state)?;
+        return Ok(true);
+    }
     let effect = instruction
         .stack_effect()
         .map_err(|_| object_definition_error(id, decoded.pc()))?;
@@ -4012,6 +4072,28 @@ fn transfer_object_definition_provenance(
         return Err(object_definition_error(id, decoded.pc()));
     }
     Ok(true)
+}
+
+fn apply_nip_catch_provenance(
+    id: FunctionTemplateId,
+    pc: BytecodePc,
+    transform: Option<CertifiedNipCatchTransform>,
+    state: &mut Vec<ObjectDefinitionProvenance>,
+) -> Result<(), BytecodeVerificationError> {
+    let Some(transform) = transform else {
+        return Err(object_definition_error(id, pc));
+    };
+    let input_depth = transform.input_depth as usize;
+    let retained_prefix = transform.retained_prefix as usize;
+    if state.len() != input_depth || retained_prefix >= input_depth {
+        return Err(object_definition_error(id, pc));
+    }
+    let value = *state
+        .last()
+        .ok_or_else(|| object_definition_error(id, pc))?;
+    state.truncate(retained_prefix);
+    state.push(value);
+    Ok(())
 }
 
 // A converted key is also a temporal anchor: the fresh object must remain
@@ -4258,6 +4340,8 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Throw
             | FinalOpcode::Catch
             | FinalOpcode::NipCatch
+            | FinalOpcode::Gosub
+            | FinalOpcode::Ret
             | FinalOpcode::GetVarUndef
             | FinalOpcode::GetVar
             | FinalOpcode::PutVar
@@ -4404,15 +4488,70 @@ enum InternalStackValue {
         handler: InstructionIndex,
     },
     CatchException(BytecodePc),
+    FinallyPending {
+        target: InstructionIndex,
+        original: JavaScriptStackValue,
+    },
+    FinallyReturn {
+        target: InstructionIndex,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JavaScriptStackValue {
+    Ordinary,
+    ForInKey(BytecodePc),
+    ForInDone(BytecodePc),
+    ForInHeadKey(BytecodePc),
+    CatchException(BytecodePc),
+}
+
+impl JavaScriptStackValue {
+    const fn from_internal(value: InternalStackValue) -> Option<Self> {
+        match value {
+            InternalStackValue::Ordinary => Some(Self::Ordinary),
+            InternalStackValue::ForInKey(site) => Some(Self::ForInKey(site)),
+            InternalStackValue::ForInDone(site) => Some(Self::ForInDone(site)),
+            InternalStackValue::ForInHeadKey(site) => Some(Self::ForInHeadKey(site)),
+            InternalStackValue::CatchException(site) => Some(Self::CatchException(site)),
+            InternalStackValue::ForInIterator(_)
+            | InternalStackValue::CatchMarker { .. }
+            | InternalStackValue::FinallyPending { .. }
+            | InternalStackValue::FinallyReturn { .. } => None,
+        }
+    }
+
+    const fn into_internal(self) -> InternalStackValue {
+        match self {
+            Self::Ordinary => InternalStackValue::Ordinary,
+            Self::ForInKey(site) => InternalStackValue::ForInKey(site),
+            Self::ForInDone(site) => InternalStackValue::ForInDone(site),
+            Self::ForInHeadKey(site) => InternalStackValue::ForInHeadKey(site),
+            Self::CatchException(site) => InternalStackValue::CatchException(site),
+        }
+    }
 }
 
 impl InternalStackValue {
     const fn is_javascript_value(self) -> bool {
-        !matches!(self, Self::ForInIterator(_) | Self::CatchMarker { .. })
+        !matches!(
+            self,
+            Self::ForInIterator(_)
+                | Self::CatchMarker { .. }
+                | Self::FinallyPending { .. }
+                | Self::FinallyReturn { .. }
+        )
     }
 
     const fn is_catch_value(self) -> bool {
         matches!(self, Self::CatchMarker { .. } | Self::CatchException(_))
+    }
+
+    const fn is_finally_value(self) -> bool {
+        matches!(
+            self,
+            Self::FinallyPending { .. } | Self::FinallyReturn { .. }
+        )
     }
 }
 
@@ -4427,10 +4566,19 @@ struct CertifiedCatchLocalPut {
     local: u32,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CertifiedNipCatchTransform {
+    input_depth: u32,
+    retained_prefix: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct InternalStackCertificate {
     local_key_puts: Vec<Option<CertifiedForInLocalPut>>,
     catch_local_puts: Vec<Option<CertifiedCatchLocalPut>>,
+    nip_catch_transforms: Vec<Option<CertifiedNipCatchTransform>>,
+    finally_continuations: Vec<Vec<InstructionIndex>>,
+    ret_finalizers: Vec<Option<InstructionIndex>>,
 }
 
 impl InternalStackCertificate {
@@ -4449,6 +4597,43 @@ impl InternalStackCertificate {
             .flatten()
             .is_some_and(|certificate| certificate.local == local)
     }
+
+    fn nip_catch_transform(&self, instruction: usize) -> Option<CertifiedNipCatchTransform> {
+        self.nip_catch_transforms
+            .get(instruction)
+            .copied()
+            .flatten()
+    }
+
+    fn effective_successors<'a>(
+        &'a self,
+        instructions: &'a [VerifiedInstruction],
+        instruction: usize,
+    ) -> EffectiveSuccessors<'a> {
+        let ret_finalizer = self.ret_finalizers.get(instruction).copied().flatten();
+        effective_successors(
+            instructions,
+            instruction,
+            &self.finally_continuations,
+            ret_finalizer,
+        )
+    }
+
+    fn has_effective_successor(
+        &self,
+        instructions: &[VerifiedInstruction],
+        instruction: usize,
+        target: u32,
+    ) -> bool {
+        self.effective_successors(instructions, instruction)
+            .any(|edge| edge.target.get() == target)
+    }
+
+    fn is_finally_target(&self, instruction: usize) -> bool {
+        self.finally_continuations
+            .get(instruction)
+            .is_some_and(|continuations| !continuations.is_empty())
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -4466,6 +4651,98 @@ struct ForInLocalPutSummary {
 struct InternalStackTransfer {
     normal_completion: bool,
     iteration_branch_key: Option<BytecodePc>,
+    ret_finalizer: Option<InstructionIndex>,
+}
+
+#[derive(Clone, Copy)]
+struct EffectiveEdge {
+    target: InstructionIndex,
+    is_branch_target: bool,
+    enters_finally: bool,
+}
+
+enum EffectiveSuccessors<'a> {
+    Structural {
+        edges: [Option<EffectiveEdge>; 3],
+        next: usize,
+    },
+    One(Option<EffectiveEdge>),
+    Ret(std::slice::Iter<'a, InstructionIndex>),
+}
+
+impl Iterator for EffectiveSuccessors<'_> {
+    type Item = EffectiveEdge;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Structural { edges, next } => {
+                while *next < edges.len() {
+                    let edge = edges[*next].take();
+                    *next += 1;
+                    if edge.is_some() {
+                        return edge;
+                    }
+                }
+                None
+            }
+            Self::One(edge) => edge.take(),
+            Self::Ret(continuations) => continuations.next().copied().map(|target| EffectiveEdge {
+                target,
+                is_branch_target: false,
+                enters_finally: false,
+            }),
+        }
+    }
+}
+
+fn effective_successors<'a>(
+    instructions: &'a [VerifiedInstruction],
+    instruction: usize,
+    finally_continuations: &'a [Vec<InstructionIndex>],
+    ret_finalizer: Option<InstructionIndex>,
+) -> EffectiveSuccessors<'a> {
+    let Some(verified) = instructions.get(instruction) else {
+        return EffectiveSuccessors::Structural {
+            edges: [None; 3],
+            next: 0,
+        };
+    };
+    let successors = verified.successors();
+    match verified.decoded().instruction().opcode() {
+        FinalOpcode::Gosub => {
+            EffectiveSuccessors::One(successors.branch_target().map(|target| EffectiveEdge {
+                target,
+                is_branch_target: false,
+                enters_finally: true,
+            }))
+        }
+        FinalOpcode::Ret => {
+            let continuations = ret_finalizer
+                .and_then(|target| finally_continuations.get(target.get() as usize))
+                .map_or([].as_slice(), Vec::as_slice);
+            EffectiveSuccessors::Ret(continuations.iter())
+        }
+        _ => EffectiveSuccessors::Structural {
+            edges: [
+                successors.fallthrough().map(|target| EffectiveEdge {
+                    target,
+                    is_branch_target: false,
+                    enters_finally: false,
+                }),
+                successors.branch_target().map(|target| EffectiveEdge {
+                    target,
+                    is_branch_target: true,
+                    enters_finally: false,
+                }),
+                successors.jump_target().map(|target| EffectiveEdge {
+                    target,
+                    is_branch_target: false,
+                    enters_finally: false,
+                }),
+            ],
+            next: 0,
+        },
+    }
 }
 
 #[allow(
@@ -4479,6 +4756,21 @@ fn verify_internal_operand_stack(
     usage: &mut BytecodeGraphUsage,
 ) -> Result<InternalStackCertificate, BytecodeVerificationError> {
     let instructions = function.control_flow().instructions();
+    let gosub_sites = usize_to_u64(
+        instructions
+            .iter()
+            .filter(|verified| verified.decoded().instruction().opcode() == FinalOpcode::Gosub)
+            .count(),
+    );
+    if gosub_sites > u64::from(MAX_GOSUB_SITES_PER_FUNCTION) {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::GosubSiteCountOutOfRange {
+                sites: gosub_sites,
+                maximum: MAX_GOSUB_SITES_PER_FUNCTION,
+            },
+        ));
+    }
     if !instructions.iter().any(|verified| {
         matches!(
             verified.decoded().instruction().opcode(),
@@ -4487,6 +4779,8 @@ fn verify_internal_operand_stack(
                 | FinalOpcode::Nip
                 | FinalOpcode::Catch
                 | FinalOpcode::NipCatch
+                | FinalOpcode::Gosub
+                | FinalOpcode::Ret
         )
     }) {
         return Ok(InternalStackCertificate::default());
@@ -4522,33 +4816,88 @@ fn verify_internal_operand_stack(
         None::<CertifiedCatchLocalPut>,
         BytecodeGraphResource::FrameStateEntries,
     )?;
+    let mut nip_catch_transforms = try_filled_vec(
+        id,
+        instructions.len(),
+        None::<CertifiedNipCatchTransform>,
+        BytecodeGraphResource::FrameStateEntries,
+    )?;
     let mut catch_handler_targets = try_filled_vec(
         id,
         instructions.len(),
         false,
         BytecodeGraphResource::FrameStateEntries,
     )?;
+    let mut finally_targets = try_filled_vec(
+        id,
+        instructions.len(),
+        false,
+        BytecodeGraphResource::FrameStateEntries,
+    )?;
+    let mut finally_continuations = try_filled_vec(
+        id,
+        instructions.len(),
+        Vec::<InstructionIndex>::new(),
+        BytecodeGraphResource::FrameStateEntries,
+    )?;
+    let mut ret_finalizers = try_filled_vec(
+        id,
+        instructions.len(),
+        None::<InstructionIndex>,
+        BytecodeGraphResource::FrameStateEntries,
+    )?;
     for verified in instructions {
-        if verified.decoded().instruction().opcode() != FinalOpcode::Catch {
-            continue;
+        match verified.decoded().instruction().opcode() {
+            FinalOpcode::Catch => {
+                let handler = verified.successors().branch_target().ok_or_else(|| {
+                    catch_stack_error(
+                        id,
+                        verified.decoded().pc(),
+                        verified.decoded().instruction().opcode(),
+                    )
+                })?;
+                let target = catch_handler_targets
+                    .get_mut(handler.get() as usize)
+                    .ok_or_else(|| {
+                        catch_stack_error(
+                            id,
+                            verified.decoded().pc(),
+                            verified.decoded().instruction().opcode(),
+                        )
+                    })?;
+                *target = true;
+            }
+            FinalOpcode::Gosub => {
+                let target = verified.successors().branch_target().ok_or_else(|| {
+                    finally_stack_error(id, verified.decoded().pc(), FinalOpcode::Gosub)
+                })?;
+                let continuation = verified.successors().fallthrough().ok_or_else(|| {
+                    finally_stack_error(id, verified.decoded().pc(), FinalOpcode::Gosub)
+                })?;
+                *finally_targets
+                    .get_mut(target.get() as usize)
+                    .ok_or_else(|| {
+                        finally_stack_error(id, verified.decoded().pc(), FinalOpcode::Gosub)
+                    })? = true;
+                let continuations = finally_continuations
+                    .get_mut(target.get() as usize)
+                    .ok_or_else(|| {
+                        finally_stack_error(id, verified.decoded().pc(), FinalOpcode::Gosub)
+                    })?;
+                continuations.try_reserve(1).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::AllocationFailed {
+                            resource: BytecodeGraphResource::FrameStateEntries,
+                            requested: 1,
+                        },
+                    )
+                })?;
+                continuations.push(continuation);
+                charge_frame_state_entries(id, usage, 1, limits.max_frame_state_entries)?;
+            }
+            _ => {}
         }
-        let handler = verified.successors().branch_target().ok_or_else(|| {
-            catch_stack_error(
-                id,
-                verified.decoded().pc(),
-                verified.decoded().instruction().opcode(),
-            )
-        })?;
-        let target = catch_handler_targets
-            .get_mut(handler.get() as usize)
-            .ok_or_else(|| {
-                catch_stack_error(
-                    id,
-                    verified.decoded().pc(),
-                    verified.decoded().instruction().opcode(),
-                )
-            })?;
-        *target = true;
     }
     let mut work = VecDeque::new();
     work.try_reserve_exact(instructions.len()).map_err(|_| {
@@ -4565,10 +4914,31 @@ fn verify_internal_operand_stack(
     let mut evaluations = 0_u64;
     loop {
         if work.is_empty() {
-            while entries.get(next_seed).is_some_and(Option::is_some) {
+            while entries.get(next_seed).is_some_and(Option::is_some)
+                || catch_handler_targets.get(next_seed) == Some(&true)
+                || finally_targets.get(next_seed) == Some(&true)
+            {
                 next_seed = next_seed.saturating_add(1);
             }
             if next_seed == entries.len() {
+                if let Some(protected) = entries.iter().enumerate().find_map(|(index, entry)| {
+                    (entry.is_none() && (catch_handler_targets[index] || finally_targets[index]))
+                        .then_some(index)
+                }) {
+                    let pc = instructions[protected].decoded().pc();
+                    let error = if finally_targets[protected] {
+                        BytecodeVerificationErrorKind::FinallyReturnJoinMismatch {
+                            target: pc,
+                            incoming_from: pc,
+                        }
+                    } else {
+                        BytecodeVerificationErrorKind::CatchMarkerJoinMismatch {
+                            target: pc,
+                            incoming_from: pc,
+                        }
+                    };
+                    return Err(BytecodeVerificationError::function(id, error));
+                }
                 break;
             }
             entries[next_seed] = Some(Vec::new());
@@ -4596,31 +4966,35 @@ fn verify_internal_operand_stack(
             limits.max_policy_transfers,
         )?;
         let mut state = try_copy_slice(id, entry, BytecodeGraphResource::FrameStateEntries)?;
+        // Component zero starts at function entry. Later components only audit
+        // structurally retained instructions absent from the effective graph,
+        // such as a gosub continuation whose finalizer never executes `ret`.
+        let effectively_reachable = component == 0;
         let transfer = transfer_internal_operand_stack(
             id,
             index,
             decoded,
+            effectively_reachable,
             instructions[index].successors().branch_target(),
             &mut state,
             &mut local_key_puts,
             &mut catch_local_puts,
+            &mut nip_catch_transforms,
+            &mut ret_finalizers,
         )?;
         if !transfer.normal_completion {
             continue;
         }
 
-        let successors = instructions[index].successors();
         let mut has_successor = false;
-        for (successor, is_branch_target) in [
-            (successors.fallthrough(), false),
-            (successors.branch_target(), true),
-            (successors.jump_target(), false),
-        ]
-        .into_iter()
-        .filter_map(|(successor, is_branch_target)| {
-            successor.map(|successor| (successor, is_branch_target))
-        }) {
+        for edge in effective_successors(
+            instructions,
+            index,
+            &finally_continuations,
+            transfer.ret_finalizer,
+        ) {
             has_successor = true;
+            let successor = edge.target;
             let target_pc = instructions
                 .get(successor.get() as usize)
                 .map(|instruction| instruction.decoded().pc())
@@ -4633,6 +5007,32 @@ fn verify_internal_operand_stack(
                         },
                     )
                 })?;
+            let finally_marker = if edge.enters_finally {
+                let pending_index = state.len().checked_sub(1).ok_or_else(|| {
+                    finally_stack_error(id, decoded.pc(), decoded.instruction().opcode())
+                })?;
+                let original = JavaScriptStackValue::from_internal(state[pending_index])
+                    .ok_or_else(|| {
+                        finally_stack_error(id, decoded.pc(), decoded.instruction().opcode())
+                    })?;
+                state[pending_index] = InternalStackValue::FinallyPending {
+                    target: successor,
+                    original,
+                };
+                state.try_reserve(1).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::AllocationFailed {
+                            resource: BytecodeGraphResource::FrameStateEntries,
+                            requested: 1,
+                        },
+                    )
+                })?;
+                state.push(InternalStackValue::FinallyReturn { target: successor });
+                Some((pending_index, original))
+            } else {
+                None
+            };
             let branch_key_index = transfer
                 .iteration_branch_key
                 .map(|site| {
@@ -4652,7 +5052,7 @@ fn verify_internal_operand_stack(
                             &state,
                         ));
                     }
-                    state[key_index] = if is_branch_target {
+                    state[key_index] = if edge.is_branch_target {
                         InternalStackValue::ForInHeadKey(site)
                     } else {
                         InternalStackValue::Ordinary
@@ -4661,7 +5061,7 @@ fn verify_internal_operand_stack(
                 })
                 .transpose()?;
             let catch_exception = if decoded.instruction().opcode() == FinalOpcode::Catch
-                && is_branch_target
+                && edge.is_branch_target
             {
                 let marker_index = state.len().checked_sub(1).ok_or_else(|| {
                     catch_stack_error(id, decoded.pc(), decoded.instruction().opcode())
@@ -4699,6 +5099,8 @@ fn verify_internal_operand_stack(
                 target_pc,
                 component,
                 catch_handler_targets[successor.get() as usize],
+                finally_targets[successor.get() as usize],
+                edge.enters_finally,
                 &state,
                 &mut entries,
                 &mut components,
@@ -4714,9 +5116,40 @@ fn verify_internal_operand_stack(
             if let Some((marker_index, site, handler)) = catch_exception {
                 state[marker_index] = InternalStackValue::CatchMarker { site, handler };
             }
+            if let Some((pending_index, original)) = finally_marker {
+                match state.pop() {
+                    Some(InternalStackValue::FinallyReturn { target }) if target == successor => {}
+                    _ => {
+                        return Err(finally_stack_error(
+                            id,
+                            decoded.pc(),
+                            decoded.instruction().opcode(),
+                        ));
+                    }
+                }
+                if !matches!(
+                    state.get(pending_index),
+                    Some(InternalStackValue::FinallyPending { target, .. })
+                        if *target == successor
+                ) {
+                    return Err(finally_stack_error(
+                        id,
+                        decoded.pc(),
+                        decoded.instruction().opcode(),
+                    ));
+                }
+                state[pending_index] = original.into_internal();
+            }
         }
         if !has_successor {
-            verify_internal_stack_exit(id, decoded, &state)?;
+            verify_internal_stack_exit(
+                id,
+                decoded,
+                &state,
+                finally_continuations
+                    .iter()
+                    .any(|continuations| !continuations.is_empty()),
+            )?;
         }
     }
 
@@ -4729,6 +5162,9 @@ fn verify_internal_operand_stack(
     Ok(InternalStackCertificate {
         local_key_puts,
         catch_local_puts,
+        nip_catch_transforms,
+        finally_continuations,
+        ret_finalizers,
     })
 }
 
@@ -4850,6 +5286,7 @@ fn classify_for_in_declarative_local_puts(
 }
 
 #[allow(
+    clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "marker isolation, edge-specific handler and key provenance, and ordinary stack transfer form one typed opcode boundary"
 )]
@@ -4857,10 +5294,13 @@ fn transfer_internal_operand_stack(
     id: FunctionTemplateId,
     instruction_index: usize,
     decoded: crate::DecodedInstruction,
+    effectively_reachable: bool,
     catch_handler: Option<InstructionIndex>,
     state: &mut Vec<InternalStackValue>,
     local_key_puts: &mut [Option<CertifiedForInLocalPut>],
     catch_local_puts: &mut [Option<CertifiedCatchLocalPut>],
+    nip_catch_transforms: &mut [Option<CertifiedNipCatchTransform>],
+    ret_finalizers: &mut [Option<InstructionIndex>],
 ) -> Result<InternalStackTransfer, BytecodeVerificationError> {
     let instruction = decoded.instruction();
     let opcode = instruction.opcode();
@@ -4886,6 +5326,7 @@ fn transfer_internal_operand_stack(
             return Ok(InternalStackTransfer {
                 normal_completion: true,
                 iteration_branch_key: None,
+                ret_finalizer: None,
             });
         }
         FinalOpcode::ForInStart => {
@@ -4900,6 +5341,7 @@ fn transfer_internal_operand_stack(
             return Ok(InternalStackTransfer {
                 normal_completion: true,
                 iteration_branch_key: None,
+                ret_finalizer: None,
             });
         }
         FinalOpcode::ForInNext => {
@@ -4921,6 +5363,7 @@ fn transfer_internal_operand_stack(
             return Ok(InternalStackTransfer {
                 normal_completion: true,
                 iteration_branch_key: None,
+                ret_finalizer: None,
             });
         }
         FinalOpcode::IfFalse | FinalOpcode::IfFalse8 => {
@@ -4938,6 +5381,7 @@ fn transfer_internal_operand_stack(
                 return Ok(InternalStackTransfer {
                     normal_completion: true,
                     iteration_branch_key: Some(key),
+                    ret_finalizer: None,
                 });
             }
         }
@@ -4955,6 +5399,7 @@ fn transfer_internal_operand_stack(
                 return Ok(InternalStackTransfer {
                     normal_completion: true,
                     iteration_branch_key: None,
+                    ret_finalizer: None,
                 });
             }
             if let Some(marker) = state.len().checked_sub(2)
@@ -4979,54 +5424,200 @@ fn transfer_internal_operand_stack(
                 return Ok(InternalStackTransfer {
                     normal_completion: true,
                     iteration_branch_key: None,
+                    ret_finalizer: None,
                 });
             }
         }
         FinalOpcode::Drop => {
-            if state.pop().is_none() {
+            if state.is_empty() {
+                if effectively_reachable {
+                    return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+                }
                 return Ok(InternalStackTransfer {
                     normal_completion: false,
                     iteration_branch_key: None,
+                    ret_finalizer: None,
                 });
             }
+            if let Some(InternalStackValue::FinallyReturn { target }) = state.last().copied()
+                && !matches!(
+                    state.get(state.len().saturating_sub(2)),
+                    Some(InternalStackValue::FinallyPending {
+                        target: pending_target,
+                        ..
+                    }) if *pending_target == target
+                )
+            {
+                return Err(finally_stack_error(id, decoded.pc(), opcode));
+            }
+            state.pop();
             invalidate_internal_value_provenance(state);
             return Ok(InternalStackTransfer {
                 normal_completion: true,
                 iteration_branch_key: None,
+                ret_finalizer: None,
             });
         }
         FinalOpcode::Nip => {
-            let marker_index = state.len().checked_sub(2);
-            if !matches!(
-                marker_index.map(|index| (state[index], state[index + 1])),
-                Some((InternalStackValue::ForInIterator(_), value))
-                    if value.is_javascript_value()
-            ) {
-                return Err(for_in_stack_error(id, decoded.pc(), opcode));
+            let Some(value_index) = state.len().checked_sub(1) else {
+                if !effectively_reachable {
+                    return Ok(InternalStackTransfer {
+                        normal_completion: false,
+                        iteration_branch_key: None,
+                        ret_finalizer: None,
+                    });
+                }
+                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+            };
+            let Some(marker_index) = value_index.checked_sub(1) else {
+                if !effectively_reachable {
+                    return Ok(InternalStackTransfer {
+                        normal_completion: false,
+                        iteration_branch_key: None,
+                        ret_finalizer: None,
+                    });
+                }
+                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+            };
+            if !state[value_index].is_javascript_value() {
+                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
             }
-            state.truncate(state.len() - 2);
-            state.push(InternalStackValue::Ordinary);
+            match state[marker_index] {
+                InternalStackValue::ForInIterator(_)
+                | InternalStackValue::FinallyPending { .. } => {}
+                InternalStackValue::FinallyReturn { target } => {
+                    if !matches!(
+                        marker_index
+                            .checked_sub(1)
+                            .and_then(|pending| state.get(pending)),
+                        Some(InternalStackValue::FinallyPending {
+                            target: pending_target,
+                            ..
+                        }) if *pending_target == target
+                    ) {
+                        return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+                    }
+                }
+                _ => return Err(internal_stack_error(id, decoded.pc(), opcode, state)),
+            }
+            state[marker_index] = state[value_index];
+            state.truncate(value_index);
             invalidate_internal_value_provenance(state);
             return Ok(InternalStackTransfer {
                 normal_completion: true,
                 iteration_branch_key: None,
+                ret_finalizer: None,
             });
         }
         FinalOpcode::NipCatch => {
-            let marker_index = state.len().checked_sub(2);
-            if !matches!(
-                marker_index.map(|index| (state[index], state[index + 1])),
-                Some((InternalStackValue::CatchMarker { .. }, value))
-                    if value.is_javascript_value()
-            ) {
+            let Some(value_index) = state.len().checked_sub(1) else {
+                if !effectively_reachable {
+                    return Ok(InternalStackTransfer {
+                        normal_completion: false,
+                        iteration_branch_key: None,
+                        ret_finalizer: None,
+                    });
+                }
                 return Err(catch_stack_error(id, decoded.pc(), opcode));
+            };
+            if !state[value_index].is_javascript_value() {
+                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
             }
-            state.truncate(state.len() - 2);
+            let Some(marker_index) = state[..value_index]
+                .iter()
+                .rposition(|value| matches!(value, InternalStackValue::CatchMarker { .. }))
+            else {
+                return Err(catch_stack_error(id, decoded.pc(), opcode));
+            };
+            let mut cursor = marker_index + 1;
+            while cursor < value_index {
+                match state[cursor] {
+                    InternalStackValue::FinallyPending { target, .. } => {
+                        if !matches!(
+                            state.get(cursor + 1),
+                            Some(InternalStackValue::FinallyReturn {
+                                target: return_target
+                            }) if *return_target == target && cursor + 1 < value_index
+                        ) {
+                            return Err(finally_stack_error(id, decoded.pc(), opcode));
+                        }
+                        cursor += 2;
+                    }
+                    InternalStackValue::FinallyReturn { .. } => {
+                        return Err(finally_stack_error(id, decoded.pc(), opcode));
+                    }
+                    _ => {
+                        return Err(catch_stack_error(id, decoded.pc(), opcode));
+                    }
+                }
+            }
+            let transform = CertifiedNipCatchTransform {
+                input_depth: usize_to_u32(state.len()),
+                retained_prefix: usize_to_u32(marker_index),
+            };
+            let Some(certificate) = nip_catch_transforms.get_mut(instruction_index) else {
+                return Err(catch_stack_error(id, decoded.pc(), opcode));
+            };
+            match *certificate {
+                Some(established) if established != transform => {
+                    return Err(catch_stack_error(id, decoded.pc(), opcode));
+                }
+                Some(_) => {}
+                None => *certificate = Some(transform),
+            }
+            state.truncate(marker_index);
             state.push(InternalStackValue::Ordinary);
             invalidate_internal_value_provenance(state);
             return Ok(InternalStackTransfer {
                 normal_completion: true,
                 iteration_branch_key: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::Ret => {
+            if !effectively_reachable && state.is_empty() {
+                return Ok(InternalStackTransfer {
+                    normal_completion: false,
+                    iteration_branch_key: None,
+                    ret_finalizer: None,
+                });
+            }
+            let Some(pair_start) = state.len().checked_sub(2) else {
+                return Err(finally_stack_error(id, decoded.pc(), opcode));
+            };
+            let (
+                InternalStackValue::FinallyPending {
+                    target: pending_target,
+                    original,
+                },
+                InternalStackValue::FinallyReturn {
+                    target: return_target,
+                },
+            ) = (state[pair_start], state[pair_start + 1])
+            else {
+                return Err(finally_stack_error(id, decoded.pc(), opcode));
+            };
+            if pending_target != return_target {
+                return Err(finally_stack_error(id, decoded.pc(), opcode));
+            }
+            let target = return_target;
+            state.truncate(pair_start);
+            state.push(original.into_internal());
+            let Some(certificate) = ret_finalizers.get_mut(instruction_index) else {
+                return Err(finally_stack_error(id, decoded.pc(), opcode));
+            };
+            match *certificate {
+                Some(established) if established != target => {
+                    return Err(finally_stack_error(id, decoded.pc(), opcode));
+                }
+                Some(_) => {}
+                None => *certificate = Some(target),
+            }
+            invalidate_internal_value_provenance(state);
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_key: None,
+                ret_finalizer: Some(target),
             });
         }
         _ => {}
@@ -5039,10 +5630,14 @@ fn transfer_internal_operand_stack(
     let pops = effect.pops() as usize;
     let pushes = effect.pushes() as usize;
     let Some(input_start) = state.len().checked_sub(pops) else {
-        return Ok(InternalStackTransfer {
-            normal_completion: false,
-            iteration_branch_key: None,
-        });
+        if !effectively_reachable {
+            return Ok(InternalStackTransfer {
+                normal_completion: false,
+                iteration_branch_key: None,
+                ret_finalizer: None,
+            });
+        }
+        return Err(internal_stack_error(id, decoded.pc(), opcode, state));
     };
     if state[input_start..]
         .iter()
@@ -5075,6 +5670,7 @@ fn transfer_internal_operand_stack(
     Ok(InternalStackTransfer {
         normal_completion: true,
         iteration_branch_key: None,
+        ret_finalizer: None,
     })
 }
 
@@ -5100,6 +5696,8 @@ fn propagate_internal_operand_stack(
     target_pc: BytecodePc,
     component: u32,
     target_is_catch_handler: bool,
+    target_is_finally: bool,
+    enters_finally: bool,
     output: &[InternalStackValue],
     entries: &mut [Option<Vec<InternalStackValue>>],
     components: &mut [Option<u32>],
@@ -5109,6 +5707,38 @@ fn propagate_internal_operand_stack(
     usage: &mut BytecodeGraphUsage,
 ) -> Result<(), BytecodeVerificationError> {
     let index = successor.get() as usize;
+    if target_is_finally {
+        if !enters_finally
+            || !matches!(
+                output.get(output.len().saturating_sub(2)..),
+                Some([
+                    InternalStackValue::FinallyPending {
+                        target: pending_target,
+                        ..
+                    },
+                    InternalStackValue::FinallyReturn {
+                        target: return_target
+                    }
+                ]) if *pending_target == successor && *return_target == successor
+            )
+        {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::FinallyReturnJoinMismatch {
+                    target: target_pc,
+                    incoming_from: source_pc,
+                },
+            ));
+        }
+    } else if enters_finally {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::FinallyReturnJoinMismatch {
+                target: target_pc,
+                incoming_from: source_pc,
+            },
+        ));
+    }
     let component_slot = components
         .get_mut(index)
         .ok_or_else(|| internal_join_error(id, target_pc, source_pc, output, &[]))?;
@@ -5118,7 +5748,16 @@ fn propagate_internal_operand_stack(
                 .get(index)
                 .and_then(Option::as_deref)
                 .ok_or_else(|| internal_join_error(id, target_pc, source_pc, output, &[]))?;
-            let carries_internal_value = output
+            // A Gosub necessarily contributes its own certified pending/return
+            // suffix. Ignore only that suffix when deciding whether a later,
+            // disconnected compiler component is trying to smuggle an
+            // independently forged marker into an already verified finalizer.
+            let component_prefix = if target_is_finally && enters_finally {
+                &output[..output.len() - 2]
+            } else {
+                output
+            };
+            let carries_internal_value = component_prefix
                 .iter()
                 .any(|value| *value != InternalStackValue::Ordinary);
             if existing != output && (target_is_catch_handler || carries_internal_value) {
@@ -5161,7 +5800,45 @@ fn verify_internal_stack_exit(
     id: FunctionTemplateId,
     decoded: crate::DecodedInstruction,
     state: &[InternalStackValue],
+    has_finally: bool,
 ) -> Result<(), BytecodeVerificationError> {
+    let mut prefix_len = state.len();
+    while matches!(
+        state.get(prefix_len.saturating_sub(1)),
+        Some(InternalStackValue::FinallyReturn { .. })
+    ) {
+        let Some(pair_start) = prefix_len.checked_sub(2) else {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::FinallyReturnMarkerAtExit { pc: decoded.pc() },
+            ));
+        };
+        if !matches!(
+            (state[pair_start], state[pair_start + 1]),
+            (
+                InternalStackValue::FinallyPending {
+                    target: pending_target,
+                    ..
+                },
+                InternalStackValue::FinallyReturn {
+                    target: return_target
+                }
+            ) if pending_target == return_target
+        ) {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::FinallyReturnMarkerAtExit { pc: decoded.pc() },
+            ));
+        }
+        prefix_len = pair_start;
+    }
+    let state = &state[..prefix_len];
+    if state.iter().any(|value| value.is_finally_value()) {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::FinallyReturnMarkerAtExit { pc: decoded.pc() },
+        ));
+    }
     if decoded.instruction().opcode() == FinalOpcode::Throw {
         if state
             .iter()
@@ -5203,6 +5880,13 @@ fn verify_internal_stack_exit(
             BytecodeVerificationErrorKind::ForInIteratorMarkerAtExit { pc: decoded.pc() },
         ));
     }
+    if has_finally && !state.is_empty() {
+        return Err(finally_stack_error(
+            id,
+            decoded.pc(),
+            decoded.instruction().opcode(),
+        ));
+    }
     Ok(())
 }
 
@@ -5212,7 +5896,12 @@ fn internal_stack_error(
     opcode: FinalOpcode,
     state: &[InternalStackValue],
 ) -> BytecodeVerificationError {
-    if opcode == FinalOpcode::Catch
+    if opcode == FinalOpcode::Gosub
+        || opcode == FinalOpcode::Ret
+        || state.iter().any(|value| value.is_finally_value())
+    {
+        finally_stack_error(id, pc, opcode)
+    } else if opcode == FinalOpcode::Catch
         || opcode == FinalOpcode::NipCatch
         || state.iter().any(|value| value.is_catch_value())
     {
@@ -5220,6 +5909,17 @@ fn internal_stack_error(
     } else {
         for_in_stack_error(id, pc, opcode)
     }
+}
+
+fn finally_stack_error(
+    id: FunctionTemplateId,
+    pc: BytecodePc,
+    opcode: FinalOpcode,
+) -> BytecodeVerificationError {
+    BytecodeVerificationError::function(
+        id,
+        BytecodeVerificationErrorKind::FinallyReturnStackMismatch { pc, opcode },
+    )
 }
 
 fn catch_stack_error(
@@ -5252,6 +5952,15 @@ fn internal_join_error(
     incoming: &[InternalStackValue],
 ) -> BytecodeVerificationError {
     let kind = if established
+        .iter()
+        .chain(incoming)
+        .any(|value| value.is_finally_value())
+    {
+        BytecodeVerificationErrorKind::FinallyReturnJoinMismatch {
+            target,
+            incoming_from,
+        }
+    } else if established
         .iter()
         .chain(incoming)
         .any(|value| value.is_catch_value())
@@ -5724,15 +6433,8 @@ fn verify_binding_states(
         if !normal_completion_possible {
             continue;
         }
-        let successors = instructions[index].successors();
-        for successor in [
-            successors.fallthrough(),
-            successors.branch_target(),
-            successors.jump_target(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for edge in internal_stack.effective_successors(instructions, index) {
+            let successor = edge.target;
             charge_policy_transfers(
                 id,
                 &mut evaluations,
@@ -6264,7 +6966,11 @@ fn collect_requirements(
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
                 push_requirement(requirements, ExecutionRequirement::DynamicPropertyKeys);
             }
-            FinalOpcode::Throw | FinalOpcode::Catch | FinalOpcode::NipCatch => {
+            FinalOpcode::Throw
+            | FinalOpcode::Catch
+            | FinalOpcode::NipCatch
+            | FinalOpcode::Gosub
+            | FinalOpcode::Ret => {
                 push_requirement(requirements, ExecutionRequirement::AbruptCompletions);
             }
             FinalOpcode::PushBigIntI32 => {

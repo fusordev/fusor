@@ -8,11 +8,12 @@ use quickjs_bytecode::{
     CompilerClosureSource, CompilerConstantKind, CompilerConstantLayout, CompilerExecutableKind,
     CompilerInitializationPolicy, CompilerSource, CompilerString, CompilerWritePolicy,
     ExecutionRequirement, FinalOpcode, FunctionGraphVerificationLimits, FunctionIndexDomains,
-    FunctionTemplateId, MetadataAtomField, Operands, PcSourceSpan, ScopeLink, SourceByteSpan,
-    UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody,
-    UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader, UnverifiedFunctionMetadata,
-    VariableDefinition, VerificationLimits, VerifiedBytecode, VerifiedControlFlow,
-    verify_compiler_bytecode_graph, verify_compiler_control_flow, verify_compiler_function_graph,
+    FunctionTemplateId, MAX_GOSUB_SITES_PER_FUNCTION, MetadataAtomField, Operands, PcSourceSpan,
+    ScopeLink, SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction,
+    UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader,
+    UnverifiedFunctionMetadata, VariableDefinition, VerificationLimits, VerifiedBytecode,
+    VerifiedControlFlow, verify_compiler_bytecode_graph, verify_compiler_control_flow,
+    verify_compiler_function_graph,
 };
 
 fn atom(text: &str) -> CompilerAtom {
@@ -418,6 +419,561 @@ fn final_authority_keeps_throw_error_fail_closed() {
             pc,
             opcode: FinalOpcode::ThrowError,
         } if *pc == BytecodePc::ZERO
+    ));
+}
+
+#[test]
+fn finally_return_address_certificate_accepts_shared_and_nested_subroutines() {
+    let shared = [
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(10)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(15)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(8)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+    let shared = verify_compiler_bytecode_graph(
+        typed_stack_input(&shared, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("two callers may share one typed finalizer");
+    assert!(
+        shared
+            .requirements()
+            .contains(&ExecutionRequirement::AbruptCompletions)
+    );
+
+    let nested = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&nested, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("an inner finalizer resumes an outer typed finalizer");
+}
+
+#[test]
+fn finally_return_address_certificate_rejects_marker_misuse_and_ordinary_entry() {
+    for (opcode, operands) in [
+        (FinalOpcode::Dup, Operands::None),
+        (FinalOpcode::Swap, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::Throw, Operands::None),
+    ] {
+        let instructions = [
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Gosub, Operands::Label(6)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+            (opcode, operands),
+            (FinalOpcode::Ret, Operands::None),
+        ];
+        let variable = VariableDefinition::new(
+            Some(AtomPoolIndex::new(0)),
+            ScopeLink::End,
+            var_policy(),
+            false,
+            None,
+        );
+        let error = verify_compiler_bytecode_graph(
+            typed_stack_input(&instructions, &[atom("x")], &[variable]),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("ordinary bytecode cannot consume or rearrange a finally return marker");
+        assert!(
+            matches!(
+                error.kind(),
+                BytecodeVerificationErrorKind::FinallyReturnStackMismatch {
+                    opcode: rejected,
+                    ..
+                } if *rejected == opcode
+            ),
+            "{opcode:?}: {error:?}"
+        );
+    }
+
+    let ordinary_entry = [
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(9)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(10)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Goto8, Operands::Label8(1)),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&ordinary_entry, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("an ordinary branch cannot enter a certified finalizer target");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::FinallyReturnJoinMismatch { .. }
+        ),
+        "{error:?}"
+    );
+
+    let certified_cleanup = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(1)),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&certified_cleanup, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a paired drop sequence may discard an overridden finally continuation");
+}
+
+#[test]
+fn finally_return_address_certificate_rejects_missing_and_partial_pairs() {
+    for (instructions, rejected) in [
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::Ret, Operands::None),
+            ],
+            FinalOpcode::Ret,
+        ),
+        (
+            vec![
+                (FinalOpcode::Gosub, Operands::Label(5)),
+                (FinalOpcode::ReturnUndef, Operands::None),
+                (FinalOpcode::Ret, Operands::None),
+            ],
+            FinalOpcode::Gosub,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::Gosub, Operands::Label(6)),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Dup, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            FinalOpcode::Dup,
+        ),
+    ] {
+        let error = verify_compiler_bytecode_graph(
+            typed_stack_input(&instructions, &[], &[]),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("a finally return requires one adjacent typed pending/return pair");
+        assert!(
+            matches!(
+                error.kind(),
+                BytecodeVerificationErrorKind::FinallyReturnStackMismatch {
+                    opcode,
+                    ..
+                } if *opcode == rejected
+            ),
+            "{rejected:?}: {error:?}"
+        );
+    }
+
+    let partial_exit = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&partial_exit, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("dropping only the return marker cannot leak its typed pending value");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::FinallyReturnMarkerAtExit { .. }
+    ));
+}
+
+#[test]
+fn finally_return_address_certificate_allows_only_an_inert_unreachable_ret() {
+    verify_compiler_bytecode_graph(
+        typed_stack_input(
+            &[
+                (FinalOpcode::ReturnUndef, Operands::None),
+                (FinalOpcode::Ret, Operands::None),
+            ],
+            &[],
+            &[],
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("an empty structurally unreachable trailing ret is inert compiler output");
+
+    for instructions in [
+        vec![
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Ret, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::ReturnUndef, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Ret, Operands::None),
+        ],
+    ] {
+        let error = verify_compiler_bytecode_graph(
+            typed_stack_input(&instructions, &[], &[]),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("reachable or nonempty ret still requires an exact pending/return pair");
+        assert!(
+            matches!(
+                error.kind(),
+                BytecodeVerificationErrorKind::FinallyReturnStackMismatch {
+                    opcode: FinalOpcode::Ret,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn compiler_return_cleanup_nips_only_the_adjacent_finally_pair() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Nip, Operands::None),
+        (FinalOpcode::Nip, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("two exact nip steps remove the adjacent return marker then pending value");
+}
+
+#[test]
+fn finally_abrupt_exits_discard_only_complete_typed_pairs() {
+    for opcode in [
+        FinalOpcode::Return,
+        FinalOpcode::ReturnUndef,
+        FinalOpcode::Throw,
+    ] {
+        let mut instructions = vec![
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Gosub, Operands::Label(6)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ];
+        if opcode != FinalOpcode::ReturnUndef {
+            instructions.push((FinalOpcode::Push1, Operands::NoneInt));
+        }
+        instructions.push((opcode, Operands::None));
+        verify_compiler_bytecode_graph(
+            typed_stack_input(&instructions, &[], &[]),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect("a finalizer abrupt completion discards its complete pending/return pair");
+    }
+
+    let through_catch = [
+        (FinalOpcode::Catch, Operands::Label(13)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(9)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&through_catch, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("nip_catch may discard complete finally pairs above the nearest catch marker");
+
+    let unrelated_nonempty_exit = [
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(9)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(9)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&unrelated_nonempty_exit, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a gosub elsewhere cannot authorize an unrelated nonempty return");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::FinallyReturnStackMismatch {
+                opcode: FinalOpcode::Return,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn nip_catch_cannot_hide_a_following_typed_stack_underflow() {
+    let instructions = [
+        (FinalOpcode::Catch, Operands::Label(13)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(9)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Add, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("the certified variable-width nip_catch leaves only one value for add");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::ForInIteratorStackMismatch {
+                opcode: FinalOpcode::Add,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn nip_catch_cannot_hide_an_empty_drop_on_an_effective_path() {
+    let instructions = [
+        (FinalOpcode::Catch, Operands::Label(13)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(9)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("the second effective drop has no typed value after variable-width cleanup");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::ForInIteratorStackMismatch {
+                opcode: FinalOpcode::Drop,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn object_provenance_uses_the_certified_nip_catch_finally_transform() {
+    let instructions = [
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::ToPropKey, Operands::None),
+        (FinalOpcode::Catch, Operands::Label(15)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(13)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::DefineArrayEl, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("fresh-object and converted-key provenance survive certified finally cleanup");
+}
+
+#[test]
+fn effective_finally_edges_feed_binding_and_object_provenance_certificates() {
+    let variable = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        let_policy(),
+        true,
+        None,
+    );
+    let initializes_in_finalizer = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(7)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::GetLoc0, Operands::NoneLoc),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&initializes_in_finalizer, &[atom("x")], &[variable]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("the continuation observes finalizer binding effects");
+
+    let defines_method_after_finalizer = [
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(14)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::DefineMethod,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 4,
+            },
+        ),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        define_method_input(
+            &defines_method_after_finalizer,
+            CompilerExecutableKind::OrdinaryMethod,
+            0,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("object provenance crosses a physical finally marker and its certified return");
+}
+
+#[test]
+fn finally_return_address_certificate_charges_exact_state_and_transfer_budgets() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+    let input = typed_stack_input(&instructions, &[], &[]);
+    let usage =
+        verify_compiler_bytecode_graph(input.clone(), BytecodeGraphVerificationLimits::default())
+            .expect("baseline nested-finally certificate")
+            .usage();
+    assert!(usage.frame_state_entries() > 0);
+    assert!(usage.policy_transfers() > 0);
+
+    assert_limit(
+        &input,
+        BytecodeGraphVerificationLimits::default()
+            .with_max_frame_state_entries(usage.frame_state_entries()),
+        BytecodeGraphVerificationLimits::default()
+            .with_max_frame_state_entries(usage.frame_state_entries() - 1),
+        BytecodeGraphResource::FrameStateEntries,
+        usage.frame_state_entries() - 1,
+        usage.frame_state_entries(),
+    );
+    assert_limit(
+        &input,
+        BytecodeGraphVerificationLimits::default()
+            .with_max_policy_transfers(usage.policy_transfers()),
+        BytecodeGraphVerificationLimits::default()
+            .with_max_policy_transfers(usage.policy_transfers() - 1),
+        BytecodeGraphResource::PolicyTransfers,
+        usage.policy_transfers() - 1,
+        usage.policy_transfers(),
+    );
+}
+
+#[test]
+fn final_authority_rejects_more_than_the_compatibility_gosub_site_cap() {
+    let rejected_sites = usize::try_from(MAX_GOSUB_SITES_PER_FUNCTION).expect("gosub cap") + 1;
+    let mut instructions = Vec::with_capacity(rejected_sites * 5);
+    for _ in 0..rejected_sites {
+        instructions.extend_from_slice(&[
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::Gosub, Operands::Label(6)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+            (FinalOpcode::Ret, Operands::None),
+        ]);
+    }
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("the pinned per-function gosub-site compatibility cap is mandatory");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::GosubSiteCountOutOfRange {
+            sites,
+            maximum: MAX_GOSUB_SITES_PER_FUNCTION,
+        } if *sites == u64::from(MAX_GOSUB_SITES_PER_FUNCTION) + 1
     ));
 }
 
@@ -2099,6 +2655,30 @@ fn disconnected_catch_component_cannot_hide_a_marker_in_an_earlier_component() {
 }
 
 #[test]
+fn disconnected_for_in_component_cannot_hide_a_marker_in_an_earlier_component() {
+    let instructions = [
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(-4)),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a cross-component edge cannot hide a live for-in marker");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::ForInIteratorJoinMismatch { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn catch_marker_certificate_charges_exact_state_and_transfer_budgets() {
     let instructions = [
         (FinalOpcode::Catch, Operands::Label(7)),
@@ -2367,6 +2947,33 @@ fn for_in_marker_certificate_requires_exact_join_identity() {
             BytecodeVerificationErrorKind::ForInIteratorJoinMismatch { .. }
         ),
         "{error:?}"
+    );
+}
+
+#[test]
+fn marker_free_dead_gosub_can_reuse_an_already_verified_finalizer() {
+    let instructions = [
+        (FinalOpcode::Catch, Operands::Label(13)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(18)),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(7)),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect(
+        "a marker-free dead component may reuse a finalizer verified under the live catch prefix",
     );
 }
 

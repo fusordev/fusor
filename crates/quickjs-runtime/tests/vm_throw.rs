@@ -1,7 +1,7 @@
 use std::{fmt::Write as _, sync::Arc};
 
 use quickjs_bytecode::{FunctionTemplateId, VerificationLimits};
-use quickjs_compiler::{CompilationContext, LeafCompilationError, UnsupportedLeafFeature};
+use quickjs_compiler::CompilationContext;
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 use quickjs_runtime::{
     ExceptionKind, ExecutionError, ExecutionLimits, HandleError, HandleKind, JsException, JsNumber,
@@ -27,24 +27,6 @@ fn compile(
                 .compile_tree(&root, VerificationLimits::default())
                 .expect("verified function tree");
             Arc::new(tree.verified_bytecode().clone())
-        },
-    )
-    .expect("frontend")
-}
-
-fn compile_error(source: &str, root_name: &str) -> LeafCompilationError {
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage plan");
-            let root = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some(root_name))
-                .expect("root function");
-            context
-                .compile_tree(&root, VerificationLimits::default())
-                .expect_err("unsupported handler control flow must fail closed")
         },
     )
     .expect("frontend")
@@ -531,14 +513,21 @@ fn thrown_function_root_limit_failure_is_atomic_and_runtime_is_reusable() {
 }
 
 #[test]
-fn finally_handler_control_flow_remains_fail_closed() {
+fn finally_return_overrides_the_pending_return() {
     let source = "function f(){try{return 1;}finally{return 2;}}";
-    let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "f") else {
-        panic!("finally control flow must remain unsupported");
-    };
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedBody);
-    assert_eq!(
-        &source[span.start as usize..span.end as usize],
-        "{return 2;}"
+    let authority = compile(source, "f", "runtime-finally.js");
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context.instantiate(authority).expect("function");
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("finally return");
+    assert!(
+        result
+            .as_number()
+            .expect("live value")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(2))
     );
 }

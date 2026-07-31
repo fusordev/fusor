@@ -544,14 +544,13 @@ Slot =
   | Catch { handler_pc, marker_id }
   | IteratorCatch { marker_id }
   | DisabledIteratorCatch { marker_id }
-  | ReturnAddress {
-        subroutine_pc,
-        continuations: { continuation_pc -> resume_shape_id }
-    }
+  | FinallyPending { subroutine_pc, value_kind }
+  | FinallyReturn { subroutine_pc }
 ```
 
-`Catch`, iterator markers, and return addresses are non-forgeable verifier/VM
-types. They are never represented as ordinary JavaScript integers. A
+`Catch`, iterator markers, pending-finally values, and finally return
+addresses are non-forgeable verifier/VM types. They are never represented as
+ordinary JavaScript integers. A
 `RawFunction` is the internal function-bytecode constant consumed by class
 construction; it is not a JavaScript value.
 
@@ -622,9 +621,12 @@ other ordinary consumption of a marker is rejected.
 
 `nip_catch` requires a top `JsValue` and an innermost enabled `Catch` or
 `IteratorCatch` below it. It discards the slots between them, replaces the
-marker with the saved value, and removes that handler. It may not cross a
-return address, raw function, disabled iterator marker, or another internal
-slot. This is the typed form of the runtime's backward marker scan
+marker with the saved value, and removes that handler. The current synchronous
+compiler profile permits it to cross only complete adjacent
+`FinallyPending`/`FinallyReturn` pairs for the same subroutine; a partial,
+crossed, or mismatched pair is rejected. It may not cross a raw function,
+disabled iterator marker, or another internal slot. This is the typed form of
+the runtime's backward marker scan
 (`quickjs.c:19052-19067`).
 
 No per-instruction exception edge is needed: the `catch` instruction seeds its
@@ -691,18 +693,24 @@ one extra slot and separately seeds a synthetic continuation
 **Rust hardening.**
 
 - `gosub target` has no direct successor. It sends
-  `S, ReturnAddress(target, {p+5 -> shape(S)})` to `target`.
+  `S_without_top, FinallyPending(target, top), FinallyReturn(target)` to
+  `target`; the top pending JavaScript value is therefore inseparable from the
+  return marker.
 - A return address cannot be forged, duplicated, converted to `JsValue`,
   consumed by another opcode, or moved by a stack permutation.
-- Multiple `gosub` sites may join at the same subroutine. Their return-address
-  slots union continuation maps only when the subroutine PC and every slot
-  below the address have compatible types and marker identities.
-- `ret` requires a `ReturnAddress` on top. After popping it, the remaining
-  state must equal the recorded resume shape for every continuation. It emits
-  one edge to each exact continuation.
-- Growth of a continuation set requeues the joined PC and reaches a bounded
-  fixpoint. A bare integer, missing address, extra stack value, changed marker
+- Multiple `gosub` sites may join at the same subroutine only when every slot
+  has the same compatible type and marker identity. The verifier records each
+  exact continuation against that subroutine target.
+- `ret` requires one adjacent matching `FinallyPending`/`FinallyReturn` pair
+  on top. It restores the pending JavaScript value and emits one edge to each
+  exact continuation recorded for that subroutine.
+- Effective `gosub`/`ret` edges, rather than the structural continuation edge,
+  feed binding-state and object-provenance analysis. A finalizer that always
+  completes abruptly therefore leaves its continuation semantically dead.
+- A bare integer, missing or partial pair, extra stack value, changed marker
   chain, cross-subroutine address, or non-boundary continuation is rejected.
+- One function may contain at most 65,534 `gosub` sites. The final
+  whole-function authority checks this cap before admitting execution.
 
 ## Stack maximum and joins
 
@@ -720,9 +728,8 @@ or catch position at a join (`quickjs.c:35595-35618`).
   position-wise equal slot kinds. `Catch`, iterator, disabled-iterator, and raw
   function slots also require equal identity/target. `JsValue` joins with
   `JsValue`.
-- Return-address slots for the same subroutine union compatible continuation
-  maps. This is the only join that changes an existing state; a changed union
-  is reprocessed.
+- Finalizer entries join only identical pending-value and return-address
+  shapes. Continuations are retained separately by subroutine target.
 - Different handler chains, marker positions, raw child identities,
   subroutine identities, or resume shapes are verifier errors, even when
   heights match.
@@ -814,10 +821,11 @@ The verifier is complete only when the following tests are automated.
 6. **Iterators:** cover sync and async starts, `for_of_next` at offset zero and
    nonzero, async disable/reinstate, normal and dummy `iterator_close`, nested
    outer catches, and exception-unwind states.
-7. **Finally:** cover one and many `gosub` callers, nested subroutines, and
-   return-address set growth. Reject forged integers, `ret` without an address,
-   a moved/duplicated address, extra or missing return stack slots, wrong
-   resume shapes, and mixed subroutine identities.
+7. **Finally:** cover one and many `gosub` callers, nested subroutines,
+   effective continuation propagation, and abrupt finalizers. Reject forged
+   integers, `ret` without an exact pending/return pair, moved or duplicated
+   addresses, extra or missing return stack slots, wrong resume shapes, mixed
+   subroutine identities, and a 65,535th `gosub` site.
 8. **Indices:** for each index family, accept `count - 1` and reject `count`;
    include implied short indices, `var_ref` versus `closure_var_count`,
    captured-vardef bijection, heterogeneous value/function pools,

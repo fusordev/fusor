@@ -22,8 +22,9 @@
 //! runtime function or closure. The current `quickjs-runtime` interpreter can
 //! install its first fail-closed opcode profile into a same-runtime realm and
 //! derives child environments only from this authority. Serialized bytecode,
-//! the full exceptional typed-stack proof, direct eval, and incoming
-//! source-map chaining remain deferred and fail closed. Retained source
+//! direct eval, and incoming source-map chaining remain deferred and fail
+//! closed. The current ordinary compiler profile has a bounded typed proof for
+//! catch, `for-in`, and shared synchronous-finally subroutines. Retained source
 //! structure is checked, but source authenticity remains a compiler-trusted
 //! invariant.
 
@@ -73,10 +74,10 @@ pub use verified_bytecode::{
     BytecodeGraphVerificationLimits, BytecodeVerificationError, BytecodeVerificationErrorKind,
     ClosureVariableDefinition, CompilerBindingKind, CompilerBindingPolicy, CompilerClosureBinding,
     CompilerExecutableKind, CompilerInitializationPolicy, CompilerSource, CompilerWritePolicy,
-    ExecutionRequirement, MetadataAtomField, PcSourceSpan, ScopeLink, SourceByteSpan,
-    UnverifiedCompilerBytecodeGraph, UnverifiedFunctionMetadata, VariableDefinition,
-    VerifiedBytecode, VerifiedBytecodeFunction, VerifiedCompilerSource, VerifiedFunctionMetadata,
-    verify_compiler_bytecode_graph,
+    ExecutionRequirement, MAX_GOSUB_SITES_PER_FUNCTION, MetadataAtomField, PcSourceSpan, ScopeLink,
+    SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedFunctionMetadata,
+    VariableDefinition, VerifiedBytecode, VerifiedBytecodeFunction, VerifiedCompilerSource,
+    VerifiedFunctionMetadata, verify_compiler_bytecode_graph,
 };
 pub use verifier::{
     CompilerCaptureLayout, CompilerCapturedBinding, CompilerConstantKind, CompilerConstantLayout,

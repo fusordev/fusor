@@ -95,6 +95,284 @@ fn test_engine_failure(error: impl Error + Send + Sync + 'static) -> DynamicFunc
 }
 
 #[test]
+fn ordinary_stack_helpers_reject_finally_return_addresses() {
+    let (_, _, mut frame) = ordinary_test_frame();
+    let continuation = frame.instruction;
+
+    frame
+        .stack
+        .push(OperandStackEntry::FinallyReturn { continuation });
+    assert!(matches!(
+        pop(&mut frame),
+        Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation consumed an internal finally return address",
+        })
+    ));
+
+    frame
+        .stack
+        .push(OperandStackEntry::FinallyReturn { continuation });
+    assert!(matches!(
+        peek(&frame),
+        Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation inspected an internal finally return address",
+        })
+    ));
+    assert!(matches!(
+        stack_value_at(&frame, 0),
+        Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation indexed an internal finally return address",
+        })
+    ));
+}
+
+#[test]
+fn finally_return_pop_rejects_forged_javascript_and_catch_entries() {
+    let (_, _, mut frame) = ordinary_test_frame();
+
+    push(&mut frame, StoredValue::Number(JsNumber::from_i32(1)));
+    assert!(matches!(
+        pop_finally_continuation(&mut frame),
+        Err(EngineFault::RuntimeInvariant {
+            message: "verified ret operand is not an internal finally return address",
+        })
+    ));
+
+    let handler = frame.instruction;
+    frame.stack.push(OperandStackEntry::Catch { handler });
+    assert!(matches!(
+        pop_finally_continuation(&mut frame),
+        Err(EngineFault::RuntimeInvariant {
+            message: "verified ret operand is not an internal finally return address",
+        })
+    ));
+
+    let continuation = frame.instruction;
+    frame
+        .stack
+        .push(OperandStackEntry::FinallyReturn { continuation });
+    assert_eq!(
+        pop_finally_continuation(&mut frame).expect("typed finally return address"),
+        continuation
+    );
+}
+
+#[test]
+fn gosub_uses_the_verified_target_and_ret_uses_the_verified_continuation() {
+    // This structural certificate only drives the private dispatch helper; it
+    // is never installed or executed in place of whole-graph authority.
+    let mut builder = quickjs_bytecode::BytecodeBuilder::new();
+    for (opcode, operands) in [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ] {
+        builder
+            .push(opcode, operands)
+            .expect("structural finally fixture");
+    }
+    let control_flow = quickjs_bytecode::verify_control_flow(
+        quickjs_bytecode::UnverifiedFunctionBody::new(
+            builder.into_bytes(),
+            2,
+            quickjs_bytecode::FunctionIndexDomains::default(),
+            quickjs_bytecode::UnverifiedFunctionHeader::default(),
+        ),
+        quickjs_bytecode::VerificationLimits::default(),
+    )
+    .expect("structurally verified finally fixture");
+    let gosub = control_flow.instructions()[1];
+    let target = gosub
+        .successors()
+        .branch_target()
+        .expect("verified finally target");
+    let continuation = gosub
+        .successors()
+        .fallthrough()
+        .expect("verified finally continuation");
+
+    let (_, _, mut frame) = ordinary_test_frame();
+    push(&mut frame, StoredValue::Undefined);
+    enter_finally_subroutine(gosub, &mut frame).expect("verified gosub");
+    assert_eq!(frame.instruction, target);
+    assert!(matches!(
+        frame.stack.as_slice(),
+        [
+            OperandStackEntry::JavaScript(StoredValue::Undefined),
+            OperandStackEntry::FinallyReturn {
+                continuation: actual,
+            },
+        ] if *actual == continuation
+    ));
+
+    frame.instruction =
+        pop_finally_continuation(&mut frame).expect("verified ret continuation marker");
+    assert_eq!(frame.instruction, continuation);
+    assert!(matches!(
+        frame.stack.as_slice(),
+        [OperandStackEntry::JavaScript(StoredValue::Undefined)]
+    ));
+}
+
+#[test]
+fn verified_generic_drop_can_discard_a_finally_return_address() {
+    let (_, _, mut frame) = ordinary_test_frame();
+    frame.stack.push(OperandStackEntry::FinallyReturn {
+        continuation: frame.instruction,
+    });
+
+    drop_stack_entry(&mut frame).expect("verified abrupt override discards the return address");
+    assert!(frame.stack.is_empty());
+}
+
+#[test]
+fn nip_catch_scans_to_the_nearest_marker_and_preserves_the_top_value() {
+    let (_, _, mut frame) = ordinary_test_frame();
+    let handler = frame.instruction;
+    let continuation = frame.instruction;
+    frame.stack.push(OperandStackEntry::Catch { handler });
+    push(&mut frame, StoredValue::Number(JsNumber::from_i32(7)));
+    frame.stack.push(OperandStackEntry::Catch { handler });
+    push(&mut frame, StoredValue::Number(JsNumber::from_i32(1)));
+    frame
+        .stack
+        .push(OperandStackEntry::FinallyReturn { continuation });
+    push(&mut frame, StoredValue::Number(JsNumber::from_i32(2)));
+
+    let mut budget = execution_budget_with_consumed(u64::MAX, 1);
+    nip_catch(&mut frame, &mut budget).expect("nearest catch marker");
+
+    assert!(matches!(
+        frame.stack.as_slice(),
+        [
+            OperandStackEntry::Catch {
+                handler: outer_handler,
+            },
+            OperandStackEntry::JavaScript(StoredValue::Number(prefix)),
+            OperandStackEntry::JavaScript(StoredValue::Number(top)),
+        ] if *outer_handler == handler
+            && prefix.strict_equals(JsNumber::from_i32(7))
+            && top.strict_equals(JsNumber::from_i32(2))
+    ));
+}
+
+#[test]
+fn nip_catch_precharges_the_bounded_scan_before_mutating_the_stack() {
+    let (_, _, mut frame) = ordinary_test_frame();
+    let handler = frame.instruction;
+    let continuation = frame.instruction;
+    frame.stack.push(OperandStackEntry::Catch { handler });
+    push(&mut frame, StoredValue::Number(JsNumber::from_i32(1)));
+    frame
+        .stack
+        .push(OperandStackEntry::FinallyReturn { continuation });
+    push(&mut frame, StoredValue::Number(JsNumber::from_i32(2)));
+
+    let mut budget = execution_budget_with_consumed(4, 1);
+    let Err(error) = nip_catch(&mut frame, &mut budget) else {
+        panic!("nip_catch must precharge its complete bounded scan");
+    };
+    assert!(matches!(
+        error,
+        ExecutionError::InstructionLimitExceeded {
+            limit: 4,
+            executed: 4,
+        }
+    ));
+    assert!(matches!(
+        frame.stack.as_slice(),
+        [
+            OperandStackEntry::Catch {
+                handler: actual_handler,
+            },
+            OperandStackEntry::JavaScript(StoredValue::Number(pending)),
+            OperandStackEntry::FinallyReturn {
+                continuation: actual_continuation,
+            },
+            OperandStackEntry::JavaScript(StoredValue::Number(top)),
+        ] if *actual_handler == handler
+            && pending.strict_equals(JsNumber::from_i32(1))
+            && *actual_continuation == continuation
+            && top.strict_equals(JsNumber::from_i32(2))
+    ));
+}
+
+#[test]
+fn exception_unwind_discards_intervening_finally_return_addresses() {
+    let (mut runtime, realm, mut frame) = ordinary_test_frame();
+    let handler = frame.instruction;
+    let continuation = frame.instruction;
+    frame.stack.push(OperandStackEntry::Catch { handler });
+    push(&mut frame, StoredValue::Number(JsNumber::from_i32(1)));
+    frame
+        .stack
+        .push(OperandStackEntry::FinallyReturn { continuation });
+    let mut active_frame_values = frame.reserved_values;
+    let mut frames = vec![frame];
+
+    dispatch_pending_exception(
+        &mut runtime,
+        &mut frames,
+        &mut active_frame_values,
+        PendingException {
+            realm,
+            payload: PendingExceptionPayload::ThrownValue(StoredValue::Number(JsNumber::from_i32(
+                9,
+            ))),
+            origin: native_function_host_origin(),
+        },
+    )
+    .expect("verified catch dispatch");
+
+    assert_eq!(frames.len(), 1);
+    let frame = &frames[0];
+    assert_eq!(frame.instruction, handler);
+    assert!(matches!(
+        frame.stack.as_slice(),
+        [OperandStackEntry::JavaScript(StoredValue::Number(caught))]
+            if caught.strict_equals(JsNumber::from_i32(9))
+    ));
+}
+
+#[test]
+fn finally_return_markers_do_not_hide_or_create_execution_roots() {
+    let (mut runtime, realm, mut frame) = ordinary_test_frame();
+    let prototype = runtime
+        .realm_object_prototype(realm)
+        .expect("Object.prototype");
+    let object = runtime
+        .allocate_ordinary_object(prototype)
+        .expect("frame-only object");
+    push(&mut frame, StoredValue::Object(object));
+    frame.stack.push(OperandStackEntry::FinallyReturn {
+        continuation: frame.instruction,
+    });
+
+    runtime.collection_pending = true;
+    collect_cycles_with_execution_roots(&mut runtime, std::slice::from_ref(&frame), &[], &[])
+        .expect("collection with typed operand-stack roots");
+    assert!(
+        runtime.heap_reference_is_live(HeapReference::Object(object)),
+        "the JavaScript value below the finally return address remains traced"
+    );
+
+    let removed = frame.stack.remove(0);
+    assert!(matches!(
+        removed,
+        OperandStackEntry::JavaScript(StoredValue::Object(actual)) if actual == object
+    ));
+    runtime.collection_pending = true;
+    collect_cycles_with_execution_roots(&mut runtime, std::slice::from_ref(&frame), &[], &[])
+        .expect("collection with only a finally return address");
+    assert!(
+        !runtime.heap_reference_is_live(HeapReference::Object(object)),
+        "a finally return address must not retain unrelated heap state"
+    );
+}
+
+#[test]
 fn for_in_next_rejects_a_non_iterator_cursor_after_verified_admission() {
     let authority = compile_test_function(
         "function iterate(value){for(var key in value){}}",
@@ -451,6 +729,31 @@ fn execution_budget_with_consumed(limit: u64, consumed: u64) -> ExecutionBudget 
         .charge_instructions(consumed)
         .expect("test setup remains within its instruction budget");
     budget
+}
+
+fn ordinary_test_frame() -> (Runtime, RealmId, Frame) {
+    let authority = compile_test_function("function run(){return 0;}", "run");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let function = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(authority)
+        .expect("function")
+        .id()
+        .expect("function id");
+    let plan = plan_frame(&runtime, function, 0, 0).expect("frame plan");
+    let frame = create_frame(
+        &mut runtime,
+        plan,
+        StoredValue::Undefined,
+        FrameArguments::Owned(CallArguments::empty()),
+        None,
+        None,
+    )
+    .expect("frame");
+    (runtime, realm_id, frame)
 }
 
 fn for_in_transition_test_runtime() -> (Runtime, RealmId, FunctionId, InstructionIndex) {

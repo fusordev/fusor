@@ -23,9 +23,9 @@ source-ordered static identifier, quoted String, Number, and BigInt
 literal-named data properties and synchronous methods/getters/setters, static
 data property reads/writes, own and inherited static accessor getter/setter
 dispatch, strict receiver-aware static method calls, and arbitrary explicit
-`throw` values. Catch-only `try` statements support optional and simple
-identifier bindings, captured catch bindings, nested rethrow, and abrupt
-cleanup across calls, loops, and `for-in` iterator state. Engine-thrown
+`throw` values. Synchronous `try` statements support optional and simple catch
+bindings, captured catch bindings, shared and nested finalizers, rethrow, and
+abrupt cleanup across calls, loops, and `for-in` iterator state. Engine-thrown
 InternalError, RangeError, ReferenceError, SyntaxError, and TypeError values
 materialize as branded objects in the throwing realm with inherited `name` and
 an exact own `message`. Computed property reads, writes, calls, data definitions, and
@@ -76,8 +76,10 @@ async/generator methods, `super`/home-object semantics, realm-global accessor
 writes, optional/spread/apply calls, the remaining Number built-ins,
 the remaining String built-ins, Symbol wrapper coercions, serialized bytecode,
 every form of eval, Error constructors and `Error.prototype.toString`, and
-`finally`/destructuring-catch typed-stack semantics remain deferred and fail
-closed.
+destructuring-catch semantics remain deferred and fail closed. Ordinary
+synchronous `try`/`catch`/`finally` now uses verified shared finalizer
+subroutines and preserves or overrides return, throw, break, and continue
+completions with bounded typed operand-stack state.
 Ordinary `new` calls now execute constructor-capable bytecode functions and
 materialize their `name`, `length`, and
 `prototype.constructor` graph. The `quickjs` facade supplies one immutable

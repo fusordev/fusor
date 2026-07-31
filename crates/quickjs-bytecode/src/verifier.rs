@@ -507,7 +507,7 @@ impl fmt::Display for InstructionIndex {
 pub enum VerifiedSuccessorKind {
     /// One ordinary fallthrough edge.
     Fallthrough,
-    /// A taken branch and a not-taken fallthrough edge.
+    /// A target edge and a continuation fallthrough edge.
     Branch,
     /// One unconditional jump edge.
     Jump,
@@ -557,7 +557,7 @@ impl VerifiedSuccessors {
         }
     }
 
-    /// Returns the taken target of a conditional branch.
+    /// Returns the taken branch, handler, or subroutine target.
     #[must_use]
     pub const fn branch_target(self) -> Option<InstructionIndex> {
         match self.0 {
@@ -2780,7 +2780,8 @@ const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
         | FinalOpcode::IfTrue
         | FinalOpcode::IfFalse8
         | FinalOpcode::IfTrue8
-        | FinalOpcode::Catch => OpcodeSemantics::Conditional,
+        | FinalOpcode::Catch
+        | FinalOpcode::Gosub => OpcodeSemantics::Conditional,
 
         FinalOpcode::Goto | FinalOpcode::Goto8 | FinalOpcode::Goto16 => OpcodeSemantics::Jump,
 
@@ -2790,7 +2791,8 @@ const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
         | FinalOpcode::ReturnUndef
         | FinalOpcode::ReturnAsync
         | FinalOpcode::Throw
-        | FinalOpcode::ThrowError => OpcodeSemantics::Terminate,
+        | FinalOpcode::ThrowError
+        | FinalOpcode::Ret => OpcodeSemantics::Terminate,
 
         FinalOpcode::PushConst
         | FinalOpcode::FClosure
@@ -2819,16 +2821,6 @@ const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
         | FinalOpcode::MakeVarRef => OpcodeSemantics::Unsupported(
             UnsupportedVerifierFeature::CapturedBindingMetadata,
             SuccessorShape::Fallthrough,
-        ),
-
-        FinalOpcode::Gosub => OpcodeSemantics::Unsupported(
-            UnsupportedVerifierFeature::FinallyReturnAddresses,
-            SuccessorShape::Jump,
-        ),
-
-        FinalOpcode::Ret => OpcodeSemantics::Unsupported(
-            UnsupportedVerifierFeature::FinallyReturnAddresses,
-            SuccessorShape::Terminate,
         ),
 
         FinalOpcode::WithGetVar
@@ -3081,6 +3073,9 @@ fn analyze_ordinary_stack(
     let has_catch_marker = instructions
         .iter()
         .any(|instruction| instruction.decoded.instruction().opcode() == FinalOpcode::Catch);
+    let has_gosub = instructions
+        .iter()
+        .any(|instruction| instruction.decoded.instruction().opcode() == FinalOpcode::Gosub);
 
     while let Some(index) = worklist.pop_front() {
         let position = usize::try_from(index.get()).map_err(|_| {
@@ -3163,6 +3158,40 @@ fn analyze_ordinary_stack(
             )
         })?;
         computed_max = computed_max.max(output_depth);
+        let finally_subroutine_depth =
+            if current.decoded.instruction().opcode() == FinalOpcode::Gosub {
+                let depth = u64::from(output_depth).checked_add(1).ok_or_else(|| {
+                    VerificationError::at_instruction(
+                        current.decoded,
+                        VerificationErrorKind::StackLimitExceeded {
+                            depth: u64::MAX,
+                            limit: limits.max_stack_depth,
+                        },
+                    )
+                })?;
+                if depth > u64::from(limits.max_stack_depth) {
+                    return Err(VerificationError::at_instruction(
+                        current.decoded,
+                        VerificationErrorKind::StackLimitExceeded {
+                            depth,
+                            limit: limits.max_stack_depth,
+                        },
+                    ));
+                }
+                let depth = u32::try_from(depth).map_err(|_| {
+                    VerificationError::at_instruction(
+                        current.decoded,
+                        VerificationErrorKind::StackLimitExceeded {
+                            depth,
+                            limit: limits.max_stack_depth,
+                        },
+                    )
+                })?;
+                computed_max = computed_max.max(depth);
+                Some(depth)
+            } else {
+                None
+            };
 
         match current.successors.0 {
             VerifiedSuccessorsRepr::Fallthrough(successor)
@@ -3178,7 +3207,7 @@ fn analyze_ordinary_stack(
                     instructions,
                     &mut worklist,
                     taken,
-                    output_depth,
+                    finally_subroutine_depth.unwrap_or(output_depth),
                     current.decoded,
                 )?;
                 propagate_stack_depth(
@@ -3192,7 +3221,24 @@ fn analyze_ordinary_stack(
             VerifiedSuccessorsRepr::Terminate => {
                 let protected_throw = has_catch_marker
                     && current.decoded.instruction().opcode() == FinalOpcode::Throw;
-                if require_empty_exits && output_depth != 0 && !protected_throw {
+                let returns_from_finally =
+                    current.decoded.instruction().opcode() == FinalOpcode::Ret;
+                // This structural pass cannot distinguish the pending
+                // completion and return-address slots introduced by `gosub`.
+                // A body containing `gosub` may therefore defer non-empty
+                // abrupt-exit proof to the whole-bytecode typed stack pass.
+                // `VerifiedControlFlow` alone remains non-executable.
+                let defers_typed_finally_exit = has_gosub
+                    && matches!(
+                        current.decoded.instruction().opcode(),
+                        FinalOpcode::Return | FinalOpcode::ReturnUndef | FinalOpcode::Throw
+                    );
+                if require_empty_exits
+                    && output_depth != 0
+                    && !protected_throw
+                    && !returns_from_finally
+                    && !defers_typed_finally_exit
+                {
                     return Err(VerificationError::at_instruction(
                         current.decoded,
                         VerificationErrorKind::NonEmptyCompilerExitStack {
@@ -3302,8 +3348,8 @@ mod tests {
         }
 
         assert_eq!(invalid, 1);
-        assert_eq!(supported, 214);
-        assert_eq!(unsupported, 29);
+        assert_eq!(supported, 216);
+        assert_eq!(unsupported, 27);
         assert_eq!(invalid + supported + unsupported, ALL_FINAL_OPCODES.len());
         assert_eq!(
             opcode_semantics(FinalOpcode::Invalid),

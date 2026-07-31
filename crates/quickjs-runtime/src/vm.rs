@@ -170,6 +170,7 @@ enum FrameBinding {
 enum OperandStackEntry {
     JavaScript(StoredValue),
     Catch { handler: InstructionIndex },
+    FinallyReturn { continuation: InstructionIndex },
 }
 
 struct Frame {
@@ -5849,6 +5850,14 @@ fn execute_one(
             let handler = branch_successor(verified_instruction, true, frame)?;
             frame.stack.push(OperandStackEntry::Catch { handler });
         }
+        FinalOpcode::Gosub => {
+            enter_finally_subroutine(verified_instruction, frame)?;
+            return Ok(Step::Continue);
+        }
+        FinalOpcode::Ret => {
+            frame.instruction = pop_finally_continuation(frame)?;
+            return Ok(Step::Continue);
+        }
         FinalOpcode::Drop => {
             drop_stack_entry(frame)?;
         }
@@ -5858,14 +5867,7 @@ fn execute_one(
             push(frame, top);
         }
         FinalOpcode::NipCatch => {
-            let top = pop(frame)?;
-            if !matches!(frame.stack.pop(), Some(OperandStackEntry::Catch { .. })) {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "verified nip_catch operand is not a catch marker",
-                }
-                .into());
-            }
-            push(frame, top);
+            nip_catch(frame, execution_budget)?;
         }
         FinalOpcode::Dup => {
             let value = peek(frame)?.duplicate();
@@ -6538,7 +6540,8 @@ fn execute_one(
                         | StoredValue::Function(_)
                         | StoredValue::Object(_),
                     )
-                    | OperandStackEntry::Catch { .. },
+                    | OperandStackEntry::Catch { .. }
+                    | OperandStackEntry::FinallyReturn { .. },
                 ) => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "verified for_in_next cursor is not a for-in iterator",
@@ -8931,7 +8934,7 @@ fn dispatch_pending_exception(
         })?;
     let handler = match frame.stack.get(marker) {
         Some(OperandStackEntry::Catch { handler }) => *handler,
-        Some(OperandStackEntry::JavaScript(_)) | None => {
+        Some(OperandStackEntry::JavaScript(_) | OperandStackEntry::FinallyReturn { .. }) | None => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "exception unwinder selected a non-catch operand entry",
             }
@@ -9115,6 +9118,9 @@ fn pop(frame: &mut Frame) -> Result<StoredValue, EngineFault> {
         Some(OperandStackEntry::Catch { .. }) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation consumed an internal catch marker",
         }),
+        Some(OperandStackEntry::FinallyReturn { .. }) => Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation consumed an internal finally return address",
+        }),
         None => Err(EngineFault::StackDepthMismatch {
             function: frame.template,
             pc: BytecodePc::ZERO,
@@ -9129,6 +9135,9 @@ fn peek(frame: &Frame) -> Result<&StoredValue, EngineFault> {
         Some(OperandStackEntry::JavaScript(value)) => Ok(value),
         Some(OperandStackEntry::Catch { .. }) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation inspected an internal catch marker",
+        }),
+        Some(OperandStackEntry::FinallyReturn { .. }) => Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation inspected an internal finally return address",
         }),
         None => Err(EngineFault::StackDepthMismatch {
             function: frame.template,
@@ -9145,6 +9154,9 @@ fn stack_value_at(frame: &Frame, index: usize) -> Result<&StoredValue, EngineFau
         Some(OperandStackEntry::Catch { .. }) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation indexed an internal catch marker",
         }),
+        Some(OperandStackEntry::FinallyReturn { .. }) => Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation indexed an internal finally return address",
+        }),
         None => Err(EngineFault::StackDepthMismatch {
             function: frame.template,
             pc: BytecodePc::ZERO,
@@ -9152,6 +9164,57 @@ fn stack_value_at(frame: &Frame, index: usize) -> Result<&StoredValue, EngineFau
             actual: frame.stack.len(),
         }),
     }
+}
+
+fn pop_finally_continuation(frame: &mut Frame) -> Result<InstructionIndex, EngineFault> {
+    match frame.stack.pop() {
+        Some(OperandStackEntry::FinallyReturn { continuation }) => Ok(continuation),
+        Some(OperandStackEntry::JavaScript(_) | OperandStackEntry::Catch { .. }) => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "verified ret operand is not an internal finally return address",
+            })
+        }
+        None => Err(EngineFault::StackDepthMismatch {
+            function: frame.template,
+            pc: BytecodePc::ZERO,
+            expected: 1,
+            actual: 0,
+        }),
+    }
+}
+
+fn enter_finally_subroutine(
+    instruction: quickjs_bytecode::VerifiedInstruction,
+    frame: &mut Frame,
+) -> Result<(), EngineFault> {
+    let target = branch_successor(instruction, true, frame)?;
+    let continuation = branch_successor(instruction, false, frame)?;
+    frame
+        .stack
+        .push(OperandStackEntry::FinallyReturn { continuation });
+    frame.instruction = target;
+    Ok(())
+}
+
+fn nip_catch(
+    frame: &mut Frame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), ExecutionError> {
+    execution_budget.charge_instructions(usize_to_u64(frame.stack.len()))?;
+
+    peek(frame)?;
+    let top = frame.stack.len().saturating_sub(1);
+    let marker = frame.stack[..top]
+        .iter()
+        .rposition(|entry| matches!(entry, OperandStackEntry::Catch { .. }))
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "verified nip_catch operand is not a catch marker",
+        })?;
+
+    let top = pop(frame)?;
+    frame.stack.truncate(marker);
+    push(frame, top);
+    Ok(())
 }
 
 fn drop_stack_entry(frame: &mut Frame) -> Result<(), EngineFault> {
