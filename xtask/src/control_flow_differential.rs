@@ -1,4 +1,4 @@
-//! Bounded runtime differential gate for labeled control flow and `switch`.
+//! Bounded runtime differential gate for labeled control flow, `switch`, and `for-in`.
 
 use crate::{
     ProgramOutput, Status, run_program_with_arguments_bounded,
@@ -82,6 +82,15 @@ const fn decimal_digits(mut value: usize) -> usize {
 const REQUIRED_COVERAGE: &[&str] = &[
     "captures",
     "chained-labels",
+    "for-in-getter-free",
+    "for-in-inherited-shadowing",
+    "for-in-key-order",
+    "for-in-labeled-control",
+    "for-in-lexical-capture",
+    "for-in-member-target",
+    "for-in-nullish",
+    "for-in-prototype-snapshot",
+    "for-in-string-indices",
     "generic-labeled-break",
     "labeled-break",
     "labeled-continue",
@@ -1053,6 +1062,7 @@ fn observe_candidate_body(body: &str) -> Result<Observation, String> {
         .with_max_heap_functions(512)
         .with_max_heap_objects(512)
         .with_max_object_properties(4_096)
+        .with_max_for_in_entries(8_192)
         .with_max_binding_cells(4_096)
         .with_max_realm_global_bindings(1_024)
         .with_max_public_roots(4_096)

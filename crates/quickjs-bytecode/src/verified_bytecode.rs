@@ -881,16 +881,16 @@ impl BytecodeGraphVerificationLimits {
         self
     }
 
-    /// Returns a copy with another binding and method-target abstract
-    /// frame-state entry maximum.
+    /// Returns a copy with another binding, method-target, and typed operand
+    /// stack abstract-state entry maximum.
     #[must_use]
     pub const fn with_max_frame_state_entries(mut self, maximum: u64) -> Self {
         self.max_frame_state_entries = maximum;
         self
     }
 
-    /// Returns a copy with another binding-policy and method-target transfer
-    /// maximum.
+    /// Returns a copy with another binding-policy, method-target, and typed
+    /// operand-stack transfer maximum.
     #[must_use]
     pub const fn with_max_policy_transfers(mut self, maximum: u64) -> Self {
         self.max_policy_transfers = maximum;
@@ -921,15 +921,15 @@ impl BytecodeGraphVerificationLimits {
         self.max_source_mappings
     }
 
-    /// Returns the conservative binding and method-target abstract frame-state
-    /// cell maximum.
+    /// Returns the conservative binding, method-target, and typed operand-stack
+    /// abstract-state cell maximum.
     #[must_use]
     pub const fn max_frame_state_entries(self) -> u64 {
         self.max_frame_state_entries
     }
 
-    /// Returns the aggregate binding-policy and method-target state-cell visit
-    /// maximum.
+    /// Returns the aggregate binding-policy, method-target, and typed
+    /// operand-stack state-cell visit maximum.
     #[must_use]
     pub const fn max_policy_transfers(self) -> u64 {
         self.max_policy_transfers
@@ -978,14 +978,15 @@ impl BytecodeGraphUsage {
         self.source_mappings
     }
 
-    /// Returns allocated binding and method-target abstract frame-state
-    /// entries.
+    /// Returns allocated binding, method-target, and typed operand-stack
+    /// abstract-state entries.
     #[must_use]
     pub const fn frame_state_entries(self) -> u64 {
         self.frame_state_entries
     }
 
-    /// Returns evaluated binding-policy and method-target transfers.
+    /// Returns evaluated binding-policy, method-target, and typed operand-stack
+    /// transfers.
     #[must_use]
     pub const fn policy_transfers(self) -> u64 {
         self.policy_transfers
@@ -1003,9 +1004,9 @@ pub enum BytecodeGraphResource {
     SourceBytes,
     /// Final PC-to-source mappings.
     SourceMappings,
-    /// Binding and method-target abstract frame-state entries.
+    /// Binding, method-target, and typed operand-stack abstract-state entries.
     FrameStateEntries,
-    /// Binding-policy and method-target transfer evaluations.
+    /// Binding-policy, method-target, and typed operand-stack evaluations.
     PolicyTransfers,
     /// Frozen verified metadata records.
     VerifiedMetadata,
@@ -1019,7 +1020,7 @@ impl fmt::Display for BytecodeGraphResource {
             Self::SourceBytes => "source bytes",
             Self::SourceMappings => "source mappings",
             Self::FrameStateEntries => "frame-state entries",
-            Self::PolicyTransfers => "policy and method-target transfers",
+            Self::PolicyTransfers => "policy, method-target, and typed-stack transfers",
             Self::VerifiedMetadata => "verified metadata records",
         })
     }
@@ -1396,6 +1397,27 @@ pub enum BytecodeVerificationErrorKind {
         /// Rejected opcode.
         opcode: FinalOpcode,
     },
+    /// An opcode forged, consumed, copied, stored, called, returned, or
+    /// reordered an internal `for-in` iterator marker.
+    ForInIteratorStackMismatch {
+        /// Final bytecode position.
+        pc: BytecodePc,
+        /// Opcode whose typed inputs were invalid.
+        opcode: FinalOpcode,
+    },
+    /// Control flow merged distinct `for-in` iterator identities or mixed an
+    /// iterator marker with an ordinary JavaScript value.
+    ForInIteratorJoinMismatch {
+        /// Join target.
+        target: BytecodePc,
+        /// Incoming edge that disagreed with the established typed stack.
+        incoming_from: BytecodePc,
+    },
+    /// A terminal path retained an internal `for-in` iterator marker.
+    ForInIteratorMarkerAtExit {
+        /// Terminal bytecode position.
+        pc: BytecodePc,
+    },
     /// `define_method` is not paired with one immediately preceding typed
     /// ordinary-method closure.
     DefineMethodTemplateMismatch {
@@ -1650,6 +1672,21 @@ impl fmt::Display for BytecodeVerificationErrorKind {
                     "opcode {opcode:?} at PC {pc} is outside compiler profile"
                 )
             }
+            Self::ForInIteratorStackMismatch { pc, opcode } => write!(
+                formatter,
+                "opcode {opcode:?} at PC {pc} violates the typed for-in iterator stack"
+            ),
+            Self::ForInIteratorJoinMismatch {
+                target,
+                incoming_from,
+            } => write!(
+                formatter,
+                "typed for-in iterator stack at PC {target} disagrees with the edge from PC {incoming_from}"
+            ),
+            Self::ForInIteratorMarkerAtExit { pc } => write!(
+                formatter,
+                "terminal at PC {pc} retains an internal for-in iterator marker"
+            ),
             Self::DefineMethodTemplateMismatch { pc } => write!(
                 formatter,
                 "define_method at PC {pc} is not paired with one typed method closure"
@@ -2022,6 +2059,15 @@ fn verify_function_metadata(
     )?;
     verify_source(id, flow, metadata)?;
     verify_supported_opcodes(id, flow, metadata.executable_kind, authority_kind)?;
+    let mut for_in_certificate = verify_for_in_iterator_stack(id, function, limits, usage)?;
+    classify_for_in_declarative_local_puts(
+        id,
+        flow,
+        &metadata.variables,
+        &mut for_in_certificate,
+        limits,
+        usage,
+    )?;
     verify_binding_opcodes(id, flow, &metadata.variables, &metadata.closures)?;
     let binding_transfers = verify_binding_states(
         id,
@@ -2029,6 +2075,7 @@ fn verify_function_metadata(
         function,
         &metadata.variables,
         &initializer_sites,
+        &for_in_certificate,
         realm_global_initializer_prefix,
         usage.policy_transfers,
         limits.max_policy_transfers,
@@ -3962,7 +4009,7 @@ fn propagate_object_definition_provenance(
         .ok_or_else(|| method_target_error(id, source_pc))?;
     let changed = match entry {
         None => {
-            charge_method_state_entries(id, usage, output.len(), state_limit)?;
+            charge_frame_state_entries(id, usage, output.len(), state_limit)?;
             *entry = Some(try_copy_slice(
                 id,
                 output,
@@ -4004,7 +4051,7 @@ fn propagate_object_definition_provenance(
     Ok(())
 }
 
-fn charge_method_state_entries(
+fn charge_frame_state_entries(
     id: FunctionTemplateId,
     usage: &mut BytecodeGraphUsage,
     amount: usize,
@@ -4145,9 +4192,12 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushTrue
             | FinalOpcode::Object
             | FinalOpcode::Drop
+            | FinalOpcode::Nip
             | FinalOpcode::Dup
             | FinalOpcode::Insert2
             | FinalOpcode::Insert3
+            | FinalOpcode::Swap
+            | FinalOpcode::Rot3l
             | FinalOpcode::CallConstructor
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
@@ -4184,6 +4234,8 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::DefineArrayEl
             | FinalOpcode::DefineMethod
             | FinalOpcode::DefineMethodComputed
+            | FinalOpcode::ForInStart
+            | FinalOpcode::ForInNext
             | FinalOpcode::IfFalse
             | FinalOpcode::IfTrue
             | FinalOpcode::Goto
@@ -4283,6 +4335,612 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::IfTrue8
             | FinalOpcode::Goto8
             | FinalOpcode::Goto16
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ForInStackValue {
+    Ordinary,
+    Iterator(BytecodePc),
+    Key(BytecodePc),
+    Done(BytecodePc),
+    HeadKey(BytecodePc),
+}
+
+impl ForInStackValue {
+    const fn is_javascript_value(self) -> bool {
+        !matches!(self, Self::Iterator(_))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CertifiedForInLocalPut {
+    local: u32,
+    cursor_site: BytecodePc,
+}
+
+#[derive(Default)]
+struct ForInIteratorCertificate {
+    local_key_puts: Vec<Option<CertifiedForInLocalPut>>,
+}
+
+impl ForInIteratorCertificate {
+    fn certifies_local_key_put(&self, instruction: usize, local: u32) -> bool {
+        self.local_key_puts
+            .get(instruction)
+            .copied()
+            .flatten()
+            .is_some_and(|certificate| certificate.local == local)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ForInLocalPutSummary {
+    unchecked_puts: u32,
+    certified_puts: u32,
+    cursor_site: Option<BytecodePc>,
+    first_certified_pc: Option<BytecodePc>,
+    has_uncertified_put: bool,
+    multiple_cursor_sites: bool,
+    declarative_authority: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ForInStackTransfer {
+    normal_completion: bool,
+    iteration_branch_key: Option<BytecodePc>,
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the bounded CFG worklist and exact operand-stack transfer form one for-in iterator certificate"
+)]
+fn verify_for_in_iterator_stack(
+    id: FunctionTemplateId,
+    function: &VerifiedCompilerFunction,
+    limits: BytecodeGraphVerificationLimits,
+    usage: &mut BytecodeGraphUsage,
+) -> Result<ForInIteratorCertificate, BytecodeVerificationError> {
+    let instructions = function.control_flow().instructions();
+    if !instructions.iter().any(|verified| {
+        matches!(
+            verified.decoded().instruction().opcode(),
+            FinalOpcode::ForInStart | FinalOpcode::ForInNext | FinalOpcode::Nip
+        )
+    }) {
+        return Ok(ForInIteratorCertificate::default());
+    }
+
+    let mut entries = try_filled_vec(
+        id,
+        instructions.len(),
+        None::<Vec<ForInStackValue>>,
+        BytecodeGraphResource::FrameStateEntries,
+    )?;
+    let mut queued = try_filled_vec(
+        id,
+        instructions.len(),
+        false,
+        BytecodeGraphResource::PolicyTransfers,
+    )?;
+    let mut components = try_filled_vec(
+        id,
+        instructions.len(),
+        None::<u32>,
+        BytecodeGraphResource::FrameStateEntries,
+    )?;
+    let mut local_key_puts = try_filled_vec(
+        id,
+        instructions.len(),
+        None::<CertifiedForInLocalPut>,
+        BytecodeGraphResource::FrameStateEntries,
+    )?;
+    let mut work = VecDeque::new();
+    work.try_reserve_exact(instructions.len()).map_err(|_| {
+        BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::AllocationFailed {
+                resource: BytecodeGraphResource::PolicyTransfers,
+                requested: usize_to_u64(instructions.len()),
+            },
+        )
+    })?;
+
+    let mut next_seed = 0_usize;
+    let mut evaluations = 0_u64;
+    loop {
+        if work.is_empty() {
+            while entries.get(next_seed).is_some_and(Option::is_some) {
+                next_seed = next_seed.saturating_add(1);
+            }
+            if next_seed == entries.len() {
+                break;
+            }
+            entries[next_seed] = Some(Vec::new());
+            components[next_seed] = Some(usize_to_u32(next_seed));
+            queued[next_seed] = true;
+            work.push_back(next_seed);
+        }
+
+        let Some(index) = work.pop_front() else {
+            continue;
+        };
+        queued[index] = false;
+        let decoded = instructions[index].decoded();
+        let component = components[index]
+            .ok_or_else(|| for_in_stack_error(id, decoded.pc(), decoded.instruction().opcode()))?;
+        let entry = entries[index]
+            .as_deref()
+            .ok_or_else(|| for_in_stack_error(id, decoded.pc(), decoded.instruction().opcode()))?;
+        charge_policy_transfers(
+            id,
+            &mut evaluations,
+            usize_to_u64(entry.len()).saturating_add(1),
+            usage.policy_transfers,
+            limits.max_policy_transfers,
+        )?;
+        let mut state = try_copy_slice(id, entry, BytecodeGraphResource::FrameStateEntries)?;
+        let transfer =
+            transfer_for_in_iterator_stack(id, index, decoded, &mut state, &mut local_key_puts)?;
+        if !transfer.normal_completion {
+            continue;
+        }
+
+        let successors = instructions[index].successors();
+        let mut has_successor = false;
+        for (successor, is_branch_target) in [
+            (successors.fallthrough(), false),
+            (successors.branch_target(), true),
+            (successors.jump_target(), false),
+        ]
+        .into_iter()
+        .filter_map(|(successor, is_branch_target)| {
+            successor.map(|successor| (successor, is_branch_target))
+        }) {
+            has_successor = true;
+            let target_pc = instructions
+                .get(successor.get() as usize)
+                .map(|instruction| instruction.decoded().pc())
+                .ok_or_else(|| {
+                    BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::ForInIteratorJoinMismatch {
+                            target: BytecodePc::new(successor.get()),
+                            incoming_from: decoded.pc(),
+                        },
+                    )
+                })?;
+            let branch_key_index = transfer
+                .iteration_branch_key
+                .map(|site| {
+                    let key_index = state.len().checked_sub(1).ok_or_else(|| {
+                        for_in_stack_error(id, decoded.pc(), decoded.instruction().opcode())
+                    })?;
+                    if state[key_index] != ForInStackValue::Key(site) {
+                        return Err(for_in_stack_error(
+                            id,
+                            decoded.pc(),
+                            decoded.instruction().opcode(),
+                        ));
+                    }
+                    state[key_index] = if is_branch_target {
+                        ForInStackValue::HeadKey(site)
+                    } else {
+                        ForInStackValue::Ordinary
+                    };
+                    Ok(key_index)
+                })
+                .transpose()?;
+            charge_policy_transfers(
+                id,
+                &mut evaluations,
+                usize_to_u64(state.len()).saturating_add(1),
+                usage.policy_transfers,
+                limits.max_policy_transfers,
+            )?;
+            propagate_for_in_iterator_stack(
+                id,
+                decoded.pc(),
+                successor,
+                target_pc,
+                component,
+                &state,
+                &mut entries,
+                &mut components,
+                &mut queued,
+                &mut work,
+                limits.max_frame_state_entries,
+                usage,
+            )?;
+            if let (Some(key_index), Some(site)) = (branch_key_index, transfer.iteration_branch_key)
+            {
+                state[key_index] = ForInStackValue::Key(site);
+            }
+        }
+        if !has_successor
+            && state
+                .iter()
+                .any(|value| matches!(value, ForInStackValue::Iterator(_)))
+        {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::ForInIteratorMarkerAtExit { pc: decoded.pc() },
+            ));
+        }
+    }
+
+    charge(
+        &mut usage.policy_transfers,
+        evaluations,
+        limits.max_policy_transfers,
+        BytecodeGraphResource::PolicyTransfers,
+    )?;
+    Ok(ForInIteratorCertificate { local_key_puts })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the classifier shares the graph resource limits and usage ledger with the typed stack pass"
+)]
+fn classify_for_in_declarative_local_puts(
+    id: FunctionTemplateId,
+    flow: &VerifiedControlFlow,
+    variables: &[VariableDefinition],
+    certificate: &mut ForInIteratorCertificate,
+    limits: BytecodeGraphVerificationLimits,
+    usage: &mut BytecodeGraphUsage,
+) -> Result<(), BytecodeVerificationError> {
+    if certificate.local_key_puts.iter().all(Option::is_none) {
+        return Ok(());
+    }
+
+    let argument_count = flow.domains().argument_count() as usize;
+    let local_count = variables.len() - argument_count;
+    charge_frame_state_entries(id, usage, local_count, limits.max_frame_state_entries)?;
+    let mut summaries = try_filled_vec(
+        id,
+        local_count,
+        ForInLocalPutSummary::default(),
+        BytecodeGraphResource::FrameStateEntries,
+    )?;
+    let mut evaluations = 0_u64;
+
+    for (index, verified) in flow.instructions().iter().enumerate() {
+        let decoded = verified.decoded();
+        let instruction = decoded.instruction();
+        let opcode = instruction.opcode();
+        if !is_unchecked_local_put(opcode) {
+            continue;
+        }
+        charge_policy_transfers(
+            id,
+            &mut evaluations,
+            1,
+            usage.policy_transfers,
+            limits.max_policy_transfers,
+        )?;
+        let Some(local) = local_operand(opcode, instruction.operands()) else {
+            return Err(for_in_stack_error(id, decoded.pc(), opcode));
+        };
+        let Some(summary) = summaries.get_mut(local as usize) else {
+            return Err(for_in_stack_error(id, decoded.pc(), opcode));
+        };
+        summary.unchecked_puts = summary.unchecked_puts.saturating_add(1);
+
+        let certified = certificate.local_key_puts.get(index).copied().flatten();
+        let Some(certified) = certified else {
+            summary.has_uncertified_put = true;
+            continue;
+        };
+        if certified.local != local {
+            return Err(for_in_stack_error(id, decoded.pc(), opcode));
+        }
+        summary.certified_puts = summary.certified_puts.saturating_add(1);
+        summary.first_certified_pc.get_or_insert(decoded.pc());
+        match summary.cursor_site {
+            Some(site) if site != certified.cursor_site => {
+                summary.multiple_cursor_sites = true;
+            }
+            Some(_) => {}
+            None => summary.cursor_site = Some(certified.cursor_site),
+        }
+    }
+
+    for (local, summary) in summaries.iter_mut().enumerate() {
+        if summary.certified_puts == 0 {
+            continue;
+        }
+        charge_policy_transfers(
+            id,
+            &mut evaluations,
+            1,
+            usage.policy_transfers,
+            limits.max_policy_transfers,
+        )?;
+        let definition = &variables[argument_count + local];
+        if definition.policy.temporal_dead_zone && summary.multiple_cursor_sites {
+            return Err(policy_error(
+                id,
+                BindingSlot::Local(usize_to_u32(local)),
+                summary.first_certified_pc,
+                BindingPolicyViolationReason::InvalidLexicalInitialization,
+            ));
+        }
+        summary.declarative_authority = definition.policy.temporal_dead_zone
+            && !summary.has_uncertified_put
+            && summary.unchecked_puts == summary.certified_puts;
+    }
+
+    for certified in &mut certificate.local_key_puts {
+        let Some(local_put) = *certified else {
+            continue;
+        };
+        charge_policy_transfers(
+            id,
+            &mut evaluations,
+            1,
+            usage.policy_transfers,
+            limits.max_policy_transfers,
+        )?;
+        if !summaries[local_put.local as usize].declarative_authority {
+            *certified = None;
+        }
+    }
+
+    charge(
+        &mut usage.policy_transfers,
+        evaluations,
+        limits.max_policy_transfers,
+        BytecodeGraphResource::PolicyTransfers,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "marker isolation, edge-specific key provenance, and ordinary stack transfer form one typed opcode boundary"
+)]
+fn transfer_for_in_iterator_stack(
+    id: FunctionTemplateId,
+    instruction_index: usize,
+    decoded: crate::DecodedInstruction,
+    state: &mut Vec<ForInStackValue>,
+    local_key_puts: &mut [Option<CertifiedForInLocalPut>],
+) -> Result<ForInStackTransfer, BytecodeVerificationError> {
+    let instruction = decoded.instruction();
+    let opcode = instruction.opcode();
+    match opcode {
+        FinalOpcode::ForInStart => {
+            invalidate_for_in_key_provenance(state);
+            let Some(input) = state.last_mut() else {
+                return Err(for_in_stack_error(id, decoded.pc(), opcode));
+            };
+            if *input != ForInStackValue::Ordinary {
+                return Err(for_in_stack_error(id, decoded.pc(), opcode));
+            }
+            *input = ForInStackValue::Iterator(decoded.pc());
+            return Ok(ForInStackTransfer {
+                normal_completion: true,
+                iteration_branch_key: None,
+            });
+        }
+        FinalOpcode::ForInNext => {
+            invalidate_for_in_key_provenance(state);
+            let Some(ForInStackValue::Iterator(site)) = state.last().copied() else {
+                return Err(for_in_stack_error(id, decoded.pc(), opcode));
+            };
+            state.try_reserve(2).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 2,
+                    },
+                )
+            })?;
+            state.push(ForInStackValue::Key(site));
+            state.push(ForInStackValue::Done(site));
+            return Ok(ForInStackTransfer {
+                normal_completion: true,
+                iteration_branch_key: None,
+            });
+        }
+        FinalOpcode::IfFalse | FinalOpcode::IfFalse8 => {
+            if let Some(base) = state.len().checked_sub(3)
+                && let (
+                    ForInStackValue::Iterator(iterator),
+                    ForInStackValue::Key(key),
+                    ForInStackValue::Done(done),
+                ) = (state[base], state[base + 1], state[base + 2])
+                && iterator == key
+                && key == done
+            {
+                state.pop();
+                invalidate_for_in_key_provenance(&mut state[..base]);
+                return Ok(ForInStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_key: Some(key),
+                });
+            }
+        }
+        opcode if is_unchecked_local_put(opcode) => {
+            if let Some(marker) = state.len().checked_sub(2)
+                && let (ForInStackValue::Iterator(iterator), ForInStackValue::HeadKey(key)) =
+                    (state[marker], state[marker + 1])
+                && iterator == key
+            {
+                let Some(local) = local_operand(opcode, instruction.operands()) else {
+                    return Err(for_in_stack_error(id, decoded.pc(), opcode));
+                };
+                let Some(certificate) = local_key_puts.get_mut(instruction_index) else {
+                    return Err(for_in_stack_error(id, decoded.pc(), opcode));
+                };
+                *certificate = Some(CertifiedForInLocalPut {
+                    local,
+                    cursor_site: key,
+                });
+                state.pop();
+                invalidate_for_in_key_provenance(state);
+                return Ok(ForInStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_key: None,
+                });
+            }
+        }
+        FinalOpcode::Drop => {
+            if state.pop().is_none() {
+                return Ok(ForInStackTransfer {
+                    normal_completion: false,
+                    iteration_branch_key: None,
+                });
+            }
+            invalidate_for_in_key_provenance(state);
+            return Ok(ForInStackTransfer {
+                normal_completion: true,
+                iteration_branch_key: None,
+            });
+        }
+        FinalOpcode::Nip => {
+            let marker_index = state.len().checked_sub(2);
+            if !matches!(
+                marker_index.map(|index| (state[index], state[index + 1])),
+                Some((ForInStackValue::Iterator(_), value))
+                    if value.is_javascript_value()
+            ) {
+                return Err(for_in_stack_error(id, decoded.pc(), opcode));
+            }
+            state.truncate(state.len() - 2);
+            state.push(ForInStackValue::Ordinary);
+            invalidate_for_in_key_provenance(state);
+            return Ok(ForInStackTransfer {
+                normal_completion: true,
+                iteration_branch_key: None,
+            });
+        }
+        _ => {}
+    }
+
+    invalidate_for_in_key_provenance(state);
+    let effect = instruction
+        .stack_effect()
+        .map_err(|_| for_in_stack_error(id, decoded.pc(), opcode))?;
+    let pops = effect.pops() as usize;
+    let pushes = effect.pushes() as usize;
+    let Some(input_start) = state.len().checked_sub(pops) else {
+        return Ok(ForInStackTransfer {
+            normal_completion: false,
+            iteration_branch_key: None,
+        });
+    };
+    if state[input_start..]
+        .iter()
+        .any(|value| !value.is_javascript_value())
+    {
+        return Err(for_in_stack_error(id, decoded.pc(), opcode));
+    }
+    let output_len = input_start
+        .checked_add(pushes)
+        .ok_or_else(|| for_in_stack_error(id, decoded.pc(), opcode))?;
+    if output_len > state.len() {
+        let additional = output_len - state.len();
+        state.try_reserve(additional).map_err(|_| {
+            BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::AllocationFailed {
+                    resource: BytecodeGraphResource::FrameStateEntries,
+                    requested: usize_to_u64(additional),
+                },
+            )
+        })?;
+    }
+    state.truncate(input_start);
+    state.resize(output_len, ForInStackValue::Ordinary);
+    Ok(ForInStackTransfer {
+        normal_completion: true,
+        iteration_branch_key: None,
+    })
+}
+
+fn invalidate_for_in_key_provenance(state: &mut [ForInStackValue]) {
+    for value in state {
+        if matches!(
+            value,
+            ForInStackValue::Key(_) | ForInStackValue::Done(_) | ForInStackValue::HeadKey(_)
+        ) {
+            *value = ForInStackValue::Ordinary;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propagate_for_in_iterator_stack(
+    id: FunctionTemplateId,
+    source_pc: BytecodePc,
+    successor: InstructionIndex,
+    target_pc: BytecodePc,
+    component: u32,
+    output: &[ForInStackValue],
+    entries: &mut [Option<Vec<ForInStackValue>>],
+    components: &mut [Option<u32>],
+    queued: &mut [bool],
+    work: &mut VecDeque<usize>,
+    state_limit: u64,
+    usage: &mut BytecodeGraphUsage,
+) -> Result<(), BytecodeVerificationError> {
+    let index = successor.get() as usize;
+    let component_slot = components
+        .get_mut(index)
+        .ok_or_else(|| for_in_join_error(id, target_pc, source_pc))?;
+    match *component_slot {
+        Some(established) if established != component => return Ok(()),
+        Some(_) => {}
+        None => *component_slot = Some(component),
+    }
+    let entry = entries
+        .get_mut(index)
+        .ok_or_else(|| for_in_join_error(id, target_pc, source_pc))?;
+    match entry {
+        None => {
+            charge_frame_state_entries(id, usage, output.len(), state_limit)?;
+            *entry = Some(try_copy_slice(
+                id,
+                output,
+                BytecodeGraphResource::FrameStateEntries,
+            )?);
+            if !queued[index] {
+                queued[index] = true;
+                work.push_back(index);
+            }
+        }
+        Some(existing) if existing == output => {}
+        Some(_) => {
+            return Err(for_in_join_error(id, target_pc, source_pc));
+        }
+    }
+    Ok(())
+}
+
+fn for_in_stack_error(
+    id: FunctionTemplateId,
+    pc: BytecodePc,
+    opcode: FinalOpcode,
+) -> BytecodeVerificationError {
+    BytecodeVerificationError::function(
+        id,
+        BytecodeVerificationErrorKind::ForInIteratorStackMismatch { pc, opcode },
+    )
+}
+
+fn for_in_join_error(
+    id: FunctionTemplateId,
+    target: BytecodePc,
+    incoming_from: BytecodePc,
+) -> BytecodeVerificationError {
+    BytecodeVerificationError::function(
+        id,
+        BytecodeVerificationErrorKind::ForInIteratorJoinMismatch {
+            target,
+            incoming_from,
+        },
     )
 }
 
@@ -4525,6 +5183,7 @@ fn verify_binding_states(
     function: &VerifiedCompilerFunction,
     variables: &[VariableDefinition],
     initializers: &VerifiedFunctionInitializers,
+    for_in_certificate: &ForInIteratorCertificate,
     realm_global_initializer_prefix: usize,
     prior_transfers: u64,
     transfer_limit: u64,
@@ -4626,9 +5285,7 @@ fn verify_binding_states(
         let mut state = try_copy_slice(id, state, BytecodeGraphResource::FrameStateEntries)?;
         if realm_global_initializer_prefix != 0 && index == initializers.entry_prefix_end {
             for (position, (local, _)) in tracked.iter().enumerate() {
-                if state[position] & BindingState::VALUE_INACTIVE != 0
-                    && state[position] & BindingState::CELL_ACTIVE != 0
-                {
+                if state[position] & BindingState::INACTIVE_ACTIVE != 0 {
                     return Err(policy_error(
                         id,
                         BindingSlot::Local(usize_to_u32(*local)),
@@ -4667,7 +5324,7 @@ fn verify_binding_states(
                 };
                 let certified_realm_global_initializer =
                     index < realm_global_initializer_prefix && index % 2 == 0;
-                if state[position] & BindingState::VALUE_INACTIVE != 0
+                if state[position] & BindingState::INACTIVE != 0
                     && !certified_realm_global_initializer
                 {
                     return Err(policy_error(
@@ -4677,8 +5334,7 @@ fn verify_binding_states(
                         BindingPolicyViolationReason::MissingLexicalScopeInitialization,
                     ));
                 }
-                state[position] =
-                    (state[position] & BindingState::VALUE_MASK) | BindingState::CELL_ACTIVE;
+                state[position] = BindingState::with_active_cell(state[position]);
             }
         }
         let mut normal_completion_possible = true;
@@ -4693,6 +5349,7 @@ fn verify_binding_states(
                 opcode,
                 tracked[position].1,
                 initializers.put_definitions[index] == Some(definition_index),
+                for_in_certificate.certifies_local_key_put(index, local),
                 &mut state[position],
             )?;
         }
@@ -4773,15 +5430,55 @@ fn charge_policy_transfers(
 struct BindingState;
 
 impl BindingState {
-    const VALUE_INACTIVE: u8 = 1;
-    const VALUE_UNINITIALIZED: u8 = 2;
-    const VALUE_INITIALIZED: u8 = 4;
-    const VALUE_MASK: u8 =
-        Self::VALUE_INACTIVE | Self::VALUE_UNINITIALIZED | Self::VALUE_INITIALIZED;
-    const CELL_CLOSED: u8 = 8;
-    const CELL_ACTIVE: u8 = 16;
-    const CELL_MASK: u8 = Self::CELL_CLOSED | Self::CELL_ACTIVE;
-    const ENTRY: u8 = Self::VALUE_INACTIVE | Self::CELL_CLOSED;
+    const INACTIVE_CLOSED: u8 = 1 << 0;
+    const INACTIVE_ACTIVE: u8 = 1 << 1;
+    const UNINITIALIZED_CLOSED: u8 = 1 << 2;
+    const UNINITIALIZED_ACTIVE: u8 = 1 << 3;
+    const INITIALIZED_CLOSED: u8 = 1 << 4;
+    const INITIALIZED_ACTIVE: u8 = 1 << 5;
+
+    const INACTIVE: u8 = Self::INACTIVE_CLOSED | Self::INACTIVE_ACTIVE;
+    const UNINITIALIZED: u8 = Self::UNINITIALIZED_CLOSED | Self::UNINITIALIZED_ACTIVE;
+    const INITIALIZED: u8 = Self::INITIALIZED_CLOSED | Self::INITIALIZED_ACTIVE;
+    const CLOSED: u8 =
+        Self::INACTIVE_CLOSED | Self::UNINITIALIZED_CLOSED | Self::INITIALIZED_CLOSED;
+    const ACTIVE: u8 =
+        Self::INACTIVE_ACTIVE | Self::UNINITIALIZED_ACTIVE | Self::INITIALIZED_ACTIVE;
+    const ENTRY: u8 = Self::INACTIVE_CLOSED;
+
+    const fn only(state: u8, allowed: u8) -> bool {
+        state != 0 && state & !allowed == 0
+    }
+
+    const fn with_uninitialized_value(state: u8) -> u8 {
+        let mut output = 0;
+        if state & Self::CLOSED != 0 {
+            output |= Self::UNINITIALIZED_CLOSED;
+        }
+        if state & Self::ACTIVE != 0 {
+            output |= Self::UNINITIALIZED_ACTIVE;
+        }
+        output
+    }
+
+    const fn with_initialized_value(state: u8) -> u8 {
+        let mut output = 0;
+        if state & Self::CLOSED != 0 {
+            output |= Self::INITIALIZED_CLOSED;
+        }
+        if state & Self::ACTIVE != 0 {
+            output |= Self::INITIALIZED_ACTIVE;
+        }
+        output
+    }
+
+    const fn with_closed_cell(state: u8) -> u8 {
+        (state & Self::CLOSED) | ((state & Self::ACTIVE) >> 1)
+    }
+
+    const fn with_active_cell(state: u8) -> u8 {
+        ((state & Self::CLOSED) << 1) | (state & Self::ACTIVE)
+    }
 }
 
 fn requires_binding_state(definition: &VariableDefinition) -> bool {
@@ -4793,17 +5490,20 @@ fn requires_binding_state(definition: &VariableDefinition) -> bool {
 
 fn initial_binding_state(definition: &VariableDefinition) -> u8 {
     if definition.policy.initialization == CompilerInitializationPolicy::FunctionName {
-        let cell = if definition.variable_reference.is_some() {
-            BindingState::CELL_ACTIVE
+        if definition.variable_reference.is_some() {
+            BindingState::INITIALIZED_ACTIVE
         } else {
-            BindingState::CELL_CLOSED
-        };
-        BindingState::VALUE_INITIALIZED | cell
+            BindingState::INITIALIZED_CLOSED
+        }
     } else {
         BindingState::ENTRY
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "binding identity, declaration policy, initializer authority, and for-in key authority are checked together"
+)]
 fn transfer_local_state(
     id: FunctionTemplateId,
     pc: BytecodePc,
@@ -4811,6 +5511,7 @@ fn transfer_local_state(
     opcode: FinalOpcode,
     definition: &VariableDefinition,
     is_function_initializer: bool,
+    is_for_in_key_put: bool,
     state: &mut u8,
 ) -> Result<bool, BytecodeVerificationError> {
     let slot = BindingSlot::Local(local);
@@ -4818,8 +5519,7 @@ fn transfer_local_state(
         FinalOpcode::SetLocUninitialized => {
             if definition.has_scope
                 && definition.variable_reference.is_some()
-                && *state & BindingState::CELL_ACTIVE != 0
-                && *state & (BindingState::VALUE_UNINITIALIZED | BindingState::VALUE_INITIALIZED)
+                && *state & (BindingState::UNINITIALIZED_ACTIVE | BindingState::INITIALIZED_ACTIVE)
                     != 0
             {
                 return Err(policy_error(
@@ -4829,37 +5529,39 @@ fn transfer_local_state(
                     BindingPolicyViolationReason::InvalidLexicalInitialization,
                 ));
             }
-            let cell = if definition.has_scope && definition.variable_reference.is_some() {
-                BindingState::CELL_ACTIVE
+            *state = if definition.has_scope && definition.variable_reference.is_some() {
+                BindingState::UNINITIALIZED_ACTIVE
             } else {
-                *state & BindingState::CELL_MASK
+                BindingState::with_uninitialized_value(*state)
             };
-            *state = BindingState::VALUE_UNINITIALIZED | cell;
         }
         opcode if is_unchecked_local_put(opcode) => {
-            let value = *state & BindingState::VALUE_MASK;
-            let cell = *state & BindingState::CELL_MASK;
             let valid = if is_function_initializer {
                 match definition.policy.initialization {
                     CompilerInitializationPolicy::FunctionAtScopeEntry => {
-                        value == BindingState::VALUE_UNINITIALIZED
+                        BindingState::only(*state, BindingState::UNINITIALIZED)
                             && (definition.variable_reference.is_none()
-                                || cell == BindingState::CELL_ACTIVE)
+                                || BindingState::only(*state, BindingState::UNINITIALIZED_ACTIVE))
                     }
                     CompilerInitializationPolicy::FunctionAtInstantiation
                     | CompilerInitializationPolicy::Argument => {
-                        value == BindingState::VALUE_INACTIVE
+                        BindingState::only(*state, BindingState::INACTIVE)
                     }
                     _ => false,
                 }
             } else if definition.function_initializer.is_some()
-                && value != BindingState::VALUE_INITIALIZED
+                && !BindingState::only(*state, BindingState::INITIALIZED)
             {
                 false
+            } else if is_for_in_key_put {
+                BindingState::only(
+                    *state,
+                    BindingState::UNINITIALIZED | BindingState::INITIALIZED_CLOSED,
+                )
             } else if definition.policy.writes == CompilerWritePolicy::Mutable {
-                value & BindingState::VALUE_INACTIVE == 0
+                *state & BindingState::INACTIVE == 0
             } else {
-                value == BindingState::VALUE_UNINITIALIZED
+                BindingState::only(*state, BindingState::UNINITIALIZED)
             };
             if !valid {
                 return Err(policy_error(
@@ -4869,10 +5571,10 @@ fn transfer_local_state(
                     BindingPolicyViolationReason::InvalidLexicalInitialization,
                 ));
             }
-            *state = BindingState::VALUE_INITIALIZED | (*state & BindingState::CELL_MASK);
+            *state = BindingState::with_initialized_value(*state);
         }
         FinalOpcode::GetLocCheck | FinalOpcode::PutLocCheck | FinalOpcode::SetLocCheck => {
-            if *state & BindingState::VALUE_INACTIVE != 0 {
+            if *state & BindingState::INACTIVE != 0 {
                 return Err(policy_error(
                     id,
                     slot,
@@ -4880,17 +5582,18 @@ fn transfer_local_state(
                     BindingPolicyViolationReason::MissingLexicalScopeInitialization,
                 ));
             }
-            if *state & BindingState::VALUE_INITIALIZED == 0 {
+            let normal = *state & BindingState::INITIALIZED;
+            if normal == 0 {
                 return Ok(false);
             }
-            *state = BindingState::VALUE_INITIALIZED | (*state & BindingState::CELL_MASK);
+            *state = normal;
         }
         FinalOpcode::CloseLoc => {
-            *state = (*state & BindingState::VALUE_MASK) | BindingState::CELL_CLOSED;
+            *state = BindingState::with_closed_cell(*state);
         }
         opcode
             if (is_local_read(opcode) || is_local_write(opcode))
-                && *state & BindingState::VALUE_MASK != BindingState::VALUE_INITIALIZED =>
+                && !BindingState::only(*state, BindingState::INITIALIZED) =>
         {
             return Err(policy_error(
                 id,
@@ -5160,8 +5863,13 @@ fn collect_requirements(
             | FinalOpcode::GetField2
             | FinalOpcode::PutField
             | FinalOpcode::DefineField
-            | FinalOpcode::DefineMethod => {
+            | FinalOpcode::DefineMethod
+            | FinalOpcode::ForInStart => {
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
+            }
+            FinalOpcode::ForInNext => {
+                push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
+                push_requirement(requirements, ExecutionRequirement::Strings);
             }
             FinalOpcode::GetArrayEl
             | FinalOpcode::GetArrayEl2

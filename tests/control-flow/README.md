@@ -1,7 +1,8 @@
-# Labeled control-flow and switch differential corpus
+# Control-flow, switch, and `for-in` differential corpus
 
-`manifest.json` is a bounded runtime corpus for the labeled-statement and
-`switch` milestone. Run it against the pinned official QuickJS release:
+`manifest.json` is a bounded runtime corpus for the labeled-statement,
+`switch`, and synchronous `for-in` milestones. Run it against the pinned
+official QuickJS release:
 
 ```text
 cargo xtask control-flow-differential \

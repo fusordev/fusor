@@ -95,6 +95,389 @@ fn test_engine_failure(error: impl Error + Send + Sync + 'static) -> DynamicFunc
 }
 
 #[test]
+fn for_in_next_rejects_a_non_iterator_cursor_after_verified_admission() {
+    let authority = compile_test_function(
+        "function iterate(value){for(var key in value){}}",
+        "iterate",
+    );
+    let control_flow = authority.root().function().control_flow();
+    let for_in_next_pc = control_flow
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::ForInNext)
+        .expect("for_in_next")
+        .decoded()
+        .pc();
+    let for_in_next = control_flow
+        .instruction_index_at(for_in_next_pc)
+        .expect("verified instruction index");
+
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let function = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(authority)
+        .expect("function");
+    let function = function.id().expect("function id");
+    let plan = plan_frame(&runtime, function, 0, 0).expect("frame plan");
+    let mut frame = create_frame(
+        &mut runtime,
+        plan,
+        StoredValue::Undefined,
+        FrameArguments::Owned(CallArguments::empty()),
+        None,
+        None,
+    )
+    .expect("frame");
+    frame.instruction = for_in_next;
+    frame.stack.push(StoredValue::Undefined);
+
+    let mut executed = 1;
+    let Err(error) = execute_one(&mut runtime, &mut frame, &mut executed, u64::MAX) else {
+        panic!("a forged non-iterator cursor must fail closed");
+    };
+    assert!(matches!(
+        error,
+        ExecutionError::EngineFault(EngineFault::RuntimeInvariant {
+            message: "verified for_in_next cursor is not a for-in iterator",
+        })
+    ));
+}
+
+#[test]
+fn for_in_next_fuel_exhaustion_preserves_the_unvisited_candidate_for_retry() {
+    let authority = compile_test_function(
+        "function iterate(value){for(var key in value){return key;}}",
+        "iterate",
+    );
+    let control_flow = authority.root().function().control_flow();
+    let for_in_next_pc = control_flow
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::ForInNext)
+        .expect("for_in_next")
+        .decoded()
+        .pc();
+    let for_in_next = control_flow
+        .instruction_index_at(for_in_next_pc)
+        .expect("verified instruction index");
+
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let function = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(authority)
+        .expect("function");
+    let function = function.id().expect("function id");
+    let plan = plan_frame(&runtime, function, 0, 0).expect("frame plan");
+    let mut frame = create_frame(
+        &mut runtime,
+        plan,
+        StoredValue::Undefined,
+        FrameArguments::Owned(CallArguments::empty()),
+        None,
+        None,
+    )
+    .expect("frame");
+    frame.instruction = for_in_next;
+
+    let source = source_object(&mut runtime, realm_id);
+    let key = runtime.predefined_property_key(PredefinedAtom::Name);
+    runtime
+        .append_data_property(
+            HeapReference::Object(source),
+            key,
+            PropertyLayout::data(true, true, true),
+            StoredValue::Undefined,
+        )
+        .expect("enumerable source property");
+    let (iterator, _) = runtime
+        .allocate_for_in_iterator(realm_id, StoredValue::Object(source))
+        .expect("iterator");
+    assert_eq!(runtime.usage().for_in_entries(), 1);
+    frame.stack.push(StoredValue::Object(iterator));
+
+    let mut exhausted = 1;
+    let Err(error) = execute_one(&mut runtime, &mut frame, &mut exhausted, 1) else {
+        panic!("candidate scan must be precharged");
+    };
+    assert!(
+        matches!(
+            error,
+            ExecutionError::InstructionLimitExceeded {
+                limit: 1,
+                executed: 1,
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(runtime.usage().for_in_entries(), 1);
+    assert!(matches!(
+        frame.stack.as_slice(),
+        [StoredValue::Object(actual)] if *actual == iterator
+    ));
+
+    let mut executed = 1;
+    execute_one(&mut runtime, &mut frame, &mut executed, u64::MAX)
+        .expect("the untouched candidate remains available");
+    assert_eq!(runtime.usage().for_in_entries(), 2);
+    assert!(matches!(
+        frame.stack.as_slice(),
+        [
+            StoredValue::Object(actual),
+            StoredValue::String(name),
+            StoredValue::Boolean(false),
+        ] if *actual == iterator && name.to_utf8_lossy().expect("UTF-8") == "name"
+    ));
+}
+
+#[test]
+fn for_in_next_precharges_snapshot_release_before_prototype_transition() {
+    let (mut runtime, realm_id, function, for_in_next) = for_in_transition_test_runtime();
+
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+    let prototype = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("prototype");
+    let source = runtime
+        .allocate_ordinary_object_with_prototype(HeapReference::Object(prototype))
+        .expect("source");
+    let own_key = runtime.predefined_property_key(PredefinedAtom::Name);
+    runtime
+        .append_data_property(
+            HeapReference::Object(source),
+            own_key,
+            PropertyLayout::data(true, true, true),
+            StoredValue::Undefined,
+        )
+        .expect("own property");
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Length);
+    runtime
+        .append_data_property(
+            HeapReference::Object(prototype),
+            prototype_key,
+            PropertyLayout::data(true, true, true),
+            StoredValue::Undefined,
+        )
+        .expect("prototype property");
+
+    let (prototype_iterator, _) = runtime
+        .allocate_for_in_iterator(realm_id, StoredValue::Object(source))
+        .expect("prototype iterator");
+    assert!(matches!(
+        runtime
+            .advance_for_in_iterator(prototype_iterator)
+            .expect("consume own candidate"),
+        ForInAdvance::Yield { .. }
+    ));
+    let state = runtime
+        .objects
+        .get(prototype_iterator)
+        .and_then(crate::object::HeapObject::for_in_state)
+        .expect("prototype iterator state");
+    assert_eq!(state.current(), Some(HeapReference::Object(source)));
+    assert_eq!(state.snapshot_len(), 1);
+    assert!(state.candidate().is_none());
+    let usage_before_prototype = runtime.usage().for_in_entries();
+
+    let plan = plan_frame(&runtime, function, 0, 0).expect("frame plan");
+    let mut prototype_frame = create_frame(
+        &mut runtime,
+        plan,
+        StoredValue::Undefined,
+        FrameArguments::Owned(CallArguments::empty()),
+        None,
+        None,
+    )
+    .expect("frame");
+    prototype_frame.instruction = for_in_next;
+    prototype_frame
+        .stack
+        .push(StoredValue::Object(prototype_iterator));
+
+    let mut exhausted = 1;
+    let Err(error) = execute_one(&mut runtime, &mut prototype_frame, &mut exhausted, 7) else {
+        panic!("prototype snapshot replacement must include old-snapshot release work");
+    };
+    assert!(matches!(
+        error,
+        ExecutionError::InstructionLimitExceeded {
+            limit: 7,
+            executed: 7,
+        }
+    ));
+    let state = runtime
+        .objects
+        .get(prototype_iterator)
+        .and_then(crate::object::HeapObject::for_in_state)
+        .expect("prototype iterator state");
+    assert_eq!(state.current(), Some(HeapReference::Object(source)));
+    assert_eq!(state.snapshot_len(), 1);
+    assert!(state.candidate().is_none());
+    assert_eq!(runtime.usage().for_in_entries(), usage_before_prototype);
+
+    let mut executed = 1;
+    execute_one(&mut runtime, &mut prototype_frame, &mut executed, u64::MAX)
+        .expect("prototype transition retry");
+    let state = runtime
+        .objects
+        .get(prototype_iterator)
+        .and_then(crate::object::HeapObject::for_in_state)
+        .expect("prototype iterator state");
+    assert_eq!(state.current(), Some(HeapReference::Object(prototype)));
+    assert!(matches!(
+        prototype_frame.stack.as_slice(),
+        [
+            StoredValue::Object(actual),
+            StoredValue::String(name),
+            StoredValue::Boolean(false),
+        ] if *actual == prototype_iterator
+            && name.to_utf8_lossy().expect("UTF-8") == "length"
+    ));
+}
+
+#[test]
+fn for_in_next_precharges_snapshot_release_before_terminal_transition() {
+    let (mut runtime, realm_id, function, for_in_next) = for_in_transition_test_runtime();
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+    let terminal_key = runtime
+        .property_key_from_string(
+            &JsString::from_utf8("terminal-release-key").expect("terminal key"),
+        )
+        .expect("terminal property key");
+    runtime
+        .append_data_property(
+            HeapReference::Object(object_prototype),
+            terminal_key,
+            PropertyLayout::data(true, true, true),
+            StoredValue::Undefined,
+        )
+        .expect("terminal property");
+    let (terminal_iterator, _) = runtime
+        .allocate_for_in_iterator(realm_id, StoredValue::Object(object_prototype))
+        .expect("terminal iterator");
+    loop {
+        let state = runtime
+            .objects
+            .get(terminal_iterator)
+            .and_then(crate::object::HeapObject::for_in_state)
+            .expect("terminal iterator state");
+        if state.candidate().is_none() {
+            break;
+        }
+        runtime
+            .advance_for_in_iterator(terminal_iterator)
+            .expect("consume terminal candidate");
+    }
+    let terminal_snapshot_len = runtime
+        .objects
+        .get(terminal_iterator)
+        .and_then(crate::object::HeapObject::for_in_state)
+        .expect("terminal iterator state")
+        .snapshot_len();
+    assert!(terminal_snapshot_len > 0);
+    let usage_before_terminal = runtime.usage().for_in_entries();
+
+    let plan = plan_frame(&runtime, function, 0, 0).expect("frame plan");
+    let mut terminal_frame = create_frame(
+        &mut runtime,
+        plan,
+        StoredValue::Undefined,
+        FrameArguments::Owned(CallArguments::empty()),
+        None,
+        None,
+    )
+    .expect("frame");
+    terminal_frame.instruction = for_in_next;
+    terminal_frame
+        .stack
+        .push(StoredValue::Object(terminal_iterator));
+
+    let mut exhausted = 1;
+    let Err(error) = execute_one(&mut runtime, &mut terminal_frame, &mut exhausted, 2) else {
+        panic!("terminal snapshot release must be precharged");
+    };
+    assert!(matches!(
+        error,
+        ExecutionError::InstructionLimitExceeded {
+            limit: 2,
+            executed: 2,
+        }
+    ));
+    let state = runtime
+        .objects
+        .get(terminal_iterator)
+        .and_then(crate::object::HeapObject::for_in_state)
+        .expect("terminal iterator state");
+    assert_eq!(
+        state.current(),
+        Some(HeapReference::Object(object_prototype))
+    );
+    assert_eq!(state.snapshot_len(), terminal_snapshot_len);
+    assert_eq!(runtime.usage().for_in_entries(), usage_before_terminal);
+
+    let mut executed = 1;
+    execute_one(&mut runtime, &mut terminal_frame, &mut executed, u64::MAX)
+        .expect("terminal transition retry");
+    let state = runtime
+        .objects
+        .get(terminal_iterator)
+        .and_then(crate::object::HeapObject::for_in_state)
+        .expect("terminal iterator state");
+    assert_eq!(state.current(), None);
+    assert_eq!(state.snapshot_len(), 0);
+    assert_eq!(
+        runtime.usage().for_in_entries(),
+        usage_before_terminal.saturating_sub(usize_to_u64(terminal_snapshot_len))
+    );
+    assert!(matches!(
+        terminal_frame.stack.as_slice(),
+        [
+            StoredValue::Object(actual),
+            StoredValue::Undefined,
+            StoredValue::Boolean(true),
+        ] if *actual == terminal_iterator
+    ));
+}
+
+fn for_in_transition_test_runtime() -> (Runtime, RealmId, FunctionId, InstructionIndex) {
+    let authority = compile_test_function(
+        "function iterate(value){for(var key in value){return key;}}",
+        "iterate",
+    );
+    let control_flow = authority.root().function().control_flow();
+    let for_in_next_pc = control_flow
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::ForInNext)
+        .expect("for_in_next")
+        .decoded()
+        .pc();
+    let for_in_next = control_flow
+        .instruction_index_at(for_in_next_pc)
+        .expect("verified instruction index");
+
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let function = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(authority)
+        .expect("function")
+        .id()
+        .expect("function id");
+    (runtime, realm_id, function, for_in_next)
+}
+
+#[test]
 fn symbol_to_primitive_precedes_ordinary_methods_and_receives_string_hint() {
     let (mut runtime, realm, constructor, native) = runtime_with_function_constructor();
     let object = source_object(&mut runtime, realm);

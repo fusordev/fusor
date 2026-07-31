@@ -5,13 +5,13 @@ use oxc_ast::{
     ast::{
         AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement, CallExpression,
         ComputedMemberExpression, ConditionalExpression, DoWhileStatement, Expression,
-        ExpressionStatement, ForStatement, ForStatementInit, Function, FunctionBody, FunctionType,
-        IdentifierReference, IfStatement, LabelIdentifier, LabeledStatement, LogicalExpression,
-        NewExpression, ObjectExpression, ObjectProperty, ObjectPropertyKind, Program,
-        PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement, SequenceExpression,
-        SimpleAssignmentTarget, Statement, StaticMemberExpression, SwitchStatement, ThrowStatement,
-        UnaryExpression, UpdateExpression, VariableDeclaration, VariableDeclarationKind,
-        WhileStatement,
+        ExpressionStatement, ForInStatement, ForStatement, ForStatementInit, ForStatementLeft,
+        Function, FunctionBody, FunctionType, IdentifierReference, IfStatement, LabelIdentifier,
+        LabeledStatement, LogicalExpression, NewExpression, ObjectExpression, ObjectProperty,
+        ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement,
+        SequenceExpression, SimpleAssignmentTarget, Statement, StaticMemberExpression,
+        SwitchStatement, ThrowStatement, UnaryExpression, UpdateExpression, VariableDeclaration,
+        VariableDeclarationKind, WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
@@ -1534,6 +1534,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         flow.ensure_script_terminal(completion, program.span)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the iterative statement dispatcher keeps one explicit work-stack loop"
+    )]
     fn process_statement_work<'statement>(
         &self,
         task: StatementWork<'statement, 'arena>,
@@ -1582,8 +1586,28 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             StatementWork::CloseScope(scope) => {
                 self.plan_scope_exit(planning.executable, scope, planning.layout, flow)?;
             }
+            StatementWork::PushStatementStackBase { span } => {
+                flow.push_statement_stack_base(span)?;
+            }
+            StatementWork::PopStatementStackBase { span } => {
+                flow.pop_statement_stack_base(span)?;
+            }
             StatementWork::PushControl(control) => state.controls.push(control, body_span)?,
             StatementWork::PopControl => state.controls.pop(body_span)?,
+            StatementWork::ForInHead(left) => self.plan_for_in_head(
+                left,
+                planning.layout,
+                planning.tree_layout,
+                planning.constants,
+                flow,
+            )?,
+            StatementWork::ForInAssignment(left) => self.plan_for_in_assignment(
+                left,
+                planning.layout,
+                planning.tree_layout,
+                planning.constants,
+                flow,
+            )?,
             StatementWork::Expression(expression) => self.plan_expression(
                 expression,
                 planning.layout,
@@ -1633,6 +1657,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the statement-kind dispatcher keeps lowering decisions in one exhaustive match"
+    )]
     fn plan_statement<'statement>(
         &self,
         statement: &'statement Statement<'arena>,
@@ -1669,10 +1697,19 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
             Statement::EmptyStatement(_) => {}
             Statement::ReturnStatement(statement) => {
-                Self::schedule_return_statement(statement, flow, &mut state.work)?;
+                Self::schedule_return_statement(
+                    statement,
+                    state.controls.active_for_in_markers(),
+                    flow,
+                    &mut state.work,
+                )?;
             }
             Statement::ThrowStatement(statement) => {
-                Self::schedule_throw_statement(statement, &mut state.work);
+                Self::schedule_throw_statement(
+                    statement,
+                    state.controls.active_for_in_markers(),
+                    &mut state.work,
+                )?;
             }
             Statement::IfStatement(statement) => {
                 Self::reset_script_completion(state.completion, statement.span, flow)?;
@@ -1701,6 +1738,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Statement::ForStatement(statement) => {
                 Self::reset_script_completion(state.completion, statement.span, flow)?;
                 self.plan_for_statement(statement, Vec::new(), flow, state)?;
+            }
+            Statement::ForInStatement(statement) => {
+                Self::reset_script_completion(state.completion, statement.span, flow)?;
+                self.plan_for_in_statement(statement, Vec::new(), flow, state)?;
             }
             Statement::BreakStatement(statement) => {
                 self.plan_control_jump(
@@ -1791,17 +1832,36 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     fn schedule_return_statement<'statement>(
         statement: &'statement ReturnStatement<'arena>,
+        active_for_in_markers: usize,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if let Some(argument) = &statement.argument {
+            work.try_reserve(active_for_in_markers.saturating_add(2))
+                .map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "statement work stack",
+                })?;
             work.push(StatementWork::Emit(PlannedInstruction::new(
                 FinalOpcode::Return,
                 Operands::None,
                 statement.span,
             )));
+            for _ in 0..active_for_in_markers {
+                work.push(StatementWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Nip,
+                    Operands::None,
+                    statement.span,
+                )));
+            }
             work.push(StatementWork::Expression(argument));
         } else {
+            for _ in 0..active_for_in_markers {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    statement.span,
+                ))?;
+            }
             flow.emit(PlannedInstruction::new(
                 FinalOpcode::ReturnUndef,
                 Operands::None,
@@ -1813,14 +1873,27 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     fn schedule_throw_statement<'statement>(
         statement: &'statement ThrowStatement<'arena>,
+        active_for_in_markers: usize,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
-    ) {
+    ) -> Result<(), LeafCompilationError> {
+        work.try_reserve(active_for_in_markers.saturating_add(2))
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement work stack",
+            })?;
         work.push(StatementWork::Emit(PlannedInstruction::new(
             FinalOpcode::Throw,
             Operands::None,
             statement.span,
         )));
+        for _ in 0..active_for_in_markers {
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Nip,
+                Operands::None,
+                statement.span,
+            )));
+        }
         work.push(StatementWork::Expression(&statement.argument));
+        Ok(())
     }
 
     fn plan_for_statement<'statement>(
@@ -1836,6 +1909,28 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             statement.span,
         )?;
         Self::schedule_for_statement(
+            statement,
+            scope,
+            flow,
+            &mut state.work,
+            state.active_scopes.len(),
+            labels,
+        )
+    }
+
+    fn plan_for_in_statement<'statement>(
+        &self,
+        statement: &'statement ForInStatement<'arena>,
+        labels: Vec<&'statement str>,
+        flow: &mut PlannedControlFlow,
+        state: &mut StatementPlanningState<'statement, 'arena>,
+    ) -> Result<(), LeafCompilationError> {
+        let scope = self.created_scope(
+            statement.scope_id.get(),
+            statement.node_id.get(),
+            statement.span,
+        )?;
+        Self::schedule_for_in_statement(
             statement,
             scope,
             flow,
@@ -1891,6 +1986,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Statement::ForStatement(statement) => {
                 Self::reset_script_completion(state.completion, statement.span, flow)?;
                 self.plan_for_statement(statement, labels, flow, state)
+            }
+            Statement::ForInStatement(statement) => {
+                Self::reset_script_completion(state.completion, statement.span, flow)?;
+                self.plan_for_in_statement(statement, labels, flow, state)
             }
             Statement::SwitchStatement(statement) => {
                 Self::reset_script_completion(state.completion, statement.span, flow)?;
@@ -2102,6 +2201,104 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    fn schedule_for_in_statement<'statement>(
+        statement: &'statement ForInStatement<'arena>,
+        scope: ScopeId,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+        enclosing_scope_depth: usize,
+        labels: Vec<&'statement str>,
+    ) -> Result<(), LeafCompilationError> {
+        let next = flow.new_statement_label_with_offset(statement.right.span(), 1)?;
+        let assign = flow.new_statement_label_with_offset(statement.left.span(), 2)?;
+        let rotate = flow.new_statement_label_with_offset(statement.span, 1)?;
+        let cleanup = flow.new_statement_label_with_offset(statement.span, 1)?;
+        let done = flow.new_statement_label(statement.span)?;
+        let loop_scope_depth =
+            enclosing_scope_depth
+                .checked_add(1)
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "statement scope depth",
+                })?;
+        let control = ControlRegion::for_in_iteration(
+            labels,
+            cleanup.clone(),
+            rotate.clone(),
+            loop_scope_depth,
+        );
+
+        work.try_reserve(25)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement work stack",
+            })?;
+        work.push(StatementWork::Bind(done));
+        work.push(StatementWork::PopScope(scope));
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            statement.span,
+        )));
+        work.push(StatementWork::Bind(cleanup.clone()));
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Goto,
+            target: next.clone(),
+            span: statement.span,
+        });
+        work.push(StatementWork::CloseScope(scope));
+        work.push(StatementWork::Bind(rotate.clone()));
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Goto,
+            target: rotate,
+            span: statement.body.span(),
+        });
+        work.push(StatementWork::PopStatementStackBase {
+            span: statement.span,
+        });
+        work.push(StatementWork::PopControl);
+        work.push(StatementWork::Visit(&statement.body));
+        work.push(StatementWork::PushControl(control));
+        work.push(StatementWork::PushStatementStackBase {
+            span: statement.span,
+        });
+        work.push(StatementWork::ForInAssignment(&statement.left));
+        work.push(StatementWork::Bind(assign.clone()));
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Goto,
+            target: cleanup,
+            span: statement.span,
+        });
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            statement.span,
+        )));
+        work.push(StatementWork::Branch {
+            kind: BranchKind::IfFalse,
+            target: assign,
+            span: statement.span,
+        });
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ForInNext,
+            Operands::None,
+            statement.span,
+        )));
+        work.push(StatementWork::Bind(next));
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ForInStart,
+            Operands::None,
+            statement.right.span(),
+        )));
+        work.push(StatementWork::CloseScope(scope));
+        work.push(StatementWork::Expression(&statement.right));
+        work.push(StatementWork::ForInHead(&statement.left));
+        work.push(StatementWork::PushScope {
+            scope,
+            creator: statement.node_id.get(),
+            span: statement.span,
+        });
+        Ok(())
+    }
+
     fn plan_switch_statement<'statement>(
         &self,
         statement: &'statement SwitchStatement<'arena>,
@@ -2205,10 +2402,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             })?;
         for case in &statement.cases {
             body.push(flow.new_statement_label(case.span)?);
-            matched.push(flow.new_label_with_expected_depth(case.span, Some(1))?);
+            matched.push(flow.new_statement_label_with_offset(case.span, 1)?);
         }
         let no_match = if default_index.is_none() {
-            Some(flow.new_label_with_expected_depth(statement.span, Some(1))?)
+            Some(flow.new_statement_label_with_offset(statement.span, 1)?)
         } else {
             None
         };
@@ -2424,7 +2621,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         layout: &FrameLayout,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        let control = state
+        let (control_index, control) = state
             .controls
             .resolve(label.map(|label| label.name.as_str()), jump)
             .ok_or(LeafCompilationError::SemanticInvariant {
@@ -2449,6 +2646,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         }
         for scope in state.active_scopes[control.scope_depth..].iter().rev() {
             self.plan_scope_exit(layout.executable, *scope, layout, flow)?;
+        }
+        for _ in 0..state.controls.for_in_markers_after(control_index) {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                statement_span,
+            ))?;
         }
         flow.branch(BranchKind::Goto, target, statement_span)
     }
@@ -2960,6 +3164,228 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             });
         }
         Ok(())
+    }
+
+    fn plan_for_in_head(
+        &self,
+        left: &ForStatementLeft<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let ForStatementLeft::VariableDeclaration(declaration) = left else {
+            if left.as_assignment_target().is_none() {
+                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, left.span());
+            }
+            return Ok(());
+        };
+        let (identifier, initializer) = self.validate_for_in_declaration(declaration, layout)?;
+        let Some(initializer) = initializer else {
+            return Ok(());
+        };
+        let executable = self.planned.plan.executable(layout.executable).ok_or(
+            LeafCompilationError::InvalidExecutable {
+                executable: layout.executable,
+            },
+        )?;
+        if declaration.kind != VariableDeclarationKind::Var || executable.is_strict() {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedDeclaration,
+                declaration.span,
+            );
+        }
+        if let Some(span) = anonymous_named_evaluation_span(initializer) {
+            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+        }
+        self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
+        self.emit_for_in_declaration_write(declaration.kind, identifier, layout, tree_layout, flow)
+    }
+
+    fn plan_for_in_assignment(
+        &self,
+        left: &ForStatementLeft<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if let ForStatementLeft::VariableDeclaration(declaration) = left {
+            let (identifier, _) = self.validate_for_in_declaration(declaration, layout)?;
+            return self.emit_for_in_declaration_write(
+                declaration.kind,
+                identifier,
+                layout,
+                tree_layout,
+                flow,
+            );
+        }
+
+        let target =
+            left.as_assignment_target()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "for-in non-declaration head is an assignment target",
+                    span: Some(left.span()),
+                })?;
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+                let reference = self.lowered_reference(
+                    identifier.reference_id.get(),
+                    identifier.span,
+                    layout,
+                    tree_layout,
+                )?;
+                self.validate_lowered_mutation_reference(reference, false, identifier.span)?;
+                match reference {
+                    LoweredReference::Frame { binding, slot, .. } => {
+                        for instruction in
+                            self.plan_write_slot(binding, slot, false, identifier.span)?
+                        {
+                            flow.emit(instruction)?;
+                        }
+                    }
+                    LoweredReference::RealmGlobal { slot, .. } => {
+                        flow.emit(PlannedInstruction::new(
+                            FinalOpcode::PutVar,
+                            Operands::VarRef(slot),
+                            identifier.span,
+                        ))?;
+                    }
+                }
+            }
+            AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
+                self.plan_expression(&member.object, layout, tree_layout, constants, flow)?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    member.span,
+                ))?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::PutField,
+                    Operands::Atom(constants.property_atom_index(member.property.span)?),
+                    member.span,
+                ))?;
+            }
+            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
+                self.plan_expression(&member.object, layout, tree_layout, constants, flow)?;
+                self.plan_expression(&member.expression, layout, tree_layout, constants, flow)?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Rot3l,
+                    Operands::None,
+                    member.span,
+                ))?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::PutArrayEl,
+                    Operands::None,
+                    member.span,
+                ))?;
+            }
+            _ => {
+                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, target.span());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_for_in_declaration<'declaration>(
+        &self,
+        declaration: &'declaration VariableDeclaration<'arena>,
+        layout: &FrameLayout,
+    ) -> Result<
+        (
+            &'declaration oxc_ast::ast::BindingIdentifier<'arena>,
+            Option<&'declaration Expression<'arena>>,
+        ),
+        LeafCompilationError,
+    > {
+        if declaration.declare
+            || !matches!(
+                declaration.kind,
+                VariableDeclarationKind::Var
+                    | VariableDeclarationKind::Let
+                    | VariableDeclarationKind::Const
+            )
+            || declaration.declarations.len() != 1
+        {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedDeclaration,
+                declaration.span,
+            );
+        }
+        let declarator = &declaration.declarations[0];
+        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedDeclaration,
+                declarator.id.span(),
+            );
+        };
+        let binding = self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "for-in declared compiler binding exists",
+                    span: Some(identifier.span),
+                })?;
+        if storage.placement() == StoragePlacement::GlobalObject {
+            self.validate_realm_global_var_declaration(declaration.kind, storage, identifier.span)?;
+        } else {
+            let slot = layout
+                .slot(binding)
+                .ok_or(LeafCompilationError::Unsupported {
+                    feature: UnsupportedLeafFeature::UnsupportedBinding,
+                    span: identifier.span,
+                })?;
+            self.validate_declaration_storage(declaration.kind, binding, slot, identifier.span)?;
+        }
+        Ok((identifier, declarator.init.as_ref()))
+    }
+
+    fn emit_for_in_declaration_write(
+        &self,
+        declaration_kind: VariableDeclarationKind,
+        identifier: &oxc_ast::ast::BindingIdentifier<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let binding = self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "for-in declared compiler binding exists",
+                    span: Some(identifier.span),
+                })?;
+        if storage.placement() == StoragePlacement::GlobalObject {
+            self.validate_realm_global_var_declaration(declaration_kind, storage, identifier.span)?;
+            let global = tree_layout.realm_globals.for_binding(binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "for-in Program var has a constructor-realm global identity",
+                    span: Some(identifier.span),
+                },
+            )?;
+            let slot = tree_layout.realm_globals.closure_slot(
+                &self.planned.plan,
+                layout.executable,
+                global,
+            )?;
+            return flow.emit(PlannedInstruction::new(
+                FinalOpcode::PutVar,
+                Operands::VarRef(slot),
+                identifier.span,
+            ));
+        }
+
+        let slot = layout
+            .slot(binding)
+            .ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedBinding,
+                span: identifier.span,
+            })?;
+        flow.emit(plan_put_slot(slot, identifier.span))
     }
 
     fn validate_declaration(
@@ -5498,8 +5924,16 @@ enum StatementWork<'statement, 'arena> {
     },
     PopScope(ScopeId),
     CloseScope(ScopeId),
+    PushStatementStackBase {
+        span: Span,
+    },
+    PopStatementStackBase {
+        span: Span,
+    },
     PushControl(ControlRegion<'statement>),
     PopControl,
+    ForInHead(&'statement ForStatementLeft<'arena>),
+    ForInAssignment(&'statement ForStatementLeft<'arena>),
     Declaration(&'statement VariableDeclaration<'arena>),
     Expression(&'statement Expression<'arena>),
     Emit(PlannedInstruction),
@@ -5551,6 +5985,7 @@ struct ControlRegion<'statement> {
     continue_target: Option<CompilerLabel>,
     accepts_unlabeled_break: bool,
     scope_depth: usize,
+    owns_for_in_marker: bool,
 }
 
 impl<'statement> ControlRegion<'statement> {
@@ -5566,6 +6001,23 @@ impl<'statement> ControlRegion<'statement> {
             continue_target: Some(continue_target),
             accepts_unlabeled_break: true,
             scope_depth,
+            owns_for_in_marker: false,
+        }
+    }
+
+    fn for_in_iteration(
+        labels: Vec<&'statement str>,
+        break_target: CompilerLabel,
+        continue_target: CompilerLabel,
+        scope_depth: usize,
+    ) -> Self {
+        Self {
+            labels,
+            break_target,
+            continue_target: Some(continue_target),
+            accepts_unlabeled_break: true,
+            scope_depth,
+            owns_for_in_marker: true,
         }
     }
 
@@ -5581,6 +6033,7 @@ impl<'statement> ControlRegion<'statement> {
             continue_target: None,
             accepts_unlabeled_break,
             scope_depth,
+            owns_for_in_marker: false,
         }
     }
 }
@@ -5719,13 +6172,33 @@ impl<'statement> StatementControlStack<'statement> {
         Ok(())
     }
 
-    fn resolve(&self, label: Option<&str>, jump: LoopJump) -> Option<&ControlRegion<'statement>> {
+    fn resolve(
+        &self,
+        label: Option<&str>,
+        jump: LoopJump,
+    ) -> Option<(usize, &ControlRegion<'statement>)> {
         let index = match (label, jump) {
             (Some(label), _) => self.labeled.get(label),
             (None, LoopJump::Break) => self.breakable.last(),
             (None, LoopJump::Continue) => self.iterations.last(),
         }?;
-        self.regions.get(*index)
+        self.regions.get(*index).map(|control| (*index, control))
+    }
+
+    fn active_for_in_markers(&self) -> usize {
+        self.regions
+            .iter()
+            .filter(|region| region.owns_for_in_marker)
+            .count()
+    }
+
+    fn for_in_markers_after(&self, index: usize) -> usize {
+        self.regions
+            .get(index.saturating_add(1)..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|region| region.owns_for_in_marker)
+            .count()
     }
 
     fn is_empty(&self) -> bool {
@@ -7329,6 +7802,7 @@ struct PlannedControlFlow {
     stack_anchors: Vec<StackAnchor>,
     last_instruction_can_fall_through: Option<bool>,
     label_bound_after_last_instruction: bool,
+    statement_stack_base: u32,
 }
 
 #[derive(Debug)]
@@ -7353,6 +7827,7 @@ impl PlannedControlFlow {
             stack_anchors: Vec::new(),
             last_instruction_can_fall_through: None,
             label_bound_after_last_instruction: false,
+            statement_stack_base: 0,
         }
     }
 
@@ -7408,7 +7883,39 @@ impl PlannedControlFlow {
     }
 
     fn new_statement_label(&mut self, span: Span) -> Result<CompilerLabel, LeafCompilationError> {
-        self.new_label_with_expected_depth(span, Some(0))
+        self.new_label_with_expected_depth(span, Some(self.statement_stack_base))
+    }
+
+    fn new_statement_label_with_offset(
+        &mut self,
+        span: Span,
+        offset: u32,
+    ) -> Result<CompilerLabel, LeafCompilationError> {
+        let expected = self.statement_stack_base.checked_add(offset).ok_or(
+            LeafCompilationError::CapacityExceeded {
+                domain: "statement operand-stack base",
+            },
+        )?;
+        self.new_label_with_expected_depth(span, Some(expected))
+    }
+
+    fn push_statement_stack_base(&mut self, _span: Span) -> Result<(), LeafCompilationError> {
+        self.statement_stack_base = self.statement_stack_base.checked_add(1).ok_or(
+            LeafCompilationError::CapacityExceeded {
+                domain: "statement operand-stack base",
+            },
+        )?;
+        Ok(())
+    }
+
+    fn pop_statement_stack_base(&mut self, span: Span) -> Result<(), LeafCompilationError> {
+        self.statement_stack_base = self.statement_stack_base.checked_sub(1).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "statement operand-stack base is nonempty on exit",
+                span: Some(span),
+            },
+        )?;
+        Ok(())
     }
 
     fn new_label_with_expected_depth(
@@ -7504,6 +8011,12 @@ impl PlannedControlFlow {
     }
 
     fn finish(self) -> Result<FinishedControlFlow, LeafCompilationError> {
+        if self.statement_stack_base != 0 {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "statement operand-stack base returns to zero",
+                span: self.instruction_spans.last().copied(),
+            });
+        }
         let Self {
             assembler,
             max_instructions: _,
@@ -7512,6 +8025,7 @@ impl PlannedControlFlow {
             stack_anchors,
             last_instruction_can_fall_through: _,
             label_bound_after_last_instruction: _,
+            statement_stack_base: _,
         } = self;
         let assembled = match assembler.finish() {
             Ok(assembled) => assembled,

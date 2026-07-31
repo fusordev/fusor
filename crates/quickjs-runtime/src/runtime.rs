@@ -41,7 +41,7 @@ use crate::{
     PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
-    object::{BoxedPrimitive, HeapObject, ObjectRecord, OwnProperty},
+    object::{BoxedPrimitive, ForInIterator, ForInSnapshot, HeapObject, ObjectRecord, OwnProperty},
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
 
@@ -53,6 +53,7 @@ const DEFAULT_MAX_INSTALLED_CONSTANTS: u64 = 1_048_576;
 const DEFAULT_MAX_HEAP_FUNCTIONS: u64 = 1_048_576;
 const DEFAULT_MAX_HEAP_OBJECTS: u64 = 1_048_576;
 const DEFAULT_MAX_OBJECT_PROPERTIES: u64 = 16_777_216;
+const DEFAULT_MAX_FOR_IN_ENTRIES: u64 = 16_777_216;
 const DEFAULT_MAX_BINDING_CELLS: u64 = 1_048_576;
 const DEFAULT_MAX_REALM_GLOBAL_BINDINGS: u64 = 1_048_576;
 const DEFAULT_MAX_PUBLIC_ROOTS: u64 = 1_048_576;
@@ -75,6 +76,7 @@ pub struct RuntimeLimits {
     pub(crate) max_heap_functions: u64,
     pub(crate) max_heap_objects: u64,
     pub(crate) max_object_properties: u64,
+    pub(crate) max_for_in_entries: u64,
     pub(crate) max_binding_cells: u64,
     pub(crate) max_realm_global_bindings: u64,
     max_public_roots: u64,
@@ -146,6 +148,13 @@ impl RuntimeLimits {
         self
     }
 
+    /// Replaces the maximum aggregate `for-in` snapshot and visited-key entry count.
+    #[must_use]
+    pub const fn with_max_for_in_entries(mut self, maximum: u64) -> Self {
+        self.max_for_in_entries = maximum;
+        self
+    }
+
     /// Replaces the maximum live binding-cell count.
     #[must_use]
     pub const fn with_max_binding_cells(mut self, maximum: u64) -> Self {
@@ -194,6 +203,7 @@ impl Default for RuntimeLimits {
             max_heap_functions: DEFAULT_MAX_HEAP_FUNCTIONS,
             max_heap_objects: DEFAULT_MAX_HEAP_OBJECTS,
             max_object_properties: DEFAULT_MAX_OBJECT_PROPERTIES,
+            max_for_in_entries: DEFAULT_MAX_FOR_IN_ENTRIES,
             max_binding_cells: DEFAULT_MAX_BINDING_CELLS,
             max_realm_global_bindings: DEFAULT_MAX_REALM_GLOBAL_BINDINGS,
             max_public_roots: DEFAULT_MAX_PUBLIC_ROOTS,
@@ -217,6 +227,7 @@ pub struct RuntimeUsage {
     heap_functions: u64,
     heap_objects: u64,
     object_properties: u64,
+    for_in_entries: u64,
     binding_cells: u64,
     realm_global_bindings: u64,
     public_roots: u64,
@@ -270,6 +281,12 @@ impl RuntimeUsage {
     #[must_use]
     pub const fn object_properties(self) -> u64 {
         self.object_properties
+    }
+
+    /// Returns the aggregate property-key entries retained by live `for-in` iterators.
+    #[must_use]
+    pub const fn for_in_entries(self) -> u64 {
+        self.for_in_entries
     }
 
     /// Returns the number of live captured-binding cells.
@@ -333,6 +350,20 @@ struct NumberIntrinsics {
 struct StringIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
+}
+
+pub(crate) enum ForInAdvance {
+    Continue { work: u64 },
+    Yield { key: PropertyKey, work: u64 },
+    Done { work: u64 },
+}
+
+impl ForInAdvance {
+    pub(crate) const fn work(&self) -> u64 {
+        match self {
+            Self::Continue { work } | Self::Yield { work, .. } | Self::Done { work } => *work,
+        }
+    }
 }
 
 struct RealmHandle {
@@ -679,6 +710,7 @@ pub struct Runtime {
     installed_atoms: u64,
     installed_constants: u64,
     pub(crate) object_properties: u64,
+    pub(crate) for_in_entries: u64,
     public_roots: u64,
     pub(crate) collection_pending: bool,
 }
@@ -712,6 +744,7 @@ impl Runtime {
             installed_atoms: 0,
             installed_constants: 0,
             object_properties: 0,
+            for_in_entries: 0,
             public_roots: 0,
             collection_pending: false,
         })
@@ -1664,6 +1697,7 @@ impl Runtime {
             heap_functions: usize_to_u64(self.functions.len()),
             heap_objects: usize_to_u64(self.objects.len()),
             object_properties: self.object_properties,
+            for_in_entries: self.for_in_entries,
             binding_cells: usize_to_u64(self.cells.len()),
             realm_global_bindings: usize_to_u64(self.global_bindings.len()),
             public_roots: self.public_roots,
@@ -1879,6 +1913,14 @@ impl Runtime {
                 }
                 GraphNode::Object(id) => {
                     if let Some(object) = self.objects.get(id) {
+                        if let Some(current) = object.for_in_current() {
+                            mark_heap_reference(
+                                current,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
                         mark_object_record(
                             &object.record,
                             &mut marked_functions,
@@ -1977,6 +2019,9 @@ impl Runtime {
                 self.object_properties = self
                     .object_properties
                     .saturating_sub(usize_to_u64(object.record.property_count()));
+                self.for_in_entries = self
+                    .for_in_entries
+                    .saturating_sub(usize_to_u64(object.for_in_entry_count()));
             }
         }
         for id in dead_cells {
@@ -2584,6 +2629,420 @@ impl Runtime {
                     .boxed_primitive()
                     .and_then(|value| value.string_code_unit_at(index))
             })
+    }
+
+    pub(crate) fn allocate_for_in_iterator(
+        &mut self,
+        realm: RealmId,
+        value: StoredValue,
+    ) -> Result<(ObjectId, u64), crate::ExecutionError> {
+        if matches!(value, StoredValue::Symbol(_)) {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "for-in Symbol boxing is not implemented",
+            }
+            .into());
+        }
+
+        let needs_wrapper = matches!(
+            value,
+            StoredValue::Boolean(_) | StoredValue::Number(_) | StoredValue::String(_)
+        );
+        let additional_objects = 1_u64.saturating_add(u64::from(needs_wrapper));
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(additional_objects),
+        )?;
+        self.objects
+            .try_reserve(usize::try_from(additional_objects).unwrap_or(usize::MAX))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: usize::try_from(additional_objects).unwrap_or(usize::MAX),
+            })?;
+
+        let collection_pending = self.collection_pending;
+        let (current, temporary_wrapper) = match value {
+            StoredValue::Undefined | StoredValue::Null => (None, None),
+            StoredValue::Boolean(value) => {
+                let wrapper = self.allocate_boxed_boolean(realm, value)?;
+                (Some(HeapReference::Object(wrapper)), Some(wrapper))
+            }
+            StoredValue::Number(value) => {
+                let wrapper = self.allocate_boxed_number(realm, value)?;
+                (Some(HeapReference::Object(wrapper)), Some(wrapper))
+            }
+            StoredValue::String(value) => {
+                let wrapper = self.allocate_boxed_string(realm, value)?;
+                (Some(HeapReference::Object(wrapper)), Some(wrapper))
+            }
+            StoredValue::Function(function) => (Some(HeapReference::Function(function)), None),
+            StoredValue::Object(object) => (Some(HeapReference::Object(object)), None),
+            StoredValue::Symbol(_) => unreachable!("Symbol was rejected before heap mutation"),
+        };
+
+        let (snapshot, snapshot_work) = match current {
+            Some(reference) => match self.try_for_in_snapshot(reference, 0) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    self.rollback_for_in_wrapper(temporary_wrapper, collection_pending);
+                    return Err(error);
+                }
+            },
+            None => (ForInSnapshot::empty(), 1),
+        };
+        let snapshot_len = snapshot.len();
+        let Ok(iterator) =
+            self.objects
+                .try_insert(HeapObject::for_in_iterator(ForInIterator::new(
+                    current, snapshot,
+                )))
+        else {
+            self.rollback_for_in_wrapper(temporary_wrapper, collection_pending);
+            return Err(crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            });
+        };
+        self.for_in_entries = self
+            .for_in_entries
+            .saturating_add(usize_to_u64(snapshot_len));
+        self.collection_pending = true;
+        Ok((iterator, snapshot_work))
+    }
+
+    /// Returns an O(1) upper bound for the work performed by
+    /// [`Self::allocate_for_in_iterator`].
+    ///
+    /// The VM charges this preview before it removes the source value from the
+    /// operand stack or permits snapshot construction to scan and sort keys.
+    pub(crate) fn preview_for_in_iterator_work(
+        &self,
+        value: &StoredValue,
+    ) -> Result<u64, crate::ExecutionError> {
+        if matches!(value, StoredValue::Symbol(_)) {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "for-in Symbol boxing is not implemented",
+            }
+            .into());
+        }
+
+        let needs_wrapper = matches!(
+            value,
+            StoredValue::Boolean(_) | StoredValue::Number(_) | StoredValue::String(_)
+        );
+        let additional_objects = 1_u64.saturating_add(u64::from(needs_wrapper));
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(additional_objects),
+        )?;
+        if matches!(value, StoredValue::String(_)) {
+            check_execution_limit(
+                RuntimeResource::ObjectProperties,
+                self.limits.max_object_properties,
+                self.object_properties.saturating_add(1),
+            )?;
+        }
+
+        match value {
+            StoredValue::Undefined | StoredValue::Null => Ok(1),
+            StoredValue::Boolean(_) | StoredValue::Number(_) => {
+                Ok(for_in_snapshot_work_upper_bound(0, None))
+            }
+            StoredValue::String(value) => {
+                Ok(for_in_snapshot_work_upper_bound(1, Some(value.len())))
+            }
+            StoredValue::Function(function) => {
+                Ok(self.preview_for_in_snapshot_work(HeapReference::Function(*function))?)
+            }
+            StoredValue::Object(object) => {
+                Ok(self.preview_for_in_snapshot_work(HeapReference::Object(*object))?)
+            }
+            StoredValue::Symbol(_) => unreachable!("Symbol was rejected before work preview"),
+        }
+    }
+
+    /// Returns an O(1) upper bound for one state transition performed by
+    /// [`Self::advance_for_in_iterator`].
+    ///
+    /// No snapshot, cursor, or visited-key state is changed by this preview.
+    pub(crate) fn preview_for_in_advance_work(
+        &self,
+        iterator: ObjectId,
+    ) -> Result<u64, crate::ExecutionError> {
+        let object = self
+            .objects
+            .get(iterator)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "for-in iterator",
+                index: iterator.index(),
+                generation: iterator.generation(),
+            })?;
+        let state = object
+            .for_in_state()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "for-in next received a non-iterator object",
+            })?;
+        let Some(current) = state.current() else {
+            return Ok(1);
+        };
+        if let Some(candidate) = state.candidate() {
+            if state.has_visited(candidate.key()) {
+                return Ok(1);
+            }
+            check_execution_limit(
+                RuntimeResource::ForInEntries,
+                self.limits.max_for_in_entries,
+                self.for_in_entries.saturating_add(1),
+            )?;
+            let growth_work = state.visited_growth_work();
+            if !candidate.enumerable() {
+                return Ok(growth_work);
+            }
+            return Ok(growth_work.saturating_add(
+                self.preview_for_in_property_scan_work(current, candidate.key())?
+                    .saturating_sub(1),
+            ));
+        }
+
+        let Some(prototype) = self.object_record(current)?.prototype() else {
+            return Ok(usize_to_u64(state.snapshot_len()).saturating_add(1));
+        };
+        Ok(self
+            .preview_for_in_snapshot_work(prototype)?
+            .saturating_add(usize_to_u64(state.snapshot_len())))
+    }
+
+    pub(crate) fn advance_for_in_iterator(
+        &mut self,
+        iterator: ObjectId,
+    ) -> Result<ForInAdvance, crate::ExecutionError> {
+        let (current, candidate, visited, visited_growth_work, previous_snapshot_len) = {
+            let object = self
+                .objects
+                .get(iterator)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "for-in iterator",
+                    index: iterator.index(),
+                    generation: iterator.generation(),
+                })?;
+            let state = object
+                .for_in_state()
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "for-in next received a non-iterator object",
+                })?;
+            let candidate = state.candidate().cloned();
+            let visited = candidate
+                .as_ref()
+                .is_some_and(|candidate| state.has_visited(candidate.key()));
+            (
+                state.current(),
+                candidate,
+                visited,
+                state.visited_growth_work(),
+                state.snapshot_len(),
+            )
+        };
+
+        let Some(current) = current else {
+            return Ok(ForInAdvance::Done { work: 1 });
+        };
+
+        if let Some(candidate) = candidate {
+            if visited {
+                self.for_in_state_mut(iterator)?.advance_candidate();
+                return Ok(ForInAdvance::Continue { work: 1 });
+            }
+
+            check_execution_limit(
+                RuntimeResource::ForInEntries,
+                self.limits.max_for_in_entries,
+                self.for_in_entries.saturating_add(1),
+            )?;
+            let inserted = self
+                .for_in_state_mut(iterator)?
+                .try_mark_visited(candidate.key().clone())
+                .map_err(|_| crate::ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::ForInEntries,
+                    additional: 1,
+                })?;
+            if !inserted {
+                return Err(crate::EngineFault::RuntimeInvariant {
+                    message: "for-in visited-key insertion contradicted its prior lookup",
+                }
+                .into());
+            }
+            self.for_in_entries = self.for_in_entries.saturating_add(1);
+            self.for_in_state_mut(iterator)?.advance_candidate();
+
+            if !candidate.enumerable() {
+                return Ok(ForInAdvance::Continue {
+                    work: visited_growth_work,
+                });
+            }
+            let (exists, scanned) = self.for_in_own_property_exists(current, candidate.key())?;
+            let work = visited_growth_work.saturating_add(usize_to_u64(scanned));
+            return Ok(if exists {
+                ForInAdvance::Yield {
+                    key: candidate.key().clone(),
+                    work,
+                }
+            } else {
+                ForInAdvance::Continue { work }
+            });
+        }
+
+        let prototype = self.object_record(current)?.prototype();
+        let Some(prototype) = prototype else {
+            let released = self
+                .for_in_state_mut(iterator)?
+                .replace_current(None, ForInSnapshot::empty());
+            debug_assert_eq!(released, previous_snapshot_len);
+            self.for_in_entries = self.for_in_entries.saturating_sub(usize_to_u64(released));
+            return Ok(ForInAdvance::Done {
+                work: usize_to_u64(released).saturating_add(1),
+            });
+        };
+
+        let (snapshot, snapshot_work) =
+            self.try_for_in_snapshot(prototype, previous_snapshot_len)?;
+        let snapshot_len = snapshot.len();
+        let released = self
+            .for_in_state_mut(iterator)?
+            .replace_current(Some(prototype), snapshot);
+        debug_assert_eq!(released, previous_snapshot_len);
+        self.for_in_entries = self
+            .for_in_entries
+            .saturating_sub(usize_to_u64(released))
+            .saturating_add(usize_to_u64(snapshot_len));
+        Ok(ForInAdvance::Continue {
+            work: snapshot_work.saturating_add(usize_to_u64(released)),
+        })
+    }
+
+    fn preview_for_in_snapshot_work(
+        &self,
+        reference: HeapReference,
+    ) -> Result<u64, crate::EngineFault> {
+        let string_length = match reference {
+            HeapReference::Function(_) => None,
+            HeapReference::Object(object) => self.boxed_string(object)?.map(JsString::len),
+        };
+        let property_count = self.object_record(reference)?.property_count();
+        Ok(for_in_snapshot_work_upper_bound(
+            property_count,
+            string_length,
+        ))
+    }
+
+    fn preview_for_in_property_scan_work(
+        &self,
+        reference: HeapReference,
+        key: &PropertyKey,
+    ) -> Result<u64, crate::EngineFault> {
+        if let HeapReference::Object(object) = reference
+            && let Some(string) = self.boxed_string(object)?
+            && key
+                .as_index()
+                .is_some_and(|index| index.get() < string.len())
+        {
+            return Ok(2);
+        }
+        Ok(usize_to_u64(self.object_record(reference)?.property_count()).saturating_add(1))
+    }
+
+    pub(crate) fn is_for_in_iterator(&self, object: ObjectId) -> Result<bool, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .map(|object| object.for_in_state().is_some())
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+    }
+
+    fn for_in_state_mut(
+        &mut self,
+        iterator: ObjectId,
+    ) -> Result<&mut ForInIterator, crate::EngineFault> {
+        self.objects
+            .get_mut(iterator)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "for-in iterator",
+                index: iterator.index(),
+                generation: iterator.generation(),
+            })?
+            .for_in_state_mut()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "for-in next received a non-iterator object",
+            })
+    }
+
+    fn try_for_in_snapshot(
+        &self,
+        reference: HeapReference,
+        replacing: usize,
+    ) -> Result<(ForInSnapshot, u64), crate::ExecutionError> {
+        let string_length = match reference {
+            HeapReference::Function(_) => None,
+            HeapReference::Object(object) => self.boxed_string(object)?.map(JsString::len),
+        };
+        let record = self.object_record(reference)?;
+        let count = record.for_in_candidate_count(string_length);
+        let observed = self
+            .for_in_entries
+            .saturating_sub(usize_to_u64(replacing))
+            .saturating_add(usize_to_u64(count));
+        check_execution_limit(
+            RuntimeResource::ForInEntries,
+            self.limits.max_for_in_entries,
+            observed,
+        )?;
+        let snapshot = record.try_for_in_snapshot(string_length).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ForInEntries,
+                additional: count,
+            }
+        })?;
+        // Snapshot construction performs two count passes and separate numeric
+        // and string-key passes before its conservatively charged sort.
+        let work = usize_to_u64(record.property_count())
+            .saturating_mul(4)
+            .saturating_add(usize_to_u64(snapshot.len()))
+            .saturating_add(snapshot.sort_work())
+            .saturating_add(1);
+        Ok((snapshot, work))
+    }
+
+    fn for_in_own_property_exists(
+        &self,
+        reference: HeapReference,
+        key: &PropertyKey,
+    ) -> Result<(bool, usize), crate::EngineFault> {
+        if let HeapReference::Object(object) = reference
+            && let Some(string) = self.boxed_string(object)?
+            && key
+                .as_index()
+                .is_some_and(|index| index.get() < string.len())
+        {
+            return Ok((true, 1));
+        }
+        Ok(self
+            .object_record(reference)?
+            .has_own_property_with_scan(key))
+    }
+
+    fn rollback_for_in_wrapper(&mut self, wrapper: Option<ObjectId>, collection_pending: bool) {
+        let Some(wrapper) = wrapper else {
+            return;
+        };
+        if let Some(object) = self.objects.remove(wrapper) {
+            self.object_properties = self
+                .object_properties
+                .saturating_sub(usize_to_u64(object.record.property_count()));
+        }
+        self.collection_pending = collection_pending;
     }
 
     pub(crate) fn append_data_property(
@@ -4053,9 +4512,12 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushTrue
             | FinalOpcode::Object
             | FinalOpcode::Drop
+            | FinalOpcode::Nip
             | FinalOpcode::Dup
             | FinalOpcode::Insert2
             | FinalOpcode::Insert3
+            | FinalOpcode::Swap
+            | FinalOpcode::Rot3l
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
             | FinalOpcode::CallConstructor
@@ -4081,6 +4543,8 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetVarRefCheck
             | FinalOpcode::PutVarRefCheck
             | FinalOpcode::CloseLoc
+            | FinalOpcode::ForInStart
+            | FinalOpcode::ForInNext
             | FinalOpcode::GetField
             | FinalOpcode::GetField2
             | FinalOpcode::GetArrayEl
@@ -4253,17 +4717,37 @@ pub(crate) fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+fn for_in_snapshot_work_upper_bound(property_count: usize, string_length: Option<u32>) -> u64 {
+    let property_count = usize_to_u64(property_count);
+    let candidate_count =
+        property_count.saturating_add(u64::from(string_length.unwrap_or_default()));
+    property_count
+        .saturating_mul(4)
+        .saturating_add(candidate_count)
+        .saturating_add(conservative_for_in_sort_work(candidate_count))
+        .saturating_add(1)
+}
+
+fn conservative_for_in_sort_work(entries: u64) -> u64 {
+    if entries <= 1 {
+        return 0;
+    }
+    let levels = u64::from(u64::BITS - (entries - 1).leading_zeros());
+    entries.saturating_mul(levels).saturating_mul(2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        FunctionImplementation, HeapFunction, NativeFunction, NativeFunctionKind, RealmIntrinsics,
-        RootEnvironment, Runtime, RuntimeLimits, RuntimeUsage,
+        CollectionRoot, ForInAdvance, FunctionImplementation, HeapFunction, NativeFunction,
+        NativeFunctionKind, RealmIntrinsics, RootEnvironment, Runtime, RuntimeLimits, RuntimeUsage,
         dynamic_function_declaration_property_layout, global_function_replacement_layout,
     };
     use crate::{
-        AtomError, AtomLimits, AtomUsage, JsNumber, JsString, PREDEFINED_ATOM_COUNT,
-        PREDEFINED_DESCRIPTION_CODE_UNITS, PREDEFINED_INTERNER_SLOTS, PredefinedAtom, PropertyKey,
-        PropertyLayout, RuntimeError, RuntimeResource,
+        ArrayIndex, AtomError, AtomLimits, AtomUsage, EngineFault, ExecutionError, JsNumber,
+        JsString, PREDEFINED_ATOM_COUNT, PREDEFINED_DESCRIPTION_CODE_UNITS,
+        PREDEFINED_INTERNER_SLOTS, PredefinedAtom, PropertyKey, PropertyLayout, RuntimeError,
+        RuntimeResource,
         object::{ObjectRecord, OwnProperty},
         value::{HeapReference, StoredValue},
     };
@@ -4946,7 +5430,7 @@ mod tests {
 
             assert!(matches!(
                 error,
-                crate::ExecutionError::LimitExceeded {
+                ExecutionError::LimitExceeded {
                     resource: RuntimeResource::HeapObjects,
                     limit: 5,
                     observed: 6,
@@ -5033,7 +5517,7 @@ mod tests {
 
             assert!(matches!(
                 error,
-                crate::ExecutionError::LimitExceeded {
+                ExecutionError::LimitExceeded {
                     resource: RuntimeResource::HeapObjects,
                     limit: 5,
                     observed: 6,
@@ -5131,7 +5615,7 @@ mod tests {
 
             assert!(matches!(
                 error,
-                crate::ExecutionError::LimitExceeded {
+                ExecutionError::LimitExceeded {
                     resource: actual_resource,
                     limit: actual_limit,
                     observed: actual_observed,
@@ -5456,7 +5940,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            crate::ExecutionError::EngineFault(crate::EngineFault::RuntimeInvariant {
+            ExecutionError::EngineFault(EngineFault::RuntimeInvariant {
                 message: "accessor insertion targeted an existing own property",
             })
         ));
@@ -5535,6 +6019,500 @@ mod tests {
                 setter: None,
             }) if layout == accessor_layout && actual_getter == function_constructor
         ));
+    }
+
+    #[test]
+    fn for_in_orders_keys_suppresses_shadowed_prototype_names_and_never_reads_getters() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let object_prototype = runtime
+            .realm_object_prototype(realm_id)
+            .expect("Object.prototype");
+        let prototype = runtime
+            .allocate_ordinary_object(object_prototype)
+            .expect("prototype");
+        let object = runtime
+            .allocate_ordinary_object_with_prototype(HeapReference::Object(prototype))
+            .expect("object");
+        let getter = match runtime.realms.get(realm_id).expect("realm").intrinsics {
+            RealmIntrinsics::Ready {
+                function_constructor,
+                ..
+            } => function_constructor,
+            RealmIntrinsics::Initializing => panic!("realm intrinsics"),
+        };
+
+        for (reference, name, enumerable) in [
+            (HeapReference::Object(object), "b", true),
+            (HeapReference::Object(object), "a", true),
+            (HeapReference::Object(object), "dup", true),
+            (HeapReference::Object(object), "hidden", false),
+            (HeapReference::Object(prototype), "p", true),
+            (HeapReference::Object(prototype), "dup", true),
+            (HeapReference::Object(prototype), "hidden", true),
+        ] {
+            let key = string_property_key(&mut runtime, name);
+            runtime
+                .append_data_property(
+                    reference,
+                    key,
+                    PropertyLayout::data(true, enumerable, true),
+                    StoredValue::Undefined,
+                )
+                .expect("property");
+        }
+        runtime
+            .append_data_property(
+                HeapReference::Object(object),
+                PropertyKey::from_index(ArrayIndex::new(2).expect("index")),
+                PropertyLayout::data(true, true, true),
+                StoredValue::Undefined,
+            )
+            .expect("index 2");
+        runtime
+            .append_data_property(
+                HeapReference::Object(object),
+                PropertyKey::from_index(ArrayIndex::new(1).expect("index")),
+                PropertyLayout::data(true, true, true),
+                StoredValue::Undefined,
+            )
+            .expect("index 1");
+        let getter_key = string_property_key(&mut runtime, "get");
+        runtime
+            .append_accessor_property(
+                HeapReference::Object(prototype),
+                getter_key,
+                PropertyLayout::accessor(true, true),
+                Some(getter),
+                None,
+            )
+            .expect("getter");
+
+        let (iterator, _) = runtime
+            .allocate_for_in_iterator(realm_id, StoredValue::Object(object))
+            .expect("iterator");
+        assert_eq!(
+            collect_for_in_keys(&mut runtime, iterator),
+            ["1", "2", "b", "a", "dup", "p", "get"]
+        );
+    }
+
+    #[test]
+    fn for_in_observes_deletion_and_late_prototype_snapshots_without_late_own_additions() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let object_prototype = runtime
+            .realm_object_prototype(realm_id)
+            .expect("Object.prototype");
+        let prototype = runtime
+            .allocate_ordinary_object(object_prototype)
+            .expect("prototype");
+        let object = runtime
+            .allocate_ordinary_object_with_prototype(HeapReference::Object(prototype))
+            .expect("object");
+        let a = string_property_key(&mut runtime, "a");
+        let b = string_property_key(&mut runtime, "b");
+        runtime
+            .append_data_property(
+                HeapReference::Object(object),
+                a,
+                PropertyLayout::data(true, true, true),
+                StoredValue::Undefined,
+            )
+            .expect("a");
+        runtime
+            .append_data_property(
+                HeapReference::Object(object),
+                b.clone(),
+                PropertyLayout::data(true, true, true),
+                StoredValue::Undefined,
+            )
+            .expect("own b");
+        runtime
+            .append_data_property(
+                HeapReference::Object(prototype),
+                b.clone(),
+                PropertyLayout::data(true, true, true),
+                StoredValue::Undefined,
+            )
+            .expect("prototype b");
+
+        let (iterator, _) = runtime
+            .allocate_for_in_iterator(realm_id, StoredValue::Object(object))
+            .expect("iterator");
+        assert_eq!(
+            next_for_in_key(&mut runtime, iterator).as_deref(),
+            Some("a")
+        );
+        let removed = runtime
+            .object_record_mut(HeapReference::Object(object))
+            .expect("object")
+            .pop_last_data(&b);
+        assert!(removed.is_some());
+        runtime.object_properties = runtime.object_properties.saturating_sub(1);
+        let late_own = string_property_key(&mut runtime, "late-own");
+        runtime
+            .append_data_property(
+                HeapReference::Object(object),
+                late_own,
+                PropertyLayout::data(true, true, true),
+                StoredValue::Undefined,
+            )
+            .expect("late own");
+        let late_prototype = string_property_key(&mut runtime, "late-prototype");
+        runtime
+            .append_data_property(
+                HeapReference::Object(prototype),
+                late_prototype,
+                PropertyLayout::data(true, true, true),
+                StoredValue::Undefined,
+            )
+            .expect("late prototype");
+
+        assert_eq!(
+            collect_for_in_keys(&mut runtime, iterator),
+            ["late-prototype"]
+        );
+    }
+
+    #[test]
+    fn for_in_boxes_primitives_and_enumerates_utf16_string_indices() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        for (prototype, name) in [
+            (
+                runtime
+                    .realm_boolean_prototype(realm_id)
+                    .expect("Boolean.prototype"),
+                "b",
+            ),
+            (
+                runtime
+                    .realm_number_prototype(realm_id)
+                    .expect("Number.prototype"),
+                "n",
+            ),
+            (
+                runtime
+                    .realm_string_prototype(realm_id)
+                    .expect("String.prototype"),
+                "s",
+            ),
+        ] {
+            let key = string_property_key(&mut runtime, name);
+            runtime
+                .append_data_property(
+                    HeapReference::Object(prototype),
+                    key,
+                    PropertyLayout::data(true, true, true),
+                    StoredValue::Undefined,
+                )
+                .expect("prototype property");
+        }
+
+        assert_eq!(
+            for_in_keys_for_value(&mut runtime, realm_id, StoredValue::Boolean(true)),
+            ["b"]
+        );
+        assert_eq!(
+            for_in_keys_for_value(
+                &mut runtime,
+                realm_id,
+                StoredValue::Number(JsNumber::from_i32(42)),
+            ),
+            ["n"]
+        );
+        assert_eq!(
+            for_in_keys_for_value(
+                &mut runtime,
+                realm_id,
+                StoredValue::String(JsString::from_utf8("A😀").expect("string")),
+            ),
+            ["0", "1", "2", "s"]
+        );
+        assert!(for_in_keys_for_value(&mut runtime, realm_id, StoredValue::Null).is_empty());
+        assert!(for_in_keys_for_value(&mut runtime, realm_id, StoredValue::Undefined).is_empty());
+
+        let description = JsString::from_utf8("symbol").expect("description");
+        let symbol = runtime
+            .atoms
+            .new_unique_symbol(Some(&description))
+            .expect("symbol");
+        let usage = runtime.usage();
+        let error = runtime
+            .allocate_for_in_iterator(realm_id, StoredValue::Symbol(symbol))
+            .expect_err("Symbol boxing remains fail closed");
+        assert!(matches!(
+            error,
+            ExecutionError::EngineFault(EngineFault::RuntimeInvariant {
+                message: "for-in Symbol boxing is not implemented",
+            })
+        ));
+        assert_eq!(runtime.usage(), usage);
+    }
+
+    #[test]
+    fn for_in_limits_roll_back_primitive_wrappers_and_gc_traces_iterator_current() {
+        let mut limited = Runtime::try_new(
+            RuntimeLimits::default()
+                .with_max_heap_objects(7)
+                .with_max_for_in_entries(0),
+        )
+        .expect("runtime");
+        let realm = limited.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let usage = limited.usage();
+        let collection_pending = limited.collection_pending;
+        let error = limited
+            .allocate_for_in_iterator(
+                realm_id,
+                StoredValue::String(JsString::from_utf8("x").expect("string")),
+            )
+            .expect_err("entry limit");
+        assert!(matches!(
+            error,
+            ExecutionError::LimitExceeded {
+                resource: RuntimeResource::ForInEntries,
+                limit: 0,
+                observed: 2,
+            }
+        ));
+        assert_eq!(limited.usage(), usage);
+        assert_eq!(limited.collection_pending, collection_pending);
+
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let baseline = runtime.usage().heap_objects();
+        let (iterator, _) = runtime
+            .allocate_for_in_iterator(realm_id, StoredValue::Boolean(true))
+            .expect("iterator");
+        runtime
+            .collect_cycles_with_roots(|mark| {
+                mark(CollectionRoot::Heap(HeapReference::Object(iterator)));
+            })
+            .expect("rooted collection");
+        assert_eq!(runtime.usage().heap_objects(), baseline + 2);
+        runtime.collect_cycles().expect("unrooted collection");
+        assert_eq!(runtime.usage().heap_objects(), baseline);
+        assert_eq!(runtime.usage().for_in_entries(), 0);
+    }
+
+    #[test]
+    fn for_in_work_previews_cover_primitive_function_and_prototype_transitions() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let object_prototype = runtime
+            .realm_object_prototype(realm_id)
+            .expect("Object.prototype");
+        let prototype = runtime
+            .allocate_ordinary_object(object_prototype)
+            .expect("prototype");
+        let object = runtime
+            .allocate_ordinary_object_with_prototype(HeapReference::Object(prototype))
+            .expect("object");
+        for (reference, name) in [
+            (HeapReference::Object(object), "own"),
+            (HeapReference::Object(prototype), "inherited"),
+        ] {
+            let key = string_property_key(&mut runtime, name);
+            runtime
+                .append_data_property(
+                    reference,
+                    key,
+                    PropertyLayout::data(true, true, true),
+                    StoredValue::Undefined,
+                )
+                .expect("enumerable property");
+        }
+        let function = match runtime.realms.get(realm_id).expect("realm").intrinsics {
+            RealmIntrinsics::Ready {
+                function_constructor,
+                ..
+            } => function_constructor,
+            RealmIntrinsics::Initializing => panic!("realm intrinsics"),
+        };
+
+        for value in [
+            StoredValue::Undefined,
+            StoredValue::Null,
+            StoredValue::Boolean(true),
+            StoredValue::Number(JsNumber::from_i32(42)),
+            StoredValue::String(JsString::from_utf8("A😀").expect("string")),
+            StoredValue::Object(object),
+            StoredValue::Function(function),
+        ] {
+            let preview = runtime
+                .preview_for_in_iterator_work(&value)
+                .expect("initial work preview");
+            let (iterator, actual) = runtime
+                .allocate_for_in_iterator(realm_id, value)
+                .expect("iterator");
+            assert!(actual <= preview);
+
+            let mut completed = false;
+            for _ in 0..10_000 {
+                let preview = runtime
+                    .preview_for_in_advance_work(iterator)
+                    .expect("advance work preview");
+                let advance = runtime.advance_for_in_iterator(iterator).expect("advance");
+                assert!(advance.work() <= preview);
+                if matches!(advance, ForInAdvance::Done { .. }) {
+                    completed = true;
+                    break;
+                }
+            }
+            assert!(completed, "for-in preview test iterator did not complete");
+        }
+    }
+
+    #[test]
+    fn for_in_visited_growth_is_precharged_for_non_enumerable_candidates() {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let object_prototype = runtime
+            .realm_object_prototype(realm_id)
+            .expect("Object.prototype");
+        let object = runtime
+            .allocate_ordinary_object(object_prototype)
+            .expect("object");
+        for index in 0..64 {
+            let key = string_property_key(&mut runtime, &format!("hidden-{index}"));
+            runtime
+                .append_data_property(
+                    HeapReference::Object(object),
+                    key,
+                    PropertyLayout::data(true, false, true),
+                    StoredValue::Undefined,
+                )
+                .expect("non-enumerable property");
+        }
+        let (iterator, _) = runtime
+            .allocate_for_in_iterator(realm_id, StoredValue::Object(object))
+            .expect("iterator");
+
+        let mut crossed_capacity_boundary = false;
+        for _ in 0..64 {
+            let preview = runtime
+                .preview_for_in_advance_work(iterator)
+                .expect("visited growth preview");
+            let advance = runtime
+                .advance_for_in_iterator(iterator)
+                .expect("visited growth");
+            assert!(matches!(
+                advance,
+                ForInAdvance::Continue { work } if work == preview
+            ));
+            crossed_capacity_boundary |= preview > 1;
+        }
+        assert!(
+            crossed_capacity_boundary,
+            "the regression must force a visited HashSet capacity boundary"
+        );
+
+        let mut limited = Runtime::try_new(RuntimeLimits::default().with_max_for_in_entries(1))
+            .expect("limited runtime");
+        let realm = limited.create_realm().expect("realm");
+        let realm_id = realm.0.id;
+        let object_prototype = limited
+            .realm_object_prototype(realm_id)
+            .expect("Object.prototype");
+        let object = limited
+            .allocate_ordinary_object(object_prototype)
+            .expect("object");
+        let key = string_property_key(&mut limited, "hidden");
+        limited
+            .append_data_property(
+                HeapReference::Object(object),
+                key,
+                PropertyLayout::data(true, false, true),
+                StoredValue::Undefined,
+            )
+            .expect("non-enumerable property");
+        let (iterator, _) = limited
+            .allocate_for_in_iterator(realm_id, StoredValue::Object(object))
+            .expect("iterator");
+        let usage = limited.usage();
+        let error = limited
+            .preview_for_in_advance_work(iterator)
+            .expect_err("visited entry limit must be checked before non-enumerable insertion");
+        assert!(matches!(
+            error,
+            ExecutionError::LimitExceeded {
+                resource: RuntimeResource::ForInEntries,
+                limit: 1,
+                observed: 2,
+            }
+        ));
+        assert_eq!(limited.usage(), usage);
+        assert!(
+            limited
+                .objects
+                .get(iterator)
+                .and_then(crate::object::HeapObject::for_in_state)
+                .is_some_and(|state| state.candidate().is_some())
+        );
+    }
+
+    fn string_property_key(runtime: &mut Runtime, name: &str) -> PropertyKey {
+        runtime
+            .property_key_from_string(&JsString::from_utf8(name).expect("string"))
+            .expect("property key")
+    }
+
+    fn for_in_keys_for_value(
+        runtime: &mut Runtime,
+        realm: crate::ids::RealmId,
+        value: StoredValue,
+    ) -> Vec<String> {
+        let (iterator, _) = runtime
+            .allocate_for_in_iterator(realm, value)
+            .expect("iterator");
+        collect_for_in_keys(runtime, iterator)
+    }
+
+    fn collect_for_in_keys(runtime: &mut Runtime, iterator: crate::ids::ObjectId) -> Vec<String> {
+        let mut keys = Vec::new();
+        while let Some(key) = next_for_in_key(runtime, iterator) {
+            keys.push(key);
+        }
+        keys
+    }
+
+    fn next_for_in_key(runtime: &mut Runtime, iterator: crate::ids::ObjectId) -> Option<String> {
+        for _ in 0..10_000 {
+            match runtime
+                .advance_for_in_iterator(iterator)
+                .expect("for-in advance")
+            {
+                ForInAdvance::Continue { .. } => {}
+                ForInAdvance::Yield { key, .. } => {
+                    return Some(key.as_index().map_or_else(
+                        || {
+                            key.as_atom()
+                                .and_then(crate::Atom::description)
+                                .expect("string atom")
+                                .to_utf8_lossy()
+                                .expect("UTF-8")
+                        },
+                        |index| {
+                            index
+                                .to_js_string()
+                                .expect("index string")
+                                .to_utf8_lossy()
+                                .expect("UTF-8")
+                        },
+                    ));
+                }
+                ForInAdvance::Done { .. } => return None,
+            }
+        }
+        panic!("for-in iterator did not complete within its bounded test work");
     }
 
     fn assert_data_property(

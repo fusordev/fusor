@@ -222,8 +222,20 @@ nested root with imported cells fails closed until an explicit verified root
 environment exists. `compile_leaf` remains the explicit nested-function-free
 API and rejects a selection with children. BigInt and RegExp runtime values,
 non-string atom namespaces, raw class/function stack entries,
-inferred anonymous-function names, `for-in`, and `for-of` stay rejected until
-their owned records and semantics exist.
+inferred anonymous-function names, and `for-of` stay rejected until their
+owned records and semantics exist.
+
+Synchronous `for-in` is an ordinary-profile exception to the otherwise empty
+statement-stack rule. Lowering keeps one private cursor beneath the statement
+stack, uses depth-aware statement anchors, and emits exact cleanup for nested
+break, continue, return, and throw. A second bounded CFG analysis gives every
+cursor origin a typed identity, carries key/done provenance through only the
+matching `if_false` edge, and certifies an immediately consuming lexical-head
+store. Declarative authority additionally requires every unchecked store for
+that TDZ local to share the same cursor site. Correlated binding-and-cell
+states then permit a repeated `let`/`const` write only after the captured cell
+was closed. None of these private certificates or cursor values is exposed as
+JavaScript.
 
 A final compiler-profile pass combines that staged graph with exact function
 metadata and source snapshots and returns immutable, `Arc`-backed
@@ -238,8 +250,8 @@ function-instantiation initializers in the entry prefix, and validates the
 activation-plus-initializer group for scope-entry declarations so control flow
 cannot jump into the store.
 
-The same pass runs an iterative CFG analysis over separate binding-value and
-captured-cell states. It rejects reachable missing TDZ/scope activation,
+The same pass runs an iterative CFG analysis over correlated binding-value and
+captured-cell product states. It rejects reachable missing TDZ/scope activation,
 invalid initialization, immutable writes, capture of an inactive scoped
 binding, and invalid close/reopen behavior. Six aggregate budgets bound
 variable definitions, closure definitions, unique retained source bytes,
@@ -549,9 +561,10 @@ async/generator methods, `super`/home-object semantics, realm-global setter
 dispatch, prototype mutation, proxies and other exotics, derived/class and
 nonordinary constructor forms, optional/spread/apply/tail calls, the remaining
 Number built-ins, the remaining String built-ins, Symbol sloppy-`this` boxing
-and wrapper/prototype conversions, serialized input, raw function slots, catch
-handlers, finally return addresses, iterator markers, and packed exceptional
-stack values remain fail closed. Ordinary
+and wrapper/prototype conversions, `for-in` Symbol boxing and destructuring
+heads, serialized input, raw function slots, catch handlers, finally return
+addresses, `for-of`/async iterator markers, and packed exceptional stack values
+remain fail closed. Ordinary
 accessors are typed slots: `GetField`
 and `GetField2` stop at the first own or inherited accessor, execute native or
 verified-bytecode getters through the same frame vector, preserve the original

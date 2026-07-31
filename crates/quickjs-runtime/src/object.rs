@@ -23,10 +23,14 @@
  * THE SOFTWARE.
  */
 
-use std::{collections::TryReserveError, sync::Arc};
+use std::{
+    collections::{HashSet, TryReserveError},
+    sync::Arc,
+};
 
 use crate::{
-    Atom, JsNumber, JsString, PropertyKey, PropertyLayout, PropertyLayoutKind,
+    ArrayIndex, Atom, AtomKind, JsNumber, JsString, PropertyKey, PropertyLayout,
+    PropertyLayoutKind,
     ids::FunctionId,
     value::{HeapReference, StoredValue},
 };
@@ -35,6 +39,118 @@ use crate::{
 struct ShapeProperty {
     key: PropertyKey,
     layout: PropertyLayout,
+}
+
+#[derive(Clone)]
+pub(crate) struct ForInCandidate {
+    key: PropertyKey,
+    enumerable: bool,
+}
+
+impl ForInCandidate {
+    pub(crate) fn key(&self) -> &PropertyKey {
+        &self.key
+    }
+
+    pub(crate) const fn enumerable(&self) -> bool {
+        self.enumerable
+    }
+}
+
+pub(crate) struct ForInSnapshot {
+    candidates: Vec<ForInCandidate>,
+    sort_work: u64,
+}
+
+impl ForInSnapshot {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            candidates: Vec::new(),
+            sort_work: 0,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.candidates.len()
+    }
+
+    pub(crate) fn get(&self, index: usize) -> Option<&ForInCandidate> {
+        self.candidates.get(index)
+    }
+
+    pub(crate) const fn sort_work(&self) -> u64 {
+        self.sort_work
+    }
+}
+
+pub(crate) struct ForInIterator {
+    current: Option<HeapReference>,
+    snapshot: ForInSnapshot,
+    next: usize,
+    visited: HashSet<PropertyKey>,
+}
+
+impl ForInIterator {
+    pub(crate) fn new(current: Option<HeapReference>, snapshot: ForInSnapshot) -> Self {
+        Self {
+            current,
+            snapshot,
+            next: 0,
+            visited: HashSet::new(),
+        }
+    }
+
+    pub(crate) const fn current(&self) -> Option<HeapReference> {
+        self.current
+    }
+
+    pub(crate) fn candidate(&self) -> Option<&ForInCandidate> {
+        self.snapshot.get(self.next)
+    }
+
+    pub(crate) fn advance_candidate(&mut self) {
+        self.next = self.next.saturating_add(1);
+    }
+
+    pub(crate) fn has_visited(&self, key: &PropertyKey) -> bool {
+        self.visited.contains(key)
+    }
+
+    pub(crate) fn visited_growth_work(&self) -> u64 {
+        if self.visited.len() < self.visited.capacity() {
+            return 1;
+        }
+        u64::try_from(self.visited.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1)
+    }
+
+    pub(crate) fn try_mark_visited(&mut self, key: PropertyKey) -> Result<bool, TryReserveError> {
+        if self.visited.contains(&key) {
+            return Ok(false);
+        }
+        self.visited.try_reserve(1)?;
+        Ok(self.visited.insert(key))
+    }
+
+    pub(crate) fn replace_current(
+        &mut self,
+        current: Option<HeapReference>,
+        snapshot: ForInSnapshot,
+    ) -> usize {
+        let previous = std::mem::replace(&mut self.snapshot, snapshot);
+        self.current = current;
+        self.next = 0;
+        previous.len()
+    }
+
+    pub(crate) fn entry_count(&self) -> usize {
+        self.snapshot.len().saturating_add(self.visited.len())
+    }
+
+    pub(crate) fn snapshot_len(&self) -> usize {
+        self.snapshot.len()
+    }
 }
 
 enum PropertySlot {
@@ -174,6 +290,87 @@ impl ObjectRecord {
                 })
             }
         }
+    }
+
+    pub(crate) fn has_own_property_with_scan(&self, key: &PropertyKey) -> (bool, usize) {
+        let mut scanned = 0_usize;
+        for property in self.shape.iter() {
+            scanned = scanned.saturating_add(1);
+            if property.key == *key {
+                return (true, scanned);
+            }
+        }
+        (false, scanned)
+    }
+
+    pub(crate) fn for_in_candidate_count(&self, string_length: Option<u32>) -> usize {
+        let virtual_indices = string_length.unwrap_or(0);
+        let ordinary = self.shape.iter().filter(|property| {
+            property
+                .key
+                .as_index()
+                .is_some_and(|index| index.get() >= virtual_indices)
+                || property
+                    .key
+                    .as_atom()
+                    .is_some_and(|atom| atom.kind() == AtomKind::String)
+        });
+        usize::try_from(virtual_indices)
+            .unwrap_or(usize::MAX)
+            .saturating_add(ordinary.count())
+    }
+
+    pub(crate) fn try_for_in_snapshot(
+        &self,
+        string_length: Option<u32>,
+    ) -> Result<ForInSnapshot, TryReserveError> {
+        let virtual_indices = string_length.unwrap_or(0);
+        let capacity = self.for_in_candidate_count(string_length);
+        let mut candidates = Vec::new();
+        candidates.try_reserve_exact(capacity)?;
+
+        for index in 0..virtual_indices {
+            candidates.push(ForInCandidate {
+                key: PropertyKey::from_index(
+                    ArrayIndex::new(index)
+                        .expect("QuickJS String length cannot contain the non-index u32 maximum"),
+                ),
+                enumerable: true,
+            });
+        }
+        for property in self.shape.iter() {
+            if let Some(index) = property.key.as_index()
+                && index.get() >= virtual_indices
+            {
+                candidates.push(ForInCandidate {
+                    key: property.key.clone(),
+                    enumerable: property.layout.is_enumerable(),
+                });
+            }
+        }
+        let sort_work = conservative_sort_work(candidates.len());
+        candidates.sort_unstable_by_key(|candidate| {
+            candidate
+                .key
+                .as_index()
+                .expect("only array-index candidates precede the string-key phase")
+        });
+        for property in self.shape.iter() {
+            if property
+                .key
+                .as_atom()
+                .is_some_and(|atom| atom.kind() == AtomKind::String)
+            {
+                candidates.push(ForInCandidate {
+                    key: property.key.clone(),
+                    enumerable: property.layout.is_enumerable(),
+                });
+            }
+        }
+        Ok(ForInSnapshot {
+            candidates,
+            sort_work,
+        })
     }
 
     #[cfg(test)]
@@ -365,6 +562,15 @@ impl ObjectRecord {
     }
 }
 
+fn conservative_sort_work(entries: usize) -> u64 {
+    let entries = u64::try_from(entries).unwrap_or(u64::MAX);
+    if entries <= 1 {
+        return 0;
+    }
+    let levels = u64::from(u64::BITS - (entries - 1).leading_zeros());
+    entries.saturating_mul(levels).saturating_mul(2)
+}
+
 #[allow(
     dead_code,
     reason = "all primitive wrapper payloads are defined together so later intrinsic families reuse one typed object representation"
@@ -423,14 +629,29 @@ impl BoxedPrimitive {
 pub(crate) enum HeapObjectKind {
     Ordinary,
     BoxedPrimitive(BoxedPrimitive),
+    ForInIterator(ForInIterator),
 }
 
 impl HeapObjectKind {
     #[must_use]
     pub(crate) const fn boxed_primitive(&self) -> Option<&BoxedPrimitive> {
         match self {
-            Self::Ordinary => None,
+            Self::Ordinary | Self::ForInIterator(_) => None,
             Self::BoxedPrimitive(value) => Some(value),
+        }
+    }
+
+    pub(crate) const fn for_in_iterator(&self) -> Option<&ForInIterator> {
+        match self {
+            Self::ForInIterator(iterator) => Some(iterator),
+            Self::Ordinary | Self::BoxedPrimitive(_) => None,
+        }
+    }
+
+    pub(crate) const fn for_in_iterator_mut(&mut self) -> Option<&mut ForInIterator> {
+        match self {
+            Self::ForInIterator(iterator) => Some(iterator),
+            Self::Ordinary | Self::BoxedPrimitive(_) => None,
         }
     }
 }
@@ -461,6 +682,15 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) fn for_in_iterator(iterator: ForInIterator) -> Self {
+        Self {
+            kind: HeapObjectKind::ForInIterator(iterator),
+            record: ObjectRecord::empty(None),
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     #[allow(
         dead_code,
         reason = "kind inspection supports class-sensitive object behavior beyond the first Boolean consumer"
@@ -472,6 +702,29 @@ impl HeapObject {
     #[must_use]
     pub(crate) const fn boxed_primitive(&self) -> Option<&BoxedPrimitive> {
         self.kind.boxed_primitive()
+    }
+
+    #[must_use]
+    pub(crate) const fn for_in_state(&self) -> Option<&ForInIterator> {
+        self.kind.for_in_iterator()
+    }
+
+    #[must_use]
+    pub(crate) const fn for_in_state_mut(&mut self) -> Option<&mut ForInIterator> {
+        self.kind.for_in_iterator_mut()
+    }
+
+    #[must_use]
+    pub(crate) fn for_in_entry_count(&self) -> usize {
+        self.for_in_state().map_or(0, ForInIterator::entry_count)
+    }
+
+    #[must_use]
+    pub(crate) const fn for_in_current(&self) -> Option<HeapReference> {
+        match self.kind.for_in_iterator() {
+            Some(iterator) => iterator.current(),
+            None => None,
+        }
     }
 }
 
@@ -485,6 +738,90 @@ mod tests {
         ids::FunctionMarker,
         value::StoredValue,
     };
+
+    #[test]
+    fn for_in_snapshot_orders_indices_before_inserted_strings_and_excludes_symbols() {
+        let mut atoms = AtomTable::try_new(AtomLimits::default()).expect("atoms");
+        let mut record = ObjectRecord::empty(None);
+        let string_key = |atoms: &mut AtomTable, text: &str| {
+            atoms
+                .property_key_from_string(&JsString::from_utf8(text).expect("string"))
+                .expect("property key")
+        };
+
+        record
+            .append_data(
+                string_key(&mut atoms, "b"),
+                PropertyLayout::data(true, true, true),
+                StoredValue::Undefined,
+            )
+            .expect("b");
+        record
+            .append_data(
+                PropertyKey::from_index(ArrayIndex::new(5).expect("index")),
+                PropertyLayout::data(true, true, true),
+                StoredValue::Undefined,
+            )
+            .expect("5");
+        record
+            .append_data(
+                PropertyKey::from_index(ArrayIndex::new(2).expect("index")),
+                PropertyLayout::data(true, false, true),
+                StoredValue::Undefined,
+            )
+            .expect("2");
+        record
+            .append_data(
+                string_key(&mut atoms, "a"),
+                PropertyLayout::data(true, true, true),
+                StoredValue::Undefined,
+            )
+            .expect("a");
+        let symbol_description = JsString::from_utf8("hidden").expect("description");
+        let symbol = atoms
+            .new_unique_symbol(Some(&symbol_description))
+            .expect("symbol");
+        record
+            .append_data(
+                atoms.property_key_from_symbol(&symbol).expect("symbol key"),
+                PropertyLayout::data(true, true, true),
+                StoredValue::Undefined,
+            )
+            .expect("symbol");
+
+        let snapshot = record.try_for_in_snapshot(Some(2)).expect("snapshot");
+        let keys = (0..snapshot.len())
+            .map(|index| {
+                let candidate = snapshot.get(index).expect("candidate");
+                let name = candidate.key().as_index().map_or_else(
+                    || {
+                        candidate
+                            .key()
+                            .as_atom()
+                            .and_then(crate::Atom::description)
+                            .expect("string atom")
+                            .to_utf8_lossy()
+                            .expect("UTF-8")
+                    },
+                    |index| index.get().to_string(),
+                );
+                (name, candidate.enumerable())
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            keys,
+            vec![
+                ("0".to_owned(), true),
+                ("1".to_owned(), true),
+                ("2".to_owned(), false),
+                ("5".to_owned(), true),
+                ("b".to_owned(), true),
+                ("a".to_owned(), true),
+            ]
+        );
+        assert_eq!(snapshot.sort_work(), 16);
+    }
 
     #[test]
     fn replacing_a_data_layout_preserves_value_and_can_be_rolled_back() {

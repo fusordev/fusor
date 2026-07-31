@@ -1502,6 +1502,812 @@ fn single_input(
     shaped_input(instructions, atoms, variables, 1, 1, &[], source)
 }
 
+fn typed_stack_input(
+    instructions: &[(FinalOpcode, Operands)],
+    atoms: &[CompilerAtom],
+    variables: &[VariableDefinition],
+) -> UnverifiedCompilerBytecodeGraph {
+    typed_stack_input_with_captures(instructions, atoms, variables, &[])
+}
+
+fn typed_stack_input_with_captures(
+    instructions: &[(FinalOpcode, Operands)],
+    atoms: &[CompilerAtom],
+    variables: &[VariableDefinition],
+    captures: &[CompilerCapturedBinding],
+) -> UnverifiedCompilerBytecodeGraph {
+    let locals = u32::try_from(variables.len()).expect("fixture local count");
+    let flow = flow(
+        instructions,
+        u32::try_from(atoms.len()).expect("fixture atom count"),
+        0,
+        locals,
+        captures,
+        0,
+        &[],
+    );
+    let text: Arc<str> = Arc::from("typed stack fixture");
+    let span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("fixture source length"));
+    let source = CompilerSource::new(
+        Arc::from("fixture.js"),
+        text,
+        span,
+        None,
+        Arc::from(
+            flow.instructions()
+                .iter()
+                .map(|instruction| PcSourceSpan::new(instruction.decoded().pc(), span))
+                .collect::<Vec<_>>(),
+        ),
+    );
+    let graph = verify_compiler_function_graph(
+        UnverifiedCompilerFunctionGraph::new(
+            FunctionTemplateId::new(0),
+            Arc::from([
+                UnverifiedCompilerFunction::new(flow, Arc::from([]), Arc::from([]))
+                    .with_atom_pool(Arc::from(atoms)),
+            ]),
+        ),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("typed stack fixture graph");
+    UnverifiedCompilerBytecodeGraph::new(
+        Arc::new(graph),
+        Arc::from([UnverifiedFunctionMetadata::new(
+            None,
+            Arc::from(variables),
+            Arc::from([]),
+            source,
+        )]),
+    )
+}
+
+#[test]
+fn for_in_marker_certificate_accepts_a_loop_and_exact_cleanup() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(-8)),
+    ];
+
+    let verified = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("for-in keeps its typed iterator through the loop and drops it on exit");
+
+    assert!(
+        verified
+            .requirements()
+            .contains(&ExecutionRequirement::OrdinaryObjects)
+    );
+    assert!(
+        verified
+            .requirements()
+            .contains(&ExecutionRequirement::Strings)
+    );
+}
+
+#[test]
+fn for_in_marker_certificate_accepts_nested_nip_cleanup_and_ordinary_rotations() {
+    let nested = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Nip, Operands::None),
+        (FinalOpcode::Nip, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&nested, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("nested markers are removed inside-out while preserving an ordinary completion");
+
+    for ordinary in [
+        vec![
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::Push2, Operands::NoneInt),
+            (FinalOpcode::Swap, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::Push2, Operands::NoneInt),
+            (FinalOpcode::Push3, Operands::NoneInt),
+            (FinalOpcode::Rot3l, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+    ] {
+        verify_compiler_bytecode_graph(
+            typed_stack_input(&ordinary, &[], &[]),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect("ordinary assignment-target rotations remain in the compiler profile");
+    }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the adversarial cases cover each forbidden marker escape class in one table"
+)]
+fn for_in_marker_certificate_rejects_forged_or_exposed_iterators() {
+    let local = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        var_policy(),
+        false,
+        None,
+    );
+    let cases = [
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForInNext, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            Vec::new(),
+            Vec::new(),
+            FinalOpcode::ForInNext,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForInStart, Operands::None),
+                (FinalOpcode::Dup, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            Vec::new(),
+            Vec::new(),
+            FinalOpcode::Dup,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForInStart, Operands::None),
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (FinalOpcode::Swap, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            Vec::new(),
+            Vec::new(),
+            FinalOpcode::Swap,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForInStart, Operands::None),
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (FinalOpcode::Push2, Operands::NoneInt),
+                (FinalOpcode::Rot3l, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            Vec::new(),
+            Vec::new(),
+            FinalOpcode::Rot3l,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForInStart, Operands::None),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            Vec::new(),
+            Vec::new(),
+            FinalOpcode::Return,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForInStart, Operands::None),
+                (FinalOpcode::PutLoc0, Operands::NoneLoc),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            vec![atom("stored")],
+            vec![local.clone()],
+            FinalOpcode::PutLoc0,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForInStart, Operands::None),
+                (FinalOpcode::Call0, Operands::NPopX),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            Vec::new(),
+            Vec::new(),
+            FinalOpcode::Call0,
+        ),
+    ];
+
+    for (instructions, atoms, variables, opcode) in cases {
+        let error = verify_compiler_bytecode_graph(
+            typed_stack_input(&instructions, &atoms, &variables),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err(
+            "a for-in iterator marker cannot be forged, copied, stored, called, or returned",
+        );
+        assert!(
+            matches!(
+                error.kind(),
+                BytecodeVerificationErrorKind::ForInIteratorStackMismatch {
+                    opcode: actual,
+                    ..
+                } if *actual == opcode
+            ),
+            "{opcode}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn for_in_marker_certificate_requires_exact_join_identity() {
+    let instructions = [
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(5)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(3)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("different for-in iterator sites cannot merge into one stack slot");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::ForInIteratorJoinMismatch { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn for_in_marker_certificate_rejects_crossed_and_marker_free_nip() {
+    let cases = [
+        vec![
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::ForInStart, Operands::None),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::ForInStart, Operands::None),
+            (FinalOpcode::Nip, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        vec![
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::Push2, Operands::NoneInt),
+            (FinalOpcode::Nip, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+    ];
+
+    for instructions in cases {
+        let error = verify_compiler_bytecode_graph(
+            typed_stack_input(&instructions, &[], &[]),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("nip is reserved for inside-out for-in marker cleanup");
+        assert!(
+            matches!(
+                error.kind(),
+                BytecodeVerificationErrorKind::ForInIteratorStackMismatch {
+                    opcode: FinalOpcode::Nip,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn for_in_marker_certificate_checks_unreachable_components() {
+    let instructions = [
+        (FinalOpcode::Goto8, Operands::Label8(6)),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("an unreachable component cannot smuggle a forged iterator opcode");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::ForInIteratorStackMismatch {
+                opcode: FinalOpcode::ForInNext,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn for_in_marker_certificate_stops_dead_scaffolding_at_the_reachable_loop_boundary() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(10)),
+        (FinalOpcode::Nop, Operands::None),
+        (FinalOpcode::Nop, Operands::None),
+        (FinalOpcode::Nop, Operands::None),
+        (FinalOpcode::Nop, Operands::None),
+        (FinalOpcode::Nop, Operands::None),
+        (FinalOpcode::Nop, Operands::None),
+        (FinalOpcode::Nop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(-18)),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect(
+        "dead normal-rotation scaffolding at PC 19 cannot contaminate reachable ForInNext PC 2",
+    );
+}
+
+#[test]
+fn for_in_head_key_certificate_allows_const_reinitialization_on_loop_backedges() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        const_policy(),
+        true,
+        None,
+    );
+    let instructions = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Goto8, Operands::Label8(-8)),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[atom("key")], &[definition]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("the exact for-in head key may reinitialize one uncaptured const on every iteration");
+}
+
+#[test]
+fn captured_for_in_const_requires_close_loc_before_certified_reinitialization() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        const_policy(),
+        true,
+        Some(0),
+    );
+    let captures = [CompilerCapturedBinding::ScopedLocal(0)];
+    let closed = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::CloseLoc, Operands::Loc(0)),
+        (FinalOpcode::Goto8, Operands::Label8(-11)),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input_with_captures(
+            &closed,
+            &[atom("key")],
+            std::slice::from_ref(&definition),
+            &captures,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("closing the captured cell permits a fresh const binding on the backedge");
+
+    let missing_close = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Goto8, Operands::Label8(-8)),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input_with_captures(&missing_close, &[atom("key")], &[definition], &captures),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("an initialized captured const cannot reuse its active iteration cell");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: BindingSlot::Local(0),
+            reason: BindingPolicyViolationReason::InvalidLexicalInitialization,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn captured_for_in_let_declaration_requires_close_loc_before_reinitialization() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        let_policy(),
+        true,
+        Some(0),
+    );
+    let captures = [CompilerCapturedBinding::ScopedLocal(0)];
+    let closed = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::CloseLoc, Operands::Loc(0)),
+        (FinalOpcode::Goto8, Operands::Label8(-11)),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input_with_captures(
+            &closed,
+            &[atom("key")],
+            std::slice::from_ref(&definition),
+            &captures,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("closing a captured declarative let cell permits the next iteration binding");
+
+    let missing_close = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Goto8, Operands::Label8(-8)),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input_with_captures(&missing_close, &[atom("key")], &[definition], &captures),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a captured declarative let needs a fresh closed cell on the backedge");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: BindingSlot::Local(0),
+            reason: BindingPolicyViolationReason::InvalidLexicalInitialization,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn captured_outer_let_for_in_assignment_reuses_its_initialized_cell() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        let_policy(),
+        true,
+        Some(0),
+    );
+    let captures = [CompilerCapturedBinding::ScopedLocal(0)];
+    let instructions = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::PutLocCheck, Operands::Loc(0)),
+        (FinalOpcode::Goto8, Operands::Label8(-10)),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input_with_captures(&instructions, &[atom("key")], &[definition], &captures),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("an outer captured let uses checked assignment and keeps the same active cell");
+}
+
+#[test]
+fn for_in_const_reinitialization_rejects_transformed_or_wrong_edge_keys() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        const_policy(),
+        true,
+        None,
+    );
+    let intervening_nop = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Nop, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Goto8, Operands::Label8(-9)),
+    ];
+    let transformed = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Swap, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(-11)),
+    ];
+    let done_fallthrough = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Goto8, Operands::Label8(-5)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    for instructions in [
+        intervening_nop.as_slice(),
+        transformed.as_slice(),
+        done_fallthrough.as_slice(),
+    ] {
+        let error = verify_compiler_bytecode_graph(
+            typed_stack_input(
+                instructions,
+                &[atom("key")],
+                std::slice::from_ref(&definition),
+            ),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("only the immediate false-edge for-in key consumption can reinitialize const");
+        assert!(
+            matches!(
+                error.kind(),
+                BytecodeVerificationErrorKind::BindingPolicyViolation {
+                    slot: BindingSlot::Local(0),
+                    reason: BindingPolicyViolationReason::InvalidLexicalInitialization,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn for_in_head_key_cannot_reinitialize_a_const_owned_by_another_put_site() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        const_policy(),
+        true,
+        None,
+    );
+    let instructions = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Goto8, Operands::Label8(-8)),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[atom("key")], &[definition]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a for-in key cannot mutate a const initialized by another unchecked PutLoc site");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: BindingSlot::Local(0),
+            reason: BindingPolicyViolationReason::InvalidLexicalInitialization,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn for_in_declarative_local_rejects_multiple_iterator_cursor_sites() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        const_policy(),
+        true,
+        None,
+    );
+    let instructions = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(5)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(5)),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(1)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[atom("key")], &[definition]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("one declarative local cannot take fresh-binding authority from two iterators");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: BindingSlot::Local(0),
+            reason: BindingPolicyViolationReason::InvalidLexicalInitialization,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn for_in_marker_certificate_rejects_a_marker_at_an_unreachable_terminal() {
+    let instructions = [
+        (FinalOpcode::Goto8, Operands::Label8(4)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("even an unreachable terminal must not retain an internal iterator marker");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::ForInIteratorMarkerAtExit { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn for_in_marker_certificate_charges_exact_state_and_transfer_budgets() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::ForInNext, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let input = typed_stack_input(&instructions, &[], &[]);
+    let usage =
+        verify_compiler_bytecode_graph(input.clone(), BytecodeGraphVerificationLimits::default())
+            .expect("baseline typed for-in certificate")
+            .usage();
+    assert!(usage.frame_state_entries() > 0);
+    assert!(usage.policy_transfers() > 0);
+
+    assert_limit(
+        &input,
+        BytecodeGraphVerificationLimits::default()
+            .with_max_frame_state_entries(usage.frame_state_entries()),
+        BytecodeGraphVerificationLimits::default()
+            .with_max_frame_state_entries(usage.frame_state_entries() - 1),
+        BytecodeGraphResource::FrameStateEntries,
+        usage.frame_state_entries() - 1,
+        usage.frame_state_entries(),
+    );
+    assert_limit(
+        &input,
+        BytecodeGraphVerificationLimits::default()
+            .with_max_policy_transfers(usage.policy_transfers()),
+        BytecodeGraphVerificationLimits::default()
+            .with_max_policy_transfers(usage.policy_transfers() - 1),
+        BytecodeGraphResource::PolicyTransfers,
+        usage.policy_transfers() - 1,
+        usage.policy_transfers(),
+    );
+}
+
 fn shaped_input(
     instructions: &[(FinalOpcode, Operands)],
     atoms: &[CompilerAtom],

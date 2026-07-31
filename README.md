@@ -184,9 +184,10 @@ The Number radix task reconstructs exact binary64 bit patterns on both sides,
 checks every radix for exponent and mantissa boundaries, and adds a bounded
 fixed-seed sample from
 [`tests/number-radix/manifest.json`](tests/number-radix/manifest.json).
-The control-flow task executes its strictly tagged manifest through the public
-dynamic-Function facade and compares normalized primitive results and
-engine-created errors with the pinned `qjs` oracle. Its corpus is
+The control-flow task executes its strictly tagged labeled, `switch`, and
+`for-in` manifest through the public dynamic-Function facade and compares
+normalized primitive results and engine-created errors with the pinned `qjs`
+oracle. Its corpus is
 [`tests/control-flow/manifest.json`](tests/control-flow/manifest.json).
 
 ## License

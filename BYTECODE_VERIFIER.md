@@ -57,9 +57,11 @@ are limited to normal functions. Compiler bodies may attach a constant-kind
 layout that conditionally admits ordinary value loads and nested closure
 creation; serialized bodies still reject every constant opcode. The slice
 rejects opcodes whose correct verification needs actual constant values,
-verified child bodies, raw function slots, handler or iterator markers,
-finally return addresses, or packed stack offsets. Its opaque certificate has
-no execution API and cannot cross the VM trust boundary.
+verified child bodies, raw function slots, handler or `for-of`/async iterator
+markers, finally return addresses, or packed stack offsets. Compiler-private
+synchronous `for-in` receives its cursor-identity proof only in the final
+whole-graph pass. The staged certificate has no execution API and cannot cross
+the VM trust boundary.
 
 The next compiler-only slice returns
 `VerifiedCompilerFunctionGraph`. It takes a flat `Arc`-backed graph, requires
@@ -146,8 +148,8 @@ state makes cell lifetime verifiable but does not change the result of
 successful JavaScript execution. Annex B block-function semantics remain
 rejected rather than being approximated.
 
-An iterative CFG work queue tracks binding value state
-(`inactive`/`uninitialized`/`initialized`) separately from captured-cell state
+An iterative CFG work queue tracks the correlated product of binding value
+state (`inactive`/`uninitialized`/`initialized`) and captured-cell state
 (`closed`/`active`). It checks TDZ and initialization policy, immutable writes,
 scope activation, closure capture of scoped locals, and `close_loc` cell
 rotation across joins and backedges. This analysis is bounded by aggregate
@@ -176,6 +178,24 @@ Serialized bytecode and the full exceptional typed-stack proof, including
 catch handlers, finally return addresses, and iterator markers, are not
 implemented. The complete typed-stack rules below remain the target for that
 wider boundary.
+
+Compiler-generated synchronous `for-in` has a narrower private typed-stack
+certificate. `for_in_start` replaces one ordinary value with a cursor tagged
+by its origin PC; `for_in_next` temporarily produces matching key and done
+values. Only the matching `if_false` iteration edge promotes that key to a
+one-instruction head value, and only an immediately consuming unchecked local
+store receives a certificate. Intervening operations erase that provenance.
+Exact joins reject mixed or mismatched cursor identities, ordinary operations
+cannot copy, reorder, store, call, or return a cursor, and every terminal must
+have removed it with compiler-shaped `drop`/`nip` cleanup. The analysis also
+audits disconnected instructions without allowing an unreachable component to
+contaminate the entry component. Its state cells and transfers are charged to
+the existing aggregate budgets. The ephemeral store certificate feeds the
+correlated binding-state proof. Declarative authority requires every static
+unchecked store for that TDZ local to be certified to one cursor site, so an
+unrelated initialized `const` cannot borrow a key certificate. A repeated
+`let`/`const` head write is valid only from an uninitialized state or an
+initialized state whose captured cell is closed.
 
 Current source verification is structural: it proves UTF-8 boundaries,
 containment, exact instruction-PC correspondence, and metadata consistency. It
@@ -804,9 +824,11 @@ The verifier is complete only when the following tests are automated.
     variable-reference mismatches, wrong parent closure metadata, wrong child
     names, missing or duplicate function initializers, branches into an
     initializer store, missing lexical activation, inactive captures, invalid
-    cell close/reopen backedges, malformed source spans/maps, and each of the
-    six final aggregate limits. Require deterministic sorted capability
-    families.
+    cell close/reopen backedges, forged or crossed `for-in` cursors, mismatched
+    cursor joins, transformed or done-edge keys, unrelated `const` stores,
+    multi-cursor declarative heads, missing captured-head closes, malformed
+    source spans/maps, and each of the six final aggregate limits. Require
+    deterministic sorted capability families.
 12. **Fuzzing:** mutate compiler-produced bytes and serialized metadata.
     Verification must be deterministic, must not panic or allocate beyond the
     configured budget, and the VM must never receive a value unless

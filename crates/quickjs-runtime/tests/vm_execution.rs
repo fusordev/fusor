@@ -34,6 +34,174 @@ fn runtime() -> Runtime {
 }
 
 #[test]
+fn for_in_executes_ordered_own_keys_string_indices_and_getter_free_enumeration() {
+    let authority = compile(
+        "function run(missing){\
+            let hits=0;\
+            let object={2:0,1:0,b:0,get a(){hits++;return 0;}};\
+            let own=\"\";\
+            for(var key in object) own=own+(own?\",\":\"\")+key;\
+            let string=\"\";\
+            for(var key in \"A😀\") string=string+(string?\",\":\"\")+key;\
+            let nullish=\"\";\
+            for(var key in null) nullish=nullish+key;\
+            for(var key in missing) nullish=nullish+key;\
+            return own+\"|\"+hits+\"|\"+string+\"|\"+nullish;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context.instantiate(authority).expect("function");
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("for-in execution");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "1,2,b,a|0|0,1,2|"
+    );
+}
+
+#[test]
+fn for_in_member_targets_captures_and_abrupt_control_use_verified_stack_shuffles() {
+    let authority = compile(
+        "function run(){\
+            let source={a:1,b:1};\
+            let target={key:\"\"};\
+            let staticResult=\"\";\
+            for(target.key in source) staticResult=staticResult+target.key;\
+            let property=\"key\";\
+            let computedResult=\"\";\
+            for(target[property] in source) computedResult=computedResult+target[property];\
+            let first;\
+            let second;\
+            let index=0;\
+            for(const key in source){\
+                if(index===0) first=function firstCapture(){return key;};\
+                else second=function secondCapture(){return key;};\
+                index++;\
+            }\
+            let nested=\"\";\
+            outer:for(const left in source){\
+                for(const right in {x:1,y:1}){\
+                    if(left===\"a\"&&right===\"x\") continue outer;\
+                    nested=nested+left+right;\
+                    if(left===\"b\"&&right===\"x\") break outer;\
+                }\
+            }\
+            let returned=\"\";\
+            for(const left in {x:1}){for(const right in {y:1}) return \
+                staticResult+\"|\"+computedResult+\"|\"+first()+second()+\"|\"+nested+\"|\"+left+right;}\
+            return returned;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context.instantiate(authority).expect("function");
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("for-in targets and control");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "ab|ab|ab|bx|xy"
+    );
+}
+
+#[test]
+fn for_in_scan_work_consumes_instruction_fuel_and_unwind_reclaims_private_iterators() {
+    let authority = compile("function scan(){for(var key in \"\"){}return 1;}", "scan");
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let baseline_objects = runtime.usage().heap_objects();
+    {
+        let mut context = runtime.context(&realm).expect("context");
+        let function = context.instantiate(authority).expect("function");
+        let error = context
+            .call(
+                &function,
+                &[],
+                ExecutionLimits::default().with_instruction_fuel(12),
+            )
+            .expect_err("for-in scan must consume bounded fuel");
+        assert!(matches!(
+            error,
+            ExecutionError::InstructionLimitExceeded {
+                limit: 12,
+                executed: 12,
+            }
+        ));
+    }
+
+    runtime.collect_cycles().expect("collect iterator");
+    assert_eq!(runtime.usage().heap_objects(), baseline_objects);
+    assert_eq!(runtime.usage().for_in_entries(), 0);
+}
+
+#[test]
+fn for_in_numeric_snapshot_charges_conservative_sort_work_before_iteration() {
+    let source = "function make(){return {\
+        16:0,15:0,14:0,13:0,12:0,11:0,10:0,9:0,\
+        8:0,7:0,6:0,5:0,4:0,3:0,2:0,1:0};}\
+        function scan(value){for(var key in value){}return 1;}";
+    let make = compile(source, "make");
+    let scan = compile(source, "scan");
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    {
+        let mut context = runtime.context(&realm).expect("context");
+        let make = context.instantiate(make).expect("make");
+        let scan = context.instantiate(scan).expect("scan");
+        let object = context
+            .call(&make, &[], ExecutionLimits::default())
+            .expect("numeric-key object");
+        let usage_before_scan = context.runtime_usage();
+
+        let error = context
+            .call(
+                &scan,
+                &[object],
+                ExecutionLimits::default().with_instruction_fuel(64),
+            )
+            .expect_err("snapshot sorting must exhaust fuel before the first key");
+        assert!(matches!(
+            error,
+            ExecutionError::InstructionLimitExceeded {
+                limit: 64,
+                executed: 64,
+            }
+        ));
+        assert_eq!(
+            context.runtime_usage().for_in_entries(),
+            usage_before_scan.for_in_entries(),
+            "insufficient fuel must reject the snapshot preview before retaining any keys"
+        );
+        assert_eq!(
+            context.runtime_usage().heap_objects(),
+            usage_before_scan.heap_objects(),
+            "insufficient fuel must reject the snapshot preview before allocating an iterator"
+        );
+    }
+
+    runtime.collect_cycles().expect("collect iterator");
+    assert_eq!(runtime.usage().for_in_entries(), 0);
+}
+
+#[test]
 fn executes_verified_literals_arguments_locals_and_branches() {
     let authority = compile(
         "function choose(argument){\

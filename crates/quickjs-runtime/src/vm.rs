@@ -42,10 +42,10 @@ use crate::{
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     object::OwnProperty,
     runtime::{
-        BindingCell, BytecodeFunction, CollectionRoot, EnvironmentBinding, FrameBindingAddress,
-        FunctionImplementation, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
-        InstalledTemplate, NativeFunction, NativeFunctionKind, RealmGlobalBindingState,
-        check_execution_limit, global_declaration_error, usize_to_u64,
+        BindingCell, BytecodeFunction, CollectionRoot, EnvironmentBinding, ForInAdvance,
+        FrameBindingAddress, FunctionImplementation, HeapFunction, InstalledCode,
+        InstalledConstant, InstalledRoot, InstalledTemplate, NativeFunction, NativeFunctionKind,
+        RealmGlobalBindingState, check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -1180,7 +1180,7 @@ fn execute_frame_loop(
             instruction: 0,
         })?;
         executed += 1;
-        let step = execute_one(runtime, frame)?;
+        let step = execute_one(runtime, frame, &mut executed, limits.instruction_fuel)?;
         match step {
             Step::Continue => {}
             Step::Call {
@@ -5123,7 +5123,12 @@ fn create_frame(
     clippy::too_many_lines,
     reason = "the exhaustive admitted-opcode dispatcher is intentionally centralized"
 )]
-fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, ExecutionError> {
+fn execute_one(
+    runtime: &mut Runtime,
+    frame: &mut Frame,
+    executed: &mut u64,
+    instruction_limit: u64,
+) -> Result<Step, ExecutionError> {
     let (verified_instruction, source_pc) = {
         let code = code(runtime, frame.code)?;
         let function = code.authority.function(frame.template).ok_or(
@@ -5249,6 +5254,11 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
         FinalOpcode::Drop => {
             pop(frame)?;
         }
+        FinalOpcode::Nip => {
+            let top = pop(frame)?;
+            pop(frame)?;
+            frame.stack.push(top);
+        }
         FinalOpcode::Dup => {
             let value = frame
                 .stack
@@ -5277,6 +5287,20 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
             frame.stack.push(first);
             frame.stack.push(second);
             frame.stack.push(third);
+        }
+        FinalOpcode::Swap => {
+            let right = pop(frame)?;
+            let left = pop(frame)?;
+            frame.stack.push(right);
+            frame.stack.push(left);
+        }
+        FinalOpcode::Rot3l => {
+            let third = pop(frame)?;
+            let second = pop(frame)?;
+            let first = pop(frame)?;
+            frame.stack.push(second);
+            frame.stack.push(third);
+            frame.stack.push(first);
         }
         FinalOpcode::Call
         | FinalOpcode::Call0
@@ -5876,6 +5900,65 @@ fn execute_one(runtime: &mut Runtime, frame: &mut Frame) -> Result<Step, Executi
         FinalOpcode::CloseLoc => {
             let index = local_index(opcode, operands)?;
             close_local(runtime, frame, index)?;
+        }
+        FinalOpcode::ForInStart => {
+            let work = runtime.preview_for_in_iterator_work(peek(frame)?)?;
+            charge_internal_instruction_fuel(executed, instruction_limit, work)?;
+            let value = pop(frame)?;
+            let realm = code(runtime, frame.code)?.realm;
+            let (iterator, actual_work) = runtime.allocate_for_in_iterator(realm, value)?;
+            debug_assert!(actual_work <= work);
+            frame.stack.push(StoredValue::Object(iterator));
+        }
+        FinalOpcode::ForInNext => {
+            let iterator = match frame.stack.last() {
+                Some(StoredValue::Object(object)) if runtime.is_for_in_iterator(*object)? => {
+                    *object
+                }
+                Some(
+                    StoredValue::Undefined
+                    | StoredValue::Null
+                    | StoredValue::Boolean(_)
+                    | StoredValue::Number(_)
+                    | StoredValue::String(_)
+                    | StoredValue::Symbol(_)
+                    | StoredValue::Function(_)
+                    | StoredValue::Object(_),
+                ) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "verified for_in_next cursor is not a for-in iterator",
+                    }
+                    .into());
+                }
+                None => {
+                    return Err(EngineFault::StackDepthMismatch {
+                        function: frame.template,
+                        pc: source_pc,
+                        expected: 1,
+                        actual: 0,
+                    }
+                    .into());
+                }
+            };
+            loop {
+                let work = runtime.preview_for_in_advance_work(iterator)?;
+                charge_internal_instruction_fuel(executed, instruction_limit, work)?;
+                let advance = runtime.advance_for_in_iterator(iterator)?;
+                debug_assert!(advance.work() <= work);
+                match advance {
+                    ForInAdvance::Continue { .. } => {}
+                    ForInAdvance::Yield { key, .. } => {
+                        frame.stack.push(for_in_key_value(&key)?);
+                        frame.stack.push(StoredValue::Boolean(false));
+                        break;
+                    }
+                    ForInAdvance::Done { .. } => {
+                        frame.stack.push(StoredValue::Undefined);
+                        frame.stack.push(StoredValue::Boolean(true));
+                        break;
+                    }
+                }
+            }
         }
         FinalOpcode::IfFalse | FinalOpcode::IfFalse8 => {
             let condition = pop(frame)?;
@@ -8481,6 +8564,44 @@ fn copy_addresses(
         })?;
     copied.extend_from_slice(values);
     Ok(copied)
+}
+
+fn charge_internal_instruction_fuel(
+    executed: &mut u64,
+    limit: u64,
+    additional: u64,
+) -> Result<(), ExecutionError> {
+    if additional > limit.saturating_sub(*executed) {
+        *executed = limit;
+        return Err(ExecutionError::InstructionLimitExceeded {
+            limit,
+            executed: *executed,
+        });
+    }
+    *executed = executed.saturating_add(additional);
+    Ok(())
+}
+
+fn for_in_key_value(key: &PropertyKey) -> Result<StoredValue, ExecutionError> {
+    if let Some(index) = key.as_index() {
+        return Ok(StoredValue::String(index.to_js_string()?));
+    }
+    let atom = key.as_atom().ok_or(EngineFault::RuntimeInvariant {
+        message: "for-in candidate is neither an array index nor an atom",
+    })?;
+    if atom.kind() != crate::AtomKind::String {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "for-in candidate exposed a non-string atom",
+        }
+        .into());
+    }
+    let name = atom
+        .description()
+        .cloned()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "for-in string atom has no description",
+        })?;
+    Ok(StoredValue::String(name))
 }
 
 fn unsupported_dispatch<T>(opcode: FinalOpcode) -> Result<T, ExecutionError> {

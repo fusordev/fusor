@@ -138,6 +138,8 @@ pub enum RuntimeResource {
     HeapObjects,
     /// Own property slots across ordinary objects and functions.
     ObjectProperties,
+    /// Property-key snapshots and visited-key entries retained by `for-in` iterators.
+    ForInEntries,
     /// Captured binding cells.
     BindingCells,
     /// Constructor-realm global binding records.
@@ -171,6 +173,7 @@ impl fmt::Display for RuntimeResource {
             Self::HeapFunctions => "heap functions",
             Self::HeapObjects => "heap objects",
             Self::ObjectProperties => "object properties",
+            Self::ForInEntries => "for-in iterator entries",
             Self::BindingCells => "binding cells",
             Self::RealmGlobalBindings => "realm global bindings",
             Self::PublicRoots => "public roots",

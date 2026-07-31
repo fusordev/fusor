@@ -77,6 +77,36 @@
       "covers": ["captures", "switch-fallthrough"],
       "body": "let saved;\nswitch (2) {\n  case 1: break;\n  case 2: {\n    let captured = \"inside\";\n    saved = function capture() { return captured; };\n    break;\n  }\n}\nreturn saved();",
       "expect": {"kind": "string", "value": "inside"}
+    },
+    {
+      "id": "for-in-orders-keys-without-reading-getters",
+      "covers": ["for-in-getter-free", "for-in-key-order", "for-in-string-indices"],
+      "body": "let hits = 0;\nlet object = {2: 0, 1: 0, b: 0, get a() { hits++; return 0; }};\nlet own = \"\";\nfor (const key in object) own = own + (own ? \",\" : \"\") + key;\nlet string = \"\";\nfor (const key in \"A😀\") string = string + (string ? \",\" : \"\") + key;\nreturn own + \"|\" + hits + \"|\" + string;",
+      "expect": {"kind": "string", "value": "1,2,b,a|0|0,1,2"}
+    },
+    {
+      "id": "for-in-creates-fresh-captured-lexical-cells",
+      "covers": ["captures", "for-in-lexical-capture"],
+      "body": "let first;\nlet second;\nlet index = 0;\nfor (let key in {a: 1, b: 1}) {\n  if (index === 0) first = function firstCapture() { return key; };\n  else second = function secondCapture() { return key; };\n  index++;\n}\nreturn first() + second();",
+      "expect": {"kind": "string", "value": "ab"}
+    },
+    {
+      "id": "for-in-member-target-and-labeled-control",
+      "covers": ["for-in-labeled-control", "for-in-member-target", "labeled-break", "labeled-continue"],
+      "body": "let target = {key: \"\"};\nlet assigned = \"\";\nfor (target.key in {a: 1, b: 1}) assigned = assigned + target.key;\nlet nested = \"\";\nouter: for (const left in {a: 1, b: 1}) {\n  for (const right in {x: 1, y: 1}) {\n    if (left === \"a\" && right === \"x\") continue outer;\n    nested = nested + left + right;\n    if (left === \"b\" && right === \"x\") break outer;\n  }\n}\nreturn assigned + \"|\" + nested;",
+      "expect": {"kind": "string", "value": "ab|bx"}
+    },
+    {
+      "id": "for-in-nullish-values-are-empty",
+      "covers": ["for-in-nullish"],
+      "body": "let missing;\nlet out = \"\";\nfor (const key in null) out = out + key;\nfor (const key in missing) out = out + key;\nreturn out;",
+      "expect": {"kind": "string", "value": ""}
+    },
+    {
+      "id": "for-in-snapshots-prototypes-when-reached",
+      "covers": ["for-in-inherited-shadowing", "for-in-prototype-snapshot"],
+      "body": "function Base() {}\nBase.prototype.p = 1;\nBase.prototype.q = 1;\nlet object = new Base();\nobject.a = 1;\nobject.p = 2;\nlet out = \"\";\nfor (const key in object) {\n  out = out + (out ? \",\" : \"\") + key;\n  if (key === \"a\") Base.prototype.late = 1;\n}\nreturn out;",
+      "expect": {"kind": "string", "value": "a,p,q,late"}
     }
   ]
 }

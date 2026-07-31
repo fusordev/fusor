@@ -233,9 +233,22 @@ A milestone is complete only when all of its checked items pass in CI.
         before user code with last-declaration-wins semantics, including
         argument redeclarations; strict block declarations instantiate on
         every scope entry. All compiler traversal uses explicit iterative work
-        stacks. `for-in`, `for-of`, inferred anonymous-function names,
-        non-string atom namespaces, other value families, and immutable-write
-        throws remain fail-closed.
+        stacks. `for-of`, inferred anonymous-function names, non-string atom
+        namespaces, other value families, and immutable-write throws remain
+        fail-closed.
+  - [x] Add synchronous `for-in` through the ordinary compiler profile.
+        Lowering preserves the private cursor below the statement stack,
+        supports identifier and static/computed member heads, rotates captured
+        `let`/`const` cells on every iteration, and cleans nested cursors across
+        break, continue, return, and throw. Whole-graph verification assigns
+        each cursor an unforgeable origin, certifies only the matching
+        false-branch key store, and requires closed captured cells on lexical
+        backedges. Runtime enumeration snapshots each prototype object when it
+        is reached, preserves QuickJS key order and shadow suppression without
+        invoking getters, rechecks deletions, boxes Boolean/Number/String
+        values, and charges snapshot/visited work to explicit limits and VM
+        fuel. Symbol boxing, destructuring heads, and the iterator protocol
+        used by `for-of` remain fail-closed.
   - [x] Add exact binary64 Number constants to the compiler-owned heterogeneous
         pool. Number literals requiring pool storage and direct child templates
         share one immutable `Arc`-backed source-order index namespace with no
@@ -405,7 +418,7 @@ A milestone is complete only when all of its checked items pass in CI.
     - [ ] Add persistent global lexical collision checks and
           `Function.prototype.apply`/`bind`/`Symbol.hasInstance`.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
-      stack traces, iterators, and generators.
+      stack traces, iterator-protocol execution, and generators.
   - [x] First escaping exception path: local/captured TDZ access returns a
         structured `ReferenceError` with the exact QuickJS message, function
         template, verified bytecode PC, source name, and retained source span.
