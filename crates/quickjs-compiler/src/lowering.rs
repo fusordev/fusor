@@ -3,15 +3,16 @@ use std::{collections::HashMap, error::Error, fmt, ops::Range, sync::Arc};
 use oxc_ast::{
     AstKind,
     ast::{
-        AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement, CallExpression,
-        CatchClause, ComputedMemberExpression, ConditionalExpression, DoWhileStatement, Expression,
-        ExpressionStatement, ForInStatement, ForStatement, ForStatementInit, ForStatementLeft,
-        Function, FunctionBody, FunctionType, IdentifierReference, IfStatement, LabelIdentifier,
-        LabeledStatement, LogicalExpression, NewExpression, ObjectExpression, ObjectProperty,
-        ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement,
-        SequenceExpression, SimpleAssignmentTarget, Statement, StaticMemberExpression,
-        SwitchStatement, ThrowStatement, TryStatement, UnaryExpression, UpdateExpression,
-        VariableDeclaration, VariableDeclarationKind, WhileStatement,
+        ArrayExpression, AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement,
+        CallExpression, CatchClause, ComputedMemberExpression, ConditionalExpression,
+        DoWhileStatement, Expression, ExpressionStatement, ForInStatement, ForStatement,
+        ForStatementInit, ForStatementLeft, Function, FunctionBody, FunctionType,
+        IdentifierReference, IfStatement, LabelIdentifier, LabeledStatement, LogicalExpression,
+        NewExpression, ObjectExpression, ObjectProperty, ObjectPropertyKind, Program,
+        PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement, SequenceExpression,
+        SimpleAssignmentTarget, Statement, StaticMemberExpression, SwitchStatement, ThrowStatement,
+        TryStatement, UnaryExpression, UpdateExpression, VariableDeclaration,
+        VariableDeclarationKind, WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
@@ -4257,6 +4258,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                                 &mut work,
                             )?;
                         }
+                        Expression::ArrayExpression(array) => {
+                            Self::plan_array_expression(array, &mut work)?;
+                        }
                         Expression::StaticMemberExpression(member) => {
                             Self::plan_static_member_read(member, constants, &mut work)?;
                         }
@@ -4472,6 +4476,42 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             constructor.callee.span(),
         )));
         work.push(ExpressionWork::Visit(&constructor.callee));
+        Ok(())
+    }
+
+    fn plan_array_expression<'expression>(
+        array: &'expression ArrayExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        for element in &array.elements {
+            if element.as_expression().is_none() {
+                return unsupported(
+                    UnsupportedLeafFeature::UnsupportedExpression,
+                    element.span(),
+                );
+            }
+        }
+        let argument_count = u16::try_from(array.elements.len()).map_err(|_| {
+            LeafCompilationError::CapacityExceeded {
+                domain: "array literal elements",
+            }
+        })?;
+
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ArrayFrom,
+            Operands::NPop { argument_count },
+            array.span,
+        )));
+        for element in array.elements.iter().rev() {
+            let expression =
+                element
+                    .as_expression()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "prevalidated dense array element is an expression",
+                        span: Some(element.span()),
+                    })?;
+            work.push(ExpressionWork::Visit(expression));
+        }
         Ok(())
     }
 

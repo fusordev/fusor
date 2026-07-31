@@ -1071,6 +1071,23 @@ fn reachable_underflow_and_dynamic_pop_underflow_are_rejected() {
             available: 0,
         }
     );
+
+    let array = reject(
+        encode(&[
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 2 }),
+            (FinalOpcode::Return, Operands::None),
+        ]),
+        1,
+        FunctionIndexDomains::default(),
+    );
+    assert_eq!(
+        array.kind(),
+        &VerificationErrorKind::StackUnderflow {
+            required: 2,
+            available: 1,
+        }
+    );
 }
 
 #[test]
@@ -1089,6 +1106,54 @@ fn dynamic_short_call_effect_contributes_to_the_exact_maximum() {
     assert_eq!(verified.computed_stack_size(), 3);
     assert_eq!(verified.instructions()[3].entry_stack_depth(), Some(3));
     assert_eq!(verified.instructions()[4].entry_stack_depth(), Some(1));
+}
+
+#[test]
+fn array_from_dynamic_effect_has_an_exact_inclusive_stack_budget() {
+    let bytecode = encode(&[
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 2 }),
+        (FinalOpcode::Return, Operands::None),
+    ]);
+    let defaults = VerificationLimits::default();
+    let limits = |max_stack_depth| {
+        VerificationLimits::new(
+            defaults.max_bytecode_bytes_per_function(),
+            defaults.max_instructions_per_function(),
+            defaults.max_constants_per_function(),
+            defaults.max_atom_pool_entries(),
+            defaults.max_transfer_evaluations(),
+            max_stack_depth,
+        )
+    };
+
+    let verified = verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode.clone(),
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        limits(2),
+    )
+    .expect("the exact two-slot array input fits an inclusive two-slot budget");
+    assert_eq!(verified.computed_stack_size(), 2);
+    assert_eq!(verified.instructions()[2].entry_stack_depth(), Some(2));
+    assert_eq!(verified.instructions()[3].entry_stack_depth(), Some(1));
+
+    let error = verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode,
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        limits(1),
+    )
+    .expect_err("one fewer operand-stack slot must fail closed");
+    assert_eq!(
+        error.kind(),
+        &VerificationErrorKind::StackLimitExceeded { depth: 2, limit: 1 }
+    );
 }
 
 #[test]

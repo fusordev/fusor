@@ -1,8 +1,12 @@
-# Control-flow, switch, `for-in`, catch, and finally differential corpus
+# Control-flow, array, `for-in`, catch, and finally differential corpus
 
 `manifest.json` is a bounded runtime corpus for the labeled-statement,
-`switch`, synchronous `for-in`, and synchronous `try`/`catch`/`finally`
-milestones. Catch cases cover explicit and engine-created errors, cross-frame
+`switch`, dense-array/exotic, synchronous `for-in`, and synchronous
+`try`/`catch`/`finally` milestones. Array cases cover dense construction,
+evaluation order, indexed reads and writes, length extension/coercion/
+truncation, QuickJS's observable two-pass length conversion, the uint32
+boundary, enumeration, `apply`, and default object tagging. Catch cases cover
+explicit and engine-created errors, cross-frame
 unwind, rethrow, captured bindings, iterator cleanup, Error branding, and
 ordinary dynamic `Function` syntax failures. Finally cases cover normal,
 return, throw, break, and continue completion; catch+finally; nesting;

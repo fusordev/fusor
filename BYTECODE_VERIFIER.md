@@ -162,11 +162,12 @@ guard is used.
 
 `VerifiedBytecode` retains the staged graph, final metadata, resource usage,
 and a sorted conservative set of `ExecutionRequirement` families:
-`CoreValues`, `Numbers`, `Strings`, `BigInts`, `Closures`, `Calls`,
-`AbruptCompletions`, `LexicalBindings`, `OrdinaryObjects`, `ObjectOperators`,
-and `DynamicOperators`. These are runtime implementation requirements, not a
-proof of whole-program value types. The immutable authority is shared through
-`Arc` and needs no lock.
+`CoreValues`, `Numbers`, `Strings`, `BigInts`, `Closures`, `Arrays`,
+`OrdinaryObjects`, `DynamicPropertyKeys`, `Calls`, `AbruptCompletions`,
+`LexicalBindings`, `RealmGlobalBindings`, `ObjectOperators`, and
+`DynamicOperators`. These are runtime implementation requirements, not a proof
+of whole-program value types. The immutable authority is shared through `Arc`
+and needs no lock.
 
 This type is the code-and-metadata authority for the admitted ordinary
 compiler profile, not a runtime function or closure. The current materializer
@@ -174,11 +175,14 @@ requires a realm in the same runtime and an empty external environment for the
 selected root; nested closures receive only verifier-certified parent
 captures. Direct eval remains deferred and fail closed.
 The current compiler profile admits `throw` only as a verified terminal that
-consumes exactly one ordinary value. Catch-only `try` supports an optional or
-simple identifier binding. Its runtime transports the completion through the
-explicit frame vector, enters only the nearest certified handler, and roots
-the value only if it escapes to the host. Destructuring catch bindings,
-`finally`, and serialized exceptional state remain fail closed.
+consumes exactly one ordinary value. Synchronous `try` supports catch, finally,
+and catch-plus-finally; catch accepts an optional or simple identifier binding.
+Its runtime transports completions through the explicit frame vector, enters
+only the nearest certified handler or finalizer, and roots a value only if it
+escapes to the host. Typed pending-completion markers and finalizer return
+addresses prove `gosub`/`ret` pairing and allow the finalizer to preserve or
+override return, throw, break, and continue. Destructuring catch bindings and
+serialized exceptional state remain fail closed.
 
 Compiler-generated catch and synchronous `for-in` share a narrower private
 typed operand-stack certificate. `catch` pushes a marker tagged by its origin
@@ -487,6 +491,11 @@ follows:
   count, requires both callee and `newTarget` stack entries, and contributes
   the `Calls` execution requirement. The runtime admits it only after the
   complete graph passes ordinary opcode capability preflight.
+- Compiler-produced `array_from(n)` requires exactly `n` ordinary input values,
+  contributes one array result and the `Arrays` execution requirement, and
+  participates in the exact inclusive maximum-stack proof. The dense-literal
+  compiler rejects holes, spread, and counts outside the encoded uint16 domain
+  before assembly.
 - `for_of_next(k)` requires at least `3 + k` slots and an iterator tuple at
   the referenced relative position; upstream computes its iterator offset as
   `-3-k` (`quickjs.c:19003-19011`).
@@ -783,7 +792,7 @@ frame-state matrix cells, and policy/capture transfer work are aggregate
 charges. Every input-proportional allocation after preflight is fallible and
 cannot silently retry with a larger profile. Final ownership moves the
 already-reserved metadata vector behind a fixed-size `Arc` header without
-copying it; only fixed-size ownership headers and the at-most-ten-entry
+copying it; only fixed-size ownership headers and the at-most-fourteen-entry
 execution-requirement set use bounded infallible allocation.
 
 A caller may lower the current profile. Raising it is available only through

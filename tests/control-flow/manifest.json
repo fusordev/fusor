@@ -275,6 +275,72 @@
       "covers": ["finally-captured-finalizer-cell"],
       "body": "let saved;\ntry {} finally {\n  let cell = \"f\";\n  saved = function capture() { return cell; };\n}\nreturn saved();",
       "expect": {"kind": "string", "value": "f"}
+    },
+    {
+      "id": "dense-array-literal-length-and-index-read",
+      "covers": ["array-dense-literal", "array-length", "array-index-read"],
+      "body": "let empty = [];\nlet dense = [1, 2, 3];\nreturn empty.length + \"|\" + dense.length + \"|\" + dense[1];",
+      "expect": {"kind": "string", "value": "0|3|2"}
+    },
+    {
+      "id": "array-elements-evaluate-left-to-right",
+      "covers": ["array-evaluation-order"],
+      "body": "let out = \"\";\nlet array = [out += \"a\", out += \"b\"];\nreturn out + \"|\" + array[0] + \"|\" + array[1];",
+      "expect": {"kind": "string", "value": "ab|a|ab"}
+    },
+    {
+      "id": "array-index-write-extends-length",
+      "covers": ["array-index-write", "array-length"],
+      "body": "let array = [];\narray[2] = 7;\nreturn array.length + \"|\" + array[0] + \"|\" + array[2];",
+      "expect": {"kind": "string", "value": "3|undefined|7"}
+    },
+    {
+      "id": "array-length-truncates-index-properties",
+      "covers": ["array-length-truncate"],
+      "body": "let array = [1, 2, 3];\narray.length = 1;\nreturn array.length + \"|\" + array[0] + \"|\" + array[1];",
+      "expect": {"kind": "string", "value": "1|1|undefined"}
+    },
+    {
+      "id": "array-length-conversion-is-resumable",
+      "covers": ["array-length-coercion", "array-length-truncate"],
+      "body": "let out = \"\";\nlet array = [1, 2];\nlet length = {\n  valueOf() { out += \"v\"; return 1; },\n  toString() { out += \"s\"; return \"2\"; }\n};\narray.length = length;\nreturn out + \"|\" + array.length + \"|\" + array[1];",
+      "expect": {"kind": "string", "value": "vv|1|undefined"}
+    },
+    {
+      "id": "array-length-runs-both-quickjs-conversions-before-mutation",
+      "covers": ["array-length-double-coercion", "array-length-range-error"],
+      "body": "let passes = 0;\nlet array = [1, 2];\nlet length = {\n  valueOf() { passes += 1; return passes === 1 ? 1 : 1.5; }\n};\ntry {\n  array.length = length;\n} catch (error) {\n  return passes + \"|\" + error.name + \":\" + error.message + \"|\" + array.length;\n}",
+      "expect": {"kind": "string", "value": "2|RangeError:invalid array length|2"}
+    },
+    {
+      "id": "array-invalid-length-throws-range-error",
+      "covers": ["array-length-range-error"],
+      "body": "try {\n  let array = [];\n  array.length = 1.5;\n} catch (error) {\n  return error.name + \":\" + error.message;\n}",
+      "expect": {"kind": "string", "value": "RangeError:invalid array length"}
+    },
+    {
+      "id": "array-u32-max-key-does-not-extend-length",
+      "covers": ["array-index-boundary"],
+      "body": "let array = [];\narray[4294967295] = 7;\nreturn array.length + \"|\" + array[4294967295];",
+      "expect": {"kind": "string", "value": "0|7"}
+    },
+    {
+      "id": "array-for-in-orders-indices-and-hides-length",
+      "covers": ["array-for-in", "array-length"],
+      "body": "let array = [];\narray[2] = \"c\";\narray[0] = \"a\";\narray.extra = \"x\";\nlet out = \"\";\nfor (const key in array) out += (out ? \",\" : \"\") + key;\nreturn out + \"|\" + array.length;",
+      "expect": {"kind": "string", "value": "0,2,extra|3"}
+    },
+    {
+      "id": "function-apply-consumes-a-real-array",
+      "covers": ["array-apply"],
+      "body": "function join(left, right) { return left + \"|\" + right; }\nreturn join.apply(null, [\"x\", \"y\"]);",
+      "expect": {"kind": "string", "value": "x|y"}
+    },
+    {
+      "id": "object-prototype-tags-arrays",
+      "covers": ["array-object-tag"],
+      "body": "return ({}).toString.call([]);",
+      "expect": {"kind": "string", "value": "[object Array]"}
     }
   ]
 }

@@ -69,8 +69,19 @@ The remaining String methods and all Symbol boxing remain deferred and fail
 closed. Nested calls, recursion,
 getter/setter dispatch, and abrupt unwinding use an explicit frame vector with
 cumulative frame/value ceilings and shared fuel. Installation scans every
-instruction in every template before mutation. BigInt values and mixed numeric
-domains, arrays and other exotic objects, shorthand/spread and `__proto__`
+instruction in every template before mutation. Dense array literals now
+allocate realm-owned branded arrays with exact `length` and indexed data
+properties. Indexed writes extend `length`; length writes use resumable
+QuickJS-compatible two-pass Number-hint coercion, reject invalid uint32 lengths
+with `RangeError`, and truncate configurable indices. Array indices enumerate
+in canonical order,
+`Function.prototype.apply` consumes a real array through its ordinary
+observable access path, and `Object.prototype.toString` observes the array
+brand. Allocation, property, stack, and fuel limits are checked before
+mutation.
+BigInt values and mixed numeric domains, array holes/spread, the `Array`
+constructor and `Array.prototype`
+methods, other exotic objects, shorthand/spread and `__proto__`
 data-initializer semantics, anonymous data-function inferred names,
 async/generator methods, `super`/home-object semantics, realm-global accessor
 writes, optional/spread/apply calls, the remaining Number built-ins,
@@ -109,8 +120,8 @@ before touching its list, performs one observable `length` Get and Number-hint
 `ToLength`, then reads ordinary/function object indices left-to-right through a
 GC-traced resumable continuation. Its 65,534-argument ceiling, frame/value
 preflights, and indexed-scan work share the target bytecode's execution budget.
-Bytecode `Apply`, spread calls, arrays/arguments objects, and `Reflect.apply`
-remain fail-closed.
+Bytecode `Apply`, spread calls, arguments objects, and `Reflect.apply` remain
+fail-closed.
 Function source arguments now run resumable `ToPrimitive` with the string hint:
 `Symbol.toPrimitive`, `toString`, and `valueOf` are observed in exact order,
 data or accessor-backed lookup preserves the original receiver, native or

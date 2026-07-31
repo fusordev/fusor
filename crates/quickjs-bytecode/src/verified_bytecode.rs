@@ -703,6 +703,8 @@ pub enum ExecutionRequirement {
     BigInts,
     /// Nested function templates and closure environments.
     Closures,
+    /// Dense ordinary array construction.
+    Arrays,
     /// Ordinary objects, static property access, and own data properties.
     OrdinaryObjects,
     /// Runtime conversion and lookup of computed property keys.
@@ -720,6 +722,34 @@ pub enum ExecutionRequirement {
     /// Full dynamic coercion and mixed-type operator semantics.
     DynamicOperators,
 }
+
+/// Number of conservative runtime implementation families selectable by the
+/// whole-graph compiler authority.
+pub const EXECUTION_REQUIREMENT_COUNT: usize = 14;
+
+const fn execution_requirement_ordinal(requirement: ExecutionRequirement) -> usize {
+    match requirement {
+        ExecutionRequirement::CoreValues => 0,
+        ExecutionRequirement::Numbers => 1,
+        ExecutionRequirement::Strings => 2,
+        ExecutionRequirement::BigInts => 3,
+        ExecutionRequirement::Closures => 4,
+        ExecutionRequirement::Arrays => 5,
+        ExecutionRequirement::OrdinaryObjects => 6,
+        ExecutionRequirement::DynamicPropertyKeys => 7,
+        ExecutionRequirement::Calls => 8,
+        ExecutionRequirement::AbruptCompletions => 9,
+        ExecutionRequirement::LexicalBindings => 10,
+        ExecutionRequirement::RealmGlobalBindings => 11,
+        ExecutionRequirement::ObjectOperators => 12,
+        ExecutionRequirement::DynamicOperators => 13,
+    }
+}
+
+const _: () = assert!(
+    EXECUTION_REQUIREMENT_COUNT
+        == execution_requirement_ordinal(ExecutionRequirement::DynamicOperators) + 1
+);
 
 /// Borrowed complete view of one function in [`VerifiedBytecode`].
 #[derive(Clone, Copy, Debug)]
@@ -1837,12 +1867,14 @@ pub fn verify_compiler_bytecode_graph(
         })
     })?;
     let mut requirements = Vec::new();
-    requirements.try_reserve_exact(12).map_err(|_| {
-        BytecodeVerificationError::graph(BytecodeVerificationErrorKind::AllocationFailed {
-            resource: BytecodeGraphResource::VerifiedMetadata,
-            requested: 12,
-        })
-    })?;
+    requirements
+        .try_reserve_exact(EXECUTION_REQUIREMENT_COUNT)
+        .map_err(|_| {
+            BytecodeVerificationError::graph(BytecodeVerificationErrorKind::AllocationFailed {
+                resource: BytecodeGraphResource::VerifiedMetadata,
+                requested: usize_to_u64(EXECUTION_REQUIREMENT_COUNT),
+            })
+        })?;
     requirements.push(ExecutionRequirement::CoreValues);
     let root_index = usize::try_from(graph.root_id().get()).map_err(|_| {
         BytecodeVerificationError::graph(BytecodeVerificationErrorKind::LimitExceeded {
@@ -4335,6 +4367,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CallConstructor
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
+            | FinalOpcode::ArrayFrom
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
             | FinalOpcode::Throw
@@ -6943,6 +6976,9 @@ fn collect_requirements(
             | FinalOpcode::CallMethod
             | FinalOpcode::PushThis => {
                 push_requirement(requirements, ExecutionRequirement::Calls);
+            }
+            FinalOpcode::ArrayFrom => {
+                push_requirement(requirements, ExecutionRequirement::Arrays);
             }
             FinalOpcode::Object
             | FinalOpcode::GetField

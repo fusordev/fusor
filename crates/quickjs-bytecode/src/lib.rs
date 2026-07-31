@@ -74,10 +74,10 @@ pub use verified_bytecode::{
     BytecodeGraphVerificationLimits, BytecodeVerificationError, BytecodeVerificationErrorKind,
     ClosureVariableDefinition, CompilerBindingKind, CompilerBindingPolicy, CompilerClosureBinding,
     CompilerExecutableKind, CompilerInitializationPolicy, CompilerSource, CompilerWritePolicy,
-    ExecutionRequirement, MAX_GOSUB_SITES_PER_FUNCTION, MetadataAtomField, PcSourceSpan, ScopeLink,
-    SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedFunctionMetadata,
-    VariableDefinition, VerifiedBytecode, VerifiedBytecodeFunction, VerifiedCompilerSource,
-    VerifiedFunctionMetadata, verify_compiler_bytecode_graph,
+    EXECUTION_REQUIREMENT_COUNT, ExecutionRequirement, MAX_GOSUB_SITES_PER_FUNCTION,
+    MetadataAtomField, PcSourceSpan, ScopeLink, SourceByteSpan, UnverifiedCompilerBytecodeGraph,
+    UnverifiedFunctionMetadata, VariableDefinition, VerifiedBytecode, VerifiedBytecodeFunction,
+    VerifiedCompilerSource, VerifiedFunctionMetadata, verify_compiler_bytecode_graph,
 };
 pub use verifier::{
     CompilerCaptureLayout, CompilerCapturedBinding, CompilerConstantKind, CompilerConstantLayout,

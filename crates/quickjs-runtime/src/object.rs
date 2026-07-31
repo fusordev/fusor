@@ -217,6 +217,27 @@ pub(crate) struct ObjectRecord {
     slots: Vec<PropertySlot>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ArrayTruncation {
+    final_length: u32,
+    blocked_index: Option<ArrayIndex>,
+    removed: usize,
+}
+
+impl ArrayTruncation {
+    pub(crate) const fn final_length(self) -> u32 {
+        self.final_length
+    }
+
+    pub(crate) const fn blocked_index(self) -> Option<ArrayIndex> {
+        self.blocked_index
+    }
+
+    pub(crate) const fn removed(self) -> usize {
+        self.removed
+    }
+}
+
 impl ObjectRecord {
     #[allow(
         clippy::arc_with_non_send_sync,
@@ -538,6 +559,35 @@ impl ObjectRecord {
             .try_reserve(additional)
     }
 
+    pub(crate) fn append_dense_array_data(
+        &mut self,
+        elements: Vec<StoredValue>,
+    ) -> Result<(), TryReserveError> {
+        self.try_reserve_data(elements.len())?;
+        let shape = Arc::get_mut(&mut self.shape)
+            .expect("object shape Arc is private and uniquely owned before shape interning");
+        let start = shape
+            .iter()
+            .filter_map(|property| property.key.as_index())
+            .map(ArrayIndex::get)
+            .max()
+            .map_or(0, |index| index.saturating_add(1));
+        debug_assert_eq!(start, 0, "dense array construction starts without indices");
+        for (offset, value) in elements.into_iter().enumerate() {
+            let index = u32::try_from(offset)
+                .expect("the caller preflights dense array length into the u32 domain");
+            shape.push(ShapeProperty {
+                key: PropertyKey::from_index(
+                    ArrayIndex::new(index)
+                        .expect("dense array construction never emits the length sentinel"),
+                ),
+                layout: PropertyLayout::data(true, true, true),
+            });
+            self.slots.push(PropertySlot::Data(value));
+        }
+        Ok(())
+    }
+
     pub(crate) fn pop_last_data(&mut self, key: &PropertyKey) -> Option<StoredValue> {
         if self
             .shape
@@ -558,6 +608,47 @@ impl ObjectRecord {
             PropertySlot::Accessor { .. } => {
                 unreachable!("the last slot was checked as a data slot")
             }
+        }
+    }
+
+    pub(crate) fn truncate_array_indices(&mut self, requested_length: u32) -> ArrayTruncation {
+        let blocked_index = self
+            .shape
+            .iter()
+            .filter_map(|property| {
+                let index = property.key.as_index()?;
+                (index.get() >= requested_length && !property.layout.is_configurable())
+                    .then_some(index)
+            })
+            .max();
+        let final_length =
+            blocked_index.map_or(requested_length, |index| index.get().saturating_add(1));
+        let shape = Arc::get_mut(&mut self.shape)
+            .expect("object shape Arc is private and uniquely owned before shape interning");
+        let original_length = shape.len();
+        let mut retained = 0_usize;
+        for current in 0..original_length {
+            let remove = shape[current]
+                .key
+                .as_index()
+                .is_some_and(|index| index.get() >= final_length);
+            if remove {
+                debug_assert!(shape[current].layout.is_configurable());
+            } else {
+                if retained != current {
+                    shape.swap(retained, current);
+                    self.slots.swap(retained, current);
+                }
+                retained = retained.saturating_add(1);
+            }
+        }
+        shape.truncate(retained);
+        self.slots.truncate(retained);
+        let removed = original_length.saturating_sub(retained);
+        ArrayTruncation {
+            final_length,
+            blocked_index,
+            removed,
         }
     }
 }
@@ -626,8 +717,28 @@ impl BoxedPrimitive {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ArrayState {
+    length: u32,
+}
+
+impl ArrayState {
+    pub(crate) const fn new(length: u32) -> Self {
+        Self { length }
+    }
+
+    pub(crate) const fn length(self) -> u32 {
+        self.length
+    }
+
+    pub(crate) fn replace_length(&mut self, length: u32) -> u32 {
+        std::mem::replace(&mut self.length, length)
+    }
+}
+
 pub(crate) enum HeapObjectKind {
     Ordinary,
+    Array(ArrayState),
     Error,
     BoxedPrimitive(BoxedPrimitive),
     ForInIterator(ForInIterator),
@@ -637,22 +748,36 @@ impl HeapObjectKind {
     #[must_use]
     pub(crate) const fn boxed_primitive(&self) -> Option<&BoxedPrimitive> {
         match self {
-            Self::Ordinary | Self::Error | Self::ForInIterator(_) => None,
+            Self::Ordinary | Self::Array(_) | Self::Error | Self::ForInIterator(_) => None,
             Self::BoxedPrimitive(value) => Some(value),
+        }
+    }
+
+    pub(crate) const fn array(&self) -> Option<&ArrayState> {
+        match self {
+            Self::Array(state) => Some(state),
+            Self::Ordinary | Self::Error | Self::BoxedPrimitive(_) | Self::ForInIterator(_) => None,
+        }
+    }
+
+    pub(crate) const fn array_mut(&mut self) -> Option<&mut ArrayState> {
+        match self {
+            Self::Array(state) => Some(state),
+            Self::Ordinary | Self::Error | Self::BoxedPrimitive(_) | Self::ForInIterator(_) => None,
         }
     }
 
     pub(crate) const fn for_in_iterator(&self) -> Option<&ForInIterator> {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
-            Self::Ordinary | Self::Error | Self::BoxedPrimitive(_) => None,
+            Self::Ordinary | Self::Array(_) | Self::Error | Self::BoxedPrimitive(_) => None,
         }
     }
 
     pub(crate) const fn for_in_iterator_mut(&mut self) -> Option<&mut ForInIterator> {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
-            Self::Ordinary | Self::Error | Self::BoxedPrimitive(_) => None,
+            Self::Ordinary | Self::Array(_) | Self::Error | Self::BoxedPrimitive(_) => None,
         }
     }
 }
@@ -668,6 +793,15 @@ impl HeapObject {
     pub(crate) const fn ordinary(record: ObjectRecord) -> Self {
         Self {
             kind: HeapObjectKind::Ordinary,
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn array(record: ObjectRecord, state: ArrayState) -> Self {
+        Self {
+            kind: HeapObjectKind::Array(state),
             record,
             public_roots: 0,
         }
@@ -720,6 +854,16 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn array_state(&self) -> Option<&ArrayState> {
+        self.kind.array()
+    }
+
+    #[must_use]
+    pub(crate) const fn array_state_mut(&mut self) -> Option<&mut ArrayState> {
+        self.kind.array_mut()
+    }
+
+    #[must_use]
     pub(crate) const fn for_in_state(&self) -> Option<&ForInIterator> {
         self.kind.for_in_iterator()
     }
@@ -745,7 +889,9 @@ impl HeapObject {
 
 #[cfg(test)]
 mod tests {
-    use super::{BoxedPrimitive, HeapObject, HeapObjectKind, ObjectRecord, OwnProperty};
+    use super::{
+        ArrayState, BoxedPrimitive, HeapObject, HeapObjectKind, ObjectRecord, OwnProperty,
+    };
     use crate::{
         ArrayIndex, AtomLimits, AtomTable, JsNumber, JsString, PredefinedAtom, PropertyKey,
         PropertyLayout,
@@ -994,6 +1140,65 @@ mod tests {
         assert!(!object.is_error());
         assert!(object.boxed_primitive().is_none());
         assert_eq!(object.public_roots, 0);
+    }
+
+    #[test]
+    fn array_heap_object_preserves_a_typed_length_brand() {
+        let mut object = HeapObject::array(ObjectRecord::empty(None), ArrayState::new(7));
+
+        assert!(matches!(object.kind(), HeapObjectKind::Array(_)));
+        assert_eq!(
+            object.array_state().copied().map(ArrayState::length),
+            Some(7)
+        );
+        object
+            .array_state_mut()
+            .expect("array state")
+            .replace_length(11);
+        assert_eq!(
+            object.array_state().copied().map(ArrayState::length),
+            Some(11)
+        );
+        assert!(object.boxed_primitive().is_none());
+        assert!(object.for_in_state().is_none());
+        assert_eq!(object.public_roots, 0);
+    }
+
+    #[test]
+    fn array_index_truncation_stops_at_the_highest_non_configurable_index() {
+        let mut record = ObjectRecord::empty(None);
+        for (index, configurable) in [(1, true), (3, false), (5, true)] {
+            record
+                .append_data(
+                    PropertyKey::from_index(ArrayIndex::new(index).expect("array index")),
+                    PropertyLayout::data(true, true, configurable),
+                    StoredValue::Number(JsNumber::from_i32(
+                        i32::try_from(index).expect("small fixture index"),
+                    )),
+                )
+                .expect("array property");
+        }
+
+        let truncation = record.truncate_array_indices(1);
+
+        assert_eq!(truncation.final_length(), 4);
+        assert_eq!(truncation.blocked_index().map(ArrayIndex::get), Some(3));
+        assert_eq!(truncation.removed(), 1);
+        assert!(
+            record
+                .own_property(&PropertyKey::from_index(ArrayIndex::new(1).expect("index")))
+                .is_some()
+        );
+        assert!(
+            record
+                .own_property(&PropertyKey::from_index(ArrayIndex::new(3).expect("index")))
+                .is_some()
+        );
+        assert!(
+            record
+                .own_property(&PropertyKey::from_index(ArrayIndex::new(5).expect("index")))
+                .is_none()
+        );
     }
 
     #[test]

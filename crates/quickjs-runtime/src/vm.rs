@@ -42,10 +42,11 @@ use crate::{
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     object::OwnProperty,
     runtime::{
-        BindingCell, BytecodeFunction, CollectionRoot, EnvironmentBinding, ForInAdvance,
-        FrameBindingAddress, FunctionImplementation, HeapFunction, InstalledCode,
-        InstalledConstant, InstalledRoot, InstalledTemplate, NativeFunction, NativeFunctionKind,
-        RealmGlobalBindingState, check_execution_limit, global_declaration_error, usize_to_u64,
+        ArrayDefineOutcome, ArrayLengthWriteOutcome, BindingCell, BytecodeFunction, CollectionRoot,
+        EnvironmentBinding, ForInAdvance, FrameBindingAddress, FunctionImplementation,
+        HeapFunction, InstalledCode, InstalledConstant, InstalledRoot, InstalledTemplate,
+        NativeFunction, NativeFunctionKind, RealmGlobalBindingState, array_length_from_number,
+        check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -265,6 +266,7 @@ impl IntrinsicGetContinuation {
 
 #[derive(Clone, Copy)]
 enum ObjectPrototypeTag {
+    Array,
     Boolean,
     Error,
     Function,
@@ -276,6 +278,7 @@ enum ObjectPrototypeTag {
 impl ObjectPrototypeTag {
     const fn name(self) -> &'static str {
         match self {
+            Self::Array => "Array",
             Self::Boolean => "Boolean",
             Self::Error => "Error",
             Self::Function => "Function",
@@ -429,6 +432,14 @@ struct FunctionApplyContinuation {
     origin: JsStackFrame,
 }
 
+struct ArrayLengthWriteState {
+    base: StoredValue,
+    name: JsString,
+    strict: bool,
+    original: Option<StoredValue>,
+    first_length: Option<u32>,
+}
+
 impl FunctionApplyContinuation {
     fn retained_values(&self) -> u64 {
         3_u64.saturating_add(usize_to_u64(self.arguments.len()))
@@ -462,6 +473,7 @@ enum OperatorPrimitiveTarget {
         new_target: Option<FunctionId>,
     },
     FunctionApplyLength(FunctionApplyContinuation),
+    ArrayLengthWrite(ArrayLengthWriteState),
 }
 
 impl OperatorPrimitiveTarget {
@@ -481,6 +493,9 @@ impl OperatorPrimitiveTarget {
                 new_target: Some(_),
             } => 1,
             Self::FunctionApplyLength(state) => state.retained_values(),
+            Self::ArrayLengthWrite(state) => {
+                1_u64.saturating_add(u64::from(state.original.is_some()))
+            }
         }
     }
 }
@@ -613,6 +628,12 @@ fn trace_operator_primitive_target_roots(
         }
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             trace_function_apply_roots(state, mark);
+        }
+        OperatorPrimitiveTarget::ArrayLengthWrite(state) => {
+            trace_stored_value_root(&state.base, mark);
+            if let Some(original) = &state.original {
+                trace_stored_value_root(original, mark);
+            }
         }
     }
 }
@@ -1804,9 +1825,13 @@ fn resume_native_continuations(
             NativeContinuation::FunctionApply(state) => {
                 advance_function_apply(runtime, state, Some(value), return_to, execution_budget)?
             }
-            NativeContinuation::PropertyKey(state) => {
-                advance_property_key_conversion(runtime, state, Some(value), return_to)?
-            }
+            NativeContinuation::PropertyKey(state) => advance_property_key_conversion(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::OperatorPrimitive(state) => advance_operator_primitive_conversion(
                 runtime,
                 state,
@@ -3450,6 +3475,7 @@ fn begin_property_key_conversion(
     realm: RealmId,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
         return advance_property_key_conversion(
@@ -3463,9 +3489,10 @@ fn begin_property_key_conversion(
             },
             None,
             return_to,
+            execution_budget,
         );
     }
-    finish_property_key_target(runtime, value, target, return_to, &origin)
+    finish_property_key_target(runtime, value, target, return_to, &origin, execution_budget)
 }
 
 #[allow(
@@ -3477,6 +3504,7 @@ fn advance_property_key_conversion(
     mut state: PropertyKeyContinuation,
     completion: Option<StoredValue>,
     return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if let Some(value) = completion {
         match state.stage {
@@ -3544,6 +3572,7 @@ fn advance_property_key_conversion(
                     state.target,
                     return_to,
                     &state.origin,
+                    execution_budget,
                 );
             }
             PrimitiveConversionStage::Start
@@ -4030,7 +4059,106 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             finish_function_apply_length(runtime, state, value, return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::ArrayLengthWrite(state) => finish_array_length_write(
+            runtime,
+            state,
+            value,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
     }
+}
+
+fn finish_array_length_write(
+    runtime: &mut Runtime,
+    mut state: ArrayLengthWriteState,
+    value: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let number = operator_to_number(value, realm, origin)?;
+    if let Some(original) = state.original.take() {
+        if state.first_length.is_some() {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "array length conversion retained both an original value and first pass",
+            }
+            .into());
+        }
+        state.first_length = Some(number_to_uint32(number));
+        return begin_operator_primitive_conversion(
+            runtime,
+            original,
+            OperatorPrimitiveHint::Number,
+            OperatorPrimitiveTarget::ArrayLengthWrite(state),
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        );
+    }
+
+    let length = match state.first_length {
+        Some(first_length) if JsNumber::from_u32(first_length).strict_equals(number) => {
+            first_length
+        }
+        Some(_) => return invalid_array_length(realm, origin),
+        None => {
+            let Some(length) = array_length_from_number(number) else {
+                return invalid_array_length(realm, origin);
+            };
+            length
+        }
+    };
+    let StoredValue::Object(object) = state.base else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "array length conversion lost its array base",
+        }
+        .into());
+    };
+    let work = runtime.preview_array_length_write_work(object, length)?;
+    execution_budget.charge_instructions(work)?;
+    match runtime.set_array_length(object, length)? {
+        ArrayLengthWriteOutcome::Complete
+        | ArrayLengthWriteOutcome::ReadOnly
+        | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. }
+            if !state.strict =>
+        {
+            Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+        }
+        ArrayLengthWriteOutcome::Complete => Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
+        ArrayLengthWriteOutcome::ReadOnly => Err(NativeFailure::Abrupt(property_exception_at(
+            realm,
+            origin.clone(),
+            Some(&state.name),
+            PropertyFailure::ReadOnly,
+        )?)),
+        ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. } => {
+            Err(NativeFailure::Abrupt(property_exception_at(
+                realm,
+                origin.clone(),
+                Some(&state.name),
+                PropertyFailure::NotConfigurable,
+            )?))
+        }
+    }
+}
+
+fn invalid_array_length(
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    Err(NativeFailure::Abrupt(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::RangeError,
+            message: JsString::from_utf8("invalid array length")?,
+        },
+        origin: origin.clone(),
+    }))
 }
 
 fn finish_number_to_string_radix(
@@ -4443,12 +4571,17 @@ fn operator_primitive_to_string(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the completed property-key dispatcher keeps read, resumable array-length write, accessor write, and method-definition outcomes at one audited boundary"
+)]
 fn finish_property_key_target(
     runtime: &mut Runtime,
     value: StoredValue,
     target: PropertyKeyTarget,
     return_to: Option<CallReturn>,
     origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let value = property_key_primitive_to_value(value)?;
     if matches!(target, PropertyKeyTarget::ToKey) {
@@ -4483,34 +4616,59 @@ fn finish_property_key_target(
             value,
             strict,
             realm,
-        } => match write_static_property(runtime, realm, &base, property.key, value, strict)? {
-            PropertyWriteOutcome::Complete => Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
-            PropertyWriteOutcome::Setter {
-                function,
-                receiver,
+        } => {
+            if is_array_length_target(runtime, &base, &property.key)? {
+                let target = array_length_write_target(base, property.name, strict, &value);
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::Number,
+                    target,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                );
+            }
+            match write_static_property(
+                runtime,
+                realm,
+                &base,
+                property.key,
                 value,
-            } => {
-                let mut arguments = Vec::new();
-                arguments
-                    .try_reserve_exact(1)
-                    .map_err(|_| ExecutionError::AllocationFailed {
-                        resource: RuntimeResource::FrameValues,
-                        additional: 1,
-                    })?;
-                arguments.push(value);
-                Ok(NativeDispatch::Call(NativeCall {
+                strict,
+                execution_budget,
+            )? {
+                PropertyWriteOutcome::Complete => {
+                    Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+                }
+                PropertyWriteOutcome::Setter {
                     function,
                     receiver,
-                    arguments: CallArguments::from_values(arguments),
-                    return_to,
-                    origin: origin.clone(),
-                    continuations: Vec::new(),
-                }))
+                    value,
+                } => {
+                    let mut arguments = Vec::new();
+                    arguments.try_reserve_exact(1).map_err(|_| {
+                        ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::FrameValues,
+                            additional: 1,
+                        }
+                    })?;
+                    arguments.push(value);
+                    Ok(NativeDispatch::Call(NativeCall {
+                        function,
+                        receiver,
+                        arguments: CallArguments::from_values(arguments),
+                        return_to,
+                        origin: origin.clone(),
+                        continuations: Vec::new(),
+                    }))
+                }
+                PropertyWriteOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
+                    property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
+                )),
             }
-            PropertyWriteOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
-                property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
-            )),
-        },
+        }
         PropertyKeyTarget::DefineMethod {
             base,
             function,
@@ -4820,7 +4978,9 @@ fn begin_object_prototype_to_string(
         ),
         StoredValue::Object(object) => (
             HeapReference::Object(*object),
-            if runtime.boxed_boolean(*object)?.is_some() {
+            if runtime.is_array_object(*object)? {
+                ObjectPrototypeTag::Array
+            } else if runtime.boxed_boolean(*object)?.is_some() {
                 ObjectPrototypeTag::Boolean
             } else if runtime.boxed_number(*object)?.is_some() {
                 ObjectPrototypeTag::Number
@@ -5846,6 +6006,41 @@ fn execute_one(
             let object = runtime.allocate_ordinary_object(prototype)?;
             push(frame, StoredValue::Object(object));
         }
+        FinalOpcode::ArrayFrom => {
+            let Operands::NPop { argument_count } = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let element_count = usize::from(argument_count);
+            if frame.stack.len() < element_count {
+                return Err(EngineFault::StackDepthMismatch {
+                    function: frame.template,
+                    pc: source_pc,
+                    expected: u32::from(argument_count),
+                    actual: frame.stack.len(),
+                }
+                .into());
+            }
+            let first = frame.stack.len() - element_count;
+            for index in first..frame.stack.len() {
+                stack_value_at(frame, index)?;
+            }
+            execution_budget.charge_instructions(usize_to_u64(element_count))?;
+
+            let mut elements = Vec::new();
+            elements.try_reserve_exact(element_count).map_err(|_| {
+                ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::FrameValues,
+                    additional: element_count,
+                }
+            })?;
+            for index in first..frame.stack.len() {
+                elements.push(stack_value_at(frame, index)?.duplicate());
+            }
+            let realm = code(runtime, frame.code)?.realm;
+            let array = runtime.allocate_array(realm, elements)?;
+            frame.stack.truncate(first);
+            push(frame, StoredValue::Object(array));
+        }
         FinalOpcode::Catch => {
             let handler = branch_successor(verified_instruction, true, frame)?;
             frame.stack.push(OperandStackEntry::Catch { handler });
@@ -6070,6 +6265,7 @@ fn execute_one(
                     realm,
                     Some(return_to),
                     origin,
+                    execution_budget,
                 ),
                 return_to,
             );
@@ -6100,6 +6296,7 @@ fn execute_one(
                     realm,
                     Some(return_to),
                     origin,
+                    execution_budget,
                 ),
                 return_to,
             );
@@ -6123,6 +6320,7 @@ fn execute_one(
                     realm,
                     Some(return_to),
                     origin,
+                    execution_budget,
                 ),
                 return_to,
             );
@@ -6134,7 +6332,7 @@ fn execute_one(
             let base = peek(frame)?.duplicate();
             let property = computed_property_operand(runtime, &key_value)?;
             if let PropertyWriteOutcome::Failed(failure) =
-                define_static_property(runtime, &base, property.key, value)?
+                define_static_property(runtime, &base, property.key, value, execution_budget)?
             {
                 return Ok(Step::Abrupt(property_exception_at(
                     realm,
@@ -6173,6 +6371,7 @@ fn execute_one(
                     realm,
                     Some(return_to),
                     origin,
+                    execution_budget,
                 ),
                 return_to,
             );
@@ -6222,7 +6421,39 @@ fn execute_one(
             let property = static_property_operand(runtime, frame, operands)?;
             let value = pop(frame)?;
             let base = pop(frame)?;
-            match write_static_property(runtime, realm, &base, property.key, value, frame.strict)? {
+            if is_array_length_target(runtime, &base, &property.key)? {
+                let return_to =
+                    CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
+                        EngineFault::InvalidSuccessor {
+                            function: frame.template,
+                            pc: source_pc,
+                        },
+                    )?);
+                let origin = instruction_location(runtime, frame, source_pc)?;
+                let target = array_length_write_target(base, property.name, frame.strict, &value);
+                return native_step(
+                    begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::Number,
+                        target,
+                        realm,
+                        Some(return_to),
+                        origin,
+                        execution_budget,
+                    ),
+                    return_to,
+                );
+            }
+            match write_static_property(
+                runtime,
+                realm,
+                &base,
+                property.key,
+                value,
+                frame.strict,
+                execution_budget,
+            )? {
                 PropertyWriteOutcome::Complete => {}
                 PropertyWriteOutcome::Setter {
                     function,
@@ -6272,7 +6503,7 @@ fn execute_one(
             let value = pop(frame)?;
             let base = peek(frame)?.duplicate();
             if let PropertyWriteOutcome::Failed(failure) =
-                define_static_property(runtime, &base, property.key, value)?
+                define_static_property(runtime, &base, property.key, value, execution_budget)?
             {
                 return Ok(Step::Abrupt(property_exception(
                     runtime,
@@ -6363,7 +6594,7 @@ fn execute_one(
             let global = global_reference_operand(runtime, frame, index)?;
             let name = global.name.clone();
             let value = pop(frame)?;
-            match write_realm_global(runtime, global, value, frame.strict)? {
+            match write_realm_global(runtime, global, value, frame.strict, execution_budget)? {
                 RealmGlobalWriteOutcome::Complete => {}
                 RealmGlobalWriteOutcome::Missing => {
                     return Ok(Step::Abrupt(global_not_defined_exception(
@@ -7047,6 +7278,7 @@ fn write_realm_global(
     global: GlobalReferenceOperand,
     value: StoredValue,
     strict: bool,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
     let state = runtime
         .global_bindings
@@ -7077,6 +7309,7 @@ fn write_realm_global(
                     global.key,
                     value,
                     strict,
+                    execution_budget,
                 )? {
                     PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
                     PropertyWriteOutcome::Setter { .. } => {
@@ -7101,6 +7334,7 @@ fn write_realm_global(
                     global.key,
                     value,
                     strict,
+                    execution_budget,
                 )? {
                     PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
                     PropertyWriteOutcome::Setter { .. } => {
@@ -7313,6 +7547,55 @@ fn inherited_property(
     lookup_heap_property(runtime, current, key)
 }
 
+fn is_array_length_target(
+    runtime: &Runtime,
+    base: &StoredValue,
+    key: &PropertyKey,
+) -> Result<bool, ExecutionError> {
+    if key.as_atom().and_then(crate::Atom::predefined_atom) != Some(PredefinedAtom::Length) {
+        return Ok(false);
+    }
+    let StoredValue::Object(object) = base else {
+        return Ok(false);
+    };
+    Ok(runtime.array_length(*object)?.is_some())
+}
+
+fn array_length_write_target(
+    base: StoredValue,
+    name: JsString,
+    strict: bool,
+    value: &StoredValue,
+) -> OperatorPrimitiveTarget {
+    let original = (!matches!(
+        value,
+        StoredValue::Null | StoredValue::Boolean(_) | StoredValue::Number(_)
+    ))
+    .then(|| value.duplicate());
+    OperatorPrimitiveTarget::ArrayLengthWrite(ArrayLengthWriteState {
+        base,
+        name,
+        strict,
+        original,
+        first_length: None,
+    })
+}
+
+fn array_define_write_outcome(outcome: ArrayDefineOutcome, strict: bool) -> PropertyWriteOutcome {
+    match outcome {
+        ArrayDefineOutcome::Complete => PropertyWriteOutcome::Complete,
+        ArrayDefineOutcome::ReadOnlyLength if strict => {
+            PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+        }
+        ArrayDefineOutcome::NonExtensible if strict => {
+            PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible)
+        }
+        ArrayDefineOutcome::ReadOnlyLength | ArrayDefineOutcome::NonExtensible => {
+            PropertyWriteOutcome::Complete
+        }
+    }
+}
+
 fn write_primitive_property(
     runtime: &Runtime,
     prototype: HeapReference,
@@ -7362,6 +7645,7 @@ fn write_static_property(
     key: PropertyKey,
     value: StoredValue,
     strict: bool,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<PropertyWriteOutcome, ExecutionError> {
     let reference = match base {
         StoredValue::Undefined => {
@@ -7415,6 +7699,18 @@ fn write_static_property(
         StoredValue::Function(function) => HeapReference::Function(*function),
         StoredValue::Object(object) => HeapReference::Object(*object),
     };
+    let array = match reference {
+        HeapReference::Object(object) if runtime.is_array_object(object)? => Some(object),
+        HeapReference::Function(_) | HeapReference::Object(_) => None,
+    };
+    if array.is_some()
+        && key.as_atom().and_then(crate::Atom::predefined_atom) == Some(PredefinedAtom::Length)
+    {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "array length write bypassed resumable numeric conversion",
+        }
+        .into());
+    }
 
     if string_exotic_index_is_present(runtime, reference, &key)? {
         return Ok(if strict {
@@ -7424,18 +7720,25 @@ fn write_static_property(
         });
     }
 
-    let (own, prototype, extensible) = {
+    let (prototype, extensible) = {
         let record = runtime.object_record(reference)?;
-        (
-            record.own_property(&key),
-            record.prototype(),
-            record.is_extensible(),
-        )
+        (record.prototype(), record.is_extensible())
+    };
+    let own = match array {
+        Some(array) => runtime.array_own_property(array, &key)?,
+        None => runtime.object_record(reference)?.own_property(&key),
     };
     if let Some(own) = own {
         match own {
             OwnProperty::Data { layout, .. } => {
                 if layout.writable() == Some(true) {
+                    if let Some(array) = array {
+                        let work = runtime.preview_array_define_data_property_work(array)?;
+                        execution_budget.charge_instructions(work)?;
+                        let outcome =
+                            runtime.define_array_data_property(array, key, layout, value)?;
+                        return Ok(array_define_write_outcome(outcome, strict));
+                    }
                     let replaced = runtime
                         .object_record_mut(reference)?
                         .replace_existing_data(&key, value);
@@ -7497,6 +7800,17 @@ fn write_static_property(
             PropertyWriteOutcome::Complete
         });
     }
+    if let Some(array) = array {
+        let work = runtime.preview_array_define_data_property_work(array)?;
+        execution_budget.charge_instructions(work)?;
+        let outcome = runtime.define_array_data_property(
+            array,
+            key,
+            PropertyLayout::data(true, true, true),
+            value,
+        )?;
+        return Ok(array_define_write_outcome(outcome, strict));
+    }
     runtime.append_data_property(
         reference,
         key,
@@ -7511,6 +7825,7 @@ fn define_static_property(
     base: &StoredValue,
     key: PropertyKey,
     value: StoredValue,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<PropertyWriteOutcome, ExecutionError> {
     let reference = match base {
         StoredValue::Function(function) => HeapReference::Function(*function),
@@ -7524,6 +7839,33 @@ fn define_static_property(
             return Ok(PropertyWriteOutcome::Failed(PropertyFailure::NotObject));
         }
     };
+    if let HeapReference::Object(object) = reference
+        && runtime.is_array_object(object)?
+    {
+        if key.as_atom().and_then(crate::Atom::predefined_atom) == Some(PredefinedAtom::Length) {
+            return Ok(PropertyWriteOutcome::Failed(
+                PropertyFailure::NotConfigurable,
+            ));
+        }
+        let work = runtime.preview_array_define_data_property_work(object)?;
+        execution_budget.charge_instructions(work)?;
+        return Ok(
+            match runtime.define_array_data_property(
+                object,
+                key,
+                PropertyLayout::data(true, true, true),
+                value,
+            )? {
+                ArrayDefineOutcome::Complete => PropertyWriteOutcome::Complete,
+                ArrayDefineOutcome::ReadOnlyLength => {
+                    PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+                }
+                ArrayDefineOutcome::NonExtensible => {
+                    PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible)
+                }
+            },
+        );
+    }
     let (exists, extensible) = {
         let record = runtime.object_record(reference)?;
         (record.own_property(&key), record.is_extensible())

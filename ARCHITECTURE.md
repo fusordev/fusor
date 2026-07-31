@@ -259,7 +259,8 @@ instruction source mappings, abstract frame-state cells, and binding-policy
 transfers. Retained parent-edge closure checks are charged to the policy
 budget before metadata analysis. It also records a sorted conservative list
 of runtime capability families: core values, Numbers, Strings, BigInts,
-closures, direct calls, abrupt completions, lexical bindings, object operators,
+closures, arrays, ordinary objects, dynamic property keys, direct calls,
+abrupt completions, lexical bindings, realm-global bindings, object operators,
 and dynamic operators. Those families describe
 implementation requirements; they are not a whole-program value-type proof.
 All final-verifier traversals use explicit work lists and fallible bounded
@@ -542,6 +543,20 @@ Boolean, Number, and String values become one branded wrapper reused by every
 `PushThis`. Strict functions keep the raw receiver. Symbol sloppy receivers
 remain fail closed. Calls fill missing formals with `undefined` and share
 aggregate frame limits and instruction fuel.
+Dense array literals lower iteratively to one verified `array_from` instruction
+after every direct element has been prevalidated; holes and spread elements
+remain fail closed. Execution evaluates elements left-to-right, preflights the
+complete realm-owned allocation, then installs a branded array whose own
+`length` data property is writable, non-enumerable, and non-configurable.
+Canonical indexed definitions extend length, while `4294967295` remains an
+ordinary string property. Length assignment performs resumable Number-hint
+primitive conversion twice as observed by the pinned QuickJS implementation,
+requires both passes to represent the same exact uint32 value, and removes
+configurable indexed properties above a shorter length in bounded linear work.
+Enumeration hides `length`, object tagging observes the array brand, and the
+existing observable `Function.prototype.apply` scan consumes the array without
+a special argument-list bypass. The `Array` constructor, `Array.prototype`
+methods, holes, spread, iterators, and destructuring remain deferred.
 An escaping throw carries its exact JavaScript value through the same frame
 vector, allocates caller provenance before publishing any heap root, and
 preserves caller order from immediate to outermost. Dynamic operators use a

@@ -7,9 +7,10 @@ use quickjs_bytecode::{
     CompilerBindingPolicy, CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureBinding,
     CompilerClosureSource, CompilerConstantKind, CompilerConstantLayout, CompilerExecutableKind,
     CompilerInitializationPolicy, CompilerSource, CompilerString, CompilerWritePolicy,
-    ExecutionRequirement, FinalOpcode, FunctionGraphVerificationLimits, FunctionIndexDomains,
-    FunctionTemplateId, MAX_GOSUB_SITES_PER_FUNCTION, MetadataAtomField, Operands, PcSourceSpan,
-    ScopeLink, SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction,
+    EXECUTION_REQUIREMENT_COUNT, ExecutionRequirement, FinalOpcode,
+    FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId,
+    MAX_GOSUB_SITES_PER_FUNCTION, MetadataAtomField, Operands, PcSourceSpan, ScopeLink,
+    SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction,
     UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader,
     UnverifiedFunctionMetadata, VariableDefinition, VerificationLimits, VerifiedBytecode,
     VerifiedControlFlow, verify_compiler_bytecode_graph, verify_compiler_control_flow,
@@ -371,6 +372,61 @@ fn final_authority_sorts_call_before_the_adjacent_abrupt_requirement() {
             ExecutionRequirement::AbruptCompletions,
         ]
     );
+}
+
+#[test]
+fn final_authority_admits_array_from_with_a_sorted_array_requirement() {
+    let instructions = [
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 2 }),
+        (FinalOpcode::Return, Operands::None),
+    ];
+
+    let verified = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a dense array consumes its exact input values and gains array authority");
+
+    assert_eq!(
+        verified.requirements(),
+        [
+            ExecutionRequirement::CoreValues,
+            ExecutionRequirement::Numbers,
+            ExecutionRequirement::Arrays,
+        ]
+    );
+    assert!(
+        verified
+            .requirements()
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]),
+        "requirements remain sorted and deduplicated"
+    );
+}
+
+#[test]
+fn execution_requirement_capacity_matches_the_exhaustive_sorted_family_set() {
+    let requirements = [
+        ExecutionRequirement::CoreValues,
+        ExecutionRequirement::Numbers,
+        ExecutionRequirement::Strings,
+        ExecutionRequirement::BigInts,
+        ExecutionRequirement::Closures,
+        ExecutionRequirement::Arrays,
+        ExecutionRequirement::OrdinaryObjects,
+        ExecutionRequirement::DynamicPropertyKeys,
+        ExecutionRequirement::Calls,
+        ExecutionRequirement::AbruptCompletions,
+        ExecutionRequirement::LexicalBindings,
+        ExecutionRequirement::RealmGlobalBindings,
+        ExecutionRequirement::ObjectOperators,
+        ExecutionRequirement::DynamicOperators,
+    ];
+
+    assert_eq!(requirements.len(), EXECUTION_REQUIREMENT_COUNT);
+    assert!(requirements.windows(2).all(|pair| pair[0] < pair[1]));
 }
 
 #[test]

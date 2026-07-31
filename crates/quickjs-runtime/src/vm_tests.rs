@@ -228,6 +228,167 @@ fn verified_generic_drop_can_discard_a_finally_return_address() {
 }
 
 #[test]
+fn array_from_consumes_the_verified_suffix_in_left_to_right_order() {
+    let (mut runtime, _realm, mut frame) = array_from_test_frame();
+    let baseline = runtime.usage();
+    let mut budget = execution_budget_with_consumed(u64::MAX, 1);
+
+    assert!(matches!(
+        execute_one(&mut runtime, &mut frame, &mut budget),
+        Ok(Step::Continue)
+    ));
+    let [OperandStackEntry::JavaScript(StoredValue::Object(array))] = frame.stack.as_slice() else {
+        panic!("array_from must replace its complete input suffix with one array");
+    };
+    assert_eq!(runtime.array_length(*array).expect("array length"), Some(2));
+    for (index, expected) in [(0, 11), (1, 22)] {
+        assert!(matches!(
+            runtime
+                .array_own_property(
+                    *array,
+                    &PropertyKey::from_index(ArrayIndex::new(index).expect("index")),
+                )
+                .expect("array property"),
+            Some(OwnProperty::Data {
+                layout,
+                value: StoredValue::Number(value),
+            }) if layout == PropertyLayout::data(true, true, true)
+                && value.strict_equals(JsNumber::from_i32(expected))
+        ));
+    }
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 1);
+    assert_eq!(
+        runtime.usage().object_properties(),
+        baseline.object_properties() + 3
+    );
+}
+
+#[test]
+fn array_from_preflights_fuel_and_runtime_limits_before_stack_mutation() {
+    let (mut fuel_runtime, _realm, mut fuel_frame) = array_from_test_frame();
+    let fuel_usage = fuel_runtime.usage();
+    let mut fuel = execution_budget_with_consumed(2, 1);
+    assert!(matches!(
+        execute_one(&mut fuel_runtime, &mut fuel_frame, &mut fuel),
+        Err(ExecutionError::InstructionLimitExceeded {
+            limit: 2,
+            executed: 2,
+        })
+    ));
+    assert_array_from_input_stack(&fuel_frame);
+    assert_eq!(fuel_runtime.usage(), fuel_usage);
+
+    let (mut heap_runtime, _realm, mut heap_frame) = array_from_test_frame();
+    let heap_usage = heap_runtime.usage();
+    heap_runtime.limits.max_heap_objects = heap_usage.heap_objects();
+    let mut budget = execution_budget_with_consumed(u64::MAX, 1);
+    assert!(matches!(
+        execute_one(&mut heap_runtime, &mut heap_frame, &mut budget),
+        Err(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::HeapObjects,
+            limit,
+            observed,
+        }) if limit == heap_usage.heap_objects() && observed == limit + 1
+    ));
+    assert_array_from_input_stack(&heap_frame);
+    assert_eq!(heap_runtime.usage(), heap_usage);
+
+    let (mut property_runtime, _realm, mut property_frame) = array_from_test_frame();
+    let property_usage = property_runtime.usage();
+    property_runtime.limits.max_object_properties =
+        property_usage.object_properties().saturating_add(2);
+    let mut budget = execution_budget_with_consumed(u64::MAX, 1);
+    assert!(matches!(
+        execute_one(&mut property_runtime, &mut property_frame, &mut budget),
+        Err(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::ObjectProperties,
+            limit,
+            observed,
+        }) if limit == property_usage.object_properties() + 2 && observed == limit + 1
+    ));
+    assert_array_from_input_stack(&property_frame);
+    assert_eq!(property_runtime.usage(), property_usage);
+}
+
+#[test]
+fn array_length_and_index_mutations_precharge_shape_work_before_mutation() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm = runtime.context(&realm).expect("context").realm;
+    let array = runtime
+        .allocate_array(
+            realm,
+            vec![
+                StoredValue::Number(JsNumber::from_i32(1)),
+                StoredValue::Number(JsNumber::from_i32(2)),
+            ],
+        )
+        .expect("array");
+    let baseline = runtime.usage();
+
+    let length_work = runtime
+        .preview_array_length_write_work(array, 1)
+        .expect("length work");
+    let mut budget = execution_budget_with_consumed(length_work, 1);
+    let Err(NativeFailure::Execution(error)) = finish_array_length_write(
+        &mut runtime,
+        ArrayLengthWriteState {
+            base: StoredValue::Object(array),
+            name: JsString::from_utf8("length").expect("length"),
+            strict: true,
+            original: None,
+            first_length: None,
+        },
+        StoredValue::Number(JsNumber::from_i32(1)),
+        realm,
+        None,
+        &native_function_host_origin(),
+        &mut budget,
+    ) else {
+        panic!("length mutation must precharge its complete shape work");
+    };
+    assert!(matches!(
+        error,
+        ExecutionError::InstructionLimitExceeded { limit, executed }
+            if limit == length_work && executed == length_work
+    ));
+    assert_eq!(runtime.array_length(array).expect("length"), Some(2));
+    assert_eq!(runtime.usage(), baseline);
+
+    let define_work = runtime
+        .preview_array_define_data_property_work(array)
+        .expect("definition work");
+    let mut budget = execution_budget_with_consumed(define_work, 1);
+    let Err(error) = write_static_property(
+        &mut runtime,
+        realm,
+        &StoredValue::Object(array),
+        PropertyKey::from_index(ArrayIndex::new(2).expect("index")),
+        StoredValue::Number(JsNumber::from_i32(3)),
+        true,
+        &mut budget,
+    ) else {
+        panic!("index mutation must precharge its complete shape work");
+    };
+    assert!(matches!(
+        error,
+        ExecutionError::InstructionLimitExceeded { limit, executed }
+            if limit == define_work && executed == define_work
+    ));
+    assert_eq!(runtime.array_length(array).expect("length"), Some(2));
+    assert_eq!(runtime.usage(), baseline);
+    assert!(
+        runtime
+            .array_own_property(
+                array,
+                &PropertyKey::from_index(ArrayIndex::new(2).expect("index")),
+            )
+            .expect("array property")
+            .is_none()
+    );
+}
+
+#[test]
 fn nip_catch_scans_to_the_nearest_marker_and_preserves_the_top_value() {
     let (_, _, mut frame) = ordinary_test_frame();
     let handler = frame.instruction;
@@ -756,6 +917,56 @@ fn ordinary_test_frame() -> (Runtime, RealmId, Frame) {
     (runtime, realm_id, frame)
 }
 
+fn array_from_test_frame() -> (Runtime, RealmId, Frame) {
+    let authority = compile_test_function("function run(){return [1,2];}", "run");
+    let control_flow = authority.root().function().control_flow();
+    let array_from_pc = control_flow
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::ArrayFrom)
+        .expect("array_from")
+        .decoded()
+        .pc();
+    let array_from = control_flow
+        .instruction_index_at(array_from_pc)
+        .expect("array_from instruction index");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let function = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(authority)
+        .expect("function")
+        .id()
+        .expect("function id");
+    let plan = plan_frame(&runtime, function, 0, 0).expect("frame plan");
+    let mut frame = create_frame(
+        &mut runtime,
+        plan,
+        StoredValue::Undefined,
+        FrameArguments::Owned(CallArguments::empty()),
+        None,
+        None,
+    )
+    .expect("frame");
+    frame.instruction = array_from;
+    push(&mut frame, StoredValue::Number(JsNumber::from_i32(11)));
+    push(&mut frame, StoredValue::Number(JsNumber::from_i32(22)));
+    (runtime, realm_id, frame)
+}
+
+fn assert_array_from_input_stack(frame: &Frame) {
+    assert!(matches!(
+        frame.stack.as_slice(),
+        [
+            OperandStackEntry::JavaScript(StoredValue::Number(first)),
+            OperandStackEntry::JavaScript(StoredValue::Number(second)),
+        ] if first.strict_equals(JsNumber::from_i32(11))
+            && second.strict_equals(JsNumber::from_i32(22))
+    ));
+}
+
 fn for_in_transition_test_runtime() -> (Runtime, RealmId, FunctionId, InstructionIndex) {
     let authority = compile_test_function(
         "function iterate(value){for(var key in value){return key;}}",
@@ -887,6 +1098,7 @@ fn null_symbol_to_primitive_falls_back_to_the_ordinary_string_hint_order() {
         )
         .expect("ordinary converter");
 
+    let mut budget = execution_budget_with_consumed(u64::MAX, 0);
     let Ok(NativeDispatch::Call(call)) = begin_property_key_conversion(
         &mut runtime,
         StoredValue::Object(object),
@@ -894,6 +1106,7 @@ fn null_symbol_to_primitive_falls_back_to_the_ordinary_string_hint_order() {
         realm,
         None,
         native_function_host_origin(),
+        &mut budget,
     ) else {
         panic!("null Symbol.toPrimitive must fall back to toString");
     };
@@ -2314,6 +2527,7 @@ fn property_key_continuations_charge_every_suspended_javascript_value() {
 fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
     let (mut runtime, realm, constructor, _native) = runtime_with_function_constructor();
     let object = source_object(&mut runtime, realm);
+    let array = runtime.allocate_array(realm, Vec::new()).expect("array");
     let origin = native_function_host_origin();
     let continuation = |target| {
         NativeContinuation::OperatorPrimitive(OperatorPrimitiveContinuation {
@@ -2376,6 +2590,34 @@ fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
         })
         .retained_values(),
         2
+    );
+    assert_eq!(
+        continuation(OperatorPrimitiveTarget::ArrayLengthWrite(
+            ArrayLengthWriteState {
+                base: StoredValue::Object(array),
+                name: JsString::from_utf8("length").expect("length"),
+                strict: true,
+                original: Some(StoredValue::Object(object)),
+                first_length: None,
+            },
+        ))
+        .retained_values(),
+        3,
+        "the receiver, array base, and original first-pass RHS are retained"
+    );
+    assert_eq!(
+        continuation(OperatorPrimitiveTarget::ArrayLengthWrite(
+            ArrayLengthWriteState {
+                base: StoredValue::Object(array),
+                name: JsString::from_utf8("length").expect("length"),
+                strict: true,
+                original: None,
+                first_length: Some(1),
+            },
+        ))
+        .retained_values(),
+        2,
+        "the second pass retains its receiver and array base"
     );
 }
 
@@ -3511,7 +3753,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         "make",
     );
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(70)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(71)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
         .context(&realm)
@@ -3532,8 +3774,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 70,
-            observed: 71,
+            limit: 71,
+            observed: 72,
         }
     ));
     let failed = runtime.usage();
