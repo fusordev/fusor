@@ -1,0 +1,1155 @@
+/*
+ * JavaScript bytecode execution and closure semantics derived from QuickJS.
+ *
+ * Copyright (c) 2017-2018 Fabrice Bellard
+ * Copyright (c) 2017-2018 Charlie Gordon
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+//! Property operands and ordinary object read, write, and definition semantics.
+
+#[allow(
+    clippy::wildcard_imports,
+    reason = "this private VM sibling participates in the shared interpreter implementation namespace"
+)]
+use super::*;
+
+pub(super) trait AtomDescription {
+    fn description(&self) -> Option<&JsString>;
+}
+
+impl AtomDescription for crate::Atom {
+    fn description(&self) -> Option<&JsString> {
+        crate::Atom::description(self)
+    }
+}
+
+pub(super) struct StaticPropertyOperand {
+    pub(super) key: PropertyKey,
+    pub(super) name: JsString,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum DefineMethodKind {
+    Method,
+    Getter,
+    Setter,
+}
+
+pub(super) struct DefineMethodOperand {
+    pub(super) property: StaticPropertyOperand,
+    pub(super) kind: DefineMethodKind,
+    pub(super) enumerable: bool,
+}
+
+pub(super) struct DefineMethodComputedOperand {
+    pub(super) kind: DefineMethodKind,
+    pub(super) enumerable: bool,
+}
+
+pub(super) struct GlobalReferenceOperand {
+    binding: RealmGlobalBindingId,
+    realm: RealmId,
+    object: ObjectId,
+    pub(super) key: PropertyKey,
+    pub(super) name: JsString,
+}
+
+pub(super) enum PropertyReadOutcome {
+    Value(StoredValue),
+    Getter {
+        function: FunctionId,
+        receiver: StoredValue,
+    },
+    Failed(PropertyFailure),
+}
+
+pub(super) enum PropertyWriteOutcome {
+    Complete,
+    Setter {
+        function: FunctionId,
+        receiver: StoredValue,
+        value: StoredValue,
+    },
+    Failed(PropertyFailure),
+}
+
+pub(super) enum PropertyDefinitionOutcome {
+    Complete,
+    Failed(PropertyFailure),
+}
+
+pub(super) enum RealmGlobalReadOutcome {
+    Value(StoredValue),
+    Missing,
+}
+
+pub(super) enum RealmGlobalWriteOutcome {
+    Complete,
+    Missing,
+    Property(PropertyFailure),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PropertyFailure {
+    ReadNull,
+    ReadUndefined,
+    WriteNull,
+    WriteUndefined,
+    NotObject,
+    ReadOnly,
+    NoSetter,
+    NotConfigurable,
+    NonExtensible,
+}
+
+pub(super) fn static_property_operand(
+    runtime: &Runtime,
+    frame: &Frame,
+    operands: Operands,
+) -> Result<StaticPropertyOperand, EngineFault> {
+    let Operands::Atom(index) = operands else {
+        return Err(EngineFault::MissingPoolEntry {
+            pool: "property atom",
+            index: u32::MAX,
+        });
+    };
+    static_property_at(runtime, frame, index)
+}
+
+fn static_property_at(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: quickjs_bytecode::AtomPoolIndex,
+) -> Result<StaticPropertyOperand, EngineFault> {
+    let atom = installed_template(runtime, frame.code, frame.template)?
+        .atoms
+        .get(index.get() as usize)
+        .cloned()
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "property atom",
+            index: index.get(),
+        })?;
+    let name = atom
+        .description()
+        .cloned()
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "property atom description",
+            index: index.get(),
+        })?;
+    Ok(StaticPropertyOperand {
+        key: ArrayIndex::parse_property_key(&name).map_or_else(
+            || PropertyKey::from_validated_atom(atom),
+            PropertyKey::from_index,
+        ),
+        name,
+    })
+}
+
+pub(super) fn define_method_operand(
+    runtime: &Runtime,
+    frame: &Frame,
+    operands: Operands,
+) -> Result<DefineMethodOperand, EngineFault> {
+    let Operands::AtomU8 { atom, value } = operands else {
+        return Err(EngineFault::MissingPoolEntry {
+            pool: "method property atom",
+            index: u32::MAX,
+        });
+    };
+    if value & !0b111 != 0 || value & 0b11 == 0b11 {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified define_method flags are invalid",
+        });
+    }
+    let kind = match value & 0b11 {
+        0 => DefineMethodKind::Method,
+        1 => DefineMethodKind::Getter,
+        2 => DefineMethodKind::Setter,
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "verified define_method kind is invalid",
+            });
+        }
+    };
+    Ok(DefineMethodOperand {
+        property: static_property_at(runtime, frame, atom)?,
+        kind,
+        enumerable: value & 0b100 != 0,
+    })
+}
+
+pub(super) fn define_method_computed_operand(
+    operands: Operands,
+) -> Result<DefineMethodComputedOperand, EngineFault> {
+    let Operands::U8(value) = operands else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified define_method_computed operand is not u8",
+        });
+    };
+    let kind = match value {
+        4 => DefineMethodKind::Method,
+        5 => DefineMethodKind::Getter,
+        6 => DefineMethodKind::Setter,
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "verified define_method_computed flags are invalid",
+            });
+        }
+    };
+    Ok(DefineMethodComputedOperand {
+        kind,
+        enumerable: true,
+    })
+}
+
+pub(super) fn global_reference_operand(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: u32,
+) -> Result<GlobalReferenceOperand, EngineFault> {
+    let binding = *frame
+        .environment
+        .get(index as usize)
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "realm global environment",
+            index,
+        })?;
+    let EnvironmentBinding::RealmGlobal(global) = binding else {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        });
+    };
+    let record = runtime
+        .global_bindings
+        .get(global)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "realm global binding",
+            index: global.index(),
+            generation: global.generation(),
+        })?;
+    let realm = code(runtime, frame.code)?.realm;
+    if record.realm != realm {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        });
+    }
+    let name = record
+        .name
+        .description()
+        .cloned()
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "realm global atom description",
+            index,
+        })?;
+    Ok(GlobalReferenceOperand {
+        binding: global,
+        realm,
+        object: runtime.realm_global_object(realm)?,
+        key: PropertyKey::from_validated_atom(record.name.clone()),
+        name,
+    })
+}
+
+pub(super) fn read_realm_global(
+    runtime: &Runtime,
+    global: &GlobalReferenceOperand,
+) -> Result<RealmGlobalReadOutcome, ExecutionError> {
+    let binding =
+        runtime
+            .global_bindings
+            .get(global.binding)
+            .ok_or(EngineFault::StaleHeapEdge {
+                edge: "realm global binding",
+                index: global.binding.index(),
+                generation: global.binding.generation(),
+            })?;
+    match binding.state {
+        RealmGlobalBindingState::Unresolved | RealmGlobalBindingState::Object => {
+            read_heap_property_if_present(
+                runtime,
+                HeapReference::Object(global.object),
+                &global.key,
+            )
+            .map(|value| {
+                value.map_or(
+                    RealmGlobalReadOutcome::Missing,
+                    RealmGlobalReadOutcome::Value,
+                )
+            })
+        }
+    }
+}
+
+pub(super) fn write_realm_global(
+    runtime: &mut Runtime,
+    global: GlobalReferenceOperand,
+    value: StoredValue,
+    strict: bool,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    let state = runtime
+        .global_bindings
+        .get(global.binding)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "realm global binding",
+            index: global.binding.index(),
+            generation: global.binding.generation(),
+        })?
+        .state;
+    match state {
+        RealmGlobalBindingState::Unresolved => {
+            let present = read_heap_property_if_present(
+                runtime,
+                HeapReference::Object(global.object),
+                &global.key,
+            )?
+            .is_some();
+            if !present && strict {
+                return Ok(RealmGlobalWriteOutcome::Missing);
+            }
+            let base = StoredValue::Object(global.object);
+            Ok(
+                match write_static_property(
+                    runtime,
+                    global.realm,
+                    &base,
+                    global.key,
+                    value,
+                    strict,
+                    execution_budget,
+                )? {
+                    PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
+                    PropertyWriteOutcome::Setter { .. } => {
+                        return Err(EngineFault::UnsupportedAccessorWrite {
+                            operation: "realm-global property write",
+                        }
+                        .into());
+                    }
+                    PropertyWriteOutcome::Failed(failure) => {
+                        RealmGlobalWriteOutcome::Property(failure)
+                    }
+                },
+            )
+        }
+        RealmGlobalBindingState::Object => {
+            let base = StoredValue::Object(global.object);
+            Ok(
+                match write_static_property(
+                    runtime,
+                    global.realm,
+                    &base,
+                    global.key,
+                    value,
+                    strict,
+                    execution_budget,
+                )? {
+                    PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
+                    PropertyWriteOutcome::Setter { .. } => {
+                        return Err(EngineFault::UnsupportedAccessorWrite {
+                            operation: "realm-global property write",
+                        }
+                        .into());
+                    }
+                    PropertyWriteOutcome::Failed(failure) => {
+                        RealmGlobalWriteOutcome::Property(failure)
+                    }
+                },
+            )
+        }
+    }
+}
+
+pub(super) fn read_static_property(
+    runtime: &Runtime,
+    realm: RealmId,
+    base: &StoredValue,
+    key: &PropertyKey,
+) -> Result<PropertyReadOutcome, ExecutionError> {
+    Ok(match base {
+        StoredValue::Undefined => PropertyReadOutcome::Failed(PropertyFailure::ReadUndefined),
+        StoredValue::Null => PropertyReadOutcome::Failed(PropertyFailure::ReadNull),
+        StoredValue::Boolean(_) => read_heap_property_for_receiver(
+            runtime,
+            HeapReference::Object(runtime.realm_boolean_prototype(realm)?),
+            base.duplicate(),
+            key,
+        )?,
+        StoredValue::Number(_) => read_heap_property_for_receiver(
+            runtime,
+            HeapReference::Object(runtime.realm_number_prototype(realm)?),
+            base.duplicate(),
+            key,
+        )?,
+        StoredValue::Symbol(atom) => {
+            if property_key_has_string_name(key, "description") {
+                atom.description().map_or_else(
+                    || PropertyReadOutcome::Value(StoredValue::Undefined),
+                    |description| {
+                        PropertyReadOutcome::Value(StoredValue::String(description.clone()))
+                    },
+                )
+            } else {
+                PropertyReadOutcome::Value(StoredValue::Undefined)
+            }
+        }
+        StoredValue::String(value) => {
+            if let Some(index) = key.as_index()
+                && index.get() < value.len()
+            {
+                PropertyReadOutcome::Value(StoredValue::String(
+                    value.slice(index.get()..index.get().saturating_add(1))?,
+                ))
+            } else if key.as_atom().and_then(crate::Atom::predefined_atom)
+                == Some(PredefinedAtom::Length)
+            {
+                PropertyReadOutcome::Value(StoredValue::Number(JsNumber::from_f64(f64::from(
+                    value.len(),
+                ))))
+            } else {
+                read_heap_property_for_receiver(
+                    runtime,
+                    HeapReference::Object(runtime.realm_string_prototype(realm)?),
+                    base.duplicate(),
+                    key,
+                )?
+            }
+        }
+        StoredValue::Function(function) => read_heap_property_for_receiver(
+            runtime,
+            HeapReference::Function(*function),
+            base.duplicate(),
+            key,
+        )?,
+        StoredValue::Object(object) => read_heap_property_for_receiver(
+            runtime,
+            HeapReference::Object(*object),
+            base.duplicate(),
+            key,
+        )?,
+    })
+}
+
+fn property_key_has_string_name(key: &PropertyKey, expected: &str) -> bool {
+    key.as_atom().is_some_and(|atom| {
+        atom.kind() == crate::AtomKind::String
+            && atom
+                .description()
+                .is_some_and(|name| name.code_units().eq(expected.encode_utf16()))
+    })
+}
+
+pub(super) fn read_heap_property_for_receiver(
+    runtime: &Runtime,
+    reference: HeapReference,
+    receiver: StoredValue,
+    key: &PropertyKey,
+) -> Result<PropertyReadOutcome, ExecutionError> {
+    Ok(match lookup_heap_property(runtime, Some(reference), key)? {
+        None => PropertyReadOutcome::Value(StoredValue::Undefined),
+        Some(OwnProperty::Data { value, .. }) => PropertyReadOutcome::Value(value),
+        Some(OwnProperty::Accessor {
+            getter: Some(function),
+            ..
+        }) => PropertyReadOutcome::Getter { function, receiver },
+        Some(OwnProperty::Accessor { getter: None, .. }) => {
+            PropertyReadOutcome::Value(StoredValue::Undefined)
+        }
+    })
+}
+
+pub(super) fn read_heap_property(
+    runtime: &Runtime,
+    reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<StoredValue, ExecutionError> {
+    Ok(read_heap_property_if_present(runtime, reference, key)?.unwrap_or(StoredValue::Undefined))
+}
+
+fn read_heap_property_if_present(
+    runtime: &Runtime,
+    reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<Option<StoredValue>, ExecutionError> {
+    match lookup_heap_property(runtime, Some(reference), key)? {
+        None => Ok(None),
+        Some(OwnProperty::Data { value, .. }) => Ok(Some(value)),
+        Some(OwnProperty::Accessor { .. }) => Err(EngineFault::UnsupportedAccessorRead {
+            operation: "synchronous property read",
+        }
+        .into()),
+    }
+}
+
+pub(super) fn lookup_heap_property(
+    runtime: &Runtime,
+    mut current: Option<HeapReference>,
+    key: &PropertyKey,
+) -> Result<Option<OwnProperty>, ExecutionError> {
+    let mut remaining = runtime
+        .functions
+        .len()
+        .saturating_add(runtime.objects.len())
+        .saturating_add(1);
+    while let Some(reference) = current {
+        if remaining == 0 {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ordinary prototype chain contains a cycle",
+            }
+            .into());
+        }
+        remaining -= 1;
+        if let Some(property) = string_exotic_index_property(runtime, reference, key)? {
+            return Ok(Some(property));
+        }
+        let record = runtime.object_record(reference)?;
+        if let Some(property) = record.own_property(key) {
+            return Ok(Some(property));
+        }
+        current = record.prototype();
+    }
+    Ok(None)
+}
+
+fn string_exotic_index_property(
+    runtime: &Runtime,
+    reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<Option<OwnProperty>, ExecutionError> {
+    let HeapReference::Object(object) = reference else {
+        return Ok(None);
+    };
+    let Some(index) = key.as_index() else {
+        return Ok(None);
+    };
+    let Some(unit) = runtime.boxed_string_code_unit_at(object, index.get())? else {
+        return Ok(None);
+    };
+    Ok(Some(OwnProperty::Data {
+        layout: PropertyLayout::data(false, true, false),
+        value: StoredValue::String(JsString::from_code_units([unit])?),
+    }))
+}
+
+fn string_exotic_index_is_present(
+    runtime: &Runtime,
+    reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<bool, ExecutionError> {
+    let HeapReference::Object(object) = reference else {
+        return Ok(false);
+    };
+    let Some(index) = key.as_index() else {
+        return Ok(false);
+    };
+    Ok(runtime
+        .boxed_string_code_unit_at(object, index.get())?
+        .is_some())
+}
+
+fn inherited_property(
+    runtime: &Runtime,
+    current: Option<HeapReference>,
+    key: &PropertyKey,
+) -> Result<Option<OwnProperty>, ExecutionError> {
+    lookup_heap_property(runtime, current, key)
+}
+
+pub(super) fn is_array_length_target(
+    runtime: &Runtime,
+    base: &StoredValue,
+    key: &PropertyKey,
+) -> Result<bool, ExecutionError> {
+    if key.as_atom().and_then(crate::Atom::predefined_atom) != Some(PredefinedAtom::Length) {
+        return Ok(false);
+    }
+    let StoredValue::Object(object) = base else {
+        return Ok(false);
+    };
+    Ok(runtime.array_length(*object)?.is_some())
+}
+
+pub(super) fn array_length_write_target(
+    base: StoredValue,
+    name: JsString,
+    strict: bool,
+    value: &StoredValue,
+) -> OperatorPrimitiveTarget {
+    let original = (!matches!(
+        value,
+        StoredValue::Null | StoredValue::Boolean(_) | StoredValue::Number(_)
+    ))
+    .then(|| value.duplicate());
+    OperatorPrimitiveTarget::ArrayLengthWrite(ArrayLengthWriteState {
+        base,
+        name,
+        strict,
+        original,
+        first_length: None,
+    })
+}
+
+fn array_define_write_outcome(outcome: ArrayDefineOutcome, strict: bool) -> PropertyWriteOutcome {
+    match outcome {
+        ArrayDefineOutcome::Complete => PropertyWriteOutcome::Complete,
+        ArrayDefineOutcome::ReadOnlyLength if strict => {
+            PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+        }
+        ArrayDefineOutcome::NonExtensible if strict => {
+            PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible)
+        }
+        ArrayDefineOutcome::ReadOnlyLength | ArrayDefineOutcome::NonExtensible => {
+            PropertyWriteOutcome::Complete
+        }
+    }
+}
+
+fn write_primitive_property(
+    runtime: &Runtime,
+    prototype: HeapReference,
+    receiver: &StoredValue,
+    key: &PropertyKey,
+    value: StoredValue,
+    strict: bool,
+) -> Result<PropertyWriteOutcome, ExecutionError> {
+    if let Some(inherited) = inherited_property(runtime, Some(prototype), key)? {
+        match inherited {
+            OwnProperty::Accessor { setter, .. } => {
+                return Ok(match setter {
+                    Some(function) => PropertyWriteOutcome::Setter {
+                        function,
+                        receiver: receiver.duplicate(),
+                        value,
+                    },
+                    None if strict => PropertyWriteOutcome::Failed(PropertyFailure::NoSetter),
+                    None => PropertyWriteOutcome::Complete,
+                });
+            }
+            OwnProperty::Data { layout, .. } if layout.writable() != Some(true) => {
+                return Ok(if strict {
+                    PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+                } else {
+                    PropertyWriteOutcome::Complete
+                });
+            }
+            OwnProperty::Data { .. } => {}
+        }
+    }
+    Ok(if strict {
+        PropertyWriteOutcome::Failed(PropertyFailure::NotObject)
+    } else {
+        PropertyWriteOutcome::Complete
+    })
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "ordinary write semantics audit every primitive, own, inherited, accessor, and extensibility branch"
+)]
+pub(super) fn write_static_property(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    base: &StoredValue,
+    key: PropertyKey,
+    value: StoredValue,
+    strict: bool,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<PropertyWriteOutcome, ExecutionError> {
+    let reference = match base {
+        StoredValue::Undefined => {
+            return Ok(PropertyWriteOutcome::Failed(
+                PropertyFailure::WriteUndefined,
+            ));
+        }
+        StoredValue::Null => {
+            return Ok(PropertyWriteOutcome::Failed(PropertyFailure::WriteNull));
+        }
+        StoredValue::Boolean(_) => {
+            let prototype = runtime.realm_boolean_prototype(realm)?;
+            return write_primitive_property(
+                runtime,
+                HeapReference::Object(prototype),
+                base,
+                &key,
+                value,
+                strict,
+            );
+        }
+        StoredValue::Number(_) => {
+            let prototype = runtime.realm_number_prototype(realm)?;
+            return write_primitive_property(
+                runtime,
+                HeapReference::Object(prototype),
+                base,
+                &key,
+                value,
+                strict,
+            );
+        }
+        StoredValue::String(_) => {
+            let prototype = runtime.realm_string_prototype(realm)?;
+            return write_primitive_property(
+                runtime,
+                HeapReference::Object(prototype),
+                base,
+                &key,
+                value,
+                strict,
+            );
+        }
+        StoredValue::Symbol(_) => {
+            return Ok(if strict {
+                PropertyWriteOutcome::Failed(PropertyFailure::NotObject)
+            } else {
+                PropertyWriteOutcome::Complete
+            });
+        }
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+    };
+    let array = match reference {
+        HeapReference::Object(object) if runtime.is_array_object(object)? => Some(object),
+        HeapReference::Function(_) | HeapReference::Object(_) => None,
+    };
+    if array.is_some()
+        && key.as_atom().and_then(crate::Atom::predefined_atom) == Some(PredefinedAtom::Length)
+    {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "array length write bypassed resumable numeric conversion",
+        }
+        .into());
+    }
+
+    if string_exotic_index_is_present(runtime, reference, &key)? {
+        return Ok(if strict {
+            PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+        } else {
+            PropertyWriteOutcome::Complete
+        });
+    }
+
+    let (prototype, extensible) = {
+        let record = runtime.object_record(reference)?;
+        (record.prototype(), record.is_extensible())
+    };
+    let own = match array {
+        Some(array) => runtime.array_own_property(array, &key)?,
+        None => runtime.object_record(reference)?.own_property(&key),
+    };
+    if let Some(own) = own {
+        match own {
+            OwnProperty::Data { layout, .. } => {
+                if layout.writable() == Some(true) {
+                    if let Some(array) = array {
+                        let work = runtime.preview_array_define_data_property_work(array)?;
+                        execution_budget.charge_instructions(work)?;
+                        let outcome =
+                            runtime.define_array_data_property(array, key, layout, value)?;
+                        return Ok(array_define_write_outcome(outcome, strict));
+                    }
+                    let replaced = runtime
+                        .object_record_mut(reference)?
+                        .replace_existing_data(&key, value);
+                    if !replaced {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "located own data property disappeared before its update",
+                        }
+                        .into());
+                    }
+                    runtime.collection_pending = true;
+                    return Ok(PropertyWriteOutcome::Complete);
+                }
+                return Ok(if strict {
+                    PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+                } else {
+                    PropertyWriteOutcome::Complete
+                });
+            }
+            OwnProperty::Accessor { setter, .. } => {
+                return Ok(match setter {
+                    Some(function) => PropertyWriteOutcome::Setter {
+                        function,
+                        receiver: base.duplicate(),
+                        value,
+                    },
+                    None if strict => PropertyWriteOutcome::Failed(PropertyFailure::NoSetter),
+                    None => PropertyWriteOutcome::Complete,
+                });
+            }
+        }
+    }
+    if let Some(inherited) = inherited_property(runtime, prototype, &key)? {
+        match inherited {
+            OwnProperty::Data { layout, .. } if layout.writable() != Some(true) => {
+                return Ok(if strict {
+                    PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+                } else {
+                    PropertyWriteOutcome::Complete
+                });
+            }
+            OwnProperty::Data { .. } => {}
+            OwnProperty::Accessor { setter, .. } => {
+                return Ok(match setter {
+                    Some(function) => PropertyWriteOutcome::Setter {
+                        function,
+                        receiver: base.duplicate(),
+                        value,
+                    },
+                    None if strict => PropertyWriteOutcome::Failed(PropertyFailure::NoSetter),
+                    None => PropertyWriteOutcome::Complete,
+                });
+            }
+        }
+    }
+    if !extensible {
+        return Ok(if strict {
+            PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible)
+        } else {
+            PropertyWriteOutcome::Complete
+        });
+    }
+    if let Some(array) = array {
+        let work = runtime.preview_array_define_data_property_work(array)?;
+        execution_budget.charge_instructions(work)?;
+        let outcome = runtime.define_array_data_property(
+            array,
+            key,
+            PropertyLayout::data(true, true, true),
+            value,
+        )?;
+        return Ok(array_define_write_outcome(outcome, strict));
+    }
+    runtime.append_data_property(
+        reference,
+        key,
+        PropertyLayout::data(true, true, true),
+        value,
+    )?;
+    Ok(PropertyWriteOutcome::Complete)
+}
+
+pub(super) fn define_static_property(
+    runtime: &mut Runtime,
+    base: &StoredValue,
+    key: PropertyKey,
+    value: StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<PropertyWriteOutcome, ExecutionError> {
+    let reference = match base {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            return Ok(PropertyWriteOutcome::Failed(PropertyFailure::NotObject));
+        }
+    };
+    if let HeapReference::Object(object) = reference
+        && runtime.is_array_object(object)?
+    {
+        if key.as_atom().and_then(crate::Atom::predefined_atom) == Some(PredefinedAtom::Length) {
+            return Ok(PropertyWriteOutcome::Failed(
+                PropertyFailure::NotConfigurable,
+            ));
+        }
+        let work = runtime.preview_array_define_data_property_work(object)?;
+        execution_budget.charge_instructions(work)?;
+        return Ok(
+            match runtime.define_array_data_property(
+                object,
+                key,
+                PropertyLayout::data(true, true, true),
+                value,
+            )? {
+                ArrayDefineOutcome::Complete => PropertyWriteOutcome::Complete,
+                ArrayDefineOutcome::ReadOnlyLength => {
+                    PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+                }
+                ArrayDefineOutcome::NonExtensible => {
+                    PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible)
+                }
+            },
+        );
+    }
+    let (exists, extensible) = {
+        let record = runtime.object_record(reference)?;
+        (record.own_property(&key), record.is_extensible())
+    };
+    if exists.is_some() {
+        let replaced = runtime
+            .object_record_mut(reference)?
+            .replace_existing_with_data(&key, PropertyLayout::data(true, true, true), value);
+        if replaced.is_none() {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "located own property disappeared before its data definition",
+            }
+            .into());
+        }
+        runtime.collection_pending = true;
+        return Ok(PropertyWriteOutcome::Complete);
+    }
+    if !extensible {
+        return Ok(PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible));
+    }
+    runtime.append_data_property(
+        reference,
+        key,
+        PropertyLayout::data(true, true, true),
+        value,
+    )?;
+    Ok(PropertyWriteOutcome::Complete)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "method naming, descriptor merging, publication, and rollback form one failure-atomic transaction"
+)]
+pub(super) fn define_static_method(
+    runtime: &mut Runtime,
+    base: &StoredValue,
+    key: PropertyKey,
+    name: &JsString,
+    function: FunctionId,
+    kind: DefineMethodKind,
+    enumerable: bool,
+) -> Result<PropertyDefinitionOutcome, ExecutionError> {
+    let reference = match base {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            return Ok(PropertyDefinitionOutcome::Failed(
+                PropertyFailure::NotObject,
+            ));
+        }
+    };
+    if reference == HeapReference::Function(function) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "define_method cannot publish a function onto itself",
+        }
+        .into());
+    }
+    if bytecode_function_is_constructor(runtime, function)? {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "define_method received a constructable function",
+        }
+        .into());
+    }
+
+    let function_name = method_function_name(name, kind)?;
+    let previous_name = preflight_method_function_name(runtime, function)?;
+    let (existing, extensible) = {
+        let record = runtime.object_record(reference)?;
+        (record.own_property(&key), record.is_extensible())
+    };
+    if existing
+        .as_ref()
+        .is_some_and(|property| !property.layout().is_configurable())
+    {
+        return Ok(PropertyDefinitionOutcome::Failed(
+            PropertyFailure::NotConfigurable,
+        ));
+    }
+    if existing.is_none() && !extensible {
+        return Ok(PropertyDefinitionOutcome::Failed(
+            PropertyFailure::NonExtensible,
+        ));
+    }
+    if existing.is_none() {
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            runtime.limits.max_object_properties,
+            runtime.object_properties.saturating_add(1),
+        )?;
+        runtime
+            .object_record_mut(reference)?
+            .try_reserve_data(1)
+            .map_err(|_| ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+    }
+
+    let layout = match kind {
+        DefineMethodKind::Method => PropertyLayout::data(true, enumerable, true),
+        DefineMethodKind::Getter | DefineMethodKind::Setter => {
+            PropertyLayout::accessor(enumerable, true)
+        }
+    };
+    set_preflighted_method_function_name(runtime, function, function_name)?;
+    let definition = (|| -> Result<(), ExecutionError> {
+        if let Some(existing) = existing {
+            let replacement = match kind {
+                DefineMethodKind::Method => runtime
+                    .object_record_mut(reference)?
+                    .replace_existing_with_data(&key, layout, StoredValue::Function(function)),
+                DefineMethodKind::Getter => {
+                    let setter = match existing {
+                        OwnProperty::Accessor { setter, .. } => setter,
+                        OwnProperty::Data { .. } => None,
+                    };
+                    runtime
+                        .object_record_mut(reference)?
+                        .replace_existing_with_accessor(&key, layout, Some(function), setter)
+                }
+                DefineMethodKind::Setter => {
+                    let getter = match existing {
+                        OwnProperty::Accessor { getter, .. } => getter,
+                        OwnProperty::Data { .. } => None,
+                    };
+                    runtime
+                        .object_record_mut(reference)?
+                        .replace_existing_with_accessor(&key, layout, getter, Some(function))
+                }
+            };
+            if replacement.is_none() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "located own property disappeared during define_method",
+                }
+                .into());
+            }
+        } else {
+            match kind {
+                DefineMethodKind::Method => runtime.append_data_property(
+                    reference,
+                    key,
+                    layout,
+                    StoredValue::Function(function),
+                )?,
+                DefineMethodKind::Getter => runtime.append_accessor_property(
+                    reference,
+                    key,
+                    layout,
+                    Some(function),
+                    None,
+                )?,
+                DefineMethodKind::Setter => runtime.append_accessor_property(
+                    reference,
+                    key,
+                    layout,
+                    None,
+                    Some(function),
+                )?,
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = definition {
+        restore_preflighted_method_function_name(runtime, function, previous_name)?;
+        return Err(error);
+    }
+    // The function name is initialized before the target slot becomes
+    // observable. Every fallible target-append resource is preflighted above;
+    // the rollback remains as a defensive transaction boundary.
+    if runtime
+        .object_record(HeapReference::Function(function))?
+        .own_property(&runtime.predefined_property_key(PredefinedAtom::Name))
+        .is_none()
+    {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "defined method lost its initialized name property",
+        }
+        .into());
+    }
+    runtime.collection_pending = true;
+    Ok(PropertyDefinitionOutcome::Complete)
+}
+
+fn method_function_name(
+    name: &JsString,
+    kind: DefineMethodKind,
+) -> Result<JsString, JsStringError> {
+    match kind {
+        DefineMethodKind::Method => Ok(name.clone()),
+        DefineMethodKind::Getter => JsString::from_utf8("get ")?.concat(name),
+        DefineMethodKind::Setter => JsString::from_utf8("set ")?.concat(name),
+    }
+}
+
+fn preflight_method_function_name(
+    runtime: &Runtime,
+    function: FunctionId,
+) -> Result<OwnProperty, ExecutionError> {
+    let key = runtime.predefined_property_key(PredefinedAtom::Name);
+    let property = runtime
+        .object_record(HeapReference::Function(function))?
+        .own_property(&key)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "define_method function has no own name property",
+        })?;
+    match property {
+        OwnProperty::Data { layout, .. } if layout == PropertyLayout::data(false, false, true) => {
+            Ok(property)
+        }
+        OwnProperty::Data { .. } | OwnProperty::Accessor { .. } => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "define_method function has an invalid name descriptor",
+            }
+            .into())
+        }
+    }
+}
+
+fn set_preflighted_method_function_name(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    name: JsString,
+) -> Result<(), ExecutionError> {
+    let key = runtime.predefined_property_key(PredefinedAtom::Name);
+    let replaced = runtime
+        .object_record_mut(HeapReference::Function(function))?
+        .replace_existing_with_data(
+            &key,
+            PropertyLayout::data(false, false, true),
+            StoredValue::String(name),
+        );
+    if replaced.is_none() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "preflighted define_method name property disappeared",
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn restore_preflighted_method_function_name(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    previous: OwnProperty,
+) -> Result<(), ExecutionError> {
+    let key = runtime.predefined_property_key(PredefinedAtom::Name);
+    let restored = runtime
+        .object_record_mut(HeapReference::Function(function))?
+        .restore_existing_property(&key, previous);
+    if restored.is_none() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "preflighted define_method name property disappeared during rollback",
+        }
+        .into());
+    }
+    Ok(())
+}

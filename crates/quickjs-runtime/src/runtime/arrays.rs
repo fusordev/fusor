@@ -1,0 +1,464 @@
+/*
+ * JavaScript runtime and closure ownership derived from QuickJS.
+ *
+ * Copyright (c) 2017-2018 Fabrice Bellard
+ * Copyright (c) 2017-2018 Charlie Gordon
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+//! Array exotic allocation, indexed property definition, and length mutation.
+
+use super::{
+    ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayState, Atom, HeapObject, HeapReference,
+    JsNumber, ObjectId, ObjectRecord, OwnProperty, PredefinedAtom, PropertyKey, PropertyLayout,
+    PropertyLayoutKind, RealmId, Runtime, RuntimeResource, StoredValue, check_execution_limit,
+    stale_heap_reference, usize_to_u64,
+};
+
+impl Runtime {
+    pub(crate) fn allocate_array(
+        &mut self,
+        realm: RealmId,
+        elements: Vec<StoredValue>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let prototype = self.realm_array_prototype(realm)?;
+        self.allocate_array_with_prototype(HeapReference::Object(prototype), elements)
+    }
+
+    pub(crate) fn allocate_array_with_prototype(
+        &mut self,
+        prototype: HeapReference,
+        elements: Vec<StoredValue>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.heap_reference_is_live(prototype) {
+            return Err(stale_heap_reference(prototype).into());
+        }
+        let property_count =
+            elements
+                .len()
+                .checked_add(1)
+                .ok_or(crate::ExecutionError::LimitExceeded {
+                    resource: RuntimeResource::ObjectProperties,
+                    limit: u64::from(u32::MAX).saturating_add(1),
+                    observed: u64::MAX,
+                })?;
+        let length =
+            u32::try_from(elements.len()).map_err(|_| crate::ExecutionError::LimitExceeded {
+                resource: RuntimeResource::ObjectProperties,
+                limit: u64::from(u32::MAX).saturating_add(1),
+                observed: usize_to_u64(property_count),
+            })?;
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties
+                .saturating_add(usize_to_u64(property_count)),
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+
+        let mut record = ObjectRecord::empty(Some(prototype));
+        record.try_reserve_data(property_count).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: property_count,
+            }
+        })?;
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::Length),
+                PropertyLayout::data(true, false, false),
+                StoredValue::Number(JsNumber::from_f64(f64::from(length))),
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: property_count,
+            })?;
+        record.append_dense_array_data(elements).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: property_count,
+            }
+        })?;
+        let object = self
+            .objects
+            .try_insert(HeapObject::array(record, ArrayState::new(length)))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.object_properties = self
+            .object_properties
+            .saturating_add(usize_to_u64(property_count));
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    pub(crate) fn allocate_sparse_array_with_prototype(
+        &mut self,
+        prototype: HeapReference,
+        length: u32,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.heap_reference_is_live(prototype) {
+            return Err(stale_heap_reference(prototype).into());
+        }
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties.saturating_add(1),
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+
+        let mut record = ObjectRecord::empty(Some(prototype));
+        record
+            .try_reserve_data(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::Length),
+                PropertyLayout::data(true, false, false),
+                StoredValue::Number(JsNumber::from_f64(f64::from(length))),
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        let object = self
+            .objects
+            .try_insert(HeapObject::array(record, ArrayState::new(length)))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.object_properties = self.object_properties.saturating_add(1);
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    pub(crate) fn is_array_object(&self, object: ObjectId) -> Result<bool, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .map(|object| object.array_state().is_some())
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+    }
+
+    pub(crate) fn array_length(&self, object: ObjectId) -> Result<Option<u32>, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .map(|object| object.array_state().copied().map(ArrayState::length))
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+    }
+
+    pub(crate) fn array_own_property(
+        &self,
+        object: ObjectId,
+        key: &PropertyKey,
+    ) -> Result<Option<OwnProperty>, crate::EngineFault> {
+        let object = self
+            .objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        if object.array_state().is_none() {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "array own-property lookup received a non-array object",
+            });
+        }
+        Ok(object.record.own_property(key))
+    }
+
+    pub(crate) fn preview_array_define_data_property_work(
+        &self,
+        object: ObjectId,
+    ) -> Result<u64, crate::ExecutionError> {
+        let object = self
+            .objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "array object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        if object.array_state().is_none() {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "array definition work preview received a non-array object",
+            }
+            .into());
+        }
+        Ok(usize_to_u64(object.record.property_count())
+            .saturating_mul(4)
+            .saturating_add(4))
+    }
+
+    pub(crate) fn preview_array_length_write_work(
+        &self,
+        object: ObjectId,
+        _requested_length: u32,
+    ) -> Result<u64, crate::ExecutionError> {
+        let object = self
+            .objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "array object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        if object.array_state().is_none() {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "array length work preview received a non-array object",
+            }
+            .into());
+        }
+        // The mutation performs at most four linear shape passes: length
+        // descriptor lookup, blocker discovery, stable compaction, and length
+        // slot update. Return a conservative bound before any mutation.
+        Ok(usize_to_u64(object.record.property_count())
+            .saturating_mul(4)
+            .saturating_add(4))
+    }
+
+    pub(crate) fn define_array_data_property(
+        &mut self,
+        object: ObjectId,
+        key: PropertyKey,
+        layout: PropertyLayout,
+        value: StoredValue,
+    ) -> Result<ArrayDefineOutcome, crate::ExecutionError> {
+        if layout.kind() != PropertyLayoutKind::Data {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "array data-property definition received an accessor layout",
+            }
+            .into());
+        }
+        if key.as_atom().and_then(Atom::predefined_atom) == Some(PredefinedAtom::Length) {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "array length definition bypassed numeric length validation",
+            }
+            .into());
+        }
+        let (length, exists, extensible, length_writable) = {
+            let array = self
+                .objects
+                .get(object)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "array object",
+                    index: object.index(),
+                    generation: object.generation(),
+                })?;
+            let length = array
+                .array_state()
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "array data-property definition received a non-array object",
+                })?
+                .length();
+            let length_property = array
+                .record
+                .own_property(&self.predefined_property_key(PredefinedAtom::Length))
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "array object has no own length property",
+                })?;
+            (
+                length,
+                array.record.own_property(&key).is_some(),
+                array.record.is_extensible(),
+                length_property.layout().writable() == Some(true),
+            )
+        };
+        let extended_length = key
+            .as_index()
+            .and_then(|index| (index.get() >= length).then_some(index.get().saturating_add(1)));
+        if extended_length.is_some() && !length_writable {
+            return Ok(ArrayDefineOutcome::ReadOnlyLength);
+        }
+        if exists {
+            let replaced = self
+                .objects
+                .get_mut(object)
+                .expect("live array remains present")
+                .record
+                .replace_existing_with_data(&key, layout, value);
+            if replaced.is_none() {
+                return Err(crate::EngineFault::RuntimeInvariant {
+                    message: "located array property disappeared before its data definition",
+                }
+                .into());
+            }
+            if let Some(length) = extended_length {
+                self.update_array_length(object, length)?;
+            }
+            self.collection_pending = true;
+            return Ok(ArrayDefineOutcome::Complete);
+        }
+        if !extensible {
+            return Ok(ArrayDefineOutcome::NonExtensible);
+        }
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties.saturating_add(1),
+        )?;
+        self.objects
+            .get_mut(object)
+            .expect("live array remains present")
+            .record
+            .try_reserve_data(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        self.objects
+            .get_mut(object)
+            .expect("live array remains present")
+            .record
+            .append_data(key, layout, value)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        if let Some(length) = extended_length {
+            self.update_array_length(object, length)?;
+        }
+        self.object_properties = self.object_properties.saturating_add(1);
+        self.collection_pending = true;
+        Ok(ArrayDefineOutcome::Complete)
+    }
+
+    pub(crate) fn set_array_length(
+        &mut self,
+        object: ObjectId,
+        requested_length: u32,
+    ) -> Result<ArrayLengthWriteOutcome, crate::EngineFault> {
+        let length_key = self.predefined_property_key(PredefinedAtom::Length);
+        let (current_length, writable) = {
+            let array = self
+                .objects
+                .get(object)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "array object",
+                    index: object.index(),
+                    generation: object.generation(),
+                })?;
+            let current_length = array
+                .array_state()
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "array length write received a non-array object",
+                })?
+                .length();
+            let property = array.record.own_property(&length_key).ok_or(
+                crate::EngineFault::RuntimeInvariant {
+                    message: "array object has no own length property",
+                },
+            )?;
+            (current_length, property.layout().writable() == Some(true))
+        };
+        if !writable {
+            return Ok(ArrayLengthWriteOutcome::ReadOnly);
+        }
+        if requested_length >= current_length {
+            self.update_array_length(object, requested_length)?;
+            self.collection_pending = true;
+            return Ok(ArrayLengthWriteOutcome::Complete);
+        }
+
+        let truncation = self
+            .objects
+            .get_mut(object)
+            .expect("live array remains present")
+            .record
+            .truncate_array_indices(requested_length);
+        self.object_properties = self
+            .object_properties
+            .saturating_sub(usize_to_u64(truncation.removed()));
+        self.update_array_length(object, truncation.final_length())?;
+        self.collection_pending = true;
+        Ok(match truncation.blocked_index() {
+            Some(index) => ArrayLengthWriteOutcome::BlockedByNonConfigurable {
+                index,
+                final_length: truncation.final_length(),
+            },
+            None => ArrayLengthWriteOutcome::Complete,
+        })
+    }
+
+    fn update_array_length(
+        &mut self,
+        object: ObjectId,
+        length: u32,
+    ) -> Result<(), crate::EngineFault> {
+        let length_key = self.predefined_property_key(PredefinedAtom::Length);
+        let array = self
+            .objects
+            .get_mut(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "array object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        let replaced = array.record.replace_existing_data(
+            &length_key,
+            StoredValue::Number(JsNumber::from_f64(f64::from(length))),
+        );
+        if !replaced {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "array object lost its own data length property",
+            });
+        }
+        let state = array
+            .array_state_mut()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "array length update received a non-array object",
+            })?;
+        state.replace_length(length);
+        Ok(())
+    }
+}

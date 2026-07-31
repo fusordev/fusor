@@ -1,0 +1,1119 @@
+/*
+ * JavaScript bytecode execution and closure semantics derived from QuickJS.
+ *
+ * Copyright (c) 2017-2018 Fabrice Bellard
+ * Copyright (c) 2017-2018 Charlie Gordon
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+//! Native intrinsic dispatch and resumable Function.prototype.apply execution.
+
+#[allow(
+    clippy::wildcard_imports,
+    reason = "this private VM sibling participates in the shared interpreter implementation namespace"
+)]
+use super::*;
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing a Frame would introduce an unaccounted infallible allocation in the interpreter path"
+)]
+pub(super) enum NativeDispatch {
+    Immediate(StoredValue),
+    Pair(StoredValue, StoredValue),
+    Frame(Frame),
+    Call(NativeCall),
+}
+
+pub(super) enum NativeFailure {
+    Abrupt(PendingException),
+    AbruptAfterTransient(PendingException),
+    Execution(ExecutionError),
+}
+
+impl From<ExecutionError> for NativeFailure {
+    fn from(error: ExecutionError) -> Self {
+        Self::Execution(error)
+    }
+}
+
+impl From<JsStringError> for NativeFailure {
+    fn from(error: JsStringError) -> Self {
+        Self::Execution(error.into())
+    }
+}
+
+impl From<crate::AtomError> for NativeFailure {
+    fn from(error: crate::AtomError) -> Self {
+        Self::Execution(error.into())
+    }
+}
+
+impl From<EngineFault> for NativeFailure {
+    fn from(error: EngineFault) -> Self {
+        Self::Execution(error.into())
+    }
+}
+
+pub(super) fn native_continuation_values(continuations: &[NativeContinuation]) -> u64 {
+    continuations.iter().fold(0_u64, |total, continuation| {
+        total.saturating_add(continuation.retained_values())
+    })
+}
+
+pub(super) fn active_execution_frames(frames: &[Frame]) -> usize {
+    frames.iter().fold(frames.len(), |total, frame| {
+        total.saturating_add(frame.native_returns.len())
+    })
+}
+
+fn attach_native_continuations(
+    frame: &mut Frame,
+    mut outer: Vec<NativeContinuation>,
+) -> Result<(), NativeFailure> {
+    if outer.is_empty() {
+        return Ok(());
+    }
+    // Every frame returned by an unresolved native dispatch is freshly
+    // created. Continuations are attached exactly once at the resolver
+    // boundary, so this reservation is always for zero additional elements
+    // and cannot fail after a dynamic root commits its environment.
+    debug_assert!(frame.native_returns.is_empty());
+    let retained_values = native_continuation_values(&outer);
+    outer.try_reserve(frame.native_returns.len()).map_err(|_| {
+        ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: frame.native_returns.len(),
+        }
+    })?;
+    outer.append(&mut frame.native_returns);
+    frame.native_returns = outer;
+    frame.reserved_values = frame.reserved_values.saturating_add(retained_values);
+    Ok(())
+}
+
+fn prepend_native_continuations(
+    call: &mut NativeCall,
+    mut outer: Vec<NativeContinuation>,
+) -> Result<(), NativeFailure> {
+    if outer.is_empty() {
+        return Ok(());
+    }
+    outer
+        .try_reserve(call.continuations.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: call.continuations.len(),
+        })?;
+    outer.append(&mut call.continuations);
+    call.continuations = outer;
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "resuming a native abstract operation needs the same explicit execution authority and budgets as its originating call"
+)]
+pub(super) fn resume_native_continuations(
+    runtime: &mut Runtime,
+    mut continuations: Vec<NativeContinuation>,
+    mut value: StoredValue,
+    return_to: Option<CallReturn>,
+    active_root_frames: &[Frame],
+    active_frames: usize,
+    active_frame_values: u64,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    while let Some(continuation) = continuations.pop() {
+        let suspended_frames = active_frames.saturating_add(continuations.len());
+        let suspended_values =
+            active_frame_values.saturating_add(native_continuation_values(&continuations));
+        let dispatch = match continuation {
+            NativeContinuation::FunctionSource(state) => {
+                let Some(compiler) = compiler else {
+                    return Err(NativeFailure::Execution(
+                        DynamicFunctionCompileFailure::Engine {
+                            source: Arc::new(DynamicFunctionServiceUnavailable),
+                        }
+                        .into(),
+                    ));
+                };
+                advance_function_source_conversion(
+                    runtime,
+                    state,
+                    Some(value),
+                    return_to,
+                    suspended_frames,
+                    suspended_values,
+                    compiler,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::FunctionApply(state) => {
+                advance_function_apply(runtime, state, Some(value), return_to, execution_budget)?
+            }
+            NativeContinuation::PropertyKey(state) => advance_property_key_conversion(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::OperatorPrimitive(state) => advance_operator_primitive_conversion(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::IntrinsicGet(IntrinsicGetContinuation::ArrayConstructor {
+                realm,
+                new_target,
+                arguments,
+                origin,
+            }) => finish_array_constructor_after_prototype_get(
+                runtime,
+                realm,
+                new_target,
+                arguments,
+                origin,
+                &value,
+                execution_budget,
+            )?,
+            NativeContinuation::IntrinsicGet(state) => {
+                finish_intrinsic_get(runtime, state, value, active_root_frames, &continuations)?
+            }
+            NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
+        };
+        match dispatch {
+            NativeDispatch::Immediate(next) => value = next,
+            pair @ NativeDispatch::Pair(_, _) => {
+                if continuations.is_empty() {
+                    return Ok(pair);
+                }
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "operator value pair escaped into an outer native continuation",
+                }
+                .into());
+            }
+            NativeDispatch::Frame(mut frame) => {
+                attach_native_continuations(&mut frame, continuations)?;
+                return Ok(NativeDispatch::Frame(frame));
+            }
+            NativeDispatch::Call(mut call) => {
+                prepend_native_continuations(&mut call, continuations)?;
+                return Ok(NativeDispatch::Call(call));
+            }
+        }
+    }
+    Ok(NativeDispatch::Immediate(value))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the iterative native-to-bytecode transition carries explicit frame and dynamic-compilation budgets"
+)]
+pub(super) fn resolve_native_dispatch(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
+    active_root_frames: &[Frame],
+    active_frames: usize,
+    active_frame_values: u64,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut saw_temporary_receiver = false;
+    let result = resolve_native_dispatch_inner(
+        runtime,
+        dispatch,
+        active_root_frames,
+        active_frames,
+        active_frame_values,
+        compiler,
+        execution_budget,
+        &mut saw_temporary_receiver,
+    );
+    match result {
+        Err(NativeFailure::Execution(error)) => {
+            if saw_temporary_receiver && runtime.collection_pending {
+                let _ = collect_cycles_with_execution_roots(runtime, active_root_frames, &[], &[]);
+            }
+            Err(NativeFailure::Execution(error))
+        }
+        Err(NativeFailure::Abrupt(pending)) if saw_temporary_receiver => {
+            Err(NativeFailure::AbruptAfterTransient(pending))
+        }
+        result => result,
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the iterative native-to-bytecode transition carries explicit frame and dynamic-compilation budgets"
+)]
+fn resolve_native_dispatch_inner(
+    runtime: &mut Runtime,
+    mut dispatch: NativeDispatch,
+    active_root_frames: &[Frame],
+    active_frames: usize,
+    active_frame_values: u64,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    execution_budget: &mut ExecutionBudget,
+    saw_temporary_receiver: &mut bool,
+) -> Result<NativeDispatch, NativeFailure> {
+    loop {
+        let NativeDispatch::Call(call) = dispatch else {
+            return Ok(dispatch);
+        };
+        *saw_temporary_receiver |=
+            native_continuations_have_temporary_receiver(&call.continuations);
+        let suspended_frames = active_frames.saturating_add(call.continuations.len());
+        // Call inputs are a synchronous transfer buffer, not values reserved
+        // by an active frame. Persistent native state lives in continuations
+        // and is charged here; a bytecode callee is charged by `plan_frame`.
+        let suspended_values =
+            active_frame_values.saturating_add(native_continuation_values(&call.continuations));
+        check_execution_limit(
+            RuntimeResource::Frames,
+            u64::from(runtime.limits.max_active_frames),
+            usize_to_u64(suspended_frames),
+        )?;
+        check_execution_limit(
+            RuntimeResource::FrameValues,
+            runtime.limits.max_active_frame_values,
+            suspended_values,
+        )?;
+        let native = runtime
+            .functions
+            .get(call.function)
+            .ok_or(EngineFault::StaleHeapEdge {
+                edge: "function",
+                index: call.function.index(),
+                generation: call.function.generation(),
+            })?
+            .native()
+            .copied();
+        if let Some(native) = native {
+            let outcome = dispatch_native_call(
+                runtime,
+                call.function,
+                native,
+                CallInputs {
+                    receiver: call.receiver,
+                    arguments: call.arguments,
+                    new_target: None,
+                },
+                call.return_to,
+                Some(call.origin),
+                suspended_frames,
+                suspended_values,
+                compiler,
+                execution_budget,
+            )?;
+            dispatch = match outcome {
+                NativeDispatch::Immediate(value) => resume_native_continuations(
+                    runtime,
+                    call.continuations,
+                    value,
+                    call.return_to,
+                    active_root_frames,
+                    active_frames,
+                    active_frame_values,
+                    compiler,
+                    execution_budget,
+                )?,
+                NativeDispatch::Pair(_, _) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "native function produced an operator value pair",
+                    }
+                    .into());
+                }
+                NativeDispatch::Frame(mut frame) => {
+                    attach_native_continuations(&mut frame, call.continuations)?;
+                    NativeDispatch::Frame(frame)
+                }
+                NativeDispatch::Call(mut inner) => {
+                    prepend_native_continuations(&mut inner, call.continuations)?;
+                    NativeDispatch::Call(inner)
+                }
+            };
+            continue;
+        }
+
+        let plan = plan_frame(runtime, call.function, suspended_frames, suspended_values)
+            .map_err(NativeFailure::Execution)?;
+        let mut frame = create_frame(
+            runtime,
+            plan,
+            call.receiver,
+            FrameArguments::Owned(call.arguments),
+            call.return_to,
+            None,
+        )
+        .map_err(NativeFailure::Execution)?;
+        attach_native_continuations(&mut frame, call.continuations)?;
+        return Ok(NativeDispatch::Frame(frame));
+    }
+}
+
+#[derive(Debug)]
+struct DynamicFunctionServiceUnavailable;
+
+impl fmt::Display for DynamicFunctionServiceUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("no ordinary dynamic-Function compiler was supplied for this execution")
+    }
+}
+
+impl Error for DynamicFunctionServiceUnavailable {}
+
+pub(super) fn execute_native_entry(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    native: NativeFunction,
+    arguments: Vec<StoredValue>,
+    limits: ExecutionLimits,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+) -> Result<StoredValue, ExecutionError> {
+    let mut execution_budget = ExecutionBudget::new(limits);
+    let mut prepared_frames = Vec::new();
+    prepared_frames
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    let inputs = CallInputs {
+        receiver: StoredValue::Undefined,
+        arguments: CallArguments::from_values(arguments),
+        new_target: None,
+    };
+    let dispatch = dispatch_native_call(
+        runtime,
+        function,
+        native,
+        inputs,
+        None,
+        None,
+        0,
+        0,
+        compiler,
+        &mut execution_budget,
+    );
+    let dispatch = match dispatch {
+        Ok(dispatch) => resolve_native_dispatch(
+            runtime,
+            dispatch,
+            &prepared_frames,
+            0,
+            0,
+            compiler,
+            &mut execution_budget,
+        ),
+        Err(error) => Err(error),
+    };
+    match dispatch {
+        Ok(NativeDispatch::Immediate(value)) => Ok(value),
+        Ok(NativeDispatch::Pair(_, _)) => Err(EngineFault::RuntimeInvariant {
+            message: "host native entry returned an operator value pair",
+        }
+        .into()),
+        Ok(NativeDispatch::Frame(frame)) => {
+            prepared_frames.push(frame);
+            execute_prepared_frames_with_budget(
+                runtime,
+                prepared_frames,
+                compiler,
+                None,
+                &mut execution_budget,
+            )
+        }
+        Ok(NativeDispatch::Call(_)) => Err(EngineFault::RuntimeInvariant {
+            message: "native dispatch resolver returned an unresolved call",
+        }
+        .into()),
+        Err(NativeFailure::Execution(error)) => Err(error),
+        Err(NativeFailure::Abrupt(pending)) => {
+            let exception = finish_exception(runtime, pending, Vec::new())?;
+            Err(ExecutionError::Exception(exception))
+        }
+        Err(NativeFailure::AbruptAfterTransient(pending)) => {
+            let exception = match finish_exception(runtime, pending, Vec::new()) {
+                Ok(exception) => exception,
+                Err(error) => {
+                    if runtime.collection_pending {
+                        let _ = runtime.collect_cycles();
+                    }
+                    return Err(error);
+                }
+            };
+            if runtime.collection_pending {
+                let _ = runtime.collect_cycles();
+            }
+            Err(ExecutionError::Exception(exception))
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "native invocation, compilation, installation, and rollback remain one explicit audited boundary"
+)]
+pub(super) fn dispatch_native_call(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    native: NativeFunction,
+    inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+    active_frames: usize,
+    active_frame_values: u64,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if inputs.new_target.is_some() && !native.kind.is_constructor() {
+        let Some(origin) = origin else {
+            return Err(NativeFailure::Execution(
+                EngineFault::RuntimeInvariant {
+                    message: "host construction of a nonconstructor native function is not implemented",
+                }
+                .into(),
+            ));
+        };
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm: native.realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: function_not_constructor_message(runtime, function)?,
+            },
+            origin,
+        }));
+    }
+    match native.kind {
+        NativeFunctionKind::FunctionPrototype => {
+            Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+        }
+        NativeFunctionKind::FunctionPrototypeApply => begin_function_apply(
+            runtime,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            active_frames,
+            active_frame_values,
+            execution_budget,
+        ),
+        NativeFunctionKind::FunctionPrototypeCall => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            let StoredValue::Function(function) = inputs.receiver else {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    realm: native.realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("not a function")?,
+                    },
+                    origin,
+                }));
+            };
+            let mut arguments = inputs.arguments;
+            let receiver = arguments.take_first_or_undefined();
+            let mut continuations = Vec::new();
+            continuations
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::Frames,
+                    additional: 1,
+                })?;
+            continuations.push(NativeContinuation::FunctionCall);
+            Ok(NativeDispatch::Call(NativeCall {
+                function,
+                receiver,
+                arguments,
+                return_to,
+                origin,
+                continuations,
+            }))
+        }
+        NativeFunctionKind::OrdinaryFunctionConstructor => {
+            let Some(compiler) = compiler else {
+                return Err(NativeFailure::Execution(
+                    DynamicFunctionCompileFailure::Engine {
+                        source: Arc::new(DynamicFunctionServiceUnavailable),
+                    }
+                    .into(),
+                ));
+            };
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            begin_function_source_conversion(
+                runtime,
+                native,
+                inputs.arguments.into_remaining_values(),
+                inputs.new_target,
+                return_to,
+                origin,
+                active_frames,
+                active_frame_values,
+                compiler,
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectPrototypeToString => begin_object_prototype_to_string(
+            runtime,
+            native.realm,
+            inputs.receiver,
+            return_to,
+            origin,
+        ),
+        NativeFunctionKind::ObjectPrototypeValueOf => match inputs.receiver {
+            value @ (StoredValue::Function(_) | StoredValue::Object(_)) => {
+                Ok(NativeDispatch::Immediate(value))
+            }
+            StoredValue::Boolean(value) => {
+                let object = runtime.allocate_boxed_boolean(native.realm, value)?;
+                Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+            }
+            StoredValue::Number(value) => {
+                let object = runtime.allocate_boxed_number(native.realm, value)?;
+                Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+            }
+            StoredValue::String(value) => {
+                let object = runtime.allocate_boxed_string(native.realm, value)?;
+                Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+            }
+            StoredValue::Undefined | StoredValue::Null => {
+                let Some(origin) = origin else {
+                    return Err(NativeFailure::Execution(
+                        EngineFault::RuntimeInvariant {
+                            message: "host Object.prototype.valueOf error has no source origin",
+                        }
+                        .into(),
+                    ));
+                };
+                Err(NativeFailure::Abrupt(PendingException {
+                    realm: native.realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("cannot convert to object")?,
+                    },
+                    origin,
+                }))
+            }
+            StoredValue::Symbol(_) => Err(NativeFailure::Execution(
+                EngineFault::RuntimeInvariant {
+                    message: "Object.prototype.valueOf Symbol boxing is not implemented",
+                }
+                .into(),
+            )),
+        },
+        NativeFunctionKind::BooleanConstructor => {
+            let mut arguments = inputs.arguments;
+            let value = arguments.take_first_or_undefined().is_truthy();
+            let Some(new_target) = inputs.new_target else {
+                return Ok(NativeDispatch::Immediate(StoredValue::Boolean(value)));
+            };
+            begin_boolean_constructor_wrapper(runtime, new_target, value, return_to, origin)
+        }
+        NativeFunctionKind::BooleanPrototypeToString => {
+            let value =
+                boolean_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(if value { "true" } else { "false" })?,
+            )))
+        }
+        NativeFunctionKind::BooleanPrototypeValueOf => {
+            let value =
+                boolean_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(value)))
+        }
+        NativeFunctionKind::NumberConstructor => {
+            let mut arguments = inputs.arguments;
+            let Some(argument) = arguments.take_first() else {
+                let value = JsNumber::from_i32(0);
+                return inputs.new_target.map_or_else(
+                    || Ok(NativeDispatch::Immediate(StoredValue::Number(value))),
+                    |new_target| {
+                        begin_number_constructor_wrapper(
+                            runtime, new_target, value, return_to, origin,
+                        )
+                    },
+                );
+            };
+            begin_operator_primitive_conversion(
+                runtime,
+                argument,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::NumberIntrinsic {
+                    new_target: inputs.new_target,
+                },
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::NumberPrototypeToString => {
+            let number =
+                number_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
+            let mut arguments = inputs.arguments;
+            match arguments.take_first() {
+                None | Some(StoredValue::Undefined) => Ok(NativeDispatch::Immediate(
+                    StoredValue::String(number.to_radix_string(10)?),
+                )),
+                Some(radix) => begin_operator_primitive_conversion(
+                    runtime,
+                    radix,
+                    OperatorPrimitiveHint::Number,
+                    OperatorPrimitiveTarget::NumberToString { number },
+                    native.realm,
+                    return_to,
+                    origin.unwrap_or_else(native_function_host_origin),
+                    execution_budget,
+                ),
+            }
+        }
+        NativeFunctionKind::NumberPrototypeValueOf => {
+            let value =
+                number_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
+            Ok(NativeDispatch::Immediate(StoredValue::Number(value)))
+        }
+        NativeFunctionKind::StringConstructor => {
+            let mut arguments = inputs.arguments;
+            let Some(argument) = arguments.take_first() else {
+                let value = JsString::empty();
+                return if let Some(new_target) = inputs.new_target {
+                    begin_string_constructor_wrapper(runtime, new_target, value, return_to, origin)
+                } else {
+                    Ok(NativeDispatch::Immediate(StoredValue::String(value)))
+                };
+            };
+            if inputs.new_target.is_none()
+                && let StoredValue::Symbol(symbol) = &argument
+            {
+                return Ok(NativeDispatch::Immediate(StoredValue::String(
+                    symbol_descriptive_string(symbol)?,
+                )));
+            }
+            begin_operator_primitive_conversion(
+                runtime,
+                argument,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::StringIntrinsic {
+                    new_target: inputs.new_target,
+                },
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::StringPrototypeToString
+        | NativeFunctionKind::StringPrototypeValueOf => {
+            let value =
+                string_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
+            Ok(NativeDispatch::Immediate(StoredValue::String(value)))
+        }
+        NativeFunctionKind::ArrayConstructor => {
+            let arguments = inputs.arguments.into_remaining_values();
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            if let Some(new_target) = inputs.new_target {
+                begin_array_constructor_prototype_get(
+                    runtime,
+                    native.realm,
+                    new_target,
+                    arguments,
+                    return_to,
+                    origin,
+                    execution_budget,
+                )
+            } else {
+                let prototype = HeapReference::Object(runtime.realm_array_prototype(native.realm)?);
+                finish_array_constructor(
+                    runtime,
+                    native.realm,
+                    prototype,
+                    arguments,
+                    origin,
+                    execution_budget,
+                )
+            }
+        }
+        NativeFunctionKind::FunctionPrototypeToString => {
+            let StoredValue::Function(function) = inputs.receiver else {
+                let Some(origin) = origin else {
+                    return Err(NativeFailure::Execution(
+                        EngineFault::RuntimeInvariant {
+                            message: "host Function.prototype.toString error has no source origin",
+                        }
+                        .into(),
+                    ));
+                };
+                return Err(NativeFailure::Abrupt(PendingException {
+                    realm: native.realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("not a function")?,
+                    },
+                    origin,
+                }));
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                function_to_string(runtime, function, native.realm, origin.as_ref())?,
+            )))
+        }
+    }
+}
+
+const MAX_FUNCTION_APPLY_ARGUMENTS: u32 = 65_534;
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "apply admission keeps callable validation, retained-value preflight, and native work budget explicit"
+)]
+fn begin_function_apply(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    active_frames: usize,
+    active_frame_values: u64,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(target) = inputs.receiver else {
+        return Err(function_apply_exception(
+            realm,
+            ExceptionKind::TypeError,
+            "not a function",
+            origin,
+        )?);
+    };
+    let mut supplied = inputs.arguments;
+    let receiver = supplied.take_first_or_undefined();
+    let array_like = supplied.take_first_or_undefined();
+    if matches!(array_like, StoredValue::Undefined | StoredValue::Null) {
+        return function_apply_target_call(target, receiver, Vec::new(), return_to, origin);
+    }
+    if !matches!(
+        array_like,
+        StoredValue::Function(_) | StoredValue::Object(_)
+    ) {
+        return Err(function_apply_exception(
+            realm,
+            ExceptionKind::TypeError,
+            "not a object",
+            origin,
+        )?);
+    }
+
+    check_execution_limit(
+        RuntimeResource::Frames,
+        u64::from(runtime.limits.max_active_frames),
+        usize_to_u64(active_frames).saturating_add(1),
+    )?;
+    // The fourth retained slot covers an object-valued length while its
+    // Number-hint ToPrimitive state is suspended.
+    check_execution_limit(
+        RuntimeResource::FrameValues,
+        runtime.limits.max_active_frame_values,
+        active_frame_values.saturating_add(4),
+    )?;
+    let state = FunctionApplyContinuation {
+        target,
+        receiver,
+        array_like,
+        realm,
+        length: None,
+        next_index: 0,
+        arguments: Vec::new(),
+        stage: FunctionApplyStage::AwaitLength,
+        active_frame_values,
+        origin,
+    };
+    let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
+    charge_heap_property_lookup(runtime, &state.array_like, execution_budget)?;
+    match read_static_property(runtime, realm, &state.array_like, &length_key)? {
+        PropertyReadOutcome::Value(value) => begin_function_apply_length_conversion(
+            runtime,
+            state,
+            value,
+            return_to,
+            execution_budget,
+        ),
+        PropertyReadOutcome::Getter { function, receiver } => {
+            function_apply_getter_call(state, function, receiver, return_to)
+        }
+        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
+            message: "object-valued apply argument list failed its length read",
+        }
+        .into()),
+    }
+}
+
+fn advance_function_apply(
+    runtime: &mut Runtime,
+    mut state: FunctionApplyContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(value) = completion else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "apply continuation resumed without a getter completion",
+        }
+        .into());
+    };
+    match state.stage {
+        FunctionApplyStage::AwaitLength => begin_function_apply_length_conversion(
+            runtime,
+            state,
+            value,
+            return_to,
+            execution_budget,
+        ),
+        FunctionApplyStage::AwaitIndex => {
+            let length = state.length.ok_or(EngineFault::RuntimeInvariant {
+                message: "apply index continuation has no fixed length",
+            })?;
+            if state.next_index >= length {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "apply index continuation resumed after its fixed length",
+                }
+                .into());
+            }
+            state.arguments.push(value);
+            state.next_index = state.next_index.saturating_add(1);
+            advance_function_apply_indices(runtime, state, return_to, execution_budget)
+        }
+    }
+}
+
+fn begin_function_apply_length_conversion(
+    runtime: &mut Runtime,
+    state: FunctionApplyContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let realm = state.realm;
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::FunctionApplyLength(state),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "ToLength is clamped and checked against the 65,534 QuickJS call-argument ceiling before conversion"
+)]
+pub(super) fn finish_function_apply_length(
+    runtime: &mut Runtime,
+    mut state: FunctionApplyContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let number = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+    let integer = if number.is_nan() || number <= 0.0 {
+        0.0
+    } else if number.is_infinite() {
+        number
+    } else {
+        number.floor()
+    };
+    if integer > f64::from(MAX_FUNCTION_APPLY_ARGUMENTS) {
+        return Err(function_apply_exception(
+            state.realm,
+            ExceptionKind::RangeError,
+            "too many arguments in function call (only 65534 allowed)",
+            state.origin,
+        )?);
+    }
+    let length = integer as u32;
+    check_execution_limit(
+        RuntimeResource::FrameValues,
+        runtime.limits.max_active_frame_values,
+        state
+            .active_frame_values
+            .saturating_add(3)
+            .saturating_add(u64::from(length)),
+    )?;
+    state
+        .arguments
+        .try_reserve_exact(length as usize)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: length as usize,
+        })?;
+    // Charge the complete fixed scan before the first observable indexed Get.
+    execution_budget.charge_instructions(u64::from(length))?;
+    state.length = Some(length);
+    state.stage = FunctionApplyStage::AwaitIndex;
+    advance_function_apply_indices(runtime, state, return_to, execution_budget)
+}
+
+fn advance_function_apply_indices(
+    runtime: &mut Runtime,
+    mut state: FunctionApplyContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let length = state.length.ok_or(EngineFault::RuntimeInvariant {
+        message: "apply argument scan has no fixed length",
+    })?;
+    while state.next_index < length {
+        let index = ArrayIndex::new(state.next_index).ok_or(EngineFault::RuntimeInvariant {
+            message: "apply argument index exceeds the array-index domain",
+        })?;
+        let key = PropertyKey::from_index(index);
+        charge_heap_property_lookup(runtime, &state.array_like, execution_budget)?;
+        match read_static_property(runtime, state.realm, &state.array_like, &key)? {
+            PropertyReadOutcome::Value(value) => {
+                state.arguments.push(value);
+                state.next_index = state.next_index.saturating_add(1);
+            }
+            PropertyReadOutcome::Getter { function, receiver } => {
+                state.stage = FunctionApplyStage::AwaitIndex;
+                return function_apply_getter_call(state, function, receiver, return_to);
+            }
+            PropertyReadOutcome::Failed(_) => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "object-valued apply argument list failed an indexed read",
+                }
+                .into());
+            }
+        }
+    }
+    function_apply_target_call(
+        state.target,
+        state.receiver,
+        state.arguments,
+        return_to,
+        state.origin,
+    )
+}
+
+pub(super) fn charge_heap_property_lookup(
+    runtime: &Runtime,
+    base: &StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    let mut current = Some(base.heap_reference().ok_or(EngineFault::RuntimeInvariant {
+        message: "apply property lookup base has no heap reference",
+    })?);
+    let mut remaining = runtime
+        .functions
+        .len()
+        .saturating_add(runtime.objects.len())
+        .saturating_add(1);
+    while let Some(reference) = current {
+        if remaining == 0 {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ordinary prototype chain contains a cycle",
+            }
+            .into());
+        }
+        remaining -= 1;
+        let record = runtime.object_record(reference)?;
+        // `ObjectRecord::own_property` is a linear shape scan. Charge its
+        // complete upper bound, plus the prototype transition, before the
+        // observable Get so a hostile dense array-like cannot hide O(n²)
+        // native work behind O(n) fuel.
+        execution_budget
+            .charge_instructions(usize_to_u64(record.property_count()).saturating_add(1))?;
+        current = record.prototype();
+    }
+    Ok(())
+}
+
+fn function_apply_getter_call(
+    state: FunctionApplyContinuation,
+    function: FunctionId,
+    receiver: StoredValue,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::FunctionApply(state));
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::empty(),
+        return_to,
+        origin,
+        continuations,
+    }))
+}
+
+fn function_apply_target_call(
+    function: FunctionId,
+    receiver: StoredValue,
+    arguments: Vec<StoredValue>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::FunctionCall);
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::from_values(arguments),
+        return_to,
+        origin,
+        continuations,
+    }))
+}
+
+fn function_apply_exception(
+    realm: RealmId,
+    kind: ExceptionKind,
+    message: &str,
+    origin: JsStackFrame,
+) -> Result<NativeFailure, JsStringError> {
+    Ok(NativeFailure::Abrupt(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind,
+            message: JsString::from_utf8(message)?,
+        },
+        origin,
+    }))
+}

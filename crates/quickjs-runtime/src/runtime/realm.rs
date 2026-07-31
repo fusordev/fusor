@@ -1,0 +1,1071 @@
+/*
+ * JavaScript runtime and closure ownership derived from QuickJS.
+ *
+ * Copyright (c) 2017-2018 Fabrice Bellard
+ * Copyright (c) 2017-2018 Charlie Gordon
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+//! Runtime construction and failure-atomic realm intrinsic graph publication.
+
+use std::collections::TryReserveError;
+
+use super::{
+    Arc, Arena, ArrayIntrinsics, ArrayState, Atom, AtomError, AtomTable, BooleanIntrinsics,
+    BoxedPrimitive, Context, ErrorIntrinsics, FunctionId, FunctionImplementation, HandleError,
+    HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, JsNumber, JsString,
+    NativeFunction, NativeFunctionKind, NumberIntrinsics, ObjectId, ObjectRecord, PredefinedAtom,
+    PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState,
+    ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource,
+    StoredValue, StringIntrinsics, check_limit, predefined_string, usize_to_u64,
+};
+
+const REALM_OBJECT_COUNT: usize = 12;
+const REALM_FUNCTION_COUNT: usize = 17;
+const REALM_PROPERTY_COUNT: u64 = 74;
+
+const METHOD_PROPERTY: PropertyLayout = PropertyLayout::data(true, false, true);
+const IDENTITY_PROPERTY: PropertyLayout = PropertyLayout::data(false, false, true);
+const CONSTRUCTOR_PROTOTYPE_PROPERTY: PropertyLayout = PropertyLayout::data(false, false, false);
+const ARRAY_LENGTH_PROPERTY: PropertyLayout = PropertyLayout::data(true, false, false);
+
+struct RealmKeys {
+    function: PropertyKey,
+    boolean: PropertyKey,
+    number: PropertyKey,
+    string: PropertyKey,
+    array: PropertyKey,
+    prototype: PropertyKey,
+    constructor: PropertyKey,
+    length: PropertyKey,
+    name: PropertyKey,
+    message: PropertyKey,
+    to_string: PropertyKey,
+    value_of: PropertyKey,
+    apply: PropertyKey,
+}
+
+impl RealmKeys {
+    fn new(atoms: &AtomTable) -> Self {
+        let key = |atom| PropertyKey::from_validated_atom(atoms.predefined(atom));
+        Self {
+            function: key(PredefinedAtom::Function),
+            boolean: key(PredefinedAtom::Boolean),
+            number: key(PredefinedAtom::Number),
+            string: key(PredefinedAtom::String),
+            array: key(PredefinedAtom::Array),
+            prototype: key(PredefinedAtom::Prototype),
+            constructor: key(PredefinedAtom::Constructor),
+            length: key(PredefinedAtom::Length),
+            name: key(PredefinedAtom::Name),
+            message: key(PredefinedAtom::Message),
+            to_string: key(PredefinedAtom::ToString),
+            value_of: key(PredefinedAtom::ValueOf),
+            apply: key(PredefinedAtom::Apply),
+        }
+    }
+}
+
+struct RealmNames {
+    function: JsString,
+    boolean: JsString,
+    number: JsString,
+    string: JsString,
+    array: JsString,
+    empty: JsString,
+    to_string: JsString,
+    value_of: JsString,
+    apply: JsString,
+    error: JsString,
+    internal_error: JsString,
+    range_error: JsString,
+    reference_error: JsString,
+    syntax_error: JsString,
+    type_error: JsString,
+    call: JsString,
+}
+
+impl RealmNames {
+    fn try_new(atoms: &AtomTable) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            function: predefined_string(atoms, PredefinedAtom::Function),
+            boolean: predefined_string(atoms, PredefinedAtom::Boolean),
+            number: predefined_string(atoms, PredefinedAtom::Number),
+            string: predefined_string(atoms, PredefinedAtom::String),
+            array: predefined_string(atoms, PredefinedAtom::Array),
+            empty: predefined_string(atoms, PredefinedAtom::EmptyString),
+            to_string: predefined_string(atoms, PredefinedAtom::ToString),
+            value_of: predefined_string(atoms, PredefinedAtom::ValueOf),
+            apply: predefined_string(atoms, PredefinedAtom::Apply),
+            error: predefined_string(atoms, PredefinedAtom::Error),
+            internal_error: predefined_string(atoms, PredefinedAtom::InternalError),
+            range_error: predefined_string(atoms, PredefinedAtom::RangeError),
+            reference_error: predefined_string(atoms, PredefinedAtom::ReferenceError),
+            syntax_error: predefined_string(atoms, PredefinedAtom::SyntaxError),
+            type_error: predefined_string(atoms, PredefinedAtom::TypeError),
+            call: JsString::from_utf8("call").map_err(AtomError::from)?,
+        })
+    }
+}
+
+struct RealmBaseRecords {
+    global: ObjectRecord,
+    object_prototype: ObjectRecord,
+    function_prototype: ObjectRecord,
+    function_constructor: ObjectRecord,
+    object_to_string: ObjectRecord,
+    object_value_of: ObjectRecord,
+    function_to_string: ObjectRecord,
+    function_call: ObjectRecord,
+    function_apply: ObjectRecord,
+}
+
+struct ErrorPrototypeRecords {
+    error: ObjectRecord,
+    internal_error: ObjectRecord,
+    range_error: ObjectRecord,
+    reference_error: ObjectRecord,
+    syntax_error: ObjectRecord,
+    type_error: ObjectRecord,
+}
+
+struct PrimitiveIntrinsicRecords {
+    prototype: ObjectRecord,
+    constructor: ObjectRecord,
+    to_string: ObjectRecord,
+    value_of: ObjectRecord,
+}
+
+struct ArrayIntrinsicRecords {
+    prototype: ObjectRecord,
+    constructor: ObjectRecord,
+}
+
+struct RealmRecords {
+    base: RealmBaseRecords,
+    errors: ErrorPrototypeRecords,
+    boolean: PrimitiveIntrinsicRecords,
+    number: PrimitiveIntrinsicRecords,
+    string: PrimitiveIntrinsicRecords,
+    array: ArrayIntrinsicRecords,
+}
+
+impl RealmRecords {
+    fn try_new(length_key: &PropertyKey) -> Result<Self, RuntimeError> {
+        // Keep these reservations in the original transaction order so a
+        // recoverable allocation failure reports the same `additional` value.
+        let base = RealmBaseRecords {
+            global: reserved_record(5)?,
+            object_prototype: reserved_record(2)?,
+            function_prototype: reserved_record(6)?,
+            function_constructor: reserved_record(3)?,
+            object_to_string: reserved_record(2)?,
+            object_value_of: reserved_record(2)?,
+            function_to_string: reserved_record(2)?,
+            function_call: reserved_record(2)?,
+            function_apply: reserved_record(2)?,
+        };
+        let errors = ErrorPrototypeRecords {
+            error: reserved_record(2)?,
+            internal_error: reserved_record(2)?,
+            range_error: reserved_record(2)?,
+            reference_error: reserved_record(2)?,
+            syntax_error: reserved_record(2)?,
+            type_error: reserved_record(2)?,
+        };
+        let boolean = PrimitiveIntrinsicRecords {
+            prototype: reserved_record(3)?,
+            constructor: reserved_record(3)?,
+            to_string: reserved_record(2)?,
+            value_of: reserved_record(2)?,
+        };
+        let number = PrimitiveIntrinsicRecords {
+            prototype: reserved_record(3)?,
+            constructor: reserved_record(3)?,
+            to_string: reserved_record(2)?,
+            value_of: reserved_record(2)?,
+        };
+        let string = PrimitiveIntrinsicRecords {
+            prototype: reserved_record(4)?,
+            constructor: reserved_record(3)?,
+            to_string: reserved_record(2)?,
+            value_of: reserved_record(2)?,
+        };
+        let mut array = ArrayIntrinsicRecords {
+            prototype: reserved_record(2)?,
+            constructor: reserved_record(3)?,
+        };
+        array
+            .prototype
+            .append_data(
+                length_key.clone(),
+                ARRAY_LENGTH_PROPERTY,
+                StoredValue::Number(JsNumber::from_i32(0)),
+            )
+            .map_err(|_| property_allocation_failed(1))?;
+        Ok(Self {
+            base,
+            errors,
+            boolean,
+            number,
+            string,
+            array,
+        })
+    }
+}
+
+struct RealmBase {
+    realm: RealmId,
+    object_prototype: ObjectId,
+    global_object: ObjectId,
+    function_prototype: FunctionId,
+    function_constructor: FunctionId,
+    object_to_string: FunctionId,
+    object_value_of: FunctionId,
+    function_to_string: FunctionId,
+    function_call: FunctionId,
+    function_apply: FunctionId,
+}
+
+struct ErrorPrototypeGraph {
+    error: ObjectId,
+    internal_error: ObjectId,
+    range_error: ObjectId,
+    reference_error: ObjectId,
+    syntax_error: ObjectId,
+    type_error: ObjectId,
+}
+
+struct PrimitiveIntrinsicGraph {
+    prototype: ObjectId,
+    constructor: FunctionId,
+    to_string: FunctionId,
+    value_of: FunctionId,
+}
+
+#[derive(Clone, Copy)]
+struct PrimitiveIntrinsicKinds {
+    constructor: NativeFunctionKind,
+    to_string: NativeFunctionKind,
+    value_of: NativeFunctionKind,
+}
+
+#[derive(Clone, Copy)]
+struct PrimitivePropertySpec<'a> {
+    constructor_name: &'a JsString,
+    to_string_length: i32,
+    prototype_length: Option<i32>,
+}
+
+struct ArrayIntrinsicGraph {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+impl RealmBase {
+    fn rollback(self, runtime: &mut Runtime) {
+        for function in [
+            self.function_apply,
+            self.function_call,
+            self.function_to_string,
+            self.object_value_of,
+            self.object_to_string,
+            self.function_constructor,
+            self.function_prototype,
+        ] {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
+        debug_assert!(runtime.realms.remove(self.realm).is_some());
+        debug_assert!(runtime.objects.remove(self.global_object).is_some());
+        debug_assert!(runtime.objects.remove(self.object_prototype).is_some());
+    }
+}
+
+struct RealmGraph {
+    base: RealmBase,
+    call_atom: Atom,
+    errors: ErrorPrototypeGraph,
+    boolean: PrimitiveIntrinsicGraph,
+    number: PrimitiveIntrinsicGraph,
+    string: PrimitiveIntrinsicGraph,
+    array: ArrayIntrinsicGraph,
+}
+
+impl RealmGraph {
+    fn rollback(self, runtime: &mut Runtime) {
+        for function in [
+            self.array.constructor,
+            self.string.value_of,
+            self.string.to_string,
+            self.string.constructor,
+            self.number.value_of,
+            self.number.to_string,
+            self.number.constructor,
+            self.boolean.value_of,
+            self.boolean.to_string,
+            self.boolean.constructor,
+        ] {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
+        for object in [
+            self.array.prototype,
+            self.string.prototype,
+            self.number.prototype,
+            self.boolean.prototype,
+            self.errors.type_error,
+            self.errors.syntax_error,
+            self.errors.reference_error,
+            self.errors.range_error,
+            self.errors.internal_error,
+            self.errors.error,
+        ] {
+            debug_assert!(runtime.objects.remove(object).is_some());
+        }
+        self.base.rollback(runtime);
+        runtime.atoms.rollback_interned_string(self.call_atom);
+    }
+}
+
+impl Runtime {
+    /// Creates one bounded runtime and its predefined atom table.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured atom-table configuration or allocation error.
+    #[allow(
+        clippy::arc_with_non_send_sync,
+        reason = "Arc ownership is user-selected while Cell deliberately keeps this runtime local"
+    )]
+    pub fn try_new(limits: RuntimeLimits) -> Result<Self, RuntimeError> {
+        let atoms = AtomTable::try_new(limits.atom_limits)?;
+        let mailbox = Arc::new(ReleaseMailbox::new());
+        let runtime_identity =
+            RuntimeIdentity::from_address(Arc::as_ptr(&mailbox).cast::<()>() as usize);
+        Ok(Self {
+            mailbox,
+            atoms,
+            realms: Arena::new(runtime_identity),
+            code: Arena::new(runtime_identity),
+            functions: Arena::new(runtime_identity),
+            objects: Arena::new(runtime_identity),
+            cells: Arena::new(runtime_identity),
+            global_bindings: Arena::new(runtime_identity),
+            limits,
+            installed_templates: 0,
+            installed_atoms: 0,
+            installed_constants: 0,
+            object_properties: 0,
+            for_in_entries: 0,
+            public_roots: 0,
+            collection_pending: false,
+        })
+    }
+
+    /// Creates a realm owned by this runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns a limit or recoverable allocation failure.
+    #[allow(
+        clippy::arc_with_non_send_sync,
+        clippy::missing_panics_doc,
+        reason = "pre-reserved arena insertion failures are internal invariant violations"
+    )]
+    pub fn create_realm(&mut self) -> Result<Realm, RuntimeError> {
+        self.drain_releases();
+        self.preflight_and_reserve_realm()?;
+
+        let keys = RealmKeys::new(&self.atoms);
+        let names = RealmNames::try_new(&self.atoms)?;
+        let records = RealmRecords::try_new(&keys.length)?;
+        let graph = self.build_realm_graph(records, &names)?;
+
+        if self
+            .publish_realm_properties(&graph, &keys, &names)
+            .is_err()
+        {
+            graph.rollback(self);
+            return Err(property_allocation_failed(1));
+        }
+
+        let id = graph.base.realm;
+        self.realms
+            .get_mut(id)
+            .expect("new realm remains live")
+            .intrinsics = RealmIntrinsics::Ready {
+            function_prototype: graph.base.function_prototype,
+            function_constructor: graph.base.function_constructor,
+            errors: ErrorIntrinsics {
+                error: graph.errors.error,
+                internal_error: graph.errors.internal_error,
+                range_error: graph.errors.range_error,
+                reference_error: graph.errors.reference_error,
+                syntax_error: graph.errors.syntax_error,
+                type_error: graph.errors.type_error,
+            },
+            boolean: BooleanIntrinsics {
+                prototype: graph.boolean.prototype,
+                constructor: graph.boolean.constructor,
+            },
+            number: NumberIntrinsics {
+                prototype: graph.number.prototype,
+                constructor: graph.number.constructor,
+            },
+            string: StringIntrinsics {
+                prototype: graph.string.prototype,
+                constructor: graph.string.constructor,
+            },
+            array: ArrayIntrinsics {
+                prototype: graph.array.prototype,
+                constructor: graph.array.constructor,
+            },
+        };
+        self.object_properties += REALM_PROPERTY_COUNT;
+        Ok(Realm(Arc::new(RealmHandle {
+            owner: Arc::downgrade(&self.mailbox),
+            id,
+        })))
+    }
+
+    fn preflight_and_reserve_realm(&mut self) -> Result<(), RuntimeError> {
+        check_limit(
+            RuntimeResource::Realms,
+            self.limits.max_realms,
+            usize_to_u64(self.realms.len()).saturating_add(1),
+        )?;
+        check_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(usize_to_u64(REALM_OBJECT_COUNT)),
+        )?;
+        check_limit(
+            RuntimeResource::HeapFunctions,
+            self.limits.max_heap_functions,
+            usize_to_u64(self.functions.len()).saturating_add(usize_to_u64(REALM_FUNCTION_COUNT)),
+        )?;
+        check_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties.saturating_add(REALM_PROPERTY_COUNT),
+        )?;
+        self.realms
+            .try_reserve(1)
+            .map_err(|_| allocation_failed(RuntimeResource::Realms, 1))?;
+        self.objects
+            .try_reserve(REALM_OBJECT_COUNT)
+            .map_err(|_| allocation_failed(RuntimeResource::HeapObjects, REALM_OBJECT_COUNT))?;
+        self.functions
+            .try_reserve(REALM_FUNCTION_COUNT)
+            .map_err(|_| allocation_failed(RuntimeResource::HeapFunctions, REALM_FUNCTION_COUNT))
+    }
+
+    fn build_realm_graph(
+        &mut self,
+        records: RealmRecords,
+        names: &RealmNames,
+    ) -> Result<RealmGraph, RuntimeError> {
+        let base = self.insert_realm_base(records.base);
+        let call_atom = match self.atoms.intern_string(&names.call) {
+            Ok(atom) => atom,
+            Err(error) => {
+                base.rollback(self);
+                return Err(error.into());
+            }
+        };
+
+        let errors = self.insert_error_prototypes(&base, records.errors);
+        let boolean = self.insert_primitive_intrinsics(
+            &base,
+            records.boolean,
+            BoxedPrimitive::Boolean(false),
+            PrimitiveIntrinsicKinds {
+                constructor: NativeFunctionKind::BooleanConstructor,
+                to_string: NativeFunctionKind::BooleanPrototypeToString,
+                value_of: NativeFunctionKind::BooleanPrototypeValueOf,
+            },
+        );
+        let number = self.insert_primitive_intrinsics(
+            &base,
+            records.number,
+            BoxedPrimitive::Number(JsNumber::from_i32(0)),
+            PrimitiveIntrinsicKinds {
+                constructor: NativeFunctionKind::NumberConstructor,
+                to_string: NativeFunctionKind::NumberPrototypeToString,
+                value_of: NativeFunctionKind::NumberPrototypeValueOf,
+            },
+        );
+        let string = self.insert_primitive_intrinsics(
+            &base,
+            records.string,
+            BoxedPrimitive::String(JsString::empty()),
+            PrimitiveIntrinsicKinds {
+                constructor: NativeFunctionKind::StringConstructor,
+                to_string: NativeFunctionKind::StringPrototypeToString,
+                value_of: NativeFunctionKind::StringPrototypeValueOf,
+            },
+        );
+        let array = self.insert_array_intrinsics(&base, records.array);
+
+        Ok(RealmGraph {
+            base,
+            call_atom,
+            errors,
+            boolean,
+            number,
+            string,
+            array,
+        })
+    }
+
+    fn insert_realm_base(&mut self, mut records: RealmBaseRecords) -> RealmBase {
+        let object_prototype =
+            self.insert_reserved_object(HeapObject::ordinary(records.object_prototype));
+        records
+            .global
+            .replace_prototype(Some(HeapReference::Object(object_prototype)));
+        let global_object = self.insert_reserved_object(HeapObject::ordinary(records.global));
+        let realm = self
+            .realms
+            .try_insert(RealmState {
+                object_prototype,
+                global_object,
+                intrinsics: RealmIntrinsics::Initializing,
+                global_bindings: HashMap::new(),
+            })
+            .expect("the realm transaction reserved its realm slot");
+
+        let function_prototype = self.insert_reserved_native(
+            realm,
+            HeapReference::Object(object_prototype),
+            NativeFunctionKind::FunctionPrototype,
+            records.function_prototype,
+        );
+        let function_constructor = self.insert_reserved_native(
+            realm,
+            HeapReference::Function(function_prototype),
+            NativeFunctionKind::OrdinaryFunctionConstructor,
+            records.function_constructor,
+        );
+        let object_to_string = self.insert_reserved_native(
+            realm,
+            HeapReference::Function(function_prototype),
+            NativeFunctionKind::ObjectPrototypeToString,
+            records.object_to_string,
+        );
+        let object_value_of = self.insert_reserved_native(
+            realm,
+            HeapReference::Function(function_prototype),
+            NativeFunctionKind::ObjectPrototypeValueOf,
+            records.object_value_of,
+        );
+        let function_to_string = self.insert_reserved_native(
+            realm,
+            HeapReference::Function(function_prototype),
+            NativeFunctionKind::FunctionPrototypeToString,
+            records.function_to_string,
+        );
+        let function_call = self.insert_reserved_native(
+            realm,
+            HeapReference::Function(function_prototype),
+            NativeFunctionKind::FunctionPrototypeCall,
+            records.function_call,
+        );
+        let function_apply = self.insert_reserved_native(
+            realm,
+            HeapReference::Function(function_prototype),
+            NativeFunctionKind::FunctionPrototypeApply,
+            records.function_apply,
+        );
+        RealmBase {
+            realm,
+            object_prototype,
+            global_object,
+            function_prototype,
+            function_constructor,
+            object_to_string,
+            object_value_of,
+            function_to_string,
+            function_call,
+            function_apply,
+        }
+    }
+
+    fn insert_error_prototypes(
+        &mut self,
+        base: &RealmBase,
+        records: ErrorPrototypeRecords,
+    ) -> ErrorPrototypeGraph {
+        let error = self.insert_reserved_object_with_prototype(
+            records.error,
+            HeapReference::Object(base.object_prototype),
+        );
+        let internal_error = self.insert_reserved_object_with_prototype(
+            records.internal_error,
+            HeapReference::Object(error),
+        );
+        let range_error = self.insert_reserved_object_with_prototype(
+            records.range_error,
+            HeapReference::Object(error),
+        );
+        let reference_error = self.insert_reserved_object_with_prototype(
+            records.reference_error,
+            HeapReference::Object(error),
+        );
+        let syntax_error = self.insert_reserved_object_with_prototype(
+            records.syntax_error,
+            HeapReference::Object(error),
+        );
+        let type_error = self.insert_reserved_object_with_prototype(
+            records.type_error,
+            HeapReference::Object(error),
+        );
+        ErrorPrototypeGraph {
+            error,
+            internal_error,
+            range_error,
+            reference_error,
+            syntax_error,
+            type_error,
+        }
+    }
+
+    fn insert_primitive_intrinsics(
+        &mut self,
+        base: &RealmBase,
+        records: PrimitiveIntrinsicRecords,
+        primitive: BoxedPrimitive,
+        kinds: PrimitiveIntrinsicKinds,
+    ) -> PrimitiveIntrinsicGraph {
+        let prototype = self.insert_reserved_boxed_object(
+            records.prototype,
+            HeapReference::Object(base.object_prototype),
+            primitive,
+        );
+        let constructor = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            kinds.constructor,
+            records.constructor,
+        );
+        let to_string = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            kinds.to_string,
+            records.to_string,
+        );
+        let value_of = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            kinds.value_of,
+            records.value_of,
+        );
+        PrimitiveIntrinsicGraph {
+            prototype,
+            constructor,
+            to_string,
+            value_of,
+        }
+    }
+
+    fn insert_array_intrinsics(
+        &mut self,
+        base: &RealmBase,
+        mut records: ArrayIntrinsicRecords,
+    ) -> ArrayIntrinsicGraph {
+        records
+            .prototype
+            .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
+        let prototype =
+            self.insert_reserved_object(HeapObject::array(records.prototype, ArrayState::new(0)));
+        let constructor = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ArrayConstructor,
+            records.constructor,
+        );
+        ArrayIntrinsicGraph {
+            prototype,
+            constructor,
+        }
+    }
+
+    fn insert_reserved_native(
+        &mut self,
+        realm: RealmId,
+        prototype: HeapReference,
+        kind: NativeFunctionKind,
+        mut object: ObjectRecord,
+    ) -> FunctionId {
+        object.replace_prototype(Some(prototype));
+        self.functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction { realm, kind }),
+                object,
+                public_roots: 0,
+            })
+            .expect("the realm transaction reserved all intrinsic function slots")
+    }
+
+    fn insert_reserved_object(&mut self, object: HeapObject) -> ObjectId {
+        self.objects
+            .try_insert(object)
+            .expect("the realm transaction reserved all intrinsic object slots")
+    }
+
+    fn insert_reserved_object_with_prototype(
+        &mut self,
+        mut record: ObjectRecord,
+        prototype: HeapReference,
+    ) -> ObjectId {
+        record.replace_prototype(Some(prototype));
+        self.insert_reserved_object(HeapObject::ordinary(record))
+    }
+
+    fn insert_reserved_boxed_object(
+        &mut self,
+        mut record: ObjectRecord,
+        prototype: HeapReference,
+        primitive: BoxedPrimitive,
+    ) -> ObjectId {
+        record.replace_prototype(Some(prototype));
+        self.insert_reserved_object(HeapObject::with_boxed_primitive(record, primitive))
+    }
+
+    fn publish_realm_properties(
+        &mut self,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        self.append_object_methods(
+            graph.base.object_prototype,
+            [
+                (&keys.to_string, graph.base.object_to_string),
+                (&keys.value_of, graph.base.object_value_of),
+            ],
+        )?;
+        self.publish_error_prototype_properties(&graph.errors, keys, names)?;
+        self.publish_function_intrinsic_properties(graph, keys, names)?;
+        self.publish_primitive_intrinsic_properties(
+            &graph.boolean,
+            PrimitivePropertySpec {
+                constructor_name: &names.boolean,
+                to_string_length: 0,
+                prototype_length: None,
+            },
+            keys,
+            names,
+        )?;
+        self.publish_primitive_intrinsic_properties(
+            &graph.number,
+            PrimitivePropertySpec {
+                constructor_name: &names.number,
+                to_string_length: 1,
+                prototype_length: None,
+            },
+            keys,
+            names,
+        )?;
+        self.publish_primitive_intrinsic_properties(
+            &graph.string,
+            PrimitivePropertySpec {
+                constructor_name: &names.string,
+                to_string_length: 0,
+                prototype_length: Some(0),
+            },
+            keys,
+            names,
+        )?;
+        self.publish_array_intrinsic_properties(&graph.array, keys, names)?;
+        self.append_object_methods(
+            graph.base.global_object,
+            [
+                (&keys.function, graph.base.function_constructor),
+                (&keys.boolean, graph.boolean.constructor),
+                (&keys.number, graph.number.constructor),
+                (&keys.string, graph.string.constructor),
+                (&keys.array, graph.array.constructor),
+            ],
+        )
+    }
+
+    fn publish_error_prototype_properties(
+        &mut self,
+        errors: &ErrorPrototypeGraph,
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        for (prototype, name) in [
+            (errors.error, &names.error),
+            (errors.internal_error, &names.internal_error),
+            (errors.range_error, &names.range_error),
+            (errors.reference_error, &names.reference_error),
+            (errors.syntax_error, &names.syntax_error),
+            (errors.type_error, &names.type_error),
+        ] {
+            let record = &mut self
+                .objects
+                .get_mut(prototype)
+                .expect("new Error prototype remains live")
+                .record;
+            record.append_data(
+                keys.name.clone(),
+                METHOD_PROPERTY,
+                StoredValue::String(name.clone()),
+            )?;
+            record.append_data(
+                keys.message.clone(),
+                METHOD_PROPERTY,
+                StoredValue::String(JsString::empty()),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn publish_function_intrinsic_properties(
+        &mut self,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        {
+            let record = &mut self
+                .functions
+                .get_mut(graph.base.function_prototype)
+                .expect("new Function.prototype remains live")
+                .object;
+            record.append_data(
+                keys.constructor.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.base.function_constructor),
+            )?;
+            record.append_data(
+                keys.length.clone(),
+                IDENTITY_PROPERTY,
+                StoredValue::Number(JsNumber::from_i32(0)),
+            )?;
+            record.append_data(
+                keys.name.clone(),
+                IDENTITY_PROPERTY,
+                StoredValue::String(names.empty.clone()),
+            )?;
+            record.append_data(
+                keys.to_string.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.base.function_to_string),
+            )?;
+            record.append_data(
+                PropertyKey::from_validated_atom(graph.call_atom.clone()),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.base.function_call),
+            )?;
+            record.append_data(
+                keys.apply.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.base.function_apply),
+            )?;
+        }
+
+        self.append_constructor_identity(
+            graph.base.function_constructor,
+            StoredValue::Function(graph.base.function_prototype),
+            &names.function,
+            keys,
+        )?;
+        for (function, name, length) in [
+            (graph.base.object_to_string, &names.to_string, 0),
+            (graph.base.object_value_of, &names.value_of, 0),
+            (graph.base.function_to_string, &names.to_string, 0),
+            (graph.base.function_call, &names.call, 1),
+            (graph.base.function_apply, &names.apply, 2),
+        ] {
+            self.append_function_identity(function, name, length, keys)?;
+        }
+        Ok(())
+    }
+
+    fn publish_primitive_intrinsic_properties(
+        &mut self,
+        graph: &PrimitiveIntrinsicGraph,
+        spec: PrimitivePropertySpec<'_>,
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        if let Some(length) = spec.prototype_length {
+            self.objects
+                .get_mut(graph.prototype)
+                .expect("new primitive prototype remains live")
+                .record
+                .append_data(
+                    keys.length.clone(),
+                    IDENTITY_PROPERTY,
+                    StoredValue::Number(JsNumber::from_i32(length)),
+                )?;
+        }
+        self.append_object_methods(
+            graph.prototype,
+            [
+                (&keys.constructor, graph.constructor),
+                (&keys.to_string, graph.to_string),
+                (&keys.value_of, graph.value_of),
+            ],
+        )?;
+        self.append_constructor_identity(
+            graph.constructor,
+            StoredValue::Object(graph.prototype),
+            spec.constructor_name,
+            keys,
+        )?;
+        self.append_function_identity(
+            graph.to_string,
+            &names.to_string,
+            spec.to_string_length,
+            keys,
+        )?;
+        self.append_function_identity(graph.value_of, &names.value_of, 0, keys)
+    }
+
+    fn publish_array_intrinsic_properties(
+        &mut self,
+        graph: &ArrayIntrinsicGraph,
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        self.append_object_methods(graph.prototype, [(&keys.constructor, graph.constructor)])?;
+        self.append_constructor_identity(
+            graph.constructor,
+            StoredValue::Object(graph.prototype),
+            &names.array,
+            keys,
+        )
+    }
+
+    fn append_constructor_identity(
+        &mut self,
+        function: FunctionId,
+        prototype: StoredValue,
+        name: &JsString,
+        keys: &RealmKeys,
+    ) -> Result<(), TryReserveError> {
+        self.functions
+            .get_mut(function)
+            .expect("new intrinsic constructor remains live")
+            .object
+            .append_data(
+                keys.prototype.clone(),
+                CONSTRUCTOR_PROTOTYPE_PROPERTY,
+                prototype,
+            )?;
+        self.append_function_identity(function, name, 1, keys)
+    }
+
+    fn append_function_identity(
+        &mut self,
+        function: FunctionId,
+        name: &JsString,
+        length: i32,
+        keys: &RealmKeys,
+    ) -> Result<(), TryReserveError> {
+        let record = &mut self
+            .functions
+            .get_mut(function)
+            .expect("new intrinsic function remains live")
+            .object;
+        record.append_data(
+            keys.length.clone(),
+            IDENTITY_PROPERTY,
+            StoredValue::Number(JsNumber::from_i32(length)),
+        )?;
+        record.append_data(
+            keys.name.clone(),
+            IDENTITY_PROPERTY,
+            StoredValue::String(name.clone()),
+        )
+    }
+
+    fn append_object_methods<const N: usize>(
+        &mut self,
+        object: ObjectId,
+        methods: [(&PropertyKey, FunctionId); N],
+    ) -> Result<(), TryReserveError> {
+        let record = &mut self
+            .objects
+            .get_mut(object)
+            .expect("new intrinsic object remains live")
+            .record;
+        for (key, function) in methods {
+            record.append_data(
+                key.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(function),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Borrows an exclusive execution context for one same-runtime realm.
+    ///
+    /// # Errors
+    ///
+    /// Rejects orphaned, foreign, or stale realm handles.
+    pub fn context(&mut self, realm: &Realm) -> Result<Context<'_>, HandleError> {
+        self.drain_releases();
+        let Some(owner) = realm.0.owner.upgrade() else {
+            return Err(HandleError::Orphaned {
+                kind: HandleKind::Realm,
+            });
+        };
+        if !Arc::ptr_eq(&owner, &self.mailbox) {
+            return Err(HandleError::ForeignRuntime {
+                kind: HandleKind::Realm,
+            });
+        }
+        if !self.realms.contains(realm.0.id) {
+            return Err(HandleError::Stale {
+                kind: HandleKind::Realm,
+                index: realm.0.id.index(),
+                generation: realm.0.id.generation(),
+            });
+        }
+        Ok(Context {
+            runtime: self,
+            realm: realm.0.id,
+        })
+    }
+}
+
+fn reserved_record(capacity: usize) -> Result<ObjectRecord, RuntimeError> {
+    let mut record = ObjectRecord::empty(None);
+    record
+        .try_reserve_data(capacity)
+        .map_err(|_| property_allocation_failed(capacity))?;
+    Ok(record)
+}
+
+const fn allocation_failed(resource: RuntimeResource, additional: usize) -> RuntimeError {
+    RuntimeError::AllocationFailed {
+        resource,
+        additional,
+    }
+}
+
+const fn property_allocation_failed(additional: usize) -> RuntimeError {
+    allocation_failed(RuntimeResource::ObjectProperties, additional)
+}
