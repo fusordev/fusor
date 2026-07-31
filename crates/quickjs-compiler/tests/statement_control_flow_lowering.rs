@@ -84,6 +84,26 @@ fn source_slice_at<'source>(
 }
 
 #[test]
+fn debugger_statement_lowers_to_an_exact_source_mapped_nop() {
+    let source = "function f(value){ debugger; return value; }";
+    let compiled = compile(source, "f");
+
+    assert_eq!(
+        decoded(&compiled),
+        [
+            (BytecodePc::new(0), FinalOpcode::Nop, Operands::None),
+            (BytecodePc::new(1), FinalOpcode::GetArg0, Operands::NoneArg),
+            (BytecodePc::new(2), FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(
+        source_slice_at(&compiled, source, BytecodePc::new(0)),
+        "debugger;"
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 1);
+}
+
+#[test]
 fn block_scope_tdz_entry_matches_the_quickjs_branch_oracle() {
     let source = "function f(a){ if(a){ let x=a; return x; } return a; }";
     let compiled = compile(source, "f");

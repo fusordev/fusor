@@ -16,7 +16,7 @@ transactionally install that authority into a same-runtime realm and host-call
 the resulting function. The admitted profile executes primitive constants,
 arguments, locals, captured cells, nested closures, TDZ checks, cell rotation,
 branches, labeled loops and blocks, strict-equality `switch` dispatch with
-lexical scope and fallthrough, returns, direct ordinary
+lexical scope and fallthrough, exact-source `debugger` no-ops, returns, direct ordinary
 JavaScript-to-JavaScript calls, truthiness, `typeof`, strict equality, nullish
 tests, ordinary object literals with
 source-ordered static identifier, quoted String, Number, and BigInt

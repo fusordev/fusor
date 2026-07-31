@@ -97,6 +97,34 @@ fn ordinary_dynamic_function_executes_labeled_switch_control_flow() {
 }
 
 #[test]
+fn ordinary_dynamic_function_executes_through_debugger_statement() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let function = construct_dynamic_function(
+        &mut context,
+        source(&[], "debugger; return 17;"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function containing debugger statement")
+    .into_value()
+    .into_function()
+    .expect("ordinary wrapper completion");
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("debugger statement is an execution no-op");
+
+    assert!(
+        result
+            .as_number()
+            .expect("live value")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(17))
+    );
+}
+
+#[test]
 fn ordinary_dynamic_function_executes_the_oxc_chained_label_continue_extension() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

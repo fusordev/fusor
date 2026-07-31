@@ -207,6 +207,9 @@ A milestone is complete only when all of its checked items pass in CI.
         scheduling is incremental over `Arc`-shared labels and preflights its
         guaranteed instruction scaffold before proportional allocation.
         Labeled and unlabeled exits close every crossed captured scope.
+  - [x] Preserve pinned QuickJS's current `debugger` behavior as one verified
+        exact-span `nop`. It remains execution-neutral without a debugger while
+        retaining an instruction/source anchor for the future inspector.
   - [x] Add the captured-cell and classic-`for` substrate: compiler-owned
         capture layouts distinguish arguments, function-lifetime locals, and
         scoped locals; the staged verifier admits `close_loc` only for an

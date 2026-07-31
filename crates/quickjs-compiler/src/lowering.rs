@@ -566,11 +566,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     /// resolved argument/local reads and mutable writes, value operators
     /// including short-circuit and conditional expressions, lexical blocks,
     /// `if`/`else`, `while`, `do`/`while`, classic `for`, `switch`, labeled and
-    /// unlabeled `break`/`continue`, expression statements, and explicit or
-    /// implicit returns. A leaf may own ordinary value constants and may read
-    /// or write frame cells captured from an ancestor. The entire function is
-    /// converted to typed symbolic instructions before branch relaxation emits
-    /// any bytes.
+    /// unlabeled `break`/`continue`, exact-span no-op `debugger` statements,
+    /// expression statements, and explicit or implicit returns. A leaf may own
+    /// ordinary value constants and may read or write frame cells captured from
+    /// an ancestor. The entire function is converted to typed symbolic
+    /// instructions before branch relaxation emits any bytes.
     /// A selected static ordinary method/accessor may be staged here for
     /// inspection, but this leaf artifact is never execution authority; only
     /// [`Self::compile_tree`] on its owning parent can certify and publish the
@@ -1659,6 +1659,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
             Statement::ExpressionStatement(statement) => {
                 Self::schedule_expression_statement(statement, state.completion, &mut state.work);
+            }
+            Statement::DebuggerStatement(statement) => {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Nop,
+                    Operands::None,
+                    statement.span,
+                ))?;
             }
             Statement::EmptyStatement(_) => {}
             Statement::ReturnStatement(statement) => {

@@ -130,9 +130,11 @@ resolved argument/local reads, unary and binary operators, short-circuit
 `&&`/`||`/`??`, conditional expressions, sequence and expression statements,
 mutable identifier assignment and update, lexical blocks, `if`/`else`,
 `while`, `do`/`while`, classic `for`, `switch`, labeled and unlabeled
-`break`/`continue`, and explicit `throw` plus explicit or implicit returns. A
-deepest leaf may read or write argument/local cells forwarded through ancestor
-capture slots. It
+`break`/`continue`, exact-span `debugger` no-ops, and explicit `throw` plus
+explicit or implicit returns. Pinned QuickJS has no debugger implementation and
+skips the statement; the compiler retains it as `nop` so source lookup remains
+exact without adding observable execution behavior. A deepest leaf may read or
+write argument/local cells forwarded through ancestor capture slots. It
 lowers expressions and statements with iterative work lists, validates the
 complete selected body into typed pseudo-instructions before byte emission,
 assigns typed frame and imported-capture slots, and immediately produces a
