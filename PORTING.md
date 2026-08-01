@@ -474,7 +474,8 @@ A milestone is complete only when all of its checked items pass in CI.
         order. Abrupt completion after `next` acquisition performs
         `IteratorClose`, preserving the original exception even if `return`
         lookup or invocation fails. Call spread, iterator destructuring, and
-        async/generator iterator consumers remain fail-closed.
+        async/generator iterator consumers remain fail-closed; call spread now
+        executes through the `apply` vertical below.
   - [x] Add ordinary synchronous `for-of` through the generic iterator
         substrate. Lowering emits the pinned three-slot iterator/next/catch
         record, supports declaration, identifier, and static/computed member
