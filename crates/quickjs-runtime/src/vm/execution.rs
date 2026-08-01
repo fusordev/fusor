@@ -1598,6 +1598,79 @@ pub(super) fn execute_one(
                 return_to,
             );
         }
+        FinalOpcode::CopyDataProperties => {
+            let Operands::U8(mask) = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let target_depth = usize::from(mask & 0b11);
+            let source_depth = usize::from((mask >> 2) & 0b111);
+            let excluded_depth = usize::from((mask >> 5) & 0b111);
+            let target = stack_value_at(
+                frame,
+                frame
+                    .stack
+                    .len()
+                    .checked_sub(1_usize.saturating_add(target_depth))
+                    .ok_or(EngineFault::StackDepthMismatch {
+                        function: frame.template,
+                        pc: source_pc,
+                        expected: u32::try_from(target_depth.saturating_add(1)).unwrap_or(u32::MAX),
+                        actual: frame.stack.len(),
+                    })?,
+            )?
+            .duplicate();
+            let source = stack_value_at(
+                frame,
+                frame
+                    .stack
+                    .len()
+                    .checked_sub(1_usize.saturating_add(source_depth))
+                    .ok_or(EngineFault::StackDepthMismatch {
+                        function: frame.template,
+                        pc: source_pc,
+                        expected: u32::try_from(source_depth.saturating_add(1)).unwrap_or(u32::MAX),
+                        actual: frame.stack.len(),
+                    })?,
+            )?
+            .duplicate();
+            let excluded = stack_value_at(
+                frame,
+                frame
+                    .stack
+                    .len()
+                    .checked_sub(1_usize.saturating_add(excluded_depth))
+                    .ok_or(EngineFault::StackDepthMismatch {
+                        function: frame.template,
+                        pc: source_pc,
+                        expected: u32::try_from(excluded_depth.saturating_add(1))
+                            .unwrap_or(u32::MAX),
+                        actual: frame.stack.len(),
+                    })?,
+            )?
+            .duplicate();
+            let realm = code(runtime, frame.code)?.realm;
+            let return_to =
+                CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_copy_data_properties(
+                    runtime,
+                    target,
+                    source,
+                    excluded,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
+        }
         FinalOpcode::IfFalse | FinalOpcode::IfFalse8 => {
             let condition = pop(frame)?;
             frame.instruction =

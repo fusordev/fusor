@@ -4417,12 +4417,6 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     if let Some(span) = anonymous_named_evaluation_span(initializer) {
                         return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
                     }
-                    if pattern.rest.is_some() {
-                        return unsupported(
-                            UnsupportedLeafFeature::UnsupportedPattern,
-                            pattern.span,
-                        );
-                    }
                     return self.plan_object_destructuring_declaration(
                         pattern,
                         initializer,
@@ -4630,13 +4624,25 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         )
     }
 
+    /// Packs the three `copy_data_properties` operand depths into the single
+    /// U8: bits 0-1 are the target depth, bits 2-4 the source depth, and bits
+    /// 5-7 the excluded-object depth, each measured from the stack top with
+    /// the freshly allocated target at depth zero.
+    const fn copy_data_properties_offsets(target: u8, source: u8, excluded: u8) -> u8 {
+        target | (source << 2) | (excluded << 5)
+    }
+
     /// Destructures an on-stack value through an object pattern: `to_object`,
     /// then one `get_field2`/`get_array_el2` per property (the source object
-    /// stays below the read value), then `drop` the source. Object rest
-    /// (`{...rest}`) remains fail-closed in this slice.
+    /// stays below the read value), then `drop` the source. With object rest
+    /// (`{...rest}`) the pinned exclude list is created below the source
+    /// (`object; swap`), every destructured key is recorded in it, and the
+    /// remaining own enumerable string properties are copied into a fresh
+    /// target with `copy_data_properties` before both source and list drop.
     #[allow(
         clippy::too_many_arguments,
-        reason = "object-pattern value destructuring carries the same explicit frame, tree, constant, and flow authority as every other pattern form"
+        clippy::too_many_lines,
+        reason = "object-pattern value destructuring carries the same explicit frame, tree, constant, and flow authority as every other pattern form; the exclude-list program and copy-data-properties tail extend the same single transaction"
     )]
     fn plan_object_destructuring_value<'pattern>(
         &self,
@@ -4647,11 +4653,24 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
+        let has_rest = pattern.rest.is_some();
         flow.emit(PlannedInstruction::new(
             FinalOpcode::ToObject,
             Operands::None,
             pattern.span,
         ))?;
+        if has_rest {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Object,
+                Operands::None,
+                pattern.span,
+            ))?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                pattern.span,
+            ))?;
+        }
         for property in &pattern.properties {
             let span = property.span;
             if property.computed {
@@ -4662,17 +4681,76 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     },
                 )?;
                 self.plan_expression(key, layout, tree_layout, constants, flow)?;
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::ToPropKey,
-                    Operands::None,
-                    key.span(),
-                ))?;
+                if has_rest {
+                    // Record the key in the exclude list below the source.
+                    // The verifier's object-definition pass converts the key
+                    // while the exclude list is directly below it, so the
+                    // pinned `perm3` rotation runs before the single
+                    // `to_propkey` (observably identical: the same value is
+                    // converted exactly once).
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::Perm3,
+                        Operands::None,
+                        span,
+                    ))?;
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::ToPropKey,
+                        Operands::None,
+                        key.span(),
+                    ))?;
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::Null,
+                        Operands::None,
+                        span,
+                    ))?;
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::DefineArrayEl,
+                        Operands::None,
+                        span,
+                    ))?;
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::Perm3,
+                        Operands::None,
+                        span,
+                    ))?;
+                } else {
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::ToPropKey,
+                        Operands::None,
+                        key.span(),
+                    ))?;
+                }
                 flow.emit(PlannedInstruction::new(
                     FinalOpcode::GetArrayEl2,
                     Operands::None,
                     span,
                 ))?;
             } else {
+                if has_rest {
+                    // Record the key in the exclude list: [excludeList, source]
+                    // -> swap -> [source, excludeList] -> define_field ->
+                    // [source, excludeList] -> swap -> [excludeList, source].
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::Swap,
+                        Operands::None,
+                        span,
+                    ))?;
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::Null,
+                        Operands::None,
+                        span,
+                    ))?;
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::DefineField,
+                        Operands::Atom(constants.property_atom_index(property.key.span())?),
+                        span,
+                    ))?;
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::Swap,
+                        Operands::None,
+                        span,
+                    ))?;
+                }
                 flow.emit(PlannedInstruction::new(
                     FinalOpcode::GetField2,
                     Operands::Atom(constants.property_atom_index(property.key.span())?),
@@ -4688,11 +4766,43 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 flow,
             )?;
         }
-        flow.emit(PlannedInstruction::new(
-            FinalOpcode::Drop,
-            Operands::None,
-            pattern.span,
-        ))?;
+        if let Some(rest) = pattern.rest.as_deref() {
+            // [excludeList, source] -> target -> copy -> bind -> drops.
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Object,
+                Operands::None,
+                rest.span,
+            ))?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::CopyDataProperties,
+                Operands::U8(Self::copy_data_properties_offsets(0, 1, 2)),
+                rest.span,
+            ))?;
+            self.plan_destructuring_pattern_value(
+                &rest.argument,
+                declaration_kind,
+                layout,
+                tree_layout,
+                constants,
+                flow,
+            )?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                pattern.span,
+            ))?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                pattern.span,
+            ))?;
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                pattern.span,
+            ))?;
+        }
         Ok(())
     }
 
@@ -4942,19 +5052,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 constants,
                 flow,
             ),
-            BindingPattern::ObjectPattern(pattern) => {
-                if pattern.rest.is_some() {
-                    return unsupported(UnsupportedLeafFeature::UnsupportedPattern, pattern.span);
-                }
-                self.plan_object_destructuring_value(
-                    pattern,
-                    declaration_kind,
-                    layout,
-                    tree_layout,
-                    constants,
-                    flow,
-                )
-            }
+            BindingPattern::ObjectPattern(pattern) => self.plan_object_destructuring_value(
+                pattern,
+                declaration_kind,
+                layout,
+                tree_layout,
+                constants,
+                flow,
+            ),
         }
     }
 

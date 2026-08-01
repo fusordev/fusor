@@ -1138,3 +1138,196 @@ fn restore_preflighted_method_function_name(
     }
     Ok(())
 }
+
+/// Starts the pinned `copy_data_properties` abstract operation over the
+/// source's own enumerable string-keyed properties: each key not present on
+/// the excluded object is read (resumably, so accessors run) and defined on
+/// the target with the ordinary writable/enumerable/configurable layout.
+/// The operand stack is untouched; the caller consumes the three operands.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "copy-data-properties carries the same runtime, operand, realm, resume, origin, and budget authority as every other resumable native operation"
+)]
+pub(super) fn begin_copy_data_properties(
+    runtime: &mut Runtime,
+    target: StoredValue,
+    source: StoredValue,
+    excluded: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let reference = match &source {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "copy-data-properties source is not an object",
+            }
+            .into());
+        }
+    };
+    let (snapshot, snapshot_work) = runtime.try_for_in_snapshot(reference, 0)?;
+    execution_budget.charge_instructions(snapshot_work)?;
+    let excluded = if matches!(excluded, StoredValue::Undefined) {
+        None
+    } else {
+        Some(excluded)
+    };
+    let state = CopyDataPropertiesContinuation {
+        target,
+        source,
+        excluded,
+        snapshot,
+        next: 0,
+        current_key: None,
+        realm,
+        stage: CopyDataPropertiesStage::Next,
+        origin,
+    };
+    advance_copy_data_properties(
+        runtime,
+        state,
+        &StoredValue::Undefined,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the resumable next/read-value state machine mirrors the pinned copy_data_properties stages in one traced continuation"
+)]
+pub(super) fn advance_copy_data_properties(
+    runtime: &mut Runtime,
+    mut state: CopyDataPropertiesContinuation,
+    completion: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    loop {
+        match state.stage {
+            CopyDataPropertiesStage::Next => {
+                let Some(candidate) = state.snapshot.get(state.next).cloned() else {
+                    return Ok(NativeDispatch::CopyDataPropertiesDone);
+                };
+                state.next = state.next.saturating_add(1);
+                execution_budget.charge_instructions(1)?;
+                if !candidate.enumerable() {
+                    continue;
+                }
+                if let Some(excluded) = &state.excluded {
+                    let reference = match excluded {
+                        StoredValue::Function(function) => HeapReference::Function(*function),
+                        StoredValue::Object(object) => HeapReference::Object(*object),
+                        StoredValue::Undefined
+                        | StoredValue::Null
+                        | StoredValue::Boolean(_)
+                        | StoredValue::Number(_)
+                        | StoredValue::String(_)
+                        | StoredValue::Symbol(_) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "copy-data-properties excluded operand is not an object",
+                            }
+                            .into());
+                        }
+                    };
+                    if runtime
+                        .object_record(reference)?
+                        .own_property(candidate.key())
+                        .is_some()
+                    {
+                        continue;
+                    }
+                }
+                match read_static_property(runtime, state.realm, &state.source, candidate.key())? {
+                    PropertyReadOutcome::Value(value) => {
+                        match define_static_property(
+                            runtime,
+                            &state.target,
+                            candidate.key().clone(),
+                            value,
+                            execution_budget,
+                        )? {
+                            PropertyWriteOutcome::Complete => {}
+                            PropertyWriteOutcome::Failed(failure) => {
+                                return Err(NativeFailure::Abrupt(property_exception_at(
+                                    state.realm,
+                                    state.origin,
+                                    None,
+                                    failure,
+                                )?));
+                            }
+                            PropertyWriteOutcome::Setter { .. } => {
+                                return Err(EngineFault::RuntimeInvariant {
+                                    message: "copy-data-properties define returned a setter",
+                                }
+                                .into());
+                            }
+                        }
+                    }
+                    PropertyReadOutcome::Getter { function, receiver } => {
+                        state.stage = CopyDataPropertiesStage::ReadValue;
+                        state.current_key = Some(candidate.key().clone());
+                        let origin = state.origin.clone();
+                        return iterator_getter_call(
+                            function,
+                            receiver,
+                            NativeContinuation::CopyDataProperties(state),
+                            return_to,
+                            origin,
+                            None,
+                        );
+                    }
+                    PropertyReadOutcome::Failed(failure) => {
+                        return Err(NativeFailure::Abrupt(property_exception_at(
+                            state.realm,
+                            state.origin,
+                            None,
+                            failure,
+                        )?));
+                    }
+                }
+            }
+            CopyDataPropertiesStage::ReadValue => {
+                let key = state
+                    .current_key
+                    .take()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "copy-data-properties getter resumed without a pending key",
+                    })?;
+                match define_static_property(
+                    runtime,
+                    &state.target,
+                    key,
+                    completion.duplicate(),
+                    execution_budget,
+                )? {
+                    PropertyWriteOutcome::Complete => {
+                        state.stage = CopyDataPropertiesStage::Next;
+                    }
+                    PropertyWriteOutcome::Failed(failure) => {
+                        return Err(NativeFailure::Abrupt(property_exception_at(
+                            state.realm,
+                            state.origin,
+                            None,
+                            failure,
+                        )?));
+                    }
+                    PropertyWriteOutcome::Setter { .. } => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "copy-data-properties define returned a setter",
+                        }
+                        .into());
+                    }
+                }
+            }
+        }
+    }
+}

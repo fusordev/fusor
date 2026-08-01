@@ -496,7 +496,8 @@ pub(super) fn dispatch_pending_exception(
                     | NativeDispatch::Pair(_, _)
                     | NativeDispatch::ForOfRecord { .. }
                     | NativeDispatch::ForOfStep { .. }
-                    | NativeDispatch::ForOfClosed,
+                    | NativeDispatch::ForOfClosed
+                    | NativeDispatch::CopyDataPropertiesDone,
                 ) => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "exceptional IteratorClose completed without rethrowing",
@@ -595,7 +596,8 @@ pub(super) fn dispatch_pending_exception(
                 Ok(
                     NativeDispatch::ForOfRecord { .. }
                     | NativeDispatch::ForOfStep { .. }
-                    | NativeDispatch::ForOfClosed,
+                    | NativeDispatch::ForOfClosed
+                    | NativeDispatch::CopyDataPropertiesDone,
                 ) => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "iterator abrupt resolver produced a for-of normal result",

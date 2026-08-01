@@ -380,7 +380,7 @@ impl Runtime {
             })
     }
 
-    fn try_for_in_snapshot(
+    pub(crate) fn try_for_in_snapshot(
         &self,
         reference: HeapReference,
         replacing: usize,

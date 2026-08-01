@@ -50,6 +50,7 @@ pub(super) enum NativeDispatch {
         offset: u8,
     },
     ForOfClosed,
+    CopyDataPropertiesDone,
     Frame(Frame),
     Call(NativeCall),
 }
@@ -188,6 +189,7 @@ pub(super) fn resume_iterator_abrupt_continuations(
                     | NativeDispatch::ForOfRecord { .. }
                     | NativeDispatch::ForOfStep { .. }
                     | NativeDispatch::ForOfClosed
+                    | NativeDispatch::CopyDataPropertiesDone
                         if !continuations.is_empty() =>
                     {
                         return Err(EngineFault::RuntimeInvariant {
@@ -199,7 +201,8 @@ pub(super) fn resume_iterator_abrupt_continuations(
                     | NativeDispatch::Pair(_, _)
                     | NativeDispatch::ForOfRecord { .. }
                     | NativeDispatch::ForOfStep { .. }
-                    | NativeDispatch::ForOfClosed => {}
+                    | NativeDispatch::ForOfClosed
+                    | NativeDispatch::CopyDataPropertiesDone => {}
                 }
                 return Ok(dispatch);
             }
@@ -322,6 +325,9 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::IteratorClose(state) => {
                 advance_iterator_close(state, value, return_to)?
             }
+            NativeContinuation::CopyDataProperties(state) => {
+                advance_copy_data_properties(runtime, state, &value, return_to, execution_budget)?
+            }
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
@@ -332,7 +338,8 @@ pub(super) fn resume_native_continuations(
             dispatch @ (NativeDispatch::Pair(_, _)
             | NativeDispatch::ForOfRecord { .. }
             | NativeDispatch::ForOfStep { .. }
-            | NativeDispatch::ForOfClosed) => {
+            | NativeDispatch::ForOfClosed
+            | NativeDispatch::CopyDataPropertiesDone) => {
                 if continuations.is_empty() {
                     return Ok(dispatch);
                 }
@@ -529,7 +536,8 @@ fn resolve_native_dispatch_inner(
                 NativeDispatch::Pair(_, _)
                 | NativeDispatch::ForOfRecord { .. }
                 | NativeDispatch::ForOfStep { .. }
-                | NativeDispatch::ForOfClosed => {
+                | NativeDispatch::ForOfClosed
+                | NativeDispatch::CopyDataPropertiesDone => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "native function produced a structured continuation result",
                     }
@@ -651,7 +659,8 @@ pub(super) fn execute_native_entry(
             NativeDispatch::Pair(_, _)
             | NativeDispatch::ForOfRecord { .. }
             | NativeDispatch::ForOfStep { .. }
-            | NativeDispatch::ForOfClosed,
+            | NativeDispatch::ForOfClosed
+            | NativeDispatch::CopyDataPropertiesDone,
         ) => Err(EngineFault::RuntimeInvariant {
             message: "host native entry returned a structured continuation result",
         }

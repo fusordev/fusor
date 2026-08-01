@@ -883,6 +883,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PutArrayEl
             | FinalOpcode::ToObject
             | FinalOpcode::ToPropKey
+            | FinalOpcode::CopyDataProperties
             | FinalOpcode::DefineField
             | FinalOpcode::DefineArrayEl
             | FinalOpcode::DefineMethod

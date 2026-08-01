@@ -4238,6 +4238,25 @@ fn transfer_object_definition_provenance(
             state[first_index + 2] = second;
             state.push(third);
         }
+        FinalOpcode::Swap => {
+            // Pure stack rotation: the object-rest exclude list and the
+            // converted computed key keep their provenance through the
+            // pinned `swap` reordering.
+            let left_index = state
+                .len()
+                .checked_sub(2)
+                .ok_or_else(|| object_definition_error(id, decoded.pc()))?;
+            state.swap(left_index, left_index + 1);
+        }
+        FinalOpcode::Perm3 => {
+            // Pure stack rotation: `[a, b, c] -> [b, a, c]` keeps the
+            // exclude list and the converted key below the value.
+            let left_index = state
+                .len()
+                .checked_sub(3)
+                .ok_or_else(|| object_definition_error(id, decoded.pc()))?;
+            state.swap(left_index, left_index + 1);
+        }
         FinalOpcode::GetField2 => {
             let base = state.len() - 1;
             if is_append_provenance(state[base]) {
@@ -5038,6 +5057,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PutArrayEl
             | FinalOpcode::ToObject
             | FinalOpcode::ToPropKey
+            | FinalOpcode::CopyDataProperties
             | FinalOpcode::DefineField
             | FinalOpcode::DefineArrayEl
             | FinalOpcode::Append

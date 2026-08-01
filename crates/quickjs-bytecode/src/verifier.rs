@@ -2061,12 +2061,17 @@ fn validate_static_semantics(
             } else if compiler_generated
                 && matches!(
                     decoded.instruction().opcode(),
-                    FinalOpcode::ForOfStart | FinalOpcode::ForOfNext | FinalOpcode::IteratorClose
+                    FinalOpcode::ForOfStart
+                        | FinalOpcode::ForOfNext
+                        | FinalOpcode::IteratorClose
+                        | FinalOpcode::CopyDataProperties
                 )
             {
                 // Compiler-owned control flow is still non-executable. The
                 // whole-function typed stack verifier proves the exact
-                // synchronous iterator record before granting authority.
+                // synchronous iterator record before granting authority, and
+                // `copy_data_properties`' packed stack offsets keep their
+                // net-zero effect (three operand slots popped and re-pushed).
             } else {
                 return Err(VerificationError::at_instruction(
                     decoded,

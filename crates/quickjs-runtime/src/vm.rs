@@ -40,7 +40,7 @@ use crate::{
     PredefinedAtom, PropertyKey, PropertyLayout, Runtime, RuntimeError, RuntimeResource,
     conversion::{number_to_int32, number_to_uint32, string_to_number},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
-    object::OwnProperty,
+    object::{ForInSnapshot, OwnProperty},
     runtime::{
         ArrayDefineOutcome, ArrayLengthWriteOutcome, BindingCell, BoundFunction, BytecodeFunction,
         CollectionRoot, EnvironmentBinding, ForInAdvance, FrameBindingAddress,
@@ -262,6 +262,7 @@ enum NativeContinuation {
     ForOfClose(ForOfCloseContinuation),
     IteratorAppend(IteratorAppendContinuation),
     IteratorClose(IteratorCloseContinuation),
+    CopyDataProperties(CopyDataPropertiesContinuation),
     InstanceOf(InstanceOfContinuation),
     FunctionCall,
 }
@@ -285,6 +286,7 @@ impl NativeContinuation {
             Self::ForOfClose(state) => state.retained_values(),
             Self::IteratorAppend(state) => state.retained_values(),
             Self::IteratorClose(state) => state.retained_values(),
+            Self::CopyDataProperties(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
             Self::FunctionCall => 0,
         }
@@ -487,6 +489,30 @@ impl IteratorAppendContinuation {
             .saturating_add(u64::from(self.iterator.is_some()))
             .saturating_add(u64::from(self.next_method.is_some()))
             .saturating_add(u64::from(self.result.is_some()))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CopyDataPropertiesStage {
+    Next,
+    ReadValue,
+}
+
+struct CopyDataPropertiesContinuation {
+    target: StoredValue,
+    source: StoredValue,
+    excluded: Option<StoredValue>,
+    snapshot: ForInSnapshot,
+    next: usize,
+    current_key: Option<PropertyKey>,
+    realm: RealmId,
+    stage: CopyDataPropertiesStage,
+    origin: JsStackFrame,
+}
+
+impl CopyDataPropertiesContinuation {
+    fn retained_values(&self) -> u64 {
+        3_u64.saturating_add(u64::from(self.current_key.is_some()))
     }
 }
 
@@ -973,6 +999,10 @@ fn trace_instance_of_roots(state: &InstanceOfContinuation, mark: &mut dyn FnMut(
     trace_stored_value_root(&state.target, mark);
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "each native continuation traces its own rooted operand set; the copy-data-properties arm adds target, source, excluded, and the pending key"
+)]
 fn trace_native_continuation_roots(
     continuation: &NativeContinuation,
     mark: &mut dyn FnMut(CollectionRoot),
@@ -1064,6 +1094,13 @@ fn trace_native_continuation_roots(
             trace_stored_value_root(&state.iterator, mark);
             if let PendingExceptionPayload::ThrownValue(value) = &state.original.payload {
                 trace_stored_value_root(value, mark);
+            }
+        }
+        NativeContinuation::CopyDataProperties(state) => {
+            trace_stored_value_root(&state.target, mark);
+            trace_stored_value_root(&state.source, mark);
+            if let Some(excluded) = &state.excluded {
+                trace_stored_value_root(excluded, mark);
             }
         }
         NativeContinuation::InstanceOf(state) => {
@@ -1189,7 +1226,8 @@ fn native_dispatch_has_temporary_receiver(dispatch: &NativeDispatch) -> bool {
         | NativeDispatch::Pair(_, _)
         | NativeDispatch::ForOfRecord { .. }
         | NativeDispatch::ForOfStep { .. }
-        | NativeDispatch::ForOfClosed => false,
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone => false,
         NativeDispatch::Frame(frame) => {
             native_continuations_have_temporary_receiver(&frame.native_returns)
         }
@@ -1900,7 +1938,8 @@ fn execute_frame_loop(
                             NativeDispatch::Pair(_, _)
                             | NativeDispatch::ForOfRecord { .. }
                             | NativeDispatch::ForOfStep { .. }
-                            | NativeDispatch::ForOfClosed,
+                            | NativeDispatch::ForOfClosed
+                            | NativeDispatch::CopyDataPropertiesDone,
                         ) => {
                             return Err(EngineFault::RuntimeInvariant {
                                 message:
@@ -2100,7 +2139,8 @@ fn execute_frame_loop(
                         NativeDispatch::Pair(_, _)
                         | NativeDispatch::ForOfRecord { .. }
                         | NativeDispatch::ForOfStep { .. }
-                        | NativeDispatch::ForOfClosed,
+                        | NativeDispatch::ForOfClosed
+                        | NativeDispatch::CopyDataPropertiesDone,
                     ) => {
                         return Err(EngineFault::RuntimeInvariant {
                             message: "bytecode apply produced a structured continuation result",
@@ -2199,6 +2239,19 @@ fn execute_frame_loop(
                             instruction: 0,
                         })?;
                         finish_for_of_close(parent, return_to)?;
+                    }
+                    Ok(NativeDispatch::CopyDataPropertiesDone) => {
+                        let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?;
+                        if !matches!(return_to.disposition, ReturnDisposition::Discard) {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "copy-data-properties reached a value-producing continuation",
+                            }
+                            .into());
+                        }
+                        parent.instruction = return_to.instruction;
                     }
                     Ok(NativeDispatch::Frame(child)) => {
                         *active_frame_values =
@@ -2375,6 +2428,23 @@ fn execute_frame_loop(
                                 message: "for-of close continuation has no caller continuation",
                             })?;
                             finish_for_of_close(parent, return_to)?;
+                            continue;
+                        }
+                        Ok(NativeDispatch::CopyDataPropertiesDone) => {
+                            let parent =
+                                frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                                    message: "copy-data-properties continuation has no executing frame",
+                                })?;
+                            let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
+                                message: "copy-data-properties continuation has no caller continuation",
+                            })?;
+                            if !matches!(return_to.disposition, ReturnDisposition::Discard) {
+                                return Err(EngineFault::RuntimeInvariant {
+                                    message: "copy-data-properties reached a value-producing continuation",
+                                }
+                                .into());
+                            }
+                            parent.instruction = return_to.instruction;
                             continue;
                         }
                         Ok(NativeDispatch::Frame(child)) => {

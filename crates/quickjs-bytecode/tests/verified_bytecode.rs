@@ -581,7 +581,6 @@ fn final_authority_rejects_forged_moved_or_aliased_array_append_pairs() {
             (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
             (FinalOpcode::Push0, Operands::NoneInt),
             (FinalOpcode::Swap, Operands::None),
-            (FinalOpcode::Swap, Operands::None),
             (FinalOpcode::Undefined, Operands::None),
             (FinalOpcode::Append, Operands::None),
             (FinalOpcode::Drop, Operands::None),
@@ -616,6 +615,29 @@ fn final_authority_rejects_forged_moved_or_aliased_array_append_pairs() {
             "{error:?}"
         );
     }
+}
+
+#[test]
+fn final_authority_admits_pure_swap_rotations_preserving_the_append_pair() {
+    // `swap` is a pure stack rotation (the object-rest exclude-list lowering
+    // rotates the destination/source pair through it), so a double swap that
+    // restores the exact destination/cursor order remains an unaliased append
+    // pair. A single swap, which separates the pair, is rejected above.
+    let instructions = [
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::Swap, Operands::None),
+        (FinalOpcode::Swap, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Append, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a double swap is an identity rotation of the append pair");
 }
 
 #[test]

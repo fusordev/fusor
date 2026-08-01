@@ -785,6 +785,119 @@ fn object_pattern_as_an_array_assignment_element() {
 }
 
 #[test]
+fn object_rest_collects_remaining_properties() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let {a, ...rest} = {a: 1, b: 2, c: 3};\
+            return a * 1000 + rest.b * 100 + rest.c * 10 + (rest.a===undefined?1:0);",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object rest result");
+    assert_number(&result, 1231);
+}
+
+#[test]
+fn object_rest_excludes_destructured_keys_including_computed() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let key='a';\
+            let {[key]: x, ...rest} = {a: 1, b: 2, c: 3};\
+            return x * 100 + rest.b * 10 + rest.c + (rest.a===undefined?1:0);",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("computed object rest result");
+    assert_number(&result, 124);
+}
+
+#[test]
+fn object_rest_skips_non_enumerable_properties() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let obj={a: 1};\
+            let {...rest} = obj;\
+            return rest.a * 10 + (rest.b===undefined?1:0);",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object rest enumerable");
+    assert_number(&result, 11);
+}
+
+#[test]
+fn object_rest_copies_getter_values() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let calls=0;\
+            let obj={\
+                get a(){calls++;return 42;}\
+            };\
+            let {...rest} = obj;\
+            return rest.a * 100 + calls;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object rest getter");
+    assert_number(&result, 4201);
+}
+
+#[test]
+fn object_rest_with_defaults_and_nested_patterns() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let {a = 9, b: [x, y], ...rest} = {b: [1, 2], c: 3};\
+            return a * 1000 + x * 100 + y * 10 + rest.c;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object rest with defaults and nested");
+    assert_number(&result, 9123);
+}
+
+#[test]
+fn object_rest_on_primitive_string_boxes_indices() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let {...rest} = 'ab';\
+            return rest[0] === 'a' && rest[1] === 'b' && rest.length === undefined ? 1 : 0;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("string object rest");
+    // The String wrapper exposes indices 0 ('a') and 1 ('b') as own
+    // enumerable string properties; the non-enumerable `length` is not
+    // copied, so the rest object has no own `length`. The copied values are
+    // the string code units themselves, so arithmetic like `rest[0] * 100`
+    // coerces them to NaN exactly as it does in QuickJS.
+    assert_number(&result, 1);
+}
+
+#[test]
 fn array_destructuring_step_failures_do_not_call_return() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
