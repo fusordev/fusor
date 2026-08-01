@@ -155,15 +155,21 @@ Known intentional runtime differences:
   interpreter, and the separator defaults to `","` when absent or `undefined`.
   This closes the coercion divergence in which `String([1,2])` produced
   `"[object Array]"`.
-- [ ] Remaining conversions, BigInt domains, remaining String/Number/Array
+- [x] BigInt domain: a project-owned two's-complement limb representation
+  mirroring `JSBigInt` (`quickjs.c:490-495`), the full operator set with the two
+  numeric domains kept separate (`cannot convert bigint to number` for a mixed
+  pair, no unary `+`, no `>>>`), relational comparison and loose equality mixing
+  by exact mathematical value rather than by rounding, `typeof`, truthiness,
+  strict equality, `ToString`/`ToPropertyKey`, executable literals, an
+  `Object(bigint)` wrapper with `[object BigInt]` tagging, and a realm-owned
+  non-constructable `BigInt` with `toString`, `valueOf`,
+  `[Symbol.toStringTag]`, `asIntN`, and `asUintN`.
+- [ ] Remaining conversions (`ToNumeric` for typed arrays, the narrow integer
+  conversions, `CanonicalNumericIndexString`), remaining String/Number/Array
   method surface, shape sharing/transition interning, remaining exotics
   (`Object.defineProperty`'s resumable descriptor read, arguments, Proxy),
   dense indexed storage, deterministic finalization, limits/interrupts, and
-  diagnostics. The BigInt arithmetic core (two's-complement limbs, the full
-  operator set, radix conversion, and `asIntN`/`asUintN`) is implemented and
-  tested; the remaining BigInt work is the value domain itself, which adds the
-  `StoredValue` variant, `typeof`, equality, literal execution, and the
-  numeric-domain operator split.
+  diagnostics.
 
 ### Built-ins and asynchronous semantics
 
