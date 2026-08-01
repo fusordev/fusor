@@ -191,6 +191,7 @@ fn instance_of_method_decision(
                 origin,
                 continuations,
                 pre_call: None,
+                new_target: None,
             }))
         }
         StoredValue::Boolean(_)
@@ -265,6 +266,7 @@ fn ordinary_has_instance(
                         origin,
                         continuations,
                         pre_call: None,
+                        new_target: None,
                     }));
                 }
                 StoredValue::Boolean(_)

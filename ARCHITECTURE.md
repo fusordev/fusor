@@ -447,7 +447,7 @@ described below. `Number.prototype.toString` reuses the Number-hint conversion
 continuation for observable radix coercion and formats validated bases 2
 through 36 without exponent notation outside base ten. The remaining String
 methods, Symbol boxing, persistent global lexical collision checks, and
-`Function.prototype.apply`/`bind`/`Symbol.hasInstance` stay fail closed.
+`Function.prototype.bind`/`Symbol.hasInstance` stay fail closed.
 The path never emits `eval`/`apply_eval` and rejects direct eval anywhere in
 generated code. Direct and indirect eval remain wholly unimplemented.
 GeneratorFunction, AsyncFunction, and AsyncGeneratorFunction also remain fail
@@ -567,7 +567,15 @@ configurable indexed properties above a shorter length in bounded linear work.
 Enumeration hides `length`, object tagging observes the array brand, and the
 existing observable `Function.prototype.apply` scan consumes the array without
 a special argument-list bypass. The `Array` constructor, `Array.prototype`
-methods, holes, spread, iterators, and destructuring remain deferred.
+methods, holes, iterators, and destructuring remain deferred.
+Call spread and construction spread lower to the pinned argument-array packing:
+`array_from` for the dense prefix, a dynamic index, `define_array_el`/`append`
+per argument, the index `drop`, then `perm3` (member/construction callees) or
+`undefined; swap` (plain callees) before `apply`. The `Apply` opcode reuses the
+exact `Function.prototype.apply` admission and index scan with a
+construction flag that forwards `new.target` through bound unwrapping and
+native-to-bytecode frame creation, and abrupt spread exhaustion performs
+`IteratorClose` with original-error precedence.
 An escaping throw carries its exact JavaScript value through the same frame
 vector, allocates caller provenance before publishing any heap root, and
 preserves caller order from immediate to outermost. Dynamic operators use a
@@ -590,7 +598,7 @@ Concatenation that exceeds the JavaScript String limit raises the exact
 and mixed numeric domains,
 async/generator methods, `super`/home-object semantics, realm-global setter
 dispatch, prototype mutation, proxies and other exotics, derived/class and
-nonordinary constructor forms, optional/spread/apply/tail calls, the remaining
+nonordinary constructor forms, optional/tail calls, the remaining
 Number built-ins, the remaining String built-ins, Symbol sloppy-`this` boxing
 and wrapper/prototype conversions, `for-in` Symbol boxing and destructuring
 heads, serialized input, raw function slots, destructuring catch bindings,

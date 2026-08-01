@@ -293,6 +293,7 @@ fn exception_caller_frames(
                 | FinalOpcode::GetArrayEl
                 | FinalOpcode::GetArrayEl2
                 | FinalOpcode::PutArrayEl
+                | FinalOpcode::Apply
                 | FinalOpcode::Append
                 | FinalOpcode::ForOfStart
                 | FinalOpcode::ForOfNext

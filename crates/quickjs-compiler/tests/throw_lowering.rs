@@ -147,10 +147,10 @@ fn unreachable_statements_after_throw_are_still_lowered_and_terminated() {
 
 #[test]
 fn unsupported_unreachable_source_after_throw_still_fails_closed() {
-    let source = "function f(a){throw a;new a(...[]);}";
+    let source = "function f(a){throw a;a?.();}";
     let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "f") else {
-        panic!("unreachable spread constructor call must remain unsupported");
+        panic!("unreachable optional call must remain unsupported");
     };
     assert_eq!(feature, UnsupportedLeafFeature::UnsupportedExpression);
-    assert_eq!(&source[span.start as usize..span.end as usize], "...[]");
+    assert_eq!(&source[span.start as usize..span.end as usize], "a?.()");
 }

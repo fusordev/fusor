@@ -530,6 +530,7 @@ fn native_getter_call(
         origin,
         continuations,
         pre_call: None,
+        new_target: None,
     }))
 }
 

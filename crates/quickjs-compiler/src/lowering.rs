@@ -3,7 +3,7 @@ use std::{collections::HashMap, error::Error, fmt, ops::Range, sync::Arc};
 use oxc_ast::{
     AstKind,
     ast::{
-        ArrayExpression, ArrayExpressionElement, AssignmentExpression, AssignmentTarget,
+        Argument, ArrayExpression, ArrayExpressionElement, AssignmentExpression, AssignmentTarget,
         BindingPattern, BlockStatement, CallExpression, CatchClause, ComputedMemberExpression,
         ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForInStatement,
         ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft, Function, FunctionBody,
@@ -4674,6 +4674,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         ))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the exact QuickJS spread-call argument packing is planned as one reviewable transaction"
+    )]
     fn plan_call_expression<'expression>(
         call: &'expression CallExpression<'arena>,
         constants: &CompiledConstantPool,
@@ -4682,8 +4686,121 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         if call.optional || call.type_arguments.is_some() {
             return unsupported(UnsupportedLeafFeature::UnsupportedExpression, call.span);
         }
-        if let Some(spread) = call.arguments.iter().find(|argument| argument.is_spread()) {
-            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, spread.span());
+        if let Some(spread) = call.arguments.iter().position(Argument::is_spread) {
+            let member = Self::member_callee(&call.callee)?;
+            let dense_prefix = spread;
+            let argument_count = u16::try_from(dense_prefix).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "spread call prefix arguments",
+                }
+            })?;
+            let dynamic_index = i32::try_from(dense_prefix).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "spread call dynamic index",
+                }
+            })?;
+            // Execution order: callee first, then the dense prefix, then
+            // `array_from`, the dynamic index, each remaining argument, the
+            // index drop, the receiver insert, and finally `apply`.
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Apply,
+                Operands::U16(0),
+                call.span,
+            )));
+            if member.is_some() {
+                // `obj func array` -> `func obj array`
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Perm3,
+                    Operands::None,
+                    call.span,
+                )));
+            } else {
+                // `func array` -> `func undef array`
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    call.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Undefined,
+                    Operands::None,
+                    call.span,
+                )));
+            }
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                call.span,
+            )));
+            for argument in call.arguments.iter().skip(dense_prefix).rev() {
+                if let Argument::SpreadElement(spread) = argument {
+                    let expression = &spread.argument;
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Append,
+                        Operands::None,
+                        argument.span(),
+                    )));
+                    work.push(ExpressionWork::Visit(expression));
+                } else {
+                    let expression = argument.as_expression().ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "dynamic call argument is an expression",
+                            span: Some(argument.span()),
+                        },
+                    )?;
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Inc,
+                        Operands::None,
+                        argument.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::DefineArrayEl,
+                        Operands::None,
+                        argument.span(),
+                    )));
+                    work.push(ExpressionWork::Visit(expression));
+                }
+            }
+            work.push(ExpressionWork::Emit(plan_push_integer(
+                dynamic_index,
+                call.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::ArrayFrom,
+                Operands::NPop { argument_count },
+                call.span,
+            )));
+            for argument in call.arguments.iter().take(dense_prefix).rev() {
+                let expression =
+                    argument
+                        .as_expression()
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "dense call argument is an expression",
+                            span: Some(argument.span()),
+                        })?;
+                work.push(ExpressionWork::Visit(expression));
+            }
+            match member {
+                Some(MemberCallee::Static(member)) => {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetField2,
+                        Operands::Atom(constants.property_atom_index(member.property.span)?),
+                        member.span,
+                    )));
+                    work.push(ExpressionWork::Visit(&member.object));
+                }
+                Some(MemberCallee::Computed(member)) => {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetArrayEl2,
+                        Operands::None,
+                        member.span,
+                    )));
+                    work.push(ExpressionWork::Visit(&member.expression));
+                    work.push(ExpressionWork::Visit(&member.object));
+                }
+                None => work.push(ExpressionWork::Visit(&call.callee)),
+            }
+            return Ok(());
         }
 
         let argument_count = u16::try_from(call.arguments.len()).map_err(|_| {
@@ -4734,6 +4851,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the exact QuickJS spread-construction argument packing is planned as one reviewable transaction"
+    )]
     fn plan_new_expression<'expression>(
         constructor: &'expression NewExpression<'arena>,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
@@ -4744,12 +4865,91 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 constructor.span,
             );
         }
-        if let Some(spread) = constructor
-            .arguments
-            .iter()
-            .find(|argument| argument.is_spread())
-        {
-            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, spread.span());
+        if let Some(spread) = constructor.arguments.iter().position(Argument::is_spread) {
+            let dense_prefix = spread;
+            let argument_count = u16::try_from(dense_prefix).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "spread constructor prefix arguments",
+                }
+            })?;
+            let dynamic_index = i32::try_from(dense_prefix).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "spread constructor dynamic index",
+                }
+            })?;
+            // `new C(...a)` duplicates the callee so the pinned `apply`
+            // operand order `func this array` holds with `this` equal to the
+            // duplicated construction target.
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Apply,
+                Operands::U16(1),
+                constructor.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Perm3,
+                Operands::None,
+                constructor.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                constructor.span,
+            )));
+            for argument in constructor.arguments.iter().skip(dense_prefix).rev() {
+                if let Argument::SpreadElement(spread) = argument {
+                    let expression = &spread.argument;
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Append,
+                        Operands::None,
+                        argument.span(),
+                    )));
+                    work.push(ExpressionWork::Visit(expression));
+                } else {
+                    let expression = argument.as_expression().ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "dynamic constructor argument is an expression",
+                            span: Some(argument.span()),
+                        },
+                    )?;
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Inc,
+                        Operands::None,
+                        argument.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::DefineArrayEl,
+                        Operands::None,
+                        argument.span(),
+                    )));
+                    work.push(ExpressionWork::Visit(expression));
+                }
+            }
+            work.push(ExpressionWork::Emit(plan_push_integer(
+                dynamic_index,
+                constructor.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::ArrayFrom,
+                Operands::NPop { argument_count },
+                constructor.span,
+            )));
+            for argument in constructor.arguments.iter().take(dense_prefix).rev() {
+                let expression =
+                    argument
+                        .as_expression()
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "dense constructor argument is an expression",
+                            span: Some(argument.span()),
+                        })?;
+                work.push(ExpressionWork::Visit(expression));
+            }
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Dup,
+                Operands::None,
+                constructor.callee.span(),
+            )));
+            work.push(ExpressionWork::Visit(&constructor.callee));
+            return Ok(());
         }
 
         let argument_count = u16::try_from(constructor.arguments.len()).map_err(|_| {

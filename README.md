@@ -124,7 +124,7 @@ BigInt values and mixed numeric domains, the remaining `Array` static and
 prototype methods, other exotic objects, shorthand/spread and `__proto__`
 data-initializer semantics, anonymous data-function inferred names,
 async/generator methods, `super`/home-object semantics, realm-global accessor
-writes, optional calls, call spread, iterator destructuring, `for await`,
+writes, optional calls, iterator destructuring, `for await`,
 async/generator iterator consumers, the remaining Number built-ins, the
 remaining String built-ins, serialized bytecode, every form of eval,
 destructuring-catch semantics, and complete Error compatibility remain
@@ -167,8 +167,14 @@ before touching its list, performs one observable `length` Get and Number-hint
 `ToLength`, then reads ordinary/function object indices left-to-right through a
 GC-traced resumable continuation. Its 65,534-argument ceiling, frame/value
 preflights, and indexed-scan work share the target bytecode's execution budget.
-Bytecode `Apply`, spread calls, arguments objects, and `Reflect.apply` remain
-fail-closed.
+Call spread (`f(...args)`) and construction spread (`new C(...args)`) now lower
+to the pinned `array_from; push index; define_array_el/append; drop;
+perm3 | undefined; swap; apply` stack program, evaluate dense prefixes and
+spreads left to right, and execute through the exact `Function.prototype.apply`
+admission path with `new.target` forwarding for construction. Abrupt iterator
+exhaustion closes the iterator with original-error precedence. The strict
+15-case call-spread differential covers 15 feature tags. `arguments` objects
+and `Reflect.apply` remain fail-closed.
 Function source arguments now run resumable `ToPrimitive` with the string hint:
 `Symbol.toPrimitive`, `toString`, and `valueOf` are observed in exact order,
 data or accessor-backed lookup preserves the original receiver, native or
@@ -256,7 +262,9 @@ cargo xtask dynamic-function-differential --oracle /path/to/quickjs-2026-06-04/q
 cargo xtask number-radix-differential --oracle /path/to/quickjs-2026-06-04/qjs
 cargo xtask control-flow-differential --oracle /path/to/quickjs-2026-06-04/qjs
 cargo xtask function-apply-differential --oracle /path/to/quickjs-2026-06-04/qjs
+cargo xtask function-bind-differential --oracle /path/to/quickjs-2026-06-04/qjs
 cargo xtask iterator-differential --oracle /path/to/quickjs-2026-06-04/qjs
+cargo xtask call-spread-differential --oracle /path/to/quickjs-2026-06-04/qjs
 cargo xtask error-differential --oracle /path/to/quickjs-2026-06-04/qjs
 ```
 

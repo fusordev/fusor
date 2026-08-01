@@ -31,6 +31,7 @@ pub(crate) const DEFAULT_ERROR_CORPUS: &str = "tests/error/manifest.json";
 pub(crate) const DEFAULT_FUNCTION_APPLY_CORPUS: &str = "tests/function-apply/manifest.json";
 pub(crate) const DEFAULT_FUNCTION_BIND_CORPUS: &str = "tests/function-bind/manifest.json";
 pub(crate) const DEFAULT_ITERATOR_CORPUS: &str = "tests/iterator/manifest.json";
+pub(crate) const DEFAULT_CALL_SPREAD_CORPUS: &str = "tests/call-spread/manifest.json";
 pub(crate) const MAX_CONTROL_FLOW_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const CANDIDATE_WORKER_COMMAND: &str = "__control-flow-candidate-worker";
 
@@ -204,6 +205,24 @@ const FUNCTION_BIND_REQUIRED_COVERAGE: &[&str] = &[
     "new-target-substitution",
 ];
 
+const CALL_SPREAD_REQUIRED_COVERAGE: &[&str] = &[
+    "abrupt-close",
+    "argument-order",
+    "array-like-length",
+    "construction",
+    "construction-empty",
+    "dense-spread-order",
+    "empty-spread",
+    "evaluation-order",
+    "iterator-consumption",
+    "member-receiver",
+    "multiple-spreads",
+    "noncallable",
+    "noniterable",
+    "nonobject-list",
+    "string-iteration",
+];
+
 const ERROR_REQUIRED_COVERAGE: &[&str] = &[
     "aggregate-call",
     "aggregate-acquisition-abrupt",
@@ -328,6 +347,7 @@ enum RuntimeDifferentialSuite {
     FunctionApply,
     FunctionBind,
     Iterator,
+    CallSpread,
 }
 
 impl RuntimeDifferentialSuite {
@@ -338,6 +358,7 @@ impl RuntimeDifferentialSuite {
             Self::FunctionApply => "function-apply",
             Self::FunctionBind => "function-bind",
             Self::Iterator => "iterator",
+            Self::CallSpread => "call-spread",
         }
     }
 
@@ -348,6 +369,7 @@ impl RuntimeDifferentialSuite {
             Self::FunctionApply => FUNCTION_APPLY_REQUIRED_COVERAGE,
             Self::FunctionBind => FUNCTION_BIND_REQUIRED_COVERAGE,
             Self::Iterator => ITERATOR_REQUIRED_COVERAGE,
+            Self::CallSpread => CALL_SPREAD_REQUIRED_COVERAGE,
         }
     }
 }
@@ -382,6 +404,13 @@ pub(crate) struct FunctionBindDifferentialOptions {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct IteratorDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct CallSpreadDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -466,6 +495,17 @@ pub(crate) fn run_iterator_differential(
         &options.corpus,
         options.timeout,
         RuntimeDifferentialSuite::Iterator,
+    )
+}
+
+pub(crate) fn run_call_spread_differential(
+    options: &CallSpreadDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::CallSpread,
     )
 }
 
@@ -1743,6 +1783,26 @@ mod tests {
         })
     }
 
+    fn complete_call_spread_manifest() -> Value {
+        let cases = super::CALL_SPREAD_REQUIRED_COVERAGE
+            .iter()
+            .enumerate()
+            .map(|(index, feature)| {
+                json!({
+                    "id": format!("call-spread-case-{index}"),
+                    "covers": [feature],
+                    "body": "return \"ok\";",
+                    "expect": {"kind": "string", "value": "ok"}
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "schema": 1,
+            "quickjs_release": EXPECTED_MANIFEST_RELEASE,
+            "cases": cases
+        })
+    }
+
     fn parse(value: &Value) -> Result<super::ControlFlowCorpus, String> {
         parse_corpus(
             &serde_json::to_vec(value).expect("serialize manifest"),
@@ -1820,6 +1880,50 @@ mod tests {
         )
         .expect("checked-in function-bind manifest");
         assert_eq!(corpus.cases.len(), 20);
+    }
+
+    #[test]
+    fn accepts_a_complete_call_spread_manifest_with_its_own_coverage_contract() {
+        let manifest = complete_call_spread_manifest();
+        let corpus = parse_corpus_for_suite(
+            &serde_json::to_vec(&manifest).expect("serialize manifest"),
+            "call-spread.json",
+            RuntimeDifferentialSuite::CallSpread,
+        )
+        .expect("valid call-spread manifest");
+        assert_eq!(
+            corpus.cases.len(),
+            super::CALL_SPREAD_REQUIRED_COVERAGE.len()
+        );
+        assert_eq!(corpus.cases[0].id, "call-spread-case-0");
+    }
+
+    #[test]
+    fn call_spread_manifest_rejects_cross_suite_coverage_tags() {
+        let mut manifest = complete_call_spread_manifest();
+        manifest["cases"][0]["covers"][0] = Value::String("labeled-break".to_owned());
+        assert!(
+            parse_corpus_for_suite(
+                &serde_json::to_vec(&manifest).expect("serialize manifest"),
+                "call-spread.json",
+                RuntimeDifferentialSuite::CallSpread,
+            )
+            .expect_err("cross-suite coverage tag")
+            .contains("unknown feature")
+        );
+    }
+
+    #[test]
+    fn checked_in_call_spread_manifest_satisfies_the_strict_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/call-spread/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in call-spread manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::CallSpread,
+        )
+        .expect("checked-in call-spread manifest");
+        assert_eq!(corpus.cases.len(), 15);
     }
 
     #[test]

@@ -8,10 +8,11 @@ mod number_radix_differential;
 mod parser_differential;
 
 use control_flow_differential::{
-    CANDIDATE_WORKER_COMMAND, ControlFlowDifferentialOptions, DEFAULT_CONTROL_FLOW_CORPUS,
-    DEFAULT_ERROR_CORPUS, DEFAULT_FUNCTION_APPLY_CORPUS, DEFAULT_FUNCTION_BIND_CORPUS,
-    DEFAULT_ITERATOR_CORPUS, ErrorDifferentialOptions, FunctionApplyDifferentialOptions,
-    FunctionBindDifferentialOptions, IteratorDifferentialOptions, MAX_CONTROL_FLOW_TIMEOUT_MS,
+    CANDIDATE_WORKER_COMMAND, CallSpreadDifferentialOptions, ControlFlowDifferentialOptions,
+    DEFAULT_CALL_SPREAD_CORPUS, DEFAULT_CONTROL_FLOW_CORPUS, DEFAULT_ERROR_CORPUS,
+    DEFAULT_FUNCTION_APPLY_CORPUS, DEFAULT_FUNCTION_BIND_CORPUS, DEFAULT_ITERATOR_CORPUS,
+    ErrorDifferentialOptions, FunctionApplyDifferentialOptions, FunctionBindDifferentialOptions,
+    IteratorDifferentialOptions, MAX_CONTROL_FLOW_TIMEOUT_MS, run_call_spread_differential,
     run_control_flow_candidate_worker, run_control_flow_differential, run_error_differential,
     run_function_apply_differential, run_function_bind_differential, run_iterator_differential,
 };
@@ -37,6 +38,10 @@ const DEFAULT_PARSER_CORPUS: &str = "tests/parser";
 const DEFAULT_DYNAMIC_FUNCTION_CORPUS: &str = "tests/dynamic-function";
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "each differential task keeps one visible success/failure boundary"
+)]
 fn main() -> ExitCode {
     match Args::parse(env::args_os().skip(1)) {
         Ok(Args::Help) => {
@@ -125,6 +130,14 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Ok(Args::CallSpreadDifferential(options)) => match run_call_spread_differential(&options) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(error) => {
+                eprintln!("xtask: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Ok(Args::ControlFlowCandidateWorker) => match run_control_flow_candidate_worker() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -153,6 +166,7 @@ Usage:
   cargo xtask function-apply-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask function-bind-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask iterator-differential --oracle QJS_PATH [OPTIONS]
+  cargo xtask call-spread-differential --oracle QJS_PATH [OPTIONS]
 
 Options:
   --corpus PATH       Corpus directory (runtime default: {DEFAULT_CORPUS};
@@ -162,7 +176,8 @@ Options:
                       control-flow manifest default: {DEFAULT_CONTROL_FLOW_CORPUS};
                       Error manifest default: {DEFAULT_ERROR_CORPUS};
                       Function.prototype.apply manifest default: {DEFAULT_FUNCTION_APPLY_CORPUS};
-                      iterator manifest default: {DEFAULT_ITERATOR_CORPUS})
+                      iterator manifest default: {DEFAULT_ITERATOR_CORPUS};
+                      call-spread manifest default: {DEFAULT_CALL_SPREAD_CORPUS})
   --timeout-ms N      Per-process timeout (default: {DEFAULT_TIMEOUT_MS})
   -h, --help          Show this help
 
@@ -176,6 +191,8 @@ its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
 Function.prototype.apply --oracle must be the pinned QuickJS 2026-06-04 qjs
 interpreter; its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
 Iterator --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
+its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
+Call spread --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
 its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
 "
     );
@@ -193,6 +210,7 @@ enum Args {
     FunctionApplyDifferential(FunctionApplyDifferentialOptions),
     FunctionBindDifferential(FunctionBindDifferentialOptions),
     IteratorDifferential(IteratorDifferentialOptions),
+    CallSpreadDifferential(CallSpreadDifferentialOptions),
     ControlFlowCandidateWorker,
 }
 
@@ -253,6 +271,10 @@ impl Args {
             }
             "iterator-differential" => parse_iterator_differential_options(arguments.into_iter())
                 .map(Self::IteratorDifferential),
+            "call-spread-differential" => {
+                parse_call_spread_differential_options(arguments.into_iter())
+                    .map(Self::CallSpreadDifferential)
+            }
             unknown => Err(format!("unknown task `{unknown}`")),
         }
     }
@@ -528,6 +550,41 @@ fn parse_iterator_differential_options(
     }
 
     Ok(IteratorDifferentialOptions {
+        oracle: oracle.ok_or("missing required --oracle PATH")?,
+        corpus,
+        timeout,
+    })
+}
+
+fn parse_call_spread_differential_options(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<CallSpreadDifferentialOptions, String> {
+    let mut oracle = None;
+    let mut corpus = PathBuf::from(DEFAULT_CALL_SPREAD_CORPUS);
+    let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    while let Some(option) = arguments.next() {
+        match option.to_string_lossy().as_ref() {
+            "--oracle" => oracle = Some(required_path(&mut arguments, "--oracle")?),
+            "--corpus" => corpus = required_path(&mut arguments, "--corpus")?,
+            "--timeout-ms" => {
+                timeout = required_timeout(&mut arguments)?;
+                let milliseconds = timeout.as_millis();
+                if milliseconds == 0 || milliseconds > u128::from(MAX_CONTROL_FLOW_TIMEOUT_MS) {
+                    return Err(format!(
+                        "call-spread --timeout-ms must be between 1 and {MAX_CONTROL_FLOW_TIMEOUT_MS}"
+                    ));
+                }
+            }
+            unknown => {
+                return Err(format!(
+                    "unknown call-spread-differential option `{unknown}`"
+                ));
+            }
+        }
+    }
+
+    Ok(CallSpreadDifferentialOptions {
         oracle: oracle.ok_or("missing required --oracle PATH")?,
         corpus,
         timeout,

@@ -349,8 +349,9 @@ A milestone is complete only when all of its checked items pass in CI.
         source spans. Static-property methods now use the same frame vector and
         preserve their raw receiver; Boolean, Number, and String receivers now
         use the typed wrapper path below, while Symbol sloppy-`this`
-        normalization, optional/spread/apply, tail calls, `arguments`, and
-        direct eval remain fail closed.
+        normalization, optional calls, tail calls, `arguments`, and
+        direct eval remain fail closed. Call and construction spread execute
+        through `apply` with the exact argument-array packing below.
   - [x] Execute ordinary `Function(...)` and `new Function(...)` without eval:
         convert already-evaluated arguments in order, retain the exact
         QuickJS-compatible wrapper and fragment map, compile the complete
@@ -489,6 +490,23 @@ A milestone is complete only when all of its checked items pass in CI.
         collection. The pinned 40-case iterator differential covers 51 strict
         feature tags. Destructuring heads, `for await`, and async/generator
         iterator consumers remain fail-closed.
+  - [x] Execute call spread (`f(...args)`) and construction spread
+        (`new C(...args)`) through the shared argument-array packing. Compiler
+        lowering follows the pinned `array_from; push index; define_array_el /
+        append; drop; perm3 | undefined; swap; apply` stack program for
+        plain, member, and construction callees, evaluating dense prefix
+        arguments, spreads, and trailing arguments left to right. The
+        `Apply` opcode dispatches through the exact `Function.prototype.apply`
+        admission path (callable target first, nullish argument list as a
+        zero-argument call, `not a object` for primitives, length, and the
+        65,534 ceiling), and its construction flag forwards `new.target`
+        through bound-function unwrapping and native-to-bytecode frame
+        creation. Abrupt iterator exhaustion performs `IteratorClose` with
+        original-error precedence; the argument array is fully materialized
+        before the target call, matching the pinned operand order. The
+        15-case call-spread differential covers 15 strict feature tags.
+        Iterator destructuring, `for await`, and async/generator iterator
+        consumers remain fail-closed.
   - [ ] Represent synthetic native caller frames. In particular, each
         `Function.prototype.call`/`apply` continuation is frame-accounted but
         cannot yet render QuickJS's intervening `call (native)` or

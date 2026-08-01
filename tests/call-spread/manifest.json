@@ -1,0 +1,174 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "array-arguments-in-order",
+      "covers": [
+        "argument-order"
+      ],
+      "body": "function f(a, b, c) { return a * 100 + b * 10 + c; }\nreturn f(...[10, 20, 30]);",
+      "expect": {
+        "kind": "number",
+        "bits": "0x4093380000000000"
+      }
+    },
+    {
+      "id": "dense-and-spread-left-to-right",
+      "covers": [
+        "dense-spread-order"
+      ],
+      "body": "function f(a, b, c, d) { return a * 1000 + b * 100 + c * 10 + d; }\nreturn f(1, ...[2, 3], 4);",
+      "expect": {
+        "kind": "number",
+        "bits": "0x4093480000000000"
+      }
+    },
+    {
+      "id": "empty-array-passes-nothing",
+      "covers": [
+        "empty-spread"
+      ],
+      "body": "let count = 0;\nfunction f() { count++; return count; }\nreturn f(...[]);",
+      "expect": {
+        "kind": "number",
+        "bits": "0x3ff0000000000000"
+      }
+    },
+    {
+      "id": "custom-iterator-not-indexes",
+      "covers": [
+        "iterator-consumption"
+      ],
+      "body": "function f(a, b) { return a * 10 + b; }\nlet iterable = {[Symbol.iterator]() { let index = 0; return {next() { index++; return index === 1 ? {done: false, value: 7} : (index === 2 ? {done: false, value: 8} : {done: true}); }}; }};\nreturn f(...iterable);",
+      "expect": {
+        "kind": "number",
+        "bits": "0x4053800000000000"
+      }
+    },
+    {
+      "id": "member-receiver-preserved",
+      "covers": [
+        "member-receiver"
+      ],
+      "body": "let holder = {tag: \"held\", collect: function collect(a, b) { return this.tag + a + b; }};\nreturn holder.collect(...[\"x\", \"y\"]);",
+      "expect": {
+        "kind": "string",
+        "value": "heldxy"
+      }
+    },
+    {
+      "id": "new-constructs-through-spread",
+      "covers": [
+        "construction"
+      ],
+      "body": "function Point(x, y) { this.x = x; this.y = y; }\nlet p = new Point(...[3, 4]);\nreturn p.x * 10 + p.y;",
+      "expect": {
+        "kind": "number",
+        "bits": "0x4041000000000000"
+      }
+    },
+    {
+      "id": "new-spread-empty-array",
+      "covers": [
+        "construction-empty"
+      ],
+      "body": "function Box() { this.empty = 1; }\nreturn new Box(...[]).empty;",
+      "expect": {
+        "kind": "number",
+        "bits": "0x3ff0000000000000"
+      }
+    },
+    {
+      "id": "string-spread-code-points",
+      "covers": [
+        "string-iteration"
+      ],
+      "body": "function f(a, b) { return a + b; }\nreturn f(...\"xy\");",
+      "expect": {
+        "kind": "string",
+        "value": "xy"
+      }
+    },
+    {
+      "id": "abrupt-iterator-closes-and-preserves-error",
+      "covers": [
+        "abrupt-close"
+      ],
+      "body": "let closed = false;\nfunction f() {}\nlet iterable = {[Symbol.iterator]() { return {next() { throw new Error(\"boom\"); }, return() { closed = true; return {done: true}; }}; }};\ntry { f(...iterable); } catch (e) { return e.message === \"boom\" && closed; }",
+      "expect": {
+        "kind": "boolean",
+        "value": true
+      }
+    },
+    {
+      "id": "noncallable-target-message",
+      "covers": [
+        "noncallable"
+      ],
+      "body": "let message = \"\";\ntry { (42)(...[1]); } catch (e) { message = e.message; }\nreturn message;",
+      "expect": {
+        "kind": "throw",
+        "name": "TypeError",
+        "message": "not a function"
+      }
+    },
+    {
+      "id": "nonobject-argument-list-rejected",
+      "covers": [
+        "nonobject-list"
+      ],
+      "body": "let message = \"\";\nfunction f() {}\ntry { f.apply(null, 42); } catch (e) { message = e.message; }\nreturn message;",
+      "expect": {
+        "kind": "throw",
+        "name": "TypeError",
+        "message": "not a object"
+      }
+    },
+    {
+      "id": "spread-array-like-probe",
+      "covers": [
+        "array-like-length"
+      ],
+      "body": "function f(a, b) { return a * 10 + b; }\nlet arrayLike = {length: 2, 0: 5, 1: 6};\nreturn f.apply(null, arrayLike);",
+      "expect": {
+        "kind": "number",
+        "bits": "0x404c000000000000"
+      }
+    },
+    {
+      "id": "multiple-spreads",
+      "covers": [
+        "multiple-spreads"
+      ],
+      "body": "function f(a, b, c) { return a * 100 + b * 10 + c; }\nreturn f(...[1], ...[2], ...[3]);",
+      "expect": {
+        "kind": "number",
+        "bits": "0x405ec00000000000"
+      }
+    },
+    {
+      "id": "spread-evaluates-arguments-before-iterator",
+      "covers": [
+        "evaluation-order"
+      ],
+      "body": "let order = \"\";\nfunction mark(name) { order += name; return name; }\nfunction f() { return order; }\nreturn f(mark(\"a\"), ...[mark(\"b\")], mark(\"c\"));",
+      "expect": {
+        "kind": "string",
+        "value": "abc"
+      }
+    },
+    {
+      "id": "noniterable-spread-value",
+      "covers": [
+        "noniterable"
+      ],
+      "body": "let message = \"\";\nfunction f() {}\ntry { f(...42); } catch (e) { message = e.message; }\nreturn message;",
+      "expect": {
+        "kind": "throw",
+        "name": "TypeError",
+        "message": "value is not iterable"
+      }
+    }
+  ]
+}

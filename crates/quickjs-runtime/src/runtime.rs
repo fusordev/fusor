@@ -846,6 +846,8 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
             | FinalOpcode::CallConstructor
+            | FinalOpcode::Apply
+            | FinalOpcode::Perm3
             | FinalOpcode::Throw
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef

@@ -629,6 +629,14 @@ pub(super) fn execute_one(
             push(frame, right);
             push(frame, left);
         }
+        FinalOpcode::Perm3 => {
+            let third = pop(frame)?;
+            let second = pop(frame)?;
+            let first = pop(frame)?;
+            push(frame, second);
+            push(frame, first);
+            push(frame, third);
+        }
         FinalOpcode::Rot3l => {
             let third = pop(frame)?;
             let second = pop(frame)?;
@@ -760,6 +768,45 @@ pub(super) fn execute_one(
                     argument_count,
                     kind: CallKind::Constructor,
                 },
+                return_to,
+                source_pc,
+            });
+        }
+        FinalOpcode::Apply => {
+            let Operands::U16(magic) = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let required = 3_u32;
+            if frame.stack.len() < usize::try_from(required).unwrap_or(usize::MAX) {
+                return Err(EngineFault::StackDepthMismatch {
+                    function: frame.template,
+                    pc: source_pc,
+                    expected: required,
+                    actual: frame.stack.len(),
+                }
+                .into());
+            }
+            let callee_index = frame.stack.len() - 3;
+            let StoredValue::Function(function) = *stack_value_at(frame, callee_index)? else {
+                return Ok(Step::Abrupt(not_callable_exception(
+                    runtime, frame, source_pc,
+                )?));
+            };
+            let receiver = stack_value_at(frame, callee_index + 1)?.duplicate();
+            let array_like = stack_value_at(frame, callee_index + 2)?.duplicate();
+            frame.stack.truncate(callee_index);
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            return Ok(Step::Apply {
+                function,
+                receiver,
+                array_like,
+                magic,
                 return_to,
                 source_pc,
             });

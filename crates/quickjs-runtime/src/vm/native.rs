@@ -460,9 +460,19 @@ fn resolve_native_dispatch_inner(
                 arguments.push(argument.duplicate());
             }
             arguments.extend(call.arguments.into_remaining_values());
+            let new_target = match call.new_target {
+                Some(current) if current == call.function => Some(target),
+                other => other,
+            };
+            let receiver = if new_target.is_some() {
+                call.receiver
+            } else {
+                bound.bound_this.duplicate()
+            };
             call.function = target;
-            call.receiver = bound.bound_this.duplicate();
+            call.receiver = receiver;
             call.arguments = CallArguments::from_values(arguments);
+            call.new_target = new_target;
             dispatch = NativeDispatch::Call(call);
             continue;
         }
@@ -475,7 +485,7 @@ fn resolve_native_dispatch_inner(
                 CallInputs {
                     receiver: call.receiver,
                     arguments: call.arguments,
-                    new_target: None,
+                    new_target: call.new_target,
                 },
                 call.return_to,
                 Some(call.origin),
@@ -538,15 +548,25 @@ fn resolve_native_dispatch_inner(
 
         let plan = plan_frame(runtime, call.function, suspended_frames, suspended_values)
             .map_err(NativeFailure::Execution)?;
+        let construction = call.new_target;
         let mut frame = create_frame(
             runtime,
             plan,
-            call.receiver,
+            if construction.is_some() {
+                StoredValue::Undefined
+            } else {
+                call.receiver
+            },
             FrameArguments::Owned(call.arguments),
             call.return_to,
             None,
         )
         .map_err(NativeFailure::Execution)?;
+        if let Some(new_target) = construction {
+            frame.receiver =
+                StoredValue::Object(create_ordinary_constructor_receiver(runtime, new_target)?);
+            frame.ordinary_constructor = true;
+        }
         attach_native_continuations(&mut frame, call.continuations)?;
         apply_native_pre_call(runtime, call.pre_call.as_ref())?;
         return Ok(NativeDispatch::Frame(frame));
@@ -753,6 +773,7 @@ pub(super) fn dispatch_native_call_with_frames(
             active_frames,
             active_frame_values,
             execution_budget,
+            None,
         ),
         NativeFunctionKind::FunctionPrototypeCall => {
             let origin = origin.unwrap_or_else(native_function_host_origin);
@@ -784,6 +805,7 @@ pub(super) fn dispatch_native_call_with_frames(
                 origin,
                 continuations,
                 pre_call: None,
+                new_target: None,
             }))
         }
         NativeFunctionKind::FunctionPrototypeBind => begin_function_bind(
@@ -1208,7 +1230,7 @@ const MAX_FUNCTION_APPLY_ARGUMENTS: u32 = 65_534;
     clippy::too_many_arguments,
     reason = "apply admission keeps callable validation, retained-value preflight, and native work budget explicit"
 )]
-fn begin_function_apply(
+pub(super) fn begin_function_apply(
     runtime: &mut Runtime,
     realm: RealmId,
     inputs: CallInputs,
@@ -1217,6 +1239,7 @@ fn begin_function_apply(
     active_frames: usize,
     active_frame_values: u64,
     execution_budget: &mut ExecutionBudget,
+    new_target: Option<FunctionId>,
 ) -> Result<NativeDispatch, NativeFailure> {
     let StoredValue::Function(target) = inputs.receiver else {
         return Err(function_apply_exception(
@@ -1230,7 +1253,7 @@ fn begin_function_apply(
     let receiver = supplied.take_first_or_undefined();
     let array_like = supplied.take_first_or_undefined();
     if matches!(array_like, StoredValue::Undefined | StoredValue::Null) {
-        return function_apply_target_call(target, receiver, Vec::new(), return_to, origin);
+        return function_apply_target_call(target, receiver, Vec::new(), return_to, origin, None);
     }
     if !matches!(
         array_like,
@@ -1267,6 +1290,7 @@ fn begin_function_apply(
         stage: FunctionApplyStage::AwaitLength,
         active_frame_values,
         origin,
+        new_target,
     };
     let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
     charge_heap_property_lookup(runtime, &state.array_like, execution_budget)?;
@@ -1436,6 +1460,7 @@ fn advance_function_apply_indices(
         state.arguments,
         return_to,
         state.origin,
+        state.new_target,
     )
 }
 
@@ -1495,6 +1520,7 @@ fn function_apply_getter_call(
         origin,
         continuations,
         pre_call: None,
+        new_target: None,
     }))
 }
 
@@ -1504,6 +1530,7 @@ fn function_apply_target_call(
     arguments: Vec<StoredValue>,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
+    new_target: Option<FunctionId>,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut continuations = Vec::new();
     continuations
@@ -1521,6 +1548,7 @@ fn function_apply_target_call(
         origin,
         continuations,
         pre_call: None,
+        new_target,
     }))
 }
 

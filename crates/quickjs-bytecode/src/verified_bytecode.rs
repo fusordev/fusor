@@ -4933,7 +4933,9 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CallConstructor
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
+            | FinalOpcode::Apply
             | FinalOpcode::ArrayFrom
+            | FinalOpcode::Perm3
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
             | FinalOpcode::Throw

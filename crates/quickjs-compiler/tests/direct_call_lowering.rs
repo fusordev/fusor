@@ -332,14 +332,6 @@ fn optional_and_spread_calls_and_constructors_remain_fail_closed() {
     let cases = [
         ("function invoke(fn){return fn?.();}", "fn?.()"),
         (
-            "function invoke(fn,values){return fn(...values);}",
-            "...values",
-        ),
-        (
-            "function invoke(fn,values){return new fn(...values);}",
-            "...values",
-        ),
-        (
             "function invoke(holder){return new (holder?.Ctor)();}",
             "holder?.Ctor",
         ),
@@ -356,5 +348,78 @@ fn optional_and_spread_calls_and_constructors_remain_fail_closed() {
             expected_source,
             "{source}"
         );
+    }
+}
+
+#[test]
+fn spread_calls_and_constructors_lower_to_the_pinned_apply_stack_program() {
+    let cases = [
+        (
+            "function invoke(fn,values){return fn(...values);}",
+            vec![
+                (FinalOpcode::GetArg0, Operands::NoneArg),
+                (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+                (FinalOpcode::Push0, Operands::NoneInt),
+                (FinalOpcode::GetArg1, Operands::NoneArg),
+                (FinalOpcode::Append, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::Swap, Operands::None),
+                (FinalOpcode::Apply, Operands::U16(0)),
+            ],
+        ),
+        (
+            "function invoke(fn,values){return new fn(...values);}",
+            vec![
+                (FinalOpcode::GetArg0, Operands::NoneArg),
+                (FinalOpcode::Dup, Operands::None),
+                (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+                (FinalOpcode::Push0, Operands::NoneInt),
+                (FinalOpcode::GetArg1, Operands::NoneArg),
+                (FinalOpcode::Append, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Perm3, Operands::None),
+                (FinalOpcode::Apply, Operands::U16(1)),
+            ],
+        ),
+        (
+            "function invoke(fn,first,rest){return fn(first,...rest);}",
+            vec![
+                (FinalOpcode::GetArg0, Operands::NoneArg),
+                (FinalOpcode::GetArg1, Operands::NoneArg),
+                (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 1 }),
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (FinalOpcode::GetArg2, Operands::NoneArg),
+                (FinalOpcode::Append, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::Swap, Operands::None),
+                (FinalOpcode::Apply, Operands::U16(0)),
+            ],
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let compiled = with_parsed_program(
+            source,
+            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+            |unit| {
+                let context = CompilationContext::new(unit).expect("storage planning must succeed");
+                let executable = context
+                    .executables()
+                    .find(|executable| executable.metadata().name() == Some("invoke"))
+                    .expect("named function executable");
+                context
+                    .compile_leaf(&executable, VerificationLimits::default())
+                    .expect("spread call must lower")
+            },
+        )
+        .expect("front-end acceptance");
+        let actual: Vec<(FinalOpcode, Operands)> = decoded(&compiled)
+            .into_iter()
+            .map(|(_, opcode, operands)| (opcode, operands))
+            .filter(|(opcode, _)| *opcode != FinalOpcode::Return)
+            .collect();
+        assert_eq!(actual, expected, "{source}");
     }
 }

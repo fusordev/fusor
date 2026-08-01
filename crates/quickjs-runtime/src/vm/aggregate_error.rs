@@ -339,6 +339,7 @@ fn call_aggregate_function(
         origin,
         continuations,
         pre_call: None,
+        new_target: None,
     }))
 }
 

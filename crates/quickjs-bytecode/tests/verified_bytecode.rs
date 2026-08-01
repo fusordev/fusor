@@ -2434,18 +2434,7 @@ fn final_authority_admits_constructor_calls_and_records_the_requirement() {
 }
 
 #[test]
-fn final_authority_keeps_apply_and_tail_call_families_fail_closed() {
-    assert_final_authority_rejects_call_family(
-        &[
-            (FinalOpcode::Undefined, Operands::None),
-            (FinalOpcode::Undefined, Operands::None),
-            (FinalOpcode::Undefined, Operands::None),
-            (FinalOpcode::Apply, Operands::U16(0)),
-            (FinalOpcode::Return, Operands::None),
-        ],
-        FinalOpcode::Apply,
-        &[0, 1, 2, 3, 6],
-    );
+fn final_authority_keeps_tail_call_families_fail_closed() {
     assert_final_authority_rejects_call_family(
         &[
             (FinalOpcode::Undefined, Operands::None),

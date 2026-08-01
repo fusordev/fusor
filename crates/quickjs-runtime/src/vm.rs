@@ -633,6 +633,7 @@ struct FunctionApplyContinuation {
     stage: FunctionApplyStage,
     active_frame_values: u64,
     origin: JsStackFrame,
+    new_target: Option<FunctionId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -788,6 +789,7 @@ struct NativeCall {
     origin: JsStackFrame,
     continuations: Vec<NativeContinuation>,
     pre_call: Option<NativePreCall>,
+    new_target: Option<FunctionId>,
 }
 
 enum NativePreCall {
@@ -923,6 +925,9 @@ fn trace_function_apply_roots(
     mark: &mut dyn FnMut(CollectionRoot),
 ) {
     mark(CollectionRoot::Heap(HeapReference::Function(state.target)));
+    if let Some(new_target) = state.new_target {
+        mark(CollectionRoot::Heap(HeapReference::Function(new_target)));
+    }
     trace_stored_value_root(&state.receiver, mark);
     trace_stored_value_root(&state.array_like, mark);
     for argument in &state.arguments {
@@ -1312,6 +1317,14 @@ enum Step {
     Call {
         function: FunctionId,
         inputs: CallInputSource,
+        return_to: CallReturn,
+        source_pc: BytecodePc,
+    },
+    Apply {
+        function: FunctionId,
+        receiver: StoredValue,
+        array_like: StoredValue,
+        magic: u16,
         return_to: CallReturn,
         source_pc: BytecodePc,
     },
@@ -1972,6 +1985,131 @@ fn execute_frame_loop(
                 }
                 *active_frame_values = active_frame_values.saturating_add(child.reserved_values);
                 frames.push(child);
+            }
+            Step::Apply {
+                function,
+                receiver,
+                array_like,
+                magic,
+                return_to,
+                source_pc,
+            } => {
+                let caller = frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                    function: FunctionTemplateId::new(0),
+                    instruction: 0,
+                })?;
+                let origin = instruction_location(runtime, caller, source_pc)?;
+                let operation_realm = code(runtime, caller.code)?.realm;
+                let active_frames = active_execution_frames(frames);
+                let new_target = if magic & 1 != 0 { Some(function) } else { None };
+                let inputs = CallInputs {
+                    receiver: StoredValue::Function(function),
+                    arguments: CallArguments::from_values(vec![receiver, array_like]),
+                    new_target,
+                };
+                if frames.try_reserve(1).is_err() {
+                    return Err(ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::Frames,
+                        additional: 1,
+                    });
+                }
+                let dispatch = begin_function_apply(
+                    runtime,
+                    operation_realm,
+                    inputs,
+                    Some(return_to),
+                    origin,
+                    active_frames,
+                    *active_frame_values,
+                    execution_budget,
+                    new_target,
+                );
+                let dispatch = match dispatch {
+                    Ok(dispatch) => dispatch,
+                    Err(NativeFailure::Abrupt(pending)) => {
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
+                        continue;
+                    }
+                    Err(NativeFailure::AbruptAfterTransient(_)) => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "bytecode apply raised a resolver-only transient throw",
+                        }
+                        .into());
+                    }
+                    Err(NativeFailure::Execution(error)) => return Err(error),
+                };
+                let dispatch = resolve_native_dispatch(
+                    runtime,
+                    dispatch,
+                    frames,
+                    active_frames,
+                    *active_frame_values,
+                    compiler,
+                    execution_budget,
+                );
+                match dispatch {
+                    Ok(NativeDispatch::Immediate(value)) => {
+                        let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?;
+                        push_call_result(parent, value, return_to)?;
+                    }
+                    Ok(NativeDispatch::Frame(child)) => {
+                        *active_frame_values =
+                            active_frame_values.saturating_add(child.reserved_values);
+                        frames.push(child);
+                    }
+                    Ok(NativeDispatch::Call(_)) => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "bytecode apply resolver returned an unresolved call",
+                        }
+                        .into());
+                    }
+                    Ok(
+                        NativeDispatch::Pair(_, _)
+                        | NativeDispatch::ForOfRecord { .. }
+                        | NativeDispatch::ForOfStep { .. }
+                        | NativeDispatch::ForOfClosed,
+                    ) => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "bytecode apply produced a structured continuation result",
+                        }
+                        .into());
+                    }
+                    Err(NativeFailure::Abrupt(pending)) => {
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
+                    }
+                    Err(NativeFailure::AbruptAfterTransient(pending)) => {
+                        let frame = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                            message: "transient apply throw has no executing frame",
+                        })?;
+                        frame.transient_cleanup_pending = true;
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
+                    }
+                    Err(NativeFailure::Execution(error)) => return Err(error),
+                }
             }
             Step::Native {
                 dispatch,
