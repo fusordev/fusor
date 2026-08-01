@@ -1,293 +1,84 @@
 # QuickJS in pure Rust
 
-This repository is a source-level port of
-[QuickJS](https://bellard.org/quickjs/) to safe, pure Rust. The compatibility
-target is the official **2026-06-04** release and its ES2025 language surface.
+A safe, source-level Rust port of [QuickJS](https://bellard.org/quickjs/),
+targeting the upstream **2026-06-04** release and its ES2025 semantics.
 
 > [!IMPORTANT]
-> The port is in its bootstrap phase. Its first verified interpreter profile is
-> executable, but it is not yet a complete JavaScript engine or a drop-in
-> replacement for QuickJS.
+> This is an in-progress port, not yet a complete JavaScript engine or a
+> drop-in QuickJS replacement. Unsupported behavior is intended to fail closed.
 
-The current ordinary-function compiler profile now freezes its staged
-function graph, exact binding/closure metadata, and retained source snapshots
-as immutable, `Arc`-backed `VerifiedBytecode`. A runtime context can
-transactionally install that authority into a same-runtime realm and host-call
-the resulting function. The admitted profile executes primitive constants,
-arguments, locals, captured cells, nested closures, TDZ checks, cell rotation,
-branches, labeled loops and blocks, strict-equality `switch` dispatch with
-lexical scope and fallthrough, exact-source `debugger` no-ops, returns, direct ordinary
-JavaScript-to-JavaScript calls, truthiness, `typeof`, strict equality, nullish
-tests, ordinary object literals with
-source-ordered static identifier, quoted String, Number, and BigInt
-literal-named data properties and synchronous methods/getters/setters, static
-data property reads/writes, own and inherited static accessor getter/setter
-dispatch, strict receiver-aware static method calls, and arbitrary explicit
-`throw` values. Synchronous `try` statements support optional and simple catch
-bindings, captured catch bindings, shared and nested finalizers, rethrow, and
-abrupt cleanup across calls, loops, and `for-in` iterator state. Engine-thrown
-InternalError, RangeError, ReferenceError, SyntaxError, and TypeError values
-freeze headerless stacks before unwinding and materialize as branded objects
-in the throwing realm with inherited `name` plus exact own `message` and
-`stack` properties. Each realm also installs `Error`, `EvalError`,
-`RangeError`, `ReferenceError`, `SyntaxError`, `TypeError`, `URIError`,
-`InternalError`, and `AggregateError` as one failure-atomic intrinsic graph.
-The current complete realm graph is regression-locked at 19 objects, 42
-functions, and 192 properties, including exact Error constructor/prototype
-descriptors, own-property order, and inheritance. All nine constructors are
-callable and constructable and create internally branded objects. Observable
-`newTarget.prototype` selection, `message` conversion, inherited or own
-`cause`, generic `Error.prototype.toString`, and strict `Error.isError`
-branding execute through resumable continuations. `AggregateError` processes
-message and cause before acquiring its iterator, reads `done` before `value`,
-collects into a constructor-realm Array, and applies the pinned exceptional
-`IteratorClose` rules with original-error precedence. Constructor-created
-errors receive an own writable, non-enumerable, configurable `stack` snapshot
-containing headerless verified-bytecode frames. Computed property reads,
-writes, calls, data definitions, and
-synchronous methods/accessors perform resumable `ToPropertyKey`, including
-exact well-known Symbol identity. Non-BigInt unary, update, arithmetic, shift,
-bitwise, relational, loose-equality, and strict-equality operators execute with
-left-to-right resumable `ToPrimitive`, exact UTF-16 `StringToNumber`,
-`ToInt32`/`ToUint32`, signed-zero and NaN behavior, and verified postfix stack
-results.
-Functions and ordinary objects use typed `Arc`-backed public roots, and the
-iterative collector traces their data properties, accessor functions,
-prototypes, closures, and binding cells. Boolean and the core Number and String
-verticals are implemented primitive-wrapper families: each realm owns exact
-global constructors, branded prototypes, and `toString`/`valueOf` methods.
-Primitive property access walks the owning realm prototype without allocating a
-wrapper, construction creates a branded wrapper, strict receivers remain
-primitive, and sloppy receivers are boxed once at frame creation.
-`Object.prototype` tagging and boxing recognize the same internal brands.
-Construction runs a resumable
-`newTarget.prototype` Get with `newTarget` as the receiver and allocates only
-after conversion and the Get complete. `Object.prototype.toString` boxes
-Boolean, Number, and String primitives before its resumable
-`Symbol.toStringTag` Get, uses only primitive String overrides, otherwise
-preserves the built-in tag, and reclaims an unescaped temporary wrapper before
-execution continues without invalidating heap-, closure-, or
-exception-escaped identities.
-Number call/construct conversion, signed zero, NaN, exact Number receiver
-checks, and stringification in every radix from 2 through 36 are covered.
-Radix arguments use resumable Number-hint coercion, saturated signed-32-bit
-conversion, and exact `RangeError` behavior; non-decimal finite values use
-fixed shortest-round-trip output. String call/construct conversion uses the
-resumable String hint, including `toString`-before-`valueOf` fallback and the
-call-only Symbol descriptive-string special case; construction rejects Symbol
-values. String primitives and wrappers expose UTF-16 code-unit `length` and
-indexed properties. Primitive misses and ordinary intrinsic-wrapper misses
-fall through the matching realm's branded empty-string prototype; a custom
-new-target wrapper follows its selected prototype. Wrapper indices and
-`length` retain their non-writable exotic behavior while ordinary extra
-properties remain ordinary.
-Each realm also owns the nonconstructable global `Symbol`, its prototype, and
-the complete pinned set of 13 well-known static Symbol identities. `Symbol`,
-`Symbol.for`, `Symbol.keyFor`, `description`, `toString`, `valueOf`, and
-`Symbol.toPrimitive` are implemented together with core Symbol property
-access, wrapper branding/coercion, and `Object.prototype` tagging/boxing.
-The remaining String methods, `for-in` Symbol boxing, and sloppy Symbol
-receiver normalization remain deferred and fail closed. Nested calls,
-recursion, getter/setter dispatch, and abrupt unwinding use an explicit frame
-vector with cumulative frame/value ceilings and shared fuel. Installation
-scans every instruction in every template before mutation. Dense and elided
-array literals now allocate realm-owned branded arrays with exact `length`;
-elisions remain absent indexed properties, and a trailing elision extends
-`length` without materializing `undefined`. The realm-owned `Array` global is callable and
-constructable: exactly one primitive Number validates as an exact uint32 and
-allocates sparsely in constant space, while every other argument list becomes
-dense. Construction resolves `newTarget.prototype` before length validation
-and falls back through the new target's function realm. Indexed writes extend
-`length`; length writes use resumable
-QuickJS-compatible two-pass Number-hint coercion, reject invalid uint32 lengths
-with `RangeError`, and truncate configurable indices. Array indices enumerate
-in canonical order,
-`Function.prototype.apply` consumes a real array through its ordinary
-observable access path, and `Object.prototype.toString` observes the array
-brand. `Array.prototype.values`, `keys`, `entries`, and `Symbol.iterator`, plus
-String `Symbol.iterator`, use realm-owned objects with hidden shared Iterator,
-Array Iterator, and String Iterator prototypes. Array-literal spread lowers to
-whole-graph-verified `Append` bytecode and executes the generic synchronous
-`Symbol.iterator`/`next`/`done`/`value` protocol. Abrupt completion after
-acquiring `next` performs `IteratorClose` while preserving the original
-exception. Allocation, property, stack, and fuel limits are checked before
-mutation. Ordinary synchronous `for-of` uses the same generic iterator
-substrate through exact verified `ForOfStart`/`ForOfNext`/`IteratorClose`
-records. It supports `var`, `let`, `const`, identifier, and static/computed
-member heads; fresh captured lexical cells; same-loop and outward `continue`;
-and nested `break`, return, throw, catch, and finally cleanup. Natural
-exhaustion and step failures do not call `return`; normal abrupt exits require
-an object close result, while exceptional close preserves the original
-completion. The VM unwinds and closes iterators iteratively, roots suspended
-records through collection, and executes only whole-function typed authority.
-BigInt values and mixed numeric domains, the remaining `Array` static and
-prototype methods, other exotic objects, shorthand/spread and `__proto__`
-data-initializer semantics, anonymous data-function inferred names,
-async/generator methods, `super`/home-object semantics, realm-global accessor
-writes, optional calls, iterator destructuring, `for await`,
-async/generator iterator consumers, the remaining Number built-ins, the
-remaining String built-ins, serialized bytecode, every form of eval,
-destructuring-catch semantics, and complete Error compatibility remain
-deferred and fail closed. The Error checkpoint still lacks the `Object` and
-`Reflect` surface needed by several reflection/new-target probes and a global
-`undefined` binding; it now renders the pinned `call (native)`/`apply (native)`
-entries for frames reached through `Function.prototype.call`/`apply`, while
-deleted-stack rebuild for explicitly thrown branded Errors and host
-observation that normalizes an escaping explicitly thrown Error object
-remain pending.
-Its strict differential corpus contains 35 cases and 59 feature tags; the
-current candidate matches 18 of 35 cases. Ordinary
-synchronous `try`/`catch`/`finally` now uses verified shared finalizer
-subroutines and preserves or overrides return, throw, break, and continue
-completions with bounded typed operand-stack state.
-Ordinary `new` calls now execute constructor-capable bytecode functions and
-materialize their `name`, `length`, and
-`prototype.constructor` graph. The `quickjs` facade supplies one immutable
-`Arc` Oxc compiler service to the global `Function` call/constructor path: it
-retains the exact wrapper/map, compiles the complete generated Script,
-executes only whole-graph `VerifiedBytecode` with a constructor-realm global
-receiver, and returns the exact Script completion. Unresolved names use typed
-constructor-realm lookup/write slots, and sloppy dynamic functions normalize
-`this` once at frame creation against their installed constructor realm.
-Escaped Program `var` and function declarations now create configurable
-constructor-realm data properties, with correct existing-property handling,
-function hoisting, duplicate-last-wins initialization, and failure-atomic
-descriptor preflight.
-Escaped `let` and `const` remain
-evaluation-local TDZ cells and can survive only through escaping closures.
-The intrinsic descriptors, call/new realm selection, wrapper escape,
-`newTarget.prototype` adjustment, SyntaxError boundary, and primitive
-undefined/null/Boolean/Number/String source coercions are implemented.
-Realm-owned `Object.prototype.toString`, `Object.prototype.valueOf`, and
-`Function.prototype.toString` cover the currently representable object and
-function values with exact intrinsic descriptors and retained function source.
-Realm-owned `Function.prototype.call` and `Function.prototype.apply` have exact
-descriptors, names, lengths, prototypes, native source, and
-nonconstructability. `call` forwards the raw target receiver and remaining
-arguments through an O(1) owned argument window. `apply` validates callability
-before touching its list, performs one observable `length` Get and Number-hint
-`ToLength`, then reads ordinary/function object indices left-to-right through a
-GC-traced resumable continuation. Its 65,534-argument ceiling, frame/value
-preflights, and indexed-scan work share the target bytecode's execution budget.
-Call spread (`f(...args)`) and construction spread (`new C(...args)`) now lower
-to the pinned `array_from; push index; define_array_el/append; drop;
-perm3 | undefined; swap; apply` stack program, evaluate dense prefixes and
-spreads left to right, and execute through the exact `Function.prototype.apply`
-admission path with `new.target` forwarding for construction. Abrupt iterator
-exhaustion closes the iterator with original-error precedence. The strict
-15-case call-spread differential covers 15 feature tags. `arguments` objects
-and `Reflect.apply` remain fail-closed.
-Function source arguments now run resumable `ToPrimitive` with the string hint:
-`Symbol.toPrimitive`, `toString`, and `valueOf` are observed in exact order,
-data or accessor-backed lookup preserves the original receiver, native or
-verified-bytecode getters and methods resume on the same iterative frame
-vector, and throws stop conversion before parsing. `call` preserves the target
-realm's strict/sloppy receiver rules and forwards the Oxc compiler service when
-its target is the ordinary `Function` constructor. Sloppy Boolean, Number, and
-String boxing is implemented; sloppy Symbol receiver boxing and persistent
-global lexical collisions remain fail-closed.
-Realm-owned `Function.prototype.bind` now produces verified bound functions
-with exact descriptors, native source, and nonconstructability. Bound
-functions keep the pinned QuickJS `length` rules (own-property check, integer
-and truncating-binary64 subtraction, `NaN`/non-Number to zero, bound-of-bound
-chaining, native targets) and the `"bound "` name prefix without conversion.
-Calls override the receiver with the bound `this` and prepend bound arguments;
-construction substitutes the target as `newTarget` and throws the bound-name
-`TypeError` for non-constructable targets. Bound-function edges (target, `this`,
-arguments) participate in iterative cycle collection. The `instanceof`
-operator executes resumably: `Symbol.hasInstance` method lookup and invocation,
-the exact non-callable right-operand and non-object `prototype` `TypeError`s,
-bound-target unwrapping through the full operator, and the ordinary prototype
-chain walk. `Function.prototype[Symbol.hasInstance]` runs the ordinary path
-without an initial method lookup.
-Per-session compilation-count and generated-source limits bound nested
-construction. No dynamic-Function path uses eval or captures a caller lexical
-frame.
+## Scope
 
-## Contract
+- Pure Rust engine core: no C/C++ source, bindgen output, or C compiler in the
+  build or runtime path. The optional N-API adapter is the isolated foreign-ABI
+  boundary.
+- QuickJS is the sole runtime-semantics reference. Oxc is used only for parsing
+  and semantic analysis; the upstream C engine is a differential-test oracle,
+  never a linked or shipped dependency.
+- Only whole-function, typed, graph-verified bytecode may execute. Raw and
+  serialized bytecode, and direct `eval`, remain fail closed.
+- The core crates forbid `unsafe`; Rust-native changes must preserve observable
+  behavior under differential tests.
 
-- No C or C++ source, bindgen output, or C compiler in the engine build or
-  runtime path. The optional N-API adapter is the sole isolated foreign-ABI
-  boundary and is written in Rust.
-- The pinned QuickJS release is the sole JavaScript-runtime implementation
-  reference. Oxc is the explicitly selected JavaScript parser; no other
-  engine, port, VM, garbage collector, or RegExp implementation is consulted
-  or reused.
-- General-purpose Rust crates may provide infrastructure, but they are not
-  semantic references. Observable JavaScript behavior comes from the pinned
-  QuickJS release and its compatibility tests.
-- Core engine, compiler, runtime, host, and tool crates forbid `unsafe` Rust.
-  Any C-ABI pointer handling required by the optional N-API adapter is confined
-  to its boundary crate and audited separately.
-- Preserve observable ECMAScript behavior, not QuickJS's private in-memory
-  representation.
-- Rust-native performance changes are allowed when differential tests preserve
-  behavior and benchmarks demonstrate the tradeoff.
-- Tokio is the host async I/O and event-loop substrate. The QuickJS-derived
-  runtime retains authority over ECMAScript jobs and Promise ordering.
-- Match QuickJS's documented omissions: proper tail calls and
-  `Atomics.waitAsync` are out of scope until the upstream target implements
-  them; ECMA-402 `Intl` is a separate optional layer.
-- Treat QuickJS bytecode as a version-private reference format. The Rust port
-  will use a checked, memory-safe bytecode format rather than load untrusted
-  upstream bytecode.
-- Keep every milestone runnable, tested, and recorded in Git.
-- Keep production logic in reusable library crates with documented, stable
-  APIs. The `qjs` and `qjsc` binaries remain thin consumers of those libraries.
-- Preserve exact structured error data and source spans, provide
-  human-readable Miette rendering, and carry source maps through compilation
-  and stack traces.
+## Current profile
 
-The runtime/compiler boundaries and safety invariants live in
-[ARCHITECTURE.md](ARCHITECTURE.md), and the implementation plan and
-compatibility gates live in [PORTING.md](PORTING.md). The exact upstream
-provenance is recorded in [UPSTREAM.md](UPSTREAM.md), the hardened bytecode
-trust boundary is specified in [BYTECODE_VERIFIER.md](BYTECODE_VERIFIER.md),
-the external-crate policy is recorded in
-[DEPENDENCIES.md](DEPENDENCIES.md), and the ESM REPL, bytecode viewer, CDP,
-Wasmtime, N-API, and TypeScript-strip surfaces are specified in
-[EXTENSIONS.md](EXTENSIONS.md).
+The implemented, tested subset includes ordinary functions and closures;
+bindings and TDZ; control flow, exceptions, and `try`/`catch`/`finally`;
+ordinary objects and accessors; arrays, synchronous iterators, array spread,
+and `for-of`; operators and coercion; and the initial Boolean, Number, String,
+Symbol, Function, Array, and Error families.
+
+Key gaps remain: complete Error and reflection surfaces, most built-ins,
+BigInt domains, `eval`, destructuring iterators, async/generators, modules,
+Promises/jobs, RegExp, binary data, and the public embedding/tooling surface.
+See [PORTING.md](PORTING.md) for the authoritative checklist and compatibility
+boundaries.
+
+## Workspace
+
+| Crate | Responsibility |
+| --- | --- |
+| `quickjs-diagnostics` | Sources, spans, diagnostics, and source maps |
+| `quickjs-frontend` | Oxc parsing and owned frontend records |
+| `quickjs-bytecode` | Instructions, verifier, codec, and debug data |
+| `quickjs-compiler` | Oxc lowering to verified bytecode |
+| `quickjs-runtime` | Values, heap, realms, VM, and built-ins |
+| `quickjs` | Ergonomic host facade |
+
+Architecture and trust-boundary details are in
+[ARCHITECTURE.md](ARCHITECTURE.md) and
+[BYTECODE_VERIFIER.md](BYTECODE_VERIFIER.md). See [UPSTREAM.md](UPSTREAM.md)
+for the pinned reference and [DEPENDENCIES.md](DEPENDENCIES.md) for dependency
+policy.
 
 ## Development
 
-The repository follows the latest stable Rust toolchain. Nightly may be used
-only for an isolated, documented requirement; stable remains the release
-baseline. The standard local gates are:
+Use the current stable Rust toolchain (the workspace pins its minimum version).
+Run the normal local gates from the repository root:
 
 ```console
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo doc --workspace --no-deps
-cargo xtask parser-differential --oracle /path/to/quickjs-2026-06-04/qjs
-cargo xtask dynamic-function-differential --oracle /path/to/quickjs-2026-06-04/qjsc
-cargo xtask number-radix-differential --oracle /path/to/quickjs-2026-06-04/qjs
-cargo xtask control-flow-differential --oracle /path/to/quickjs-2026-06-04/qjs
-cargo xtask function-apply-differential --oracle /path/to/quickjs-2026-06-04/qjs
-cargo xtask function-bind-differential --oracle /path/to/quickjs-2026-06-04/qjs
-cargo xtask iterator-differential --oracle /path/to/quickjs-2026-06-04/qjs
-cargo xtask call-spread-differential --oracle /path/to/quickjs-2026-06-04/qjs
-cargo xtask error-differential --oracle /path/to/quickjs-2026-06-04/qjs
 ```
 
-The upstream C engine may be built separately as a development oracle for
-differential testing. It is never linked into or shipped with this project.
-The parser task validates the current declared non-`eval` goal/feature/claim
-matrix in [`tests/parser/manifest.json`](tests/parser/manifest.json) before
-running any fixture, and refuses undeclared fixtures or stale intentional
-differences. That matrix is an expanding compatibility gate; it is not yet a
-claim that every QuickJS grammar production has been covered.
-The Number radix task reconstructs exact binary64 bit patterns on both sides,
-checks every radix for exponent and mantissa boundaries, and adds a bounded
-fixed-seed sample from
-[`tests/number-radix/manifest.json`](tests/number-radix/manifest.json).
-The control-flow task executes its strictly tagged labeled, `switch`, and
-`for-in` manifest through the public dynamic-Function facade and compares
-normalized primitive results and engine-created errors with the pinned `qjs`
-oracle. Its corpus is
-[`tests/control-flow/manifest.json`](tests/control-flow/manifest.json).
+For a changed compatibility area, run its matching differential corpus against
+the pinned upstream QuickJS oracle, for example:
+
+```console
+cargo xtask parser-differential \\
+  --oracle /path/to/quickjs-2026-06-04/qjs
+cargo xtask dynamic-function-differential \\
+  --oracle /path/to/quickjs-2026-06-04/qjsc
+```
+
+Additional corpora cover Number radix conversion, control flow,
+`Function.prototype.apply`/`bind`, iterators, call spread, and Errors. Their
+manifests are expanding compatibility gates, not claims of exhaustive QuickJS
+coverage.
 
 ## License
 
-MIT. The original QuickJS copyright and permission notice are preserved in
+MIT. The original QuickJS copyright and permission notice are retained in
 [LICENSE](LICENSE).
