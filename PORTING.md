@@ -79,6 +79,17 @@ Known intentional parser differences:
   specification; the frontend follows ECMAScript, which reserves `prototype`
   only for static fields.
 
+Known intentional runtime differences:
+
+- `QJS-BIGINT-001`: `js_bigint_asUintN` returns its argument unchanged whenever
+  the requested width already spans the value (`quickjs.c:56075` and
+  `quickjs.c:56092`), so the pinned `qjs` reports `BigInt.asUintN(64, -1n)` as
+  `-1n` and `BigInt.asUintN(100, -1n)` as `-1n`. ECMAScript's `BigInt::asUintN`
+  is defined modulo 2**bits and is therefore always non-negative; V8 reports
+  `18446744073709551615n` and `1267650600228229401496703205375n`. Because the
+  specification is the authority where the two disagree, this port follows
+  ECMAScript. Widths below 64 agree with both engines.
+
 ### Compiler, bytecode, and execution
 
 - [x] Complete opcode metadata, checked codec/disassembly, typed operands,
@@ -124,9 +135,35 @@ Known intentional parser differences:
 - [x] Boolean, Number, and String constructor/prototype verticals, including
   wrapper behavior, realm ownership, strict/sloppy receiver rules, and
   `Object.prototype` tagging/boxing as admitted by the current profile.
-- [ ] Remaining conversions, BigInt domains, String/Number surface, complete
-  descriptors and shapes, mutable prototypes/exotics, arrays/indexed storage,
-  deterministic finalization, limits/interrupts, and diagnostics.
+- [x] Descriptor authority and mutable object structure:
+  `ValidateAndApplyPropertyDescriptor`/`OrdinaryDefineOwnProperty` decide every
+  own-property definition, so a non-configurable property rejects a
+  reconfiguration and a non-writable one accepts only a `SameValue` rewrite;
+  `[[Delete]]`, `[[OwnPropertyKeys]]` with the full index/string/symbol phase
+  order, `[[SetPrototypeOf]]` with its same-value-before-extensibility rule
+  (`quickjs.c:7940`), `[[PreventExtensions]]`, and `SetIntegrityLevel`. The
+  `delete` operator and object-literal `__proto__` reach these through the
+  pinned `OP_delete` and `OP_set_proto` shapes. A realm-owned `Object`
+  constructor publishes `getPrototypeOf`, `setPrototypeOf`, `preventExtensions`,
+  `isExtensible`, `seal`, `freeze`, `isSealed`, `isFrozen`, `keys`, and
+  `getOwnPropertyNames`. Shared `ToIntegerOrInfinity`, `ToLength`, and `ToIndex`
+  replace the previously inlined length truncations.
+- [x] `Array.prototype.join` and `Array.prototype.toString` as one resumable
+  element loop mirroring `js_array_join` (`quickjs.c:42505`): the length is read
+  once with `ToLength`, `null`/`undefined` elements and holes contribute
+  nothing, each element's `ToString` and each accessor getter can re-enter the
+  interpreter, and the separator defaults to `","` when absent or `undefined`.
+  This closes the coercion divergence in which `String([1,2])` produced
+  `"[object Array]"`.
+- [ ] Remaining conversions, BigInt domains, remaining String/Number/Array
+  method surface, shape sharing/transition interning, remaining exotics
+  (`Object.defineProperty`'s resumable descriptor read, arguments, Proxy),
+  dense indexed storage, deterministic finalization, limits/interrupts, and
+  diagnostics. The BigInt arithmetic core (two's-complement limbs, the full
+  operator set, radix conversion, and `asIntN`/`asUintN`) is implemented and
+  tested; the remaining BigInt work is the value domain itself, which adds the
+  `StoredValue` variant, `typeof`, equality, literal execution, and the
+  numeric-domain operator split.
 
 ### Built-ins and asynchronous semantics
 
