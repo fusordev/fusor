@@ -41,6 +41,62 @@ struct ShapeProperty {
     layout: PropertyLayout,
 }
 
+/// The outcome of removing one own property.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PropertyDeletion {
+    /// The object had no own property with the requested key.
+    Missing,
+    /// The own property exists but forbids reconfiguration.
+    NotConfigurable,
+    /// The own property was removed.
+    Deleted,
+}
+
+/// Which `[[OwnPropertyKeys]]` phases an own-key snapshot emits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct KeyPhases {
+    indices: bool,
+    strings: bool,
+    symbols: bool,
+}
+
+impl KeyPhases {
+    /// The index and string phases, which is what `for-in` enumerates.
+    ///
+    /// `for-in` never visits symbol keys, so the symbol phase is excluded
+    /// rather than filtered by the caller.
+    pub(crate) const FOR_IN: Self = Self {
+        indices: true,
+        strings: true,
+        symbols: false,
+    };
+
+    /// The index and string phases, which is what `Object.keys`,
+    /// `Object.getOwnPropertyNames`, and `JSON.stringify` observe.
+    pub(crate) const STRING_KEYS: Self = Self {
+        indices: true,
+        strings: true,
+        symbols: false,
+    };
+}
+
+/// Which atom-keyed phase `push_atom_keys` appends.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AtomKeyPhase {
+    String,
+    Symbol,
+}
+
+/// The integrity level `Object.seal` and `Object.freeze` apply.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntegrityLevel {
+    /// Every own property becomes non-configurable.
+    Sealed,
+    /// Every own property becomes non-configurable, and every data property
+    /// also becomes non-writable.
+    Frozen,
+}
+
 #[derive(Clone)]
 pub(crate) struct ForInCandidate {
     key: PropertyKey,
@@ -340,6 +396,74 @@ impl ObjectRecord {
         self.extensible
     }
 
+    /// Clears the extensible bit, matching `QuickJS`'s `JS_PreventExtensions`
+    /// (`quickjs.c:8923`). The operation is idempotent and never restores
+    /// extensibility: ECMAScript has no `[[PreventExtensions]]` inverse.
+    pub(crate) const fn prevent_extensions(&mut self) {
+        self.extensible = false;
+    }
+
+    /// Returns whether every own property forbids reconfiguration, which is
+    /// the own-property half of `Object.isSealed`.
+    pub(crate) fn own_properties_are_sealed(&self) -> bool {
+        self.shape
+            .iter()
+            .all(|property| !property.layout.is_configurable())
+    }
+
+    /// Returns whether every own property forbids reconfiguration and every
+    /// data property forbids assignment, the own-property half of
+    /// `Object.isFrozen`.
+    pub(crate) fn own_properties_are_frozen(&self) -> bool {
+        self.shape.iter().all(|property| {
+            !property.layout.is_configurable() && property.layout.writable() != Some(true)
+        })
+    }
+
+    /// Applies `Object.seal`'s attribute clamp to every own property.
+    pub(crate) fn seal_own_properties(&mut self) {
+        let shape = Arc::get_mut(&mut self.shape)
+            .expect("object shape Arc is private and uniquely owned before shape interning");
+        for property in shape.iter_mut() {
+            property.layout = property.layout.sealed();
+        }
+    }
+
+    /// Applies `Object.freeze`'s attribute clamp to every own property.
+    ///
+    /// Accessor properties keep their getter and setter; only their
+    /// `configurable` attribute is cleared, matching ECMAScript's
+    /// `SetIntegrityLevel` and `QuickJS`'s `js_object_seal` (`quickjs.c:40549`).
+    pub(crate) fn freeze_own_properties(&mut self) {
+        let shape = Arc::get_mut(&mut self.shape)
+            .expect("object shape Arc is private and uniquely owned before shape interning");
+        for property in shape.iter_mut() {
+            property.layout = property.layout.frozen();
+        }
+    }
+
+    /// Removes one own property, compacting the shape and slot vectors in
+    /// lockstep so their indices stay aligned.
+    ///
+    /// Returns [`PropertyDeletion::Missing`] when the key is absent,
+    /// [`PropertyDeletion::NotConfigurable`] when the property forbids
+    /// deletion, and [`PropertyDeletion::Deleted`] after removal. Deletion
+    /// preserves the relative order of the surviving properties, which
+    /// `[[OwnPropertyKeys]]` observes for string and symbol keys.
+    pub(crate) fn delete_own_property(&mut self, key: &PropertyKey) -> PropertyDeletion {
+        let Some(index) = self.shape.iter().position(|property| property.key == *key) else {
+            return PropertyDeletion::Missing;
+        };
+        if !self.shape[index].layout.is_configurable() {
+            return PropertyDeletion::NotConfigurable;
+        }
+        let shape = Arc::get_mut(&mut self.shape)
+            .expect("object shape Arc is private and uniquely owned before shape interning");
+        shape.remove(index);
+        self.slots.remove(index);
+        PropertyDeletion::Deleted
+    }
+
     pub(crate) fn property_count(&self) -> usize {
         self.slots.len()
     }
@@ -397,74 +521,120 @@ impl ObjectRecord {
         (false, scanned)
     }
 
-    pub(crate) fn for_in_candidate_count(&self, string_length: Option<u32>) -> usize {
-        let virtual_indices = string_length.unwrap_or(0);
+    /// Counts the keys `try_own_key_snapshot` would emit for the same arguments.
+    pub(crate) fn own_key_candidate_count(
+        &self,
+        string_length: Option<u32>,
+        phases: KeyPhases,
+    ) -> usize {
+        let virtual_indices = if phases.indices {
+            string_length.unwrap_or(0)
+        } else {
+            0
+        };
         let ordinary = self.shape.iter().filter(|property| {
+            if let Some(index) = property.key.as_index() {
+                return phases.indices && index.get() >= virtual_indices;
+            }
             property
                 .key
-                .as_index()
-                .is_some_and(|index| index.get() >= virtual_indices)
-                || property
-                    .key
-                    .as_atom()
-                    .is_some_and(|atom| atom.kind() == AtomKind::String)
+                .as_atom()
+                .is_some_and(|atom| match atom.kind() {
+                    AtomKind::String => phases.strings,
+                    AtomKind::Symbol | AtomKind::GlobalSymbol => phases.symbols,
+                    // Private names are not property keys; `[[OwnPropertyKeys]]`
+                    // never reports them.
+                    AtomKind::Private => false,
+                })
         });
         usize::try_from(virtual_indices)
             .unwrap_or(usize::MAX)
             .saturating_add(ordinary.count())
     }
 
-    pub(crate) fn try_for_in_snapshot(
+    /// Builds an ordered own-key snapshot.
+    ///
+    /// Keys are emitted in ECMAScript `[[OwnPropertyKeys]]` order: array
+    /// indices in ascending numeric order, then string keys in property
+    /// creation order, then symbol keys in property creation order. Each phase
+    /// can be excluded, which lets `for-in` reuse the operation while keeping
+    /// its own index-plus-string projection. `string_length` synthesizes the
+    /// virtual indices of a boxed `String` wrapper ahead of its own indices.
+    pub(crate) fn try_own_key_snapshot(
         &self,
         string_length: Option<u32>,
+        phases: KeyPhases,
     ) -> Result<ForInSnapshot, TryReserveError> {
-        let virtual_indices = string_length.unwrap_or(0);
-        let capacity = self.for_in_candidate_count(string_length);
+        let virtual_indices = if phases.indices {
+            string_length.unwrap_or(0)
+        } else {
+            0
+        };
+        let capacity = self.own_key_candidate_count(string_length, phases);
         let mut candidates = Vec::new();
         candidates.try_reserve_exact(capacity)?;
 
-        for index in 0..virtual_indices {
-            candidates.push(ForInCandidate {
-                key: PropertyKey::from_index(
-                    ArrayIndex::new(index)
-                        .expect("QuickJS String length cannot contain the non-index u32 maximum"),
-                ),
-                enumerable: true,
+        let mut sort_work = 0;
+        if phases.indices {
+            for index in 0..virtual_indices {
+                candidates.push(ForInCandidate {
+                    key: PropertyKey::from_index(
+                        ArrayIndex::new(index).expect(
+                            "QuickJS String length cannot contain the non-index u32 maximum",
+                        ),
+                    ),
+                    enumerable: true,
+                });
+            }
+            for property in self.shape.iter() {
+                if let Some(index) = property.key.as_index()
+                    && index.get() >= virtual_indices
+                {
+                    candidates.push(ForInCandidate {
+                        key: property.key.clone(),
+                        enumerable: property.layout.is_enumerable(),
+                    });
+                }
+            }
+            sort_work = conservative_sort_work(candidates.len());
+            candidates.sort_unstable_by_key(|candidate| {
+                candidate
+                    .key
+                    .as_index()
+                    .expect("only array-index candidates precede the string-key phase")
             });
         }
-        for property in self.shape.iter() {
-            if let Some(index) = property.key.as_index()
-                && index.get() >= virtual_indices
-            {
-                candidates.push(ForInCandidate {
-                    key: property.key.clone(),
-                    enumerable: property.layout.is_enumerable(),
-                });
-            }
+        if phases.strings {
+            self.push_atom_keys(&mut candidates, AtomKeyPhase::String);
         }
-        let sort_work = conservative_sort_work(candidates.len());
-        candidates.sort_unstable_by_key(|candidate| {
-            candidate
-                .key
-                .as_index()
-                .expect("only array-index candidates precede the string-key phase")
-        });
-        for property in self.shape.iter() {
-            if property
-                .key
-                .as_atom()
-                .is_some_and(|atom| atom.kind() == AtomKind::String)
-            {
-                candidates.push(ForInCandidate {
-                    key: property.key.clone(),
-                    enumerable: property.layout.is_enumerable(),
-                });
-            }
+        if phases.symbols {
+            self.push_atom_keys(&mut candidates, AtomKeyPhase::Symbol);
         }
         Ok(ForInSnapshot {
             candidates,
             sort_work,
         })
+    }
+
+    /// Appends one atom-keyed phase in property creation order.
+    fn push_atom_keys(&self, candidates: &mut Vec<ForInCandidate>, phase: AtomKeyPhase) {
+        for property in self.shape.iter() {
+            let matches = property.key.as_atom().is_some_and(|atom| {
+                let kind = atom.kind();
+                match phase {
+                    AtomKeyPhase::String => kind == AtomKind::String,
+                    AtomKeyPhase::Symbol => {
+                        matches!(kind, AtomKind::Symbol | AtomKind::GlobalSymbol)
+                    }
+                }
+            });
+            if matches {
+                candidates.push(ForInCandidate {
+                    key: property.key.clone(),
+                    enumerable: property.layout.is_enumerable(),
+                });
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1084,7 +1254,8 @@ impl HeapObject {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArrayState, BoxedPrimitive, HeapObject, HeapObjectKind, ObjectRecord, OwnProperty,
+        ArrayState, BoxedPrimitive, HeapObject, HeapObjectKind, KeyPhases, ObjectRecord,
+        OwnProperty,
     };
     use crate::{
         ArrayIndex, AtomLimits, AtomTable, JsNumber, JsString, PredefinedAtom, PropertyKey,
@@ -1144,7 +1315,9 @@ mod tests {
             )
             .expect("symbol");
 
-        let snapshot = record.try_for_in_snapshot(Some(2)).expect("snapshot");
+        let snapshot = record
+            .try_own_key_snapshot(Some(2), KeyPhases::FOR_IN)
+            .expect("snapshot");
         let keys = (0..snapshot.len())
             .map(|index| {
                 let candidate = snapshot.get(index).expect("candidate");

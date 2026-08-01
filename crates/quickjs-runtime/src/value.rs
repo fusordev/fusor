@@ -165,6 +165,19 @@ impl StoredValue {
         }
     }
 
+    /// Applies ECMAScript `SameValue`.
+    ///
+    /// This differs from strict equality only for Numbers: `NaN` equals
+    /// itself, and the two signed zeros differ. `Object.defineProperty` uses
+    /// it to decide whether redefining a non-configurable, non-writable data
+    /// property is a no-op or a `TypeError`.
+    pub(crate) fn same_value(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Number(left), Self::Number(right)) => left.same_value(*right),
+            _ => self.strict_equals(other),
+        }
+    }
+
     pub(crate) const fn heap_reference(&self) -> Option<HeapReference> {
         match self {
             Self::Undefined

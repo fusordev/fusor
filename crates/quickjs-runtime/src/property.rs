@@ -635,6 +635,37 @@ impl PropertyLayout {
             | PropertyLayoutRepr::Accessor { configurable, .. } => configurable,
         }
     }
+
+    /// Returns this layout with `configurable` cleared.
+    ///
+    /// This is ECMAScript `SetIntegrityLevel(O, "sealed")` applied to one
+    /// property: `writable` is deliberately preserved, and an accessor keeps
+    /// its accessor kind.
+    #[must_use]
+    pub const fn sealed(self) -> Self {
+        match self.0 {
+            PropertyLayoutRepr::Data {
+                writable,
+                enumerable,
+                ..
+            } => Self::data(writable, enumerable, false),
+            PropertyLayoutRepr::Accessor { enumerable, .. } => Self::accessor(enumerable, false),
+        }
+    }
+
+    /// Returns this layout with `configurable` cleared and, for a data
+    /// property, `writable` cleared.
+    ///
+    /// This is ECMAScript `SetIntegrityLevel(O, "frozen")` applied to one
+    /// property. An accessor property has no `writable` attribute, so only its
+    /// `configurable` attribute changes.
+    #[must_use]
+    pub const fn frozen(self) -> Self {
+        match self.0 {
+            PropertyLayoutRepr::Data { enumerable, .. } => Self::data(false, enumerable, false),
+            PropertyLayoutRepr::Accessor { enumerable, .. } => Self::accessor(enumerable, false),
+        }
+    }
 }
 
 impl fmt::Debug for PropertyLayout {
