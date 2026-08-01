@@ -508,6 +508,26 @@ A milestone is complete only when all of its checked items pass in CI.
         15-case call-spread differential covers 15 strict feature tags.
         Iterator destructuring, `for await`, and async/generator iterator
         consumers remain fail-closed.
+  - [x] Execute ordinary array-pattern destructuring declarations and
+        assignments through the shared iterator substrate. Declarations
+        evaluate the initializer then emit `for_of_start`; identifier
+        elements, elisions, defaults, and the pinned
+        `array_from; push index; for_of_next; define_array_el; inc` rest
+        collector run against the verified record. Assignments evaluate and
+        duplicate the RHS, destructure identifier or realm-global targets
+        (including defaults), and retain the original copy as the assignment
+        expression value. The rest collector keeps its fresh array and
+        cursor above the record, so every loop `for_of_next` uses the pinned
+        `U8(2)` temporary offset; the verifier's branch certification scans
+        across the ordinary values above the record and its
+        object-definition pass admits the fresh-array/cursor first use and
+        the same-site loop join. The runtime mirrors pinned
+        `js_for_of_next`: a step that observed `done` replaces the iterator
+        slot with `undefined`, and every later step yields
+        `{ value: undefined, done: true }` without invoking `next()` again,
+        so post-exhaustion elements, elisions, and rest bind exactly as the
+        spec requires. Nested and object patterns, member targets, and
+        iterator-destructuring heads remain fail-closed.
   - [x] Represent synthetic native caller frames. Each bytecode frame
         reached through `Function.prototype.call` or `Function.prototype.apply`
         records the pinned `call (native)` / `apply (native)` entry, including

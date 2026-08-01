@@ -470,7 +470,7 @@ fn inactive_for_of_record_cannot_be_stepped_again_but_can_be_closed() {
         .push(OperandStackEntry::ForOfCatch { active: false });
 
     assert!(matches!(
-        deactivate_for_of_record(&mut frame, false),
+        deactivate_for_of_record(&mut frame, false, 0),
         Err(EngineFault::RuntimeInvariant {
             message: "verified for-of operation has the wrong record marker",
         })
@@ -481,7 +481,7 @@ fn inactive_for_of_record_cannot_be_stepped_again_but_can_be_closed() {
     ));
 
     let (iterator, next) =
-        deactivate_for_of_record(&mut frame, true).expect("inactive record remains closable");
+        deactivate_for_of_record(&mut frame, true, 0).expect("inactive record remains closable");
     assert!(
         matches!(iterator, StoredValue::Number(value) if value.strict_equals(JsNumber::from_i32(1)))
     );

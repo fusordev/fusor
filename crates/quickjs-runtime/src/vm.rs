@@ -410,6 +410,7 @@ struct ForOfNextContinuation {
     result: Option<StoredValue>,
     realm: RealmId,
     stage: ForOfNextStage,
+    offset: u8,
     origin: JsStackFrame,
 }
 
@@ -2181,12 +2182,16 @@ fn execute_frame_loop(
                         })?;
                         push_for_of_record(parent, iterator, next, return_to)?;
                     }
-                    Ok(NativeDispatch::ForOfStep { value, done }) => {
+                    Ok(NativeDispatch::ForOfStep {
+                        value,
+                        done,
+                        offset,
+                    }) => {
                         let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
                             function: FunctionTemplateId::new(0),
                             instruction: 0,
                         })?;
-                        finish_for_of_step(parent, value, done, return_to)?;
+                        finish_for_of_step(parent, value, done, return_to, offset)?;
                     }
                     Ok(NativeDispatch::ForOfClosed) => {
                         let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
@@ -2346,7 +2351,11 @@ fn execute_frame_loop(
                             push_for_of_record(parent, iterator, next, return_to)?;
                             continue;
                         }
-                        Ok(NativeDispatch::ForOfStep { value, done }) => {
+                        Ok(NativeDispatch::ForOfStep {
+                            value,
+                            done,
+                            offset,
+                        }) => {
                             let parent =
                                 frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
                                     message: "for-of step continuation has no executing frame",
@@ -2354,7 +2363,7 @@ fn execute_frame_loop(
                             let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
                                 message: "for-of step continuation has no caller continuation",
                             })?;
-                            finish_for_of_step(parent, value, done, return_to)?;
+                            finish_for_of_step(parent, value, done, return_to, offset)?;
                             continue;
                         }
                         Ok(NativeDispatch::ForOfClosed) => {

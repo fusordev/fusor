@@ -322,11 +322,15 @@ pub(super) fn push_for_of_record(
 pub(super) fn deactivate_for_of_record(
     frame: &mut Frame,
     allow_return_dummy: bool,
+    offset: u8,
 ) -> Result<(StoredValue, StoredValue), EngineFault> {
+    // The record marker sits `offset` slots below the stack top: the
+    // array-destructuring rest collector keeps its fresh array and cursor
+    // above the record while stepping the shared iterator.
     let marker = frame
         .stack
         .len()
-        .checked_sub(1)
+        .checked_sub(1_usize.saturating_add(usize::from(offset)))
         .ok_or(EngineFault::RuntimeInvariant {
             message: "verified for-of operation has no record marker",
         })?;
@@ -361,6 +365,7 @@ pub(super) fn finish_for_of_step(
     value: StoredValue,
     done: bool,
     return_to: CallReturn,
+    offset: u8,
 ) -> Result<(), ExecutionError> {
     if !matches!(return_to.disposition, ReturnDisposition::Push) {
         return Err(EngineFault::RuntimeInvariant {
@@ -368,10 +373,13 @@ pub(super) fn finish_for_of_step(
         }
         .into());
     }
+    // The record marker is `offset` slots below the stack top, exactly as
+    // the preceding `deactivate_for_of_record` located it; the native
+    // `next()` call runs in child frames and never moves the parent stack.
     let marker = frame
         .stack
         .len()
-        .checked_sub(1)
+        .checked_sub(1_usize.saturating_add(usize::from(offset)))
         .ok_or(EngineFault::RuntimeInvariant {
             message: "for-of step completed without its record marker",
         })?;

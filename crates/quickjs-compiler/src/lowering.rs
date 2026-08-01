@@ -3,16 +3,18 @@ use std::{collections::HashMap, error::Error, fmt, ops::Range, sync::Arc};
 use oxc_ast::{
     AstKind,
     ast::{
-        Argument, ArrayExpression, ArrayExpressionElement, AssignmentExpression, AssignmentTarget,
-        BindingPattern, BlockStatement, CallExpression, CatchClause, ComputedMemberExpression,
-        ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForInStatement,
-        ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft, Function, FunctionBody,
-        FunctionType, IdentifierReference, IfStatement, LabelIdentifier, LabeledStatement,
-        LogicalExpression, NewExpression, ObjectExpression, ObjectProperty, ObjectPropertyKind,
-        Program, PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement, SequenceExpression,
-        SimpleAssignmentTarget, Statement, StaticMemberExpression, SwitchStatement, ThrowStatement,
-        TryStatement, UnaryExpression, UpdateExpression, VariableDeclaration,
-        VariableDeclarationKind, WhileStatement,
+        Argument, ArrayAssignmentTarget, ArrayExpression, ArrayExpressionElement, ArrayPattern,
+        AssignmentExpression, AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetRest,
+        BindingIdentifier, BindingPattern, BindingRestElement, BlockStatement, CallExpression,
+        CatchClause, ComputedMemberExpression, ConditionalExpression, DoWhileStatement, Expression,
+        ExpressionStatement, ForInStatement, ForOfStatement, ForStatement, ForStatementInit,
+        ForStatementLeft, Function, FunctionBody, FunctionType, IdentifierReference, IfStatement,
+        LabelIdentifier, LabeledStatement, LogicalExpression, NewExpression, ObjectExpression,
+        ObjectProperty, ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind,
+        ReturnStatement, SequenceExpression, SimpleAssignmentTarget, Statement,
+        StaticMemberExpression, SwitchStatement, ThrowStatement, TryStatement, UnaryExpression,
+        UpdateExpression, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
+        WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
@@ -4220,7 +4222,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         layout: &FrameLayout,
     ) -> Result<
         (
-            &'declaration oxc_ast::ast::BindingIdentifier<'arena>,
+            &'declaration BindingIdentifier<'arena>,
             Option<&'declaration Expression<'arena>>,
         ),
         LeafCompilationError,
@@ -4272,7 +4274,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     fn emit_for_in_declaration_write(
         &self,
         declaration_kind: VariableDeclarationKind,
-        identifier: &oxc_ast::ast::BindingIdentifier<'arena>,
+        identifier: &BindingIdentifier<'arena>,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         flow: &mut PlannedControlFlow,
@@ -4338,12 +4340,64 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         }
 
         for declarator in &declaration.declarations {
-            let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
-                return unsupported(
-                    UnsupportedLeafFeature::UnsupportedDeclaration,
-                    declarator.span,
-                );
-            };
+            match &declarator.id {
+                BindingPattern::ArrayPattern(pattern) => {
+                    let Some(initializer) = &declarator.init else {
+                        return unsupported(
+                            UnsupportedLeafFeature::UnsupportedDeclaration,
+                            declarator.span,
+                        );
+                    };
+                    if let Some(span) = anonymous_named_evaluation_span(initializer) {
+                        return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+                    }
+                    return self.plan_array_destructuring_declaration(
+                        pattern,
+                        initializer,
+                        declaration.kind,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    );
+                }
+                BindingPattern::ObjectPattern(_) | BindingPattern::AssignmentPattern(_) => {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedDeclaration,
+                        declarator.span,
+                    );
+                }
+                BindingPattern::BindingIdentifier(identifier) => {
+                    self.plan_identifier_declaration(
+                        identifier,
+                        declaration.kind,
+                        declarator,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "identifier declaration planning carries the same explicit frame, tree, constant, and flow authority as every other declaration form"
+    )]
+    fn plan_identifier_declaration(
+        &self,
+        identifier: &BindingIdentifier<'arena>,
+        declaration_kind: VariableDeclarationKind,
+        declarator: &VariableDeclarator<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        {
             let binding =
                 self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
             let storage = self.planned.plan.binding(binding).ok_or(
@@ -4354,7 +4408,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             )?;
             if storage.placement() == StoragePlacement::GlobalObject {
                 self.validate_realm_global_var_declaration(
-                    declaration.kind,
+                    declaration_kind,
                     storage,
                     identifier.span,
                 )?;
@@ -4381,7 +4435,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         identifier.span,
                     ))?;
                 }
-                continue;
+                return Ok(());
             }
 
             let frame_slot = layout
@@ -4391,7 +4445,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     span: identifier.span,
                 })?;
             self.validate_declaration_storage(
-                declaration.kind,
+                declaration_kind,
                 binding,
                 frame_slot,
                 identifier.span,
@@ -4405,7 +4459,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
                     flow.emit(plan_put_slot(frame_slot, identifier.span))?;
                 }
-                None if declaration.kind == VariableDeclarationKind::Let => {
+                None if declaration_kind == VariableDeclarationKind::Let => {
                     flow.emit(PlannedInstruction::new(
                         FinalOpcode::Undefined,
                         Operands::None,
@@ -4413,7 +4467,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     ))?;
                     flow.emit(plan_put_slot(frame_slot, identifier.span))?;
                 }
-                None if declaration.kind == VariableDeclarationKind::Var => {}
+                None if declaration_kind == VariableDeclarationKind::Var => {}
                 None => {
                     return unsupported(
                         UnsupportedLeafFeature::UnsupportedDeclaration,
@@ -4421,7 +4475,525 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     );
                 }
             }
+            Ok(())
         }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "array-pattern declaration planning carries the same explicit frame, tree, constant, and flow authority as every other declaration form"
+    )]
+    fn plan_array_destructuring_declaration<'pattern, 'expression>(
+        &self,
+        pattern: &'pattern ArrayPattern<'arena>,
+        initializer: &'expression Expression<'arena>,
+        declaration_kind: VariableDeclarationKind,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
+        self.plan_array_destructuring_elements(
+            pattern.elements.iter(),
+            pattern.rest.as_deref(),
+            declaration_kind,
+            layout,
+            tree_layout,
+            constants,
+            flow,
+            pattern.span,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "array-pattern element planning carries the same explicit frame, tree, constant, and flow authority as every other pattern form"
+    )]
+    fn plan_array_destructuring_elements<'pattern>(
+        &self,
+        elements: impl ExactSizeIterator<Item = &'pattern Option<BindingPattern<'arena>>>,
+        rest: Option<&'pattern BindingRestElement<'arena>>,
+        declaration_kind: VariableDeclarationKind,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::ForOfStart,
+            Operands::None,
+            span,
+        ))?;
+        for element in elements {
+            match element {
+                None => {
+                    // An elision consumes one iterator value and discards
+                    // both the value and the done flag.
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::ForOfNext,
+                        Operands::U8(0),
+                        span,
+                    ))?;
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::Drop,
+                        Operands::None,
+                        span,
+                    ))?;
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::Drop,
+                        Operands::None,
+                        span,
+                    ))?;
+                }
+                Some(pattern) => {
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::ForOfNext,
+                        Operands::U8(0),
+                        pattern.span(),
+                    ))?;
+                    // Discard the done flag, leaving the value on top.
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::Drop,
+                        Operands::None,
+                        pattern.span(),
+                    ))?;
+                    self.plan_destructuring_pattern_value(
+                        pattern,
+                        declaration_kind,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    )?;
+                }
+            }
+        }
+        if let Some(rest) = rest {
+            self.plan_destructuring_rest(
+                rest,
+                declaration_kind,
+                layout,
+                tree_layout,
+                constants,
+                flow,
+            )?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::IteratorClose,
+            Operands::None,
+            span,
+        ))
+    }
+
+    fn plan_destructuring_rest<'pattern>(
+        &self,
+        rest: &'pattern BindingRestElement<'arena>,
+        declaration_kind: VariableDeclarationKind,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        // `[first, ...rest]`: collect the remaining values into a fresh
+        // array using the pinned `array_from; push index; for_of_next;
+        // define_array_el; inc` loop. The record created by `for_of_start`
+        // stays three slots below the fresh array and its cursor, so every
+        // loop `for_of_next` addresses it with temporary offset 2 (the
+        // verifier certifies that the two slots above the record are
+        // ordinary JavaScript values). The `if_false` branch uses the
+        // certified for-of iteration shape: the body label receives the
+        // head value, and the fallthrough is the exhausted exit.
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::ArrayFrom,
+            Operands::NPop { argument_count: 0 },
+            rest.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Push0,
+            Operands::NoneInt,
+            rest.span,
+        ))?;
+        let next = flow.new_label(rest.span)?;
+        let body = flow.new_label(rest.span)?;
+        let done = flow.new_label(rest.span)?;
+        flow.bind(&next)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::ForOfNext,
+            Operands::U8(2),
+            rest.span,
+        ))?;
+        flow.branch(BranchKind::IfFalse, &body, rest.span)?;
+        flow.branch(BranchKind::Goto, &done, rest.span)?;
+        flow.bind(&body)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::DefineArrayEl,
+            Operands::None,
+            rest.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Inc,
+            Operands::None,
+            rest.span,
+        ))?;
+        flow.branch(BranchKind::Goto, &next, rest.span)?;
+        flow.bind(&done)?;
+        // The exhausted exit carries the final `undefined` value and the
+        // cursor above the fresh array; both are dropped before the array
+        // is stored into the rest binding.
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            rest.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            rest.span,
+        ))?;
+        self.plan_destructuring_pattern_value(
+            &rest.argument,
+            declaration_kind,
+            layout,
+            tree_layout,
+            constants,
+            flow,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "destructuring pattern value storage carries the same explicit frame, tree, constant, and flow authority as every other declaration form"
+    )]
+    fn plan_destructuring_pattern_value<'pattern>(
+        &self,
+        pattern: &'pattern BindingPattern<'arena>,
+        declaration_kind: VariableDeclarationKind,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        match pattern {
+            BindingPattern::BindingIdentifier(identifier) => {
+                let binding =
+                    self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+                let storage = self.planned.plan.binding(binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "destructured compiler binding exists",
+                        span: Some(identifier.span),
+                    },
+                )?;
+                if storage.placement() == StoragePlacement::GlobalObject {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedDeclaration,
+                        identifier.span,
+                    );
+                }
+                let frame_slot = layout
+                    .slot(binding)
+                    .ok_or(LeafCompilationError::Unsupported {
+                        feature: UnsupportedLeafFeature::UnsupportedBinding,
+                        span: identifier.span,
+                    })?;
+                self.validate_declaration_storage(
+                    declaration_kind,
+                    binding,
+                    frame_slot,
+                    identifier.span,
+                )?;
+                flow.emit(plan_put_slot(frame_slot, identifier.span))
+            }
+            BindingPattern::AssignmentPattern(assignment) => {
+                // `[a = default]`: when the destructured value is `undefined`,
+                // evaluate the default expression and store it instead.
+                let skip = flow.new_label(assignment.span)?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    assignment.span,
+                ))?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Undefined,
+                    Operands::None,
+                    assignment.span,
+                ))?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::StrictEq,
+                    Operands::None,
+                    assignment.span,
+                ))?;
+                flow.branch(BranchKind::IfFalse, &skip, assignment.span)?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    assignment.span,
+                ))?;
+                if let Some(span) = anonymous_named_evaluation_span(&assignment.right) {
+                    return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+                }
+                self.plan_expression(&assignment.right, layout, tree_layout, constants, flow)?;
+                flow.bind(&skip)?;
+                self.plan_destructuring_pattern_value(
+                    &assignment.left,
+                    declaration_kind,
+                    layout,
+                    tree_layout,
+                    constants,
+                    flow,
+                )
+            }
+            BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_) => {
+                unsupported(UnsupportedLeafFeature::UnsupportedPattern, pattern.span())
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "array-pattern assignment planning carries the same explicit frame, tree, and flow authority as every other pattern form"
+    )]
+    fn plan_array_assignment_elements<'pattern>(
+        &self,
+        pattern: &'pattern ArrayAssignmentTarget<'arena>,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<(), LeafCompilationError> {
+        // Work is a LIFO stack; the destructuring sequence runs after the
+        // caller's `dup` of the RHS, so `iterator_close` is pushed first and
+        // `for_of_start` last. The rest collector (when present) runs after
+        // every element and before the close.
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::IteratorClose,
+            Operands::None,
+            pattern.span,
+        )));
+        if let Some(rest) = pattern.rest.as_deref() {
+            self.plan_assignment_rest_collection(rest, work, flow, layout, tree_layout)?;
+        }
+        for element in pattern.elements.iter().rev() {
+            match element {
+                None => {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Drop,
+                        Operands::None,
+                        pattern.span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Drop,
+                        Operands::None,
+                        pattern.span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::ForOfNext,
+                        Operands::U8(0),
+                        pattern.span,
+                    )));
+                }
+                Some(element) => {
+                    if let AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(default) =
+                        element
+                    {
+                        // `[a = default]` assignment: when the
+                        // destructured value is `undefined`, evaluate the
+                        // default expression and store it instead.
+                        let skip = flow.new_label(default.span)?;
+                        self.plan_assignment_target_value(
+                            &default.binding,
+                            work,
+                            layout,
+                            tree_layout,
+                        )?;
+                        work.push(ExpressionWork::Bind(skip.clone()));
+                        if let Some(span) = anonymous_named_evaluation_span(&default.init) {
+                            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+                        }
+                        work.push(ExpressionWork::Visit(&default.init));
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::Drop,
+                            Operands::None,
+                            default.span,
+                        )));
+                        work.push(ExpressionWork::Branch {
+                            kind: BranchKind::IfFalse,
+                            target: skip,
+                            span: default.span,
+                        });
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::StrictEq,
+                            Operands::None,
+                            default.span,
+                        )));
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::Undefined,
+                            Operands::None,
+                            default.span,
+                        )));
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::Dup,
+                            Operands::None,
+                            default.span,
+                        )));
+                    } else {
+                        let target = element.as_assignment_target().ok_or(
+                            LeafCompilationError::SemanticInvariant {
+                                invariant: "assignment target element is an assignment target",
+                                span: Some(element.span()),
+                            },
+                        )?;
+                        self.plan_assignment_target_value(target, work, layout, tree_layout)?;
+                    }
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Drop,
+                        Operands::None,
+                        element.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::ForOfNext,
+                        Operands::U8(0),
+                        element.span(),
+                    )));
+                }
+            }
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ForOfStart,
+            Operands::None,
+            pattern.span,
+        )));
+        Ok(())
+    }
+
+    fn plan_assignment_target_value<'pattern>(
+        &self,
+        target: &'pattern AssignmentTarget<'arena>,
+        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<(), LeafCompilationError> {
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+                let reference = self.lowered_reference(
+                    identifier.reference_id.get(),
+                    identifier.span,
+                    layout,
+                    tree_layout,
+                )?;
+                if !reference.access().writes() {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedReference,
+                        identifier.span,
+                    );
+                }
+                match reference {
+                    LoweredReference::Frame { slot, .. } => {
+                        work.push(ExpressionWork::Emit(plan_put_slot(slot, identifier.span)));
+                    }
+                    LoweredReference::RealmGlobal { slot, .. } => {
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::PutVar,
+                            Operands::VarRef(slot),
+                            identifier.span,
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            AssignmentTarget::ArrayAssignmentTarget(_)
+            | AssignmentTarget::ObjectAssignmentTarget(_)
+            | AssignmentTarget::StaticMemberExpression(_)
+            | AssignmentTarget::ComputedMemberExpression(_)
+            | AssignmentTarget::TSAsExpression(_)
+            | AssignmentTarget::TSSatisfiesExpression(_)
+            | AssignmentTarget::TSNonNullExpression(_)
+            | AssignmentTarget::TSTypeAssertion(_)
+            | AssignmentTarget::PrivateFieldExpression(_) => {
+                unsupported(UnsupportedLeafFeature::UnsupportedPattern, target.span())
+            }
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "array-pattern rest assignment carries the same explicit frame, tree, and flow authority as every other pattern form"
+    )]
+    fn plan_assignment_rest_collection<'pattern>(
+        &self,
+        rest: &'pattern AssignmentTargetRest<'arena>,
+        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+        flow: &mut PlannedControlFlow,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<(), LeafCompilationError> {
+        // `[first, ...rest] = expr`: collect the remaining values into a
+        // fresh array with the pinned `array_from; push index; for_of_next;
+        // define_array_el; inc` loop. The retained RHS copy and the record
+        // sit below the fresh array and cursor, so the loop `for_of_next`
+        // addresses the record with temporary offset 2; the `if_false`
+        // branch uses the certified for-of iteration shape.
+        //
+        // Work is a LIFO stack, so each item is pushed in reverse execution
+        // order: the target store runs last, after the two exit drops.
+        self.plan_assignment_target_value(&rest.target, work, layout, tree_layout)?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            rest.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            rest.span,
+        )));
+        let next = flow.new_label(rest.span)?;
+        let body = flow.new_label(rest.span)?;
+        let done = flow.new_label(rest.span)?;
+        work.push(ExpressionWork::Bind(done.clone()));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: next.clone(),
+            span: rest.span,
+        });
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Inc,
+            Operands::None,
+            rest.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::DefineArrayEl,
+            Operands::None,
+            rest.span,
+        )));
+        work.push(ExpressionWork::Bind(body.clone()));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span: rest.span,
+        });
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::IfFalse,
+            target: body,
+            span: rest.span,
+        });
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ForOfNext,
+            Operands::U8(2),
+            rest.span,
+        )));
+        work.push(ExpressionWork::Bind(next));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Push0,
+            Operands::NoneInt,
+            rest.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ArrayFrom,
+            Operands::NPop { argument_count: 0 },
+            rest.span,
+        )));
         Ok(())
     }
 
@@ -5585,6 +6157,24 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         }
         if let AssignmentTarget::ComputedMemberExpression(member) = &assignment.left {
             return Self::plan_computed_member_assignment(assignment, member, work);
+        }
+        if let AssignmentTarget::ArrayAssignmentTarget(pattern) = &assignment.left {
+            if assignment.operator != AssignmentOperator::Assign {
+                return unsupported(
+                    UnsupportedLeafFeature::UnsupportedExpression,
+                    assignment.span,
+                );
+            }
+            // The RHS is evaluated, duplicated, and destructured; the
+            // original copy remains as the assignment expression's value.
+            self.plan_array_assignment_elements(pattern, flow, work, layout, tree_layout)?;
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Dup,
+                Operands::None,
+                assignment.span,
+            )));
+            work.push(ExpressionWork::Visit(&assignment.right));
+            return Ok(());
         }
         let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &assignment.left else {
             return unsupported(
@@ -10282,6 +10872,8 @@ pub enum UnsupportedLeafFeature {
     UnsupportedLiteral,
     /// A binding cannot be represented by this frame layout.
     UnsupportedBinding,
+    /// A destructuring pattern is outside the admitted array-pattern slice.
+    UnsupportedPattern,
     /// Program-level bindings require the constructor realm's global environment.
     GlobalEnvironment,
     /// A reference access or binding write policy is not supported.

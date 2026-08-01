@@ -4332,6 +4332,23 @@ fn transfer_object_definition_provenance(
                 state.resize(output_len, ObjectDefinitionProvenance::Unknown);
             }
         }
+        FinalOpcode::ForOfNext => {
+            // The verified for-of step pushes the certified value and done
+            // flag above the record without popping anything. The record
+            // slots and any rest-collector fresh-array/cursor pair remain in
+            // place, so the loop can keep appending to the same array.
+            state.try_reserve(2).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 2,
+                    },
+                )
+            })?;
+            state.push(ObjectDefinitionProvenance::Unknown);
+            state.push(ObjectDefinitionProvenance::Unknown);
+        }
         FinalOpcode::Drop if checked_append_pair_at_top(state).is_some() => {
             state.truncate(state.len() - 2);
             state.push(ObjectDefinitionProvenance::Unknown);
@@ -4488,6 +4505,14 @@ fn verify_linear_append_inputs(
             is_append_length_finalizer(function, instruction.operands(), state)
         }
         FinalOpcode::Drop => checked_append_pair_at_top(state).is_some(),
+        // The verified for-of opcodes never consume a tracked fresh-array or
+        // append pair. `for_of_start` pops the iterable into the
+        // internal-stack-certified three-slot record, and `for_of_next`
+        // performs no runtime pops at all (its record-slot stack metadata
+        // models the three-slot record, which this pass never tracks); the
+        // destructuring rest collector therefore keeps its fresh array and
+        // cursor alive across the loop.
+        FinalOpcode::ForOfStart | FinalOpcode::ForOfNext => true,
         _ => false,
     };
     if exact_transition {
@@ -4562,6 +4587,22 @@ fn append_pair_for_element(state: &[ObjectDefinitionProvenance]) -> Option<u32> 
             ObjectDefinitionProvenance::CheckedAppendCursor(cursor)
             | ObjectDefinitionProvenance::AppendCursorAfterElision(cursor),
         ) if destination == cursor => Some(destination),
+        // First use inside an array-destructuring rest-collection loop: the
+        // fresh array and its verified initial cursor write the first
+        // collected value, then `inc` advances into the certified
+        // destination/cursor pair shape shared with the loop backedge. The
+        // straight-line dynamic-array-literal program always converts
+        // through `append` first, so this arm admits exactly the loop form.
+        (
+            ObjectDefinitionProvenance::FreshArray {
+                site,
+                minimum_cursor,
+            },
+            ObjectDefinitionProvenance::ArrayCursorCandidate {
+                site: cursor_site,
+                value,
+            },
+        ) if site == cursor_site && value >= minimum_cursor => Some(site),
         _ => None,
     }
 }
@@ -4723,21 +4764,48 @@ fn propagate_object_definition_provenance(
         Some(existing) if existing.len() == output.len() => {
             let mut changed = false;
             for (target, incoming) in existing.iter_mut().zip(output) {
-                if *target != *incoming
-                    && (is_linear_append_provenance(*target)
-                        || is_linear_append_provenance(*incoming))
-                {
-                    return Err(BytecodeVerificationError::function(
-                        id,
-                        BytecodeVerificationErrorKind::AppendProvenanceJoinMismatch {
-                            target: target_pc,
-                            incoming_from: source_pc,
-                        },
-                    ));
-                }
                 let merged = match (*target, *incoming) {
                     (established, incoming) if established == incoming => established,
-                    _ => ObjectDefinitionProvenance::Unknown,
+                    // The array-destructuring rest-collection loop joins the
+                    // pre-loop fresh-array/cursor pair with the backedge's
+                    // certified destination/cursor pair at the same `array_from`
+                    // site; the post-loop shape strictly extends the pre-loop
+                    // shape, so the backedge state wins.
+                    (
+                        ObjectDefinitionProvenance::FreshArray { site, .. },
+                        ObjectDefinitionProvenance::AppendDestination(destination),
+                    ) if site == destination => {
+                        ObjectDefinitionProvenance::AppendDestination(destination)
+                    }
+                    (
+                        ObjectDefinitionProvenance::AppendDestination(destination),
+                        ObjectDefinitionProvenance::FreshArray { site, .. },
+                    ) if site == destination => {
+                        ObjectDefinitionProvenance::AppendDestination(destination)
+                    }
+                    (
+                        ObjectDefinitionProvenance::ArrayCursorCandidate { site, .. },
+                        ObjectDefinitionProvenance::CheckedAppendCursor(cursor),
+                    ) if site == cursor => ObjectDefinitionProvenance::CheckedAppendCursor(cursor),
+                    (
+                        ObjectDefinitionProvenance::CheckedAppendCursor(cursor),
+                        ObjectDefinitionProvenance::ArrayCursorCandidate { site, .. },
+                    ) if site == cursor => ObjectDefinitionProvenance::CheckedAppendCursor(cursor),
+                    _ => {
+                        if *target != *incoming
+                            && (is_linear_append_provenance(*target)
+                                || is_linear_append_provenance(*incoming))
+                        {
+                            return Err(BytecodeVerificationError::function(
+                                id,
+                                BytecodeVerificationErrorKind::AppendProvenanceJoinMismatch {
+                                    target: target_pc,
+                                    incoming_from: source_pc,
+                                },
+                            ));
+                        }
+                        ObjectDefinitionProvenance::Unknown
+                    }
                 };
                 changed |= merged != *target;
                 *target = merged;
@@ -5336,7 +5404,7 @@ struct InternalStackTransfer {
 #[derive(Clone, Copy)]
 enum IterationBranchValue {
     ForIn(BytecodePc),
-    ForOf(BytecodePc),
+    ForOf { site: BytecodePc, extras: usize },
 }
 
 #[derive(Clone, Copy)]
@@ -5748,10 +5816,12 @@ fn verify_internal_operand_stack(
                                 InternalStackValue::Ordinary
                             }
                         }
-                        IterationBranchValue::ForOf(site)
+                        IterationBranchValue::ForOf { site, extras }
                             if state[value_index] == InternalStackValue::ForOfValue(site) =>
                         {
-                            let Some(record_index) = value_index.checked_sub(3) else {
+                            let Some(record_index) =
+                                value_index.checked_sub(3_usize.saturating_add(extras))
+                            else {
                                 return Err(for_of_stack_error(
                                     id,
                                     decoded.pc(),
@@ -5856,8 +5926,10 @@ fn verify_internal_operand_stack(
             if let Some((value_index, branch_value)) = branch_value {
                 state[value_index] = match branch_value {
                     IterationBranchValue::ForIn(site) => InternalStackValue::ForInKey(site),
-                    IterationBranchValue::ForOf(site) => {
-                        let Some(record_index) = value_index.checked_sub(3) else {
+                    IterationBranchValue::ForOf { site, extras } => {
+                        let Some(record_index) =
+                            value_index.checked_sub(3_usize.saturating_add(extras))
+                        else {
                             return Err(for_of_stack_error(
                                 id,
                                 decoded.pc(),
@@ -6157,11 +6229,14 @@ fn transfer_internal_operand_stack(
             });
         }
         FinalOpcode::ForOfNext => {
-            if instruction.operands() != Operands::U8(0) {
+            let Operands::U8(offset) = instruction.operands() else {
                 return Err(for_of_stack_error(id, decoded.pc(), opcode));
-            }
+            };
             invalidate_internal_value_provenance(state);
-            let Some(base) = state.len().checked_sub(3) else {
+            let Some(base) = state
+                .len()
+                .checked_sub(3_usize.saturating_add(usize::from(offset)))
+            else {
                 return Err(for_of_stack_error(id, decoded.pc(), opcode));
             };
             let (
@@ -6193,30 +6268,16 @@ fn transfer_internal_operand_stack(
             });
         }
         FinalOpcode::IfFalse | FinalOpcode::IfFalse8 => {
-            if let Some(base) = state.len().checked_sub(5)
-                && let (
-                    InternalStackValue::ForOfIterator(iterator),
-                    InternalStackValue::ForOfNextMethod(next),
-                    InternalStackValue::ForOfCatch(catch),
-                    InternalStackValue::ForOfValue(value),
-                    InternalStackValue::ForOfDone(done),
-                ) = (
-                    state[base],
-                    state[base + 1],
-                    state[base + 2],
-                    state[base + 3],
-                    state[base + 4],
-                )
-                && iterator == next
-                && next == catch
-                && catch == value
-                && value == done
-            {
+            if let Some((record_index, site)) = for_of_branch_record(state) {
+                let value_index = state.len().saturating_sub(2);
+                let extras = value_index
+                    .saturating_sub(1)
+                    .saturating_sub(record_index.saturating_add(2));
                 state.pop();
-                invalidate_internal_value_provenance(&mut state[..base]);
+                invalidate_internal_value_provenance(&mut state[..record_index]);
                 return Ok(InternalStackTransfer {
                     normal_completion: true,
-                    iteration_branch_value: Some(IterationBranchValue::ForOf(value)),
+                    iteration_branch_value: Some(IterationBranchValue::ForOf { site, extras }),
                     ret_finalizer: None,
                 });
             }
@@ -7124,6 +7185,51 @@ fn for_of_stack_error(
         id,
         BytecodeVerificationErrorKind::ForOfIteratorStackMismatch { pc, opcode },
     )
+}
+
+/// Locates the certified for-of record beneath a `value`/`done` pair about
+/// to be branched on.
+///
+/// The `done` flag must sit at the top with the `value` directly below it.
+/// Any number of ordinary JavaScript values may sit between the value and
+/// the record: the array-destructuring rest collector keeps its fresh array
+/// and cursor there. The three-slot record must share the value's exact
+/// `for_of_start` site, and no other certified internal value may intervene.
+/// Returns the record start and the shared site.
+fn for_of_branch_record(state: &[InternalStackValue]) -> Option<(usize, BytecodePc)> {
+    let done_index = state.len().checked_sub(1)?;
+    let InternalStackValue::ForOfDone(site) = state[done_index] else {
+        return None;
+    };
+    let value_index = done_index.checked_sub(1)?;
+    let InternalStackValue::ForOfValue(value_site) = state[value_index] else {
+        return None;
+    };
+    if value_site != site {
+        return None;
+    }
+    let mut cursor = value_index;
+    while cursor > 0 {
+        cursor -= 1;
+        match state[cursor] {
+            InternalStackValue::Ordinary => {}
+            InternalStackValue::ForOfCatch(catch) => {
+                let iterator_index = cursor.checked_sub(2)?;
+                if matches!(
+                    (state[iterator_index], state[iterator_index + 1]),
+                    (
+                        InternalStackValue::ForOfIterator(iterator),
+                        InternalStackValue::ForOfNextMethod(next)
+                    ) if iterator == next && next == catch && catch == site
+                ) {
+                    return Some((iterator_index, site));
+                }
+                return None;
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn internal_join_error(

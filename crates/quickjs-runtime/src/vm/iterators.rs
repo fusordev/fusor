@@ -615,6 +615,7 @@ pub(super) fn begin_for_of_next(
     iterator: StoredValue,
     next: StoredValue,
     realm: RealmId,
+    offset: u8,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
@@ -644,6 +645,7 @@ pub(super) fn begin_for_of_next(
         result: None,
         realm,
         stage: ForOfNextStage::Result,
+        offset,
         origin: origin.clone(),
     };
     iterator_method_call(
@@ -690,6 +692,7 @@ pub(super) fn advance_for_of_next(
                 return Ok(NativeDispatch::ForOfStep {
                     value: StoredValue::Undefined,
                     done: true,
+                    offset: state.offset,
                 });
             }
             state.stage = ForOfNextStage::Value;
@@ -704,6 +707,7 @@ pub(super) fn advance_for_of_next(
         ForOfNextStage::Value => Ok(NativeDispatch::ForOfStep {
             value: completion,
             done: false,
+            offset: state.offset,
         }),
     }
 }

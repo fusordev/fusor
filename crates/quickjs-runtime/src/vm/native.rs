@@ -47,6 +47,7 @@ pub(super) enum NativeDispatch {
     ForOfStep {
         value: StoredValue,
         done: bool,
+        offset: u8,
     },
     ForOfClosed,
     Frame(Frame),

@@ -1469,13 +1469,42 @@ pub(super) fn execute_one(
             );
         }
         FinalOpcode::ForOfNext => {
-            if operands != Operands::U8(0) {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "verified ordinary for-of has a nonzero temporary offset",
-                }
-                .into());
+            let Operands::U8(offset) = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            // Pinned QuickJS `js_for_of_next` behavior: once a step observed
+            // `done`, the iterator slot is replaced with `undefined`, and
+            // every later step yields `{ value: undefined, done: true }`
+            // without invoking `next()` again. Array destructuring relies on
+            // this for post-exhaustion elements, elisions, and rest.
+            let marker = frame
+                .stack
+                .len()
+                .checked_sub(1_usize.saturating_add(usize::from(offset)))
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "verified for-of next has no record marker",
+                })?;
+            let iterator_slot = marker.checked_sub(2).ok_or(EngineFault::RuntimeInvariant {
+                message: "verified for-of next has an incomplete record",
+            })?;
+            let exhausted = matches!(
+                frame.stack.get(iterator_slot),
+                Some(OperandStackEntry::JavaScript(StoredValue::Undefined))
+            );
+            if exhausted {
+                let return_to =
+                    CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                        EngineFault::InvalidSuccessor {
+                            function: frame.template,
+                            pc: source_pc,
+                        },
+                    )?);
+                push(frame, StoredValue::Undefined);
+                push(frame, StoredValue::Boolean(true));
+                frame.instruction = return_to.instruction;
+                return Ok(Step::Continue);
             }
-            let (iterator, next) = deactivate_for_of_record(frame, false)?;
+            let (iterator, next) = deactivate_for_of_record(frame, false, offset)?;
             let realm = code(runtime, frame.code)?.realm;
             let return_to =
                 CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
@@ -1490,6 +1519,7 @@ pub(super) fn execute_one(
                     iterator,
                     next,
                     realm,
+                    offset,
                     Some(return_to),
                     origin,
                     execution_budget,
@@ -1498,7 +1528,7 @@ pub(super) fn execute_one(
             );
         }
         FinalOpcode::IteratorClose => {
-            let (iterator, _next) = deactivate_for_of_record(frame, true)?;
+            let (iterator, _next) = deactivate_for_of_record(frame, true, 0)?;
             let realm = code(runtime, frame.code)?.realm;
             let return_to =
                 CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
