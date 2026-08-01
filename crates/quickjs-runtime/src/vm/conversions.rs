@@ -1557,6 +1557,10 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             finish_function_apply_length(runtime, state, value, return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::ArrayJoinSeparator(state)
+        | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
+            advance_array_join(runtime, *state, Some(value), return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::ArrayLengthWrite(state) => finish_array_length_write(
             runtime,
             state,
@@ -2173,6 +2177,29 @@ fn finish_property_key_target(
                 )),
             }
         }
+        PropertyKeyTarget::Delete {
+            base,
+            strict,
+            realm,
+        } => match delete_static_property(runtime, &base, &property.key)? {
+            PropertyDeleteOutcome::Deleted => {
+                Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
+            }
+            PropertyDeleteOutcome::Refused if strict => {
+                Err(NativeFailure::Abrupt(property_exception_at(
+                    realm,
+                    origin.clone(),
+                    Some(&property.name),
+                    PropertyFailure::NotDeletable,
+                )?))
+            }
+            PropertyDeleteOutcome::Refused => {
+                Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+            }
+            PropertyDeleteOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
+                property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
+            )),
+        },
         PropertyKeyTarget::DefineMethod {
             base,
             function,

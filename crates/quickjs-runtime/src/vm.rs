@@ -38,21 +38,26 @@ use crate::{
     Function, HandleError, HandleKind, JsException, JsNumber, JsStackFrame, JsString,
     JsStringError, JsValue, OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
     PredefinedAtom, PropertyKey, PropertyLayout, Runtime, RuntimeError, RuntimeResource,
-    conversion::{number_to_int32, number_to_uint32, string_to_number},
+    conversion::{number_to_int32, number_to_length, number_to_uint32, string_to_number},
+    define_property::{
+        DefinitionDecision, PropertyDefinition, Requested, validate_and_apply_existing,
+        validate_and_apply_new,
+    },
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
-    object::{ForInSnapshot, OwnProperty},
+    object::{ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty, PropertyDeletion},
     runtime::{
         ArrayDefineOutcome, ArrayLengthWriteOutcome, BindingCell, BoundFunction, BytecodeFunction,
         CollectionRoot, EnvironmentBinding, ForInAdvance, FrameBindingAddress,
         FunctionImplementation, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
         InstalledTemplate, NativeFunction, NativeFunctionKind, PreparedIteratorResultPlan,
-        RealmGlobalBindingState, array_length_from_number, check_execution_limit,
-        global_declaration_error, usize_to_u64,
+        RealmGlobalBindingState, SetPrototypeOutcome, array_length_from_number,
+        check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
 
 mod aggregate_error;
+mod array_join;
 mod bindings;
 mod conversions;
 mod dynamic;
@@ -63,6 +68,7 @@ mod execution;
 mod instanceof;
 mod iterators;
 mod native;
+mod object_intrinsics;
 mod properties;
 mod stack;
 
@@ -71,8 +77,9 @@ mod stack;
     reason = "private VM sibling modules share one interpreter implementation namespace"
 )]
 use {
-    aggregate_error::*, bindings::*, conversions::*, dynamic::*, error_stack::*, errors::*,
-    exceptions::*, execution::*, iterators::*, native::*, properties::*, stack::*,
+    aggregate_error::*, array_join::*, bindings::*, conversions::*, dynamic::*, error_stack::*,
+    errors::*, exceptions::*, execution::*, iterators::*, native::*, object_intrinsics::*,
+    properties::*, stack::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -263,6 +270,7 @@ enum NativeContinuation {
     IteratorAppend(IteratorAppendContinuation),
     IteratorClose(IteratorCloseContinuation),
     CopyDataProperties(CopyDataPropertiesContinuation),
+    ArrayJoin(Box<ArrayJoinContinuation>),
     InstanceOf(InstanceOfContinuation),
     FunctionCall,
 }
@@ -287,6 +295,7 @@ impl NativeContinuation {
             Self::IteratorAppend(state) => state.retained_values(),
             Self::IteratorClose(state) => state.retained_values(),
             Self::CopyDataProperties(state) => state.retained_values(),
+            Self::ArrayJoin(_) => ArrayJoinContinuation::retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
             Self::FunctionCall => 0,
         }
@@ -613,13 +622,19 @@ enum PropertyKeyTarget {
         enumerable: bool,
         realm: RealmId,
     },
+    /// The `delete` operator's key, awaiting `ToPropertyKey`.
+    Delete {
+        base: StoredValue,
+        strict: bool,
+        realm: RealmId,
+    },
 }
 
 impl PropertyKeyTarget {
     const fn retained_values(&self) -> u64 {
         match self {
             Self::ToKey => 0,
-            Self::Read { .. } => 1,
+            Self::Read { .. } | Self::Delete { .. } => 1,
             Self::Write { .. } | Self::DefineMethod { .. } => 2,
         }
     }
@@ -779,6 +794,8 @@ enum OperatorPrimitiveTarget {
     ErrorToStringMessage(ErrorToStringContinuation),
     ArrayIteratorLength(ArrayIteratorNextContinuation),
     FunctionApplyLength(FunctionApplyContinuation),
+    ArrayJoinSeparator(Box<ArrayJoinContinuation>),
+    ArrayJoinElement(Box<ArrayJoinContinuation>),
     ArrayLengthWrite(ArrayLengthWriteState),
 }
 
@@ -806,6 +823,9 @@ impl OperatorPrimitiveTarget {
             }
             Self::ArrayIteratorLength(state) => state.retained_values(),
             Self::FunctionApplyLength(state) => state.retained_values(),
+            Self::ArrayJoinSeparator(_) | Self::ArrayJoinElement(_) => {
+                ArrayJoinContinuation::retained_values()
+            }
             Self::ArrayLengthWrite(state) => {
                 1_u64.saturating_add(u64::from(state.original.is_some()))
             }
@@ -913,7 +933,9 @@ fn trace_property_key_target_roots(
 ) {
     match target {
         PropertyKeyTarget::ToKey => {}
-        PropertyKeyTarget::Read { base, .. } => trace_stored_value_root(base, mark),
+        PropertyKeyTarget::Read { base, .. } | PropertyKeyTarget::Delete { base, .. } => {
+            trace_stored_value_root(base, mark);
+        }
         PropertyKeyTarget::Write { base, value, .. } => {
             trace_stored_value_root(base, mark);
             trace_stored_value_root(value, mark);
@@ -958,6 +980,10 @@ fn trace_operator_primitive_target_roots(
         }
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             trace_function_apply_roots(state, mark);
+        }
+        OperatorPrimitiveTarget::ArrayJoinSeparator(state)
+        | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
+            trace_stored_value_root(state.target(), mark);
         }
         OperatorPrimitiveTarget::ArrayLengthWrite(state) => {
             trace_stored_value_root(&state.base, mark);
@@ -1018,6 +1044,9 @@ fn trace_native_continuation_roots(
         }
         NativeContinuation::FunctionApply(state) => {
             trace_function_apply_roots(state, mark);
+        }
+        NativeContinuation::ArrayJoin(state) => {
+            trace_stored_value_root(state.target(), mark);
         }
         NativeContinuation::FunctionBind(state) => {
             trace_function_bind_roots(state, mark);

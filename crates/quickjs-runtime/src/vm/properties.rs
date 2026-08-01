@@ -118,6 +118,12 @@ pub(super) enum PropertyFailure {
     NoSetter,
     NotConfigurable,
     NonExtensible,
+    /// `delete` reached `ToObject(null)`.
+    DeleteNull,
+    /// `delete` reached `ToObject(undefined)`.
+    DeleteUndefined,
+    /// `delete` refused a non-configurable property in strict code.
+    NotDeletable,
 }
 
 pub(super) fn static_property_operand(
@@ -557,6 +563,67 @@ fn inherited_property(
     lookup_heap_property(runtime, current, key)
 }
 
+/// The observable result of the `delete` operator.
+pub(super) enum PropertyDeleteOutcome {
+    /// The property is gone, or never existed.
+    Deleted,
+    /// The property exists and refused removal. Sloppy code evaluates to
+    /// `false`; strict code throws.
+    Refused,
+    /// The base could not be converted to an object.
+    Failed(PropertyFailure),
+}
+
+/// Applies the `delete` operator to one already-converted property key.
+///
+/// This is `JS_DeleteProperty` (`quickjs.c:10920`): the base is coerced with
+/// `ToObject`, so `null` and `undefined` throw while other primitives delete
+/// from a throwaway wrapper and report success. A `String` wrapper's own index
+/// properties are non-configurable, so deleting one in range refuses while an
+/// out-of-range index succeeds. An array's cached `length` is deliberately
+/// left alone: `[[Delete]]` creates a hole rather than shortening the array.
+pub(super) fn delete_static_property(
+    runtime: &mut Runtime,
+    base: &StoredValue,
+    key: &PropertyKey,
+) -> Result<PropertyDeleteOutcome, ExecutionError> {
+    let reference = match base {
+        StoredValue::Null => {
+            return Ok(PropertyDeleteOutcome::Failed(PropertyFailure::DeleteNull));
+        }
+        StoredValue::Undefined => {
+            return Ok(PropertyDeleteOutcome::Failed(
+                PropertyFailure::DeleteUndefined,
+            ));
+        }
+        // A primitive base is boxed by `ToObject`, and the wrapper is
+        // discarded immediately. Only a `String` wrapper has own properties,
+        // and its indices are non-configurable.
+        StoredValue::Boolean(_) | StoredValue::Number(_) | StoredValue::Symbol(_) => {
+            return Ok(PropertyDeleteOutcome::Deleted);
+        }
+        StoredValue::String(value) => {
+            let refused = key
+                .as_index()
+                .is_some_and(|index| index.get() < value.len());
+            return Ok(if refused {
+                PropertyDeleteOutcome::Refused
+            } else {
+                PropertyDeleteOutcome::Deleted
+            });
+        }
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+    };
+    if string_exotic_index_is_present(runtime, reference, key)? {
+        return Ok(PropertyDeleteOutcome::Refused);
+    }
+    Ok(match runtime.delete_own_property(reference, key)? {
+        PropertyDeletion::Missing | PropertyDeletion::Deleted => PropertyDeleteOutcome::Deleted,
+        PropertyDeletion::NotConfigurable => PropertyDeleteOutcome::Refused,
+    })
+}
+
 pub(super) fn is_array_length_target(
     runtime: &Runtime,
     base: &StoredValue,
@@ -880,29 +947,46 @@ pub(super) fn define_static_property(
         let record = runtime.object_record(reference)?;
         (record.own_property(&key), record.is_extensible())
     };
-    if exists.is_some() {
-        let replaced = runtime
-            .object_record_mut(reference)?
-            .replace_existing_with_data(&key, PropertyLayout::data(true, true, true), value);
-        if replaced.is_none() {
-            return Err(EngineFault::RuntimeInvariant {
-                message: "located own property disappeared before its data definition",
-            }
-            .into());
+    // An object-literal or class-field definition is
+    // `CreateDataPropertyOrThrow`, whose descriptor is a fully writable,
+    // enumerable, configurable data property. Routing it through
+    // `ValidateAndApplyPropertyDescriptor` keeps one authority for the
+    // compatibility rules, so redefining a non-configurable property is
+    // rejected here exactly as it is for an explicit `defineProperty`.
+    let definition = PropertyDefinition::data(Requested::Present(value), Requested::Present(true))
+        .with_enumerable(Requested::Present(true))
+        .with_configurable(Requested::Present(true));
+    let decision = match &exists {
+        Some(existing) => validate_and_apply_existing(&definition, existing),
+        None => validate_and_apply_new(&definition, extensible),
+    };
+    match decision {
+        DefinitionDecision::Unchanged => Ok(PropertyWriteOutcome::Complete),
+        DefinitionDecision::Rejected if exists.is_some() => Ok(PropertyWriteOutcome::Failed(
+            PropertyFailure::NotConfigurable,
+        )),
+        DefinitionDecision::Rejected => {
+            Ok(PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible))
         }
-        runtime.collection_pending = true;
-        return Ok(PropertyWriteOutcome::Complete);
+        DefinitionDecision::Replace(property) => {
+            if runtime
+                .object_record_mut(reference)?
+                .restore_existing_property(&key, property)
+                .is_none()
+            {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "located own property disappeared before its data definition",
+                }
+                .into());
+            }
+            runtime.collection_pending = true;
+            Ok(PropertyWriteOutcome::Complete)
+        }
+        DefinitionDecision::Create(property) => {
+            runtime.append_own_property(reference, key, property)?;
+            Ok(PropertyWriteOutcome::Complete)
+        }
     }
-    if !extensible {
-        return Ok(PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible));
-    }
-    runtime.append_data_property(
-        reference,
-        key,
-        PropertyLayout::data(true, true, true),
-        value,
-    )?;
-    Ok(PropertyWriteOutcome::Complete)
 }
 
 #[allow(

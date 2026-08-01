@@ -913,6 +913,94 @@ pub(super) fn execute_one(
                 return_to,
             );
         }
+        FinalOpcode::Delete => {
+            let realm = code(runtime, frame.code)?.realm;
+            let key = pop(frame)?;
+            let base = pop(frame)?;
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            return native_step(
+                begin_property_key_conversion(
+                    runtime,
+                    key,
+                    PropertyKeyTarget::Delete {
+                        base,
+                        strict: frame.strict,
+                        realm,
+                    },
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
+        }
+        FinalOpcode::SetProto => {
+            // `OP_set_proto` keeps the target on the stack and consumes the
+            // requested prototype. Only an object or `null` takes effect; any
+            // other value is ignored (`quickjs.c:19330-19341`).
+            let requested = pop(frame)?;
+            let target = peek(frame)?.duplicate();
+            let prototype = match requested {
+                StoredValue::Null => Some(None),
+                StoredValue::Function(function) => Some(Some(HeapReference::Function(function))),
+                StoredValue::Object(object) => Some(Some(HeapReference::Object(object))),
+                StoredValue::Undefined
+                | StoredValue::Boolean(_)
+                | StoredValue::Number(_)
+                | StoredValue::String(_)
+                | StoredValue::Symbol(_) => None,
+            };
+            if let Some(prototype) = prototype {
+                let reference = match target {
+                    StoredValue::Function(function) => HeapReference::Function(function),
+                    StoredValue::Object(object) => HeapReference::Object(object),
+                    StoredValue::Undefined
+                    | StoredValue::Null
+                    | StoredValue::Boolean(_)
+                    | StoredValue::Number(_)
+                    | StoredValue::String(_)
+                    | StoredValue::Symbol(_) => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "set_proto received a non-object literal target",
+                        }
+                        .into());
+                    }
+                };
+                let realm = code(runtime, frame.code)?.realm;
+                let origin = instruction_location(runtime, frame, source_pc)?;
+                match runtime.set_prototype_of(reference, prototype)? {
+                    SetPrototypeOutcome::Complete => {}
+                    SetPrototypeOutcome::NonExtensible => {
+                        return Ok(Step::Abrupt(PendingException {
+                            realm,
+                            payload: PendingExceptionPayload::EngineError {
+                                kind: ExceptionKind::TypeError,
+                                message: JsString::from_utf8("object is not extensible")?,
+                            },
+                            origin,
+                        }));
+                    }
+                    SetPrototypeOutcome::CyclicPrototype => {
+                        return Ok(Step::Abrupt(PendingException {
+                            realm,
+                            payload: PendingExceptionPayload::EngineError {
+                                kind: ExceptionKind::TypeError,
+                                message: JsString::from_utf8("circular prototype chain")?,
+                            },
+                            origin,
+                        }));
+                    }
+                }
+            }
+        }
         FinalOpcode::PutArrayEl => {
             let realm = code(runtime, frame.code)?.realm;
             let value = pop(frame)?;

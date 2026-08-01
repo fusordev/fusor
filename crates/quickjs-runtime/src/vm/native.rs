@@ -328,6 +328,13 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::CopyDataProperties(state) => {
                 advance_copy_data_properties(runtime, state, &value, return_to, execution_budget)?
             }
+            NativeContinuation::ArrayJoin(state) => advance_array_join(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
@@ -900,6 +907,86 @@ pub(super) fn dispatch_native_call_with_frames(
             };
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(is_error)))
         }
+        NativeFunctionKind::ObjectConstructor => {
+            let mut arguments = inputs.arguments;
+            object_constructor(runtime, native.realm, arguments.take_first())
+        }
+        NativeFunctionKind::ObjectGetPrototypeOf => {
+            let mut arguments = inputs.arguments;
+            get_prototype_of(
+                runtime,
+                native.realm,
+                arguments.take_first(),
+                origin.as_ref(),
+            )
+        }
+        NativeFunctionKind::ObjectSetPrototypeOf => {
+            set_prototype_of(runtime, native.realm, inputs.arguments, origin.as_ref())
+        }
+        NativeFunctionKind::ObjectPreventExtensions => {
+            let mut arguments = inputs.arguments;
+            prevent_extensions(
+                runtime,
+                native.realm,
+                arguments.take_first(),
+                origin.as_ref(),
+            )
+        }
+        NativeFunctionKind::ObjectIsExtensible => {
+            let mut arguments = inputs.arguments;
+            is_extensible(
+                runtime,
+                native.realm,
+                arguments.take_first(),
+                origin.as_ref(),
+            )
+        }
+        NativeFunctionKind::ObjectSeal | NativeFunctionKind::ObjectFreeze => {
+            let level = if native.kind == NativeFunctionKind::ObjectSeal {
+                IntegrityLevel::Sealed
+            } else {
+                IntegrityLevel::Frozen
+            };
+            let mut arguments = inputs.arguments;
+            set_integrity_level(
+                runtime,
+                native.realm,
+                arguments.take_first(),
+                level,
+                origin.as_ref(),
+            )
+        }
+        NativeFunctionKind::ObjectIsSealed | NativeFunctionKind::ObjectIsFrozen => {
+            let level = if native.kind == NativeFunctionKind::ObjectIsSealed {
+                IntegrityLevel::Sealed
+            } else {
+                IntegrityLevel::Frozen
+            };
+            let mut arguments = inputs.arguments;
+            test_integrity_level(
+                runtime,
+                native.realm,
+                arguments.take_first(),
+                level,
+                origin.as_ref(),
+            )
+        }
+        NativeFunctionKind::ObjectKeys | NativeFunctionKind::ObjectGetOwnPropertyNames => {
+            let listing = if native.kind == NativeFunctionKind::ObjectKeys {
+                KeyListing::EnumerableOnly
+            } else {
+                KeyListing::AllStringKeys
+            };
+            let mut arguments = inputs.arguments;
+            own_property_names(
+                runtime,
+                native.realm,
+                arguments.take_first(),
+                listing,
+                origin.as_ref(),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::ObjectPrototypeToString => begin_object_prototype_to_string(
             runtime,
             native.realm,
@@ -1169,6 +1256,30 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::IteratorPrototypeIterator => {
             Ok(NativeDispatch::Immediate(inputs.receiver))
         }
+        NativeFunctionKind::ArrayPrototypeJoin => {
+            let mut arguments = inputs.arguments;
+            begin_array_join(
+                runtime,
+                native.realm,
+                inputs.receiver,
+                arguments.take_first(),
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        // `Array.prototype.toString` is `join` with no separator: the pinned
+        // table dispatches it straight to `js_array_join`
+        // (`quickjs.c:44558`).
+        NativeFunctionKind::ArrayPrototypeToString => begin_array_join(
+            runtime,
+            native.realm,
+            inputs.receiver,
+            None,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::ArrayPrototypeValues => begin_array_iterator_method(
             runtime,
             inputs.receiver,
@@ -1395,11 +1506,16 @@ fn begin_function_apply_length_conversion(
     )
 }
 
+/// Renders a `ToLength` result as a binary64 value for the argument-ceiling
+/// comparison.
 #[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "ToLength is clamped and checked against the 65,534 QuickJS call-argument ceiling before conversion"
+    clippy::cast_precision_loss,
+    reason = "a ToLength result never exceeds 2^53 - 1, which binary64 represents exactly"
 )]
+fn length_bound_as_f64(length: u64) -> f64 {
+    length as f64
+}
+
 pub(super) fn finish_function_apply_length(
     runtime: &mut Runtime,
     mut state: FunctionApplyContinuation,
@@ -1407,14 +1523,12 @@ pub(super) fn finish_function_apply_length(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let number = operator_to_number(value, state.realm, &state.origin)?.as_f64();
-    let integer = if number.is_nan() || number <= 0.0 {
-        0.0
-    } else if number.is_infinite() {
-        number
-    } else {
-        number.floor()
-    };
+    let number = operator_to_number(value, state.realm, &state.origin)?;
+    // `Function.prototype.apply` reads its argument-list length with `ToLength`
+    // and then enforces the pinned 65,534 call-argument ceiling
+    // (`quickjs.c:41058`).
+    let length_bound = number_to_length(number);
+    let integer = length_bound_as_f64(length_bound);
     if integer > f64::from(MAX_FUNCTION_APPLY_ARGUMENTS) {
         return Err(function_apply_exception(
             state.realm,
@@ -1423,7 +1537,9 @@ pub(super) fn finish_function_apply_length(
             state.origin,
         )?);
     }
-    let length = integer as u32;
+    let length = u32::try_from(length_bound).map_err(|_| EngineFault::RuntimeInvariant {
+        message: "apply length passed the argument ceiling but exceeded the u32 domain",
+    })?;
     check_execution_limit(
         RuntimeResource::FrameValues,
         runtime.limits.max_active_frame_values,

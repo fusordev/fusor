@@ -43,7 +43,8 @@ use crate::{
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     object::{
         ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, ForInIterator, ForInSnapshot,
-        HeapObject, ObjectRecord, OwnProperty, StringIterator,
+        HeapObject, IntegrityLevel, KeyPhases, ObjectRecord, OwnProperty, PropertyDeletion,
+        StringIterator,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
@@ -228,6 +229,17 @@ pub(crate) enum ArrayDefineOutcome {
     NonExtensible,
 }
 
+/// The outcome of ECMAScript `OrdinarySetPrototypeOf`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SetPrototypeOutcome {
+    /// The prototype was installed, or already had the requested value.
+    Complete,
+    /// The object is not extensible and the prototype differs.
+    NonExtensible,
+    /// The requested prototype chain already reaches the target.
+    CyclicPrototype,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArrayLengthWriteOutcome {
     Complete,
@@ -336,6 +348,17 @@ pub(crate) enum NativeFunctionKind {
     FunctionPrototypeBind,
     FunctionPrototypeHasInstance,
     OrdinaryFunctionConstructor,
+    ObjectConstructor,
+    ObjectGetPrototypeOf,
+    ObjectSetPrototypeOf,
+    ObjectPreventExtensions,
+    ObjectIsExtensible,
+    ObjectSeal,
+    ObjectFreeze,
+    ObjectIsSealed,
+    ObjectIsFrozen,
+    ObjectKeys,
+    ObjectGetOwnPropertyNames,
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
     FunctionPrototypeToString,
@@ -360,6 +383,8 @@ pub(crate) enum NativeFunctionKind {
     SymbolFor,
     SymbolKeyFor,
     IteratorPrototypeIterator,
+    ArrayPrototypeJoin,
+    ArrayPrototypeToString,
     ArrayPrototypeValues,
     ArrayPrototypeKeys,
     ArrayPrototypeEntries,
@@ -373,6 +398,7 @@ impl NativeFunctionKind {
         matches!(
             self,
             Self::OrdinaryFunctionConstructor
+                | Self::ObjectConstructor
                 | Self::ErrorConstructor(_)
                 | Self::BooleanConstructor
                 | Self::NumberConstructor
@@ -881,6 +907,8 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetArrayEl2
             | FinalOpcode::PutField
             | FinalOpcode::PutArrayEl
+            | FinalOpcode::Delete
+            | FinalOpcode::SetProto
             | FinalOpcode::ToObject
             | FinalOpcode::ToPropKey
             | FinalOpcode::CopyDataProperties
