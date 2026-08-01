@@ -404,6 +404,12 @@ pub(super) fn read_static_property(
             base.duplicate(),
             key,
         )?,
+        StoredValue::BigInt(_) => read_heap_property_for_receiver(
+            runtime,
+            HeapReference::Object(runtime.realm_bigint_prototype(realm)?),
+            base.duplicate(),
+            key,
+        )?,
         StoredValue::Symbol(_) => read_heap_property_for_receiver(
             runtime,
             HeapReference::Object(runtime.realm_symbol_prototype(realm)?),
@@ -599,7 +605,10 @@ pub(super) fn delete_static_property(
         // A primitive base is boxed by `ToObject`, and the wrapper is
         // discarded immediately. Only a `String` wrapper has own properties,
         // and its indices are non-configurable.
-        StoredValue::Boolean(_) | StoredValue::Number(_) | StoredValue::Symbol(_) => {
+        StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::Symbol(_) => {
             return Ok(PropertyDeleteOutcome::Deleted);
         }
         StoredValue::String(value) => {
@@ -735,6 +744,17 @@ pub(super) fn write_static_property(
         }
         StoredValue::Boolean(_) => {
             let prototype = runtime.realm_boolean_prototype(realm)?;
+            return write_primitive_property(
+                runtime,
+                HeapReference::Object(prototype),
+                base,
+                &key,
+                value,
+                strict,
+            );
+        }
+        StoredValue::BigInt(_) => {
+            let prototype = runtime.realm_bigint_prototype(realm)?;
             return write_primitive_property(
                 runtime,
                 HeapReference::Object(prototype),
@@ -911,6 +931,7 @@ pub(super) fn define_static_property(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             return Ok(PropertyWriteOutcome::Failed(PropertyFailure::NotObject));
@@ -1009,6 +1030,7 @@ pub(super) fn define_static_method(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             return Ok(PropertyDefinitionOutcome::Failed(
@@ -1249,6 +1271,7 @@ pub(super) fn begin_copy_data_properties(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             return Err(EngineFault::RuntimeInvariant {
@@ -1314,6 +1337,7 @@ pub(super) fn advance_copy_data_properties(
                         | StoredValue::Null
                         | StoredValue::Boolean(_)
                         | StoredValue::Number(_)
+                        | StoredValue::BigInt(_)
                         | StoredValue::String(_)
                         | StoredValue::Symbol(_) => {
                             return Err(EngineFault::RuntimeInvariant {

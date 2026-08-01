@@ -36,8 +36,8 @@ use quickjs_bytecode::{
 
 use crate::{
     ArrayIndex, Atom, AtomError, AtomLimits, AtomTable, AtomUsage, DynamicFunctionScriptError,
-    ExceptionKind, ExecutionLimits, Function, HandleError, HandleKind, InstallError, JsNumber,
-    JsString, JsValue, OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey,
+    ExceptionKind, ExecutionLimits, Function, HandleError, HandleKind, InstallError, JsBigInt,
+    JsNumber, JsString, JsValue, OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey,
     PropertyLayout, PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
@@ -75,6 +75,7 @@ enum RealmIntrinsics {
         errors: ErrorIntrinsics,
         boolean: BooleanIntrinsics,
         number: NumberIntrinsics,
+        bigint: BigIntIntrinsics,
         string: StringIntrinsics,
         array: ArrayIntrinsics,
         symbol: SymbolIntrinsics,
@@ -189,6 +190,13 @@ struct BooleanIntrinsics {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct NumberIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+/// The realm's `BigInt` constructor and prototype.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BigIntIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
 }
@@ -371,6 +379,11 @@ pub(crate) enum NativeFunctionKind {
     NumberConstructor,
     NumberPrototypeToString,
     NumberPrototypeValueOf,
+    BigIntConstructor,
+    BigIntPrototypeToString,
+    BigIntPrototypeValueOf,
+    BigIntAsIntN,
+    BigIntAsUintN,
     StringConstructor,
     StringPrototypeToString,
     StringPrototypeValueOf,
@@ -848,6 +861,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushConst
             | FinalOpcode::FClosure
             | FinalOpcode::PushAtomValue
+            | FinalOpcode::PushBigIntI32
             | FinalOpcode::Undefined
             | FinalOpcode::Null
             | FinalOpcode::PushThis

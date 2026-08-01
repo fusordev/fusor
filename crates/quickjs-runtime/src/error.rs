@@ -39,6 +39,8 @@ pub enum ValueKind {
     Boolean,
     /// An ECMAScript Number.
     Number,
+    /// An ECMAScript `BigInt`.
+    BigInt,
     /// An ECMAScript String.
     String,
     /// An ECMAScript Symbol.
@@ -56,6 +58,7 @@ impl fmt::Display for ValueKind {
             Self::Null => "null",
             Self::Boolean => "Boolean",
             Self::Number => "Number",
+            Self::BigInt => "BigInt",
             Self::String => "String",
             Self::Symbol => "Symbol",
             Self::Function => "function",

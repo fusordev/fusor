@@ -252,10 +252,6 @@ pub(crate) fn number_to_length(value: JsNumber) -> u64 {
 /// convert to `0` rather than failing, which the pinned oracle confirms:
 /// `BigInt.asUintN(NaN, 5n)` is `0n`.
 #[must_use]
-#[allow(
-    dead_code,
-    reason = "ToIndex is required by BigInt.asIntN/asUintN, whose BigInt domain is a separate milestone"
-)]
 pub(crate) fn number_to_index(value: JsNumber) -> Option<u64> {
     let integer = number_to_integer_or_infinity(value);
     if integer < 0.0 || integer > max_safe_integer_as_f64() {

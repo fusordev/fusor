@@ -17,14 +17,6 @@
 mod arena;
 mod array_index;
 mod atom;
-// The BigInt value domain lands in stages: the arithmetic core is complete and
-// tested first, then `StoredValue` grows its variant and the operators stop
-// failing closed. Until that second stage, nothing outside the module's own
-// tests constructs a `JsBigInt`.
-#[allow(
-    dead_code,
-    reason = "the BigInt arithmetic core is verified independently before the value domain is wired into StoredValue"
-)]
 mod bigint;
 mod conversion;
 mod define_property;
@@ -46,6 +38,7 @@ pub use atom::{
     MAX_ATOM_ENTRIES, PREDEFINED_ATOM_COUNT, PREDEFINED_DESCRIPTION_CODE_UNITS,
     PREDEFINED_INTERNER_SLOTS, PropertyKey,
 };
+pub use bigint::{BigIntError, JsBigInt};
 pub use error::{
     DynamicFunctionCompileFailure, DynamicFunctionScriptError, EngineFault, ExceptionKind,
     ExecutionError, HandleError, HandleKind, InstallError, JsException, JsStackFrame, RuntimeError,

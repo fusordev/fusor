@@ -30,7 +30,7 @@ use std::{
 };
 
 use crate::{
-    Atom, HandleError, HandleKind, JsNumber, JsString, ValueKind,
+    Atom, HandleError, HandleKind, JsBigInt, JsNumber, JsString, ValueKind,
     ids::{FunctionId, ObjectId},
 };
 
@@ -55,6 +55,7 @@ pub(crate) enum PrimitiveValue {
     Null,
     Boolean(bool),
     Number(JsNumber),
+    BigInt(Arc<JsBigInt>),
     String(JsString),
     Symbol(Atom),
 }
@@ -66,6 +67,7 @@ impl PrimitiveValue {
             Self::Null => StoredValue::Null,
             Self::Boolean(value) => StoredValue::Boolean(value),
             Self::Number(value) => StoredValue::Number(value),
+            Self::BigInt(value) => StoredValue::BigInt(value),
             Self::String(value) => StoredValue::String(value),
             Self::Symbol(value) => StoredValue::Symbol(value),
         }
@@ -83,6 +85,11 @@ pub(crate) enum StoredValue {
     Null,
     Boolean(bool),
     Number(JsNumber),
+    /// An ECMAScript `BigInt`.
+    ///
+    /// The payload is `Arc`-shared because a `BigInt` is an immutable
+    /// arbitrary-width value: duplicating one must not copy its limbs.
+    BigInt(Arc<JsBigInt>),
     String(JsString),
     Symbol(Atom),
     Function(FunctionId),
@@ -96,6 +103,7 @@ impl StoredValue {
             Self::Null => RootTarget::Primitive(PrimitiveValue::Null),
             Self::Boolean(value) => RootTarget::Primitive(PrimitiveValue::Boolean(value)),
             Self::Number(value) => RootTarget::Primitive(PrimitiveValue::Number(value)),
+            Self::BigInt(value) => RootTarget::Primitive(PrimitiveValue::BigInt(value)),
             Self::String(value) => RootTarget::Primitive(PrimitiveValue::String(value)),
             Self::Symbol(value) => RootTarget::Primitive(PrimitiveValue::Symbol(value)),
             Self::Function(function) => RootTarget::Heap(HeapReference::Function(function)),
@@ -109,6 +117,7 @@ impl StoredValue {
             Self::Null => ValueKind::Null,
             Self::Boolean(_) => ValueKind::Boolean,
             Self::Number(_) => ValueKind::Number,
+            Self::BigInt(_) => ValueKind::BigInt,
             Self::String(_) => ValueKind::String,
             Self::Symbol(_) => ValueKind::Symbol,
             Self::Function(_) => ValueKind::Function,
@@ -122,6 +131,7 @@ impl StoredValue {
             Self::Null => Self::Null,
             Self::Boolean(value) => Self::Boolean(*value),
             Self::Number(value) => Self::Number(*value),
+            Self::BigInt(value) => Self::BigInt(Arc::clone(value)),
             Self::String(value) => Self::String(value.clone()),
             Self::Symbol(value) => Self::Symbol(value.clone()),
             Self::Function(value) => Self::Function(*value),
@@ -137,6 +147,9 @@ impl StoredValue {
                 let value = value.as_f64();
                 value != 0.0 && !value.is_nan()
             }
+            // `0n` is the only falsy `BigInt`; there is no negative zero and no
+            // NaN in the domain.
+            Self::BigInt(value) => !value.is_zero(),
             Self::String(value) => !value.is_empty(),
             Self::Symbol(_) | Self::Function(_) | Self::Object(_) => true,
         }
@@ -147,6 +160,9 @@ impl StoredValue {
             (Self::Undefined, Self::Undefined) | (Self::Null, Self::Null) => true,
             (Self::Boolean(left), Self::Boolean(right)) => left == right,
             (Self::Number(left), Self::Number(right)) => left.strict_equals(*right),
+            // A `BigInt` is never strictly equal to a Number, so `1n === 1` is
+            // `false` while `1n === 1n` compares mathematical values.
+            (Self::BigInt(left), Self::BigInt(right)) => left == right,
             (Self::String(left), Self::String(right)) => left == right,
             (Self::Symbol(left), Self::Symbol(right)) => left.is_same_identity(right),
             (Self::Function(left), Self::Function(right)) => left == right,
@@ -156,6 +172,7 @@ impl StoredValue {
                 | Self::Null
                 | Self::Boolean(_)
                 | Self::Number(_)
+                | Self::BigInt(_)
                 | Self::String(_)
                 | Self::Symbol(_)
                 | Self::Function(_)
@@ -184,6 +201,7 @@ impl StoredValue {
             | Self::Null
             | Self::Boolean(_)
             | Self::Number(_)
+            | Self::BigInt(_)
             | Self::String(_)
             | Self::Symbol(_) => None,
             Self::Function(function) => Some(HeapReference::Function(*function)),

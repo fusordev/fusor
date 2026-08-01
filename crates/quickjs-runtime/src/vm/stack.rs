@@ -126,6 +126,7 @@ pub(super) fn take_call_inputs(
             | StoredValue::Null
             | StoredValue::Boolean(_)
             | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
             | StoredValue::Object(_) => {
@@ -150,6 +151,7 @@ pub(super) fn take_call_inputs(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_)
         | StoredValue::Object(_) => {

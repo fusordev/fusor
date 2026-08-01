@@ -201,6 +201,10 @@ fn to_object_value(
             let object = runtime.allocate_boxed_number(realm, value)?;
             Ok(Ok(StoredValue::Object(object)))
         }
+        StoredValue::BigInt(value) => {
+            let object = runtime.allocate_boxed_bigint(realm, value)?;
+            Ok(Ok(StoredValue::Object(object)))
+        }
         StoredValue::String(value) => {
             let object = runtime.allocate_boxed_string(realm, value)?;
             Ok(Ok(StoredValue::Object(object)))
@@ -470,6 +474,18 @@ pub(super) fn execute_one(
             push(
                 frame,
                 materialize_constant(runtime, frame.code, frame.template, index)?,
+            );
+        }
+        FinalOpcode::PushBigIntI32 => {
+            // The compiler emits this for a `BigInt` literal whose value fits
+            // `i32`, mirroring upstream's short-bigint fast path
+            // (`quickjs.c:26733-26737`).
+            let Operands::I32(value) = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            push(
+                frame,
+                StoredValue::BigInt(Arc::new(JsBigInt::from_i32(value))),
             );
         }
         FinalOpcode::PushAtomValue => {
@@ -883,6 +899,7 @@ pub(super) fn execute_one(
                 StoredValue::Undefined => Some(PropertyFailure::ReadUndefined),
                 StoredValue::Boolean(_)
                 | StoredValue::Number(_)
+                | StoredValue::BigInt(_)
                 | StoredValue::String(_)
                 | StoredValue::Symbol(_)
                 | StoredValue::Function(_)
@@ -955,6 +972,7 @@ pub(super) fn execute_one(
                 StoredValue::Undefined
                 | StoredValue::Boolean(_)
                 | StoredValue::Number(_)
+                | StoredValue::BigInt(_)
                 | StoredValue::String(_)
                 | StoredValue::Symbol(_) => None,
             };
@@ -966,6 +984,7 @@ pub(super) fn execute_one(
                     | StoredValue::Null
                     | StoredValue::Boolean(_)
                     | StoredValue::Number(_)
+                    | StoredValue::BigInt(_)
                     | StoredValue::String(_)
                     | StoredValue::Symbol(_) => {
                         return Err(EngineFault::RuntimeInvariant {
@@ -1094,6 +1113,7 @@ pub(super) fn execute_one(
                 StoredValue::Undefined
                 | StoredValue::Null
                 | StoredValue::Boolean(_)
+                | StoredValue::BigInt(_)
                 | StoredValue::Function(_)
                 | StoredValue::Object(_) => {
                     return Err(EngineFault::RuntimeInvariant {
@@ -1537,6 +1557,7 @@ pub(super) fn execute_one(
                         | StoredValue::Null
                         | StoredValue::Boolean(_)
                         | StoredValue::Number(_)
+                        | StoredValue::BigInt(_)
                         | StoredValue::String(_)
                         | StoredValue::Symbol(_)
                         | StoredValue::Function(_)
@@ -1908,6 +1929,7 @@ pub(super) fn execute_one(
                 StoredValue::Null | StoredValue::Object(_) => "object",
                 StoredValue::Boolean(_) => "boolean",
                 StoredValue::Number(_) => "number",
+                StoredValue::BigInt(_) => "bigint",
                 StoredValue::String(_) => "string",
                 StoredValue::Symbol(_) => "symbol",
                 StoredValue::Function(_) => "function",

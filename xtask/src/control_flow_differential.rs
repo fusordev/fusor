@@ -1553,9 +1553,15 @@ fn normalize_candidate_value(value: &JsValue) -> Result<Observation, String> {
             )
             .map(Observation::String)
         }
-        kind @ (ValueKind::Symbol | ValueKind::Function | ValueKind::Object) => Err(format!(
-            "candidate returned unsupported result kind {kind}; the runtime differential corpus must use primitive observations"
-        )),
+        // A `BigInt` has no primitive observation form in this corpus: the
+        // fixtures compare printed output, and a `BigInt` must be rendered
+        // explicitly with `String(...)` so the expectation is unambiguous.
+        kind
+        @ (ValueKind::BigInt | ValueKind::Symbol | ValueKind::Function | ValueKind::Object) => {
+            Err(format!(
+                "candidate returned unsupported result kind {kind}; the runtime differential corpus must use primitive observations"
+            ))
+        }
     }
 }
 

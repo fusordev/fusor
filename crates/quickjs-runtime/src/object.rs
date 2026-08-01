@@ -29,7 +29,7 @@ use std::{
 };
 
 use crate::{
-    ArrayIndex, Atom, AtomKind, JsNumber, JsString, PropertyKey, PropertyLayout,
+    ArrayIndex, Atom, AtomKind, JsBigInt, JsNumber, JsString, PropertyKey, PropertyLayout,
     PropertyLayoutKind,
     ids::FunctionId,
     value::{HeapReference, StoredValue},
@@ -913,6 +913,7 @@ fn conservative_sort_work(entries: usize) -> u64 {
 pub(crate) enum BoxedPrimitive {
     Boolean(bool),
     Number(JsNumber),
+    BigInt(Arc<JsBigInt>),
     String(JsString),
     Symbol(Atom),
 }
@@ -926,7 +927,7 @@ impl BoxedPrimitive {
     pub(crate) const fn as_boolean(&self) -> Option<bool> {
         match self {
             Self::Boolean(value) => Some(*value),
-            Self::Number(_) | Self::String(_) | Self::Symbol(_) => None,
+            Self::Number(_) | Self::BigInt(_) | Self::String(_) | Self::Symbol(_) => None,
         }
     }
 
@@ -934,7 +935,16 @@ impl BoxedPrimitive {
     pub(crate) const fn as_number(&self) -> Option<JsNumber> {
         match self {
             Self::Number(value) => Some(*value),
-            Self::Boolean(_) | Self::String(_) | Self::Symbol(_) => None,
+            Self::Boolean(_) | Self::BigInt(_) | Self::String(_) | Self::Symbol(_) => None,
+        }
+    }
+
+    /// Returns the wrapped `BigInt`, or `None` for another payload.
+    #[must_use]
+    pub(crate) const fn as_bigint(&self) -> Option<&Arc<JsBigInt>> {
+        match self {
+            Self::BigInt(value) => Some(value),
+            Self::Boolean(_) | Self::Number(_) | Self::String(_) | Self::Symbol(_) => None,
         }
     }
 
@@ -942,7 +952,7 @@ impl BoxedPrimitive {
     pub(crate) const fn as_string(&self) -> Option<&JsString> {
         match self {
             Self::String(value) => Some(value),
-            Self::Boolean(_) | Self::Number(_) | Self::Symbol(_) => None,
+            Self::Boolean(_) | Self::Number(_) | Self::BigInt(_) | Self::Symbol(_) => None,
         }
     }
 
@@ -955,7 +965,7 @@ impl BoxedPrimitive {
     pub(crate) const fn as_symbol(&self) -> Option<&Atom> {
         match self {
             Self::Symbol(value) => Some(value),
-            Self::Boolean(_) | Self::Number(_) | Self::String(_) => None,
+            Self::Boolean(_) | Self::Number(_) | Self::BigInt(_) | Self::String(_) => None,
         }
     }
 }

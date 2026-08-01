@@ -901,6 +901,7 @@ pub(super) fn dispatch_native_call_with_frames(
                 | StoredValue::Null
                 | StoredValue::Boolean(_)
                 | StoredValue::Number(_)
+                | StoredValue::BigInt(_)
                 | StoredValue::String(_)
                 | StoredValue::Symbol(_)
                 | StoredValue::Function(_) => false,
@@ -1006,6 +1007,10 @@ pub(super) fn dispatch_native_call_with_frames(
                 let object = runtime.allocate_boxed_number(native.realm, value)?;
                 Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
             }
+            StoredValue::BigInt(value) => {
+                let object = runtime.allocate_boxed_bigint(native.realm, value)?;
+                Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+            }
             StoredValue::String(value) => {
                 let object = runtime.allocate_boxed_string(native.realm, value)?;
                 Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
@@ -1103,6 +1108,65 @@ pub(super) fn dispatch_native_call_with_frames(
             let value =
                 number_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
             Ok(NativeDispatch::Immediate(StoredValue::Number(value)))
+        }
+        NativeFunctionKind::BigIntConstructor => {
+            let mut arguments = inputs.arguments;
+            bigint_constructor(
+                native.realm,
+                arguments.take_first(),
+                inputs.new_target,
+                &origin.unwrap_or_else(native_function_host_origin),
+            )
+        }
+        NativeFunctionKind::BigIntPrototypeToString => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            let value = this_bigint_value(runtime, native.realm, &inputs.receiver, &origin)?;
+            let mut arguments = inputs.arguments;
+            match arguments.take_first() {
+                None | Some(StoredValue::Undefined) => {
+                    bigint_prototype_to_string(&value, 10, native.realm, &origin)
+                }
+                // A supplied radix is converted with `ToNumber`, which can run a
+                // user `valueOf`, so the conversion is resumable.
+                Some(radix) => begin_operator_primitive_conversion(
+                    runtime,
+                    radix,
+                    OperatorPrimitiveHint::Number,
+                    OperatorPrimitiveTarget::BigIntToString { value },
+                    native.realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                ),
+            }
+        }
+        NativeFunctionKind::BigIntPrototypeValueOf => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            let value = this_bigint_value(runtime, native.realm, &inputs.receiver, &origin)?;
+            Ok(NativeDispatch::Immediate(StoredValue::BigInt(value)))
+        }
+        NativeFunctionKind::BigIntAsIntN | NativeFunctionKind::BigIntAsUintN => {
+            let truncation = if native.kind == NativeFunctionKind::BigIntAsIntN {
+                BigIntTruncation::Signed
+            } else {
+                BigIntTruncation::Unsigned
+            };
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            let mut arguments = inputs.arguments;
+            let bits = arguments.take_first_or_undefined();
+            let value = arguments.take_first_or_undefined();
+            // `bits` goes through `ToIndex`, so it must reach the numeric domain
+            // first; the value goes through `ToBigInt`.
+            begin_operator_primitive_conversion(
+                runtime,
+                bits,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::BigIntTruncationBits { value, truncation },
+                native.realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
         }
         NativeFunctionKind::StringConstructor => {
             let mut arguments = inputs.arguments;
@@ -1824,6 +1888,7 @@ fn bind_length_value(
         StoredValue::Undefined
         | StoredValue::Null
         | StoredValue::Boolean(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_)
         | StoredValue::Function(_)
@@ -1880,6 +1945,7 @@ fn bind_name_value(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::Symbol(_)
         | StoredValue::Function(_)
         | StoredValue::Object(_) => JsString::empty(),

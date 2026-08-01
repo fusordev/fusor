@@ -68,6 +68,13 @@ impl Runtime {
                 let wrapper = self.allocate_boxed_boolean(realm, value)?;
                 (Some(HeapReference::Object(wrapper)), Some(wrapper))
             }
+            // A `BigInt` has no own enumerable properties, so `for-in` over one
+            // visits nothing. It still needs a wrapper so the prototype chain is
+            // walked exactly like any other boxed primitive.
+            StoredValue::BigInt(value) => {
+                let wrapper = self.allocate_boxed_bigint(realm, value)?;
+                (Some(HeapReference::Object(wrapper)), Some(wrapper))
+            }
             StoredValue::Number(value) => {
                 let wrapper = self.allocate_boxed_number(realm, value)?;
                 (Some(HeapReference::Object(wrapper)), Some(wrapper))
@@ -147,7 +154,7 @@ impl Runtime {
 
         match value {
             StoredValue::Undefined | StoredValue::Null => Ok(1),
-            StoredValue::Boolean(_) | StoredValue::Number(_) => {
+            StoredValue::Boolean(_) | StoredValue::Number(_) | StoredValue::BigInt(_) => {
                 Ok(for_in_snapshot_work_upper_bound(0, None))
             }
             StoredValue::String(value) => {

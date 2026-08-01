@@ -116,6 +116,7 @@ pub(super) fn begin_array_iterator_method(
         receiver,
         StoredValue::Boolean(_)
             | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
     );
@@ -150,6 +151,11 @@ pub(super) fn begin_array_iterator_method(
         }
         StoredValue::Number(value) => {
             let wrapper = runtime.allocate_boxed_number(realm, value)?;
+            temporary_wrapper = Some(wrapper);
+            StoredValue::Object(wrapper)
+        }
+        StoredValue::BigInt(value) => {
+            let wrapper = runtime.allocate_boxed_bigint(realm, value)?;
             temporary_wrapper = Some(wrapper);
             StoredValue::Object(wrapper)
         }
@@ -626,6 +632,7 @@ pub(super) fn begin_for_of_next(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_)
         | StoredValue::Object(_) => {
@@ -819,6 +826,7 @@ pub(super) fn advance_for_of_close(
             }
             StoredValue::Boolean(_)
             | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
             | StoredValue::Object(_) => Err(iterator_exception(

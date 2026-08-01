@@ -28,19 +28,19 @@
 use std::collections::TryReserveError;
 
 use super::{
-    Arc, Arena, ArrayIntrinsics, ArrayState, Atom, AtomError, AtomTable, BooleanIntrinsics,
-    BoxedPrimitive, Context, ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId,
-    FunctionImplementation, HandleError, HandleKind, HashMap, HeapFunction, HeapObject,
-    HeapReference, IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind,
-    NumberIntrinsics, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey, PropertyLayout, Realm,
-    RealmHandle, RealmId, RealmIntrinsics, RealmState, ReleaseMailbox, Runtime, RuntimeError,
-    RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringIntrinsics,
-    SymbolIntrinsics, check_limit, predefined_string, usize_to_u64,
+    Arc, Arena, ArrayIntrinsics, ArrayState, Atom, AtomError, AtomTable, BigIntIntrinsics,
+    BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic, ErrorIntrinsicKind,
+    ErrorIntrinsics, FunctionId, FunctionImplementation, HandleError, HandleKind, HashMap,
+    HeapFunction, HeapObject, HeapReference, IteratorIntrinsics, JsNumber, JsString,
+    NativeFunction, NativeFunctionKind, NumberIntrinsics, ObjectId, ObjectRecord, PredefinedAtom,
+    PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState,
+    ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource,
+    StoredValue, StringIntrinsics, SymbolIntrinsics, check_limit, predefined_string, usize_to_u64,
 };
 
-const REALM_OBJECT_COUNT: usize = 19;
-const REALM_FUNCTION_COUNT: usize = 57;
-const REALM_PROPERTY_COUNT: u64 = 204;
+const REALM_OBJECT_COUNT: usize = 20;
+const REALM_FUNCTION_COUNT: usize = 62;
+const REALM_PROPERTY_COUNT: u64 = 222;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -49,6 +49,15 @@ const IS_ERROR_ATOM_INDEX: usize = 4;
 const BIND_ATOM_INDEX: usize = 5;
 const SYMBOL_STATIC_ATOM_START: usize = 6;
 /// Index of the first `Object` static name in the realm's dynamic atom list.
+/// Index of the first `BigInt` static name in the realm's dynamic atom list.
+///
+/// The `BigInt` statics are interned immediately after the `Object` statics, so
+/// this base is the end of that block.
+const BIGINT_STATIC_ATOM_START: usize = OBJECT_STATIC_ATOM_START + OBJECT_INTERNED_STATIC_COUNT;
+
+/// The `BigInt` static names that have no predefined atom.
+const BIGINT_INTERNED_STATICS: [&str; 2] = ["asIntN", "asUintN"];
+
 const OBJECT_STATIC_ATOM_START: usize =
     SYMBOL_STATIC_ATOM_START + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len();
 
@@ -167,6 +176,7 @@ struct RealmKeys {
     errors: [PropertyKey; ErrorIntrinsicKind::ALL.len()],
     function: PropertyKey,
     object: PropertyKey,
+    bigint: PropertyKey,
     join: PropertyKey,
     boolean: PropertyKey,
     number: PropertyKey,
@@ -199,6 +209,7 @@ impl RealmKeys {
             errors: ErrorIntrinsicKind::ALL.map(|kind| key(kind.predefined_atom())),
             function: key(PredefinedAtom::Function),
             object: key(PredefinedAtom::Object),
+            bigint: key(PredefinedAtom::BigInt),
             join: key(PredefinedAtom::Join),
             boolean: key(PredefinedAtom::Boolean),
             number: key(PredefinedAtom::Number),
@@ -238,7 +249,10 @@ struct RealmNames {
     errors: [JsString; ErrorIntrinsicKind::ALL.len()],
     function: JsString,
     object: JsString,
+    bigint: JsString,
     join: JsString,
+    as_int_n: JsString,
+    as_uint_n: JsString,
     boolean: JsString,
     number: JsString,
     string: JsString,
@@ -273,7 +287,10 @@ impl RealmNames {
                 .map(|kind| predefined_string(atoms, kind.predefined_atom())),
             function: predefined_string(atoms, PredefinedAtom::Function),
             object: predefined_string(atoms, PredefinedAtom::Object),
+            bigint: predefined_string(atoms, PredefinedAtom::BigInt),
             join: predefined_string(atoms, PredefinedAtom::Join),
+            as_int_n: JsString::from_utf8("asIntN").map_err(AtomError::from)?,
+            as_uint_n: JsString::from_utf8("asUintN").map_err(AtomError::from)?,
             boolean: predefined_string(atoms, PredefinedAtom::Boolean),
             number: predefined_string(atoms, PredefinedAtom::Number),
             string: predefined_string(atoms, PredefinedAtom::String),
@@ -339,6 +356,49 @@ struct PrimitiveIntrinsicRecords {
     value_of: ObjectRecord,
 }
 
+/// Reserved records for the `BigInt` constructor, prototype, and methods.
+struct BigIntIntrinsicRecords {
+    prototype: ObjectRecord,
+    constructor: ObjectRecord,
+    to_string: ObjectRecord,
+    value_of: ObjectRecord,
+    as_int_n: ObjectRecord,
+    as_uint_n: ObjectRecord,
+}
+
+impl BigIntIntrinsicRecords {
+    /// Reserves the `BigInt` records in the realm transaction's order.
+    ///
+    /// `BigInt.prototype` holds `constructor`, `toString`, `valueOf`, and
+    /// `[Symbol.toStringTag]`; the constructor holds `prototype`, `length`,
+    /// `name`, `asIntN`, and `asUintN`.
+    fn try_new() -> Result<Self, RuntimeError> {
+        Ok(Self {
+            prototype: reserved_record(4)?,
+            constructor: reserved_record(5)?,
+            to_string: reserved_record(2)?,
+            value_of: reserved_record(2)?,
+            as_int_n: reserved_record(2)?,
+            as_uint_n: reserved_record(2)?,
+        })
+    }
+}
+
+impl PrimitiveIntrinsicRecords {
+    /// Reserves one primitive wrapper's records.
+    ///
+    /// `prototype_properties` differs per family because each prototype carries
+    /// its own extra members beyond `constructor`, `toString`, and `valueOf`.
+    fn try_new(prototype_properties: usize) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            prototype: reserved_record(prototype_properties)?,
+            constructor: reserved_record(3)?,
+            to_string: reserved_record(2)?,
+            value_of: reserved_record(2)?,
+        })
+    }
+}
+
 struct ArrayIntrinsicRecords {
     prototype: ObjectRecord,
     constructor: ObjectRecord,
@@ -375,6 +435,7 @@ struct RealmRecords {
     errors: ErrorRecords,
     boolean: PrimitiveIntrinsicRecords,
     number: PrimitiveIntrinsicRecords,
+    bigint: BigIntIntrinsicRecords,
     string: PrimitiveIntrinsicRecords,
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
@@ -386,7 +447,7 @@ impl RealmRecords {
         // Keep these reservations in the original transaction order so a
         // recoverable allocation failure reports the same `additional` value.
         let base = RealmBaseRecords {
-            global: reserved_record(16)?,
+            global: reserved_record(20)?,
             object_prototype: reserved_record(3)?,
             function_prototype: reserved_record(6)?,
             function_constructor: reserved_record(3)?,
@@ -421,24 +482,11 @@ impl RealmRecords {
             to_string: reserved_record(2)?,
             is_error: reserved_record(2)?,
         };
-        let boolean = PrimitiveIntrinsicRecords {
-            prototype: reserved_record(3)?,
-            constructor: reserved_record(3)?,
-            to_string: reserved_record(2)?,
-            value_of: reserved_record(2)?,
-        };
-        let number = PrimitiveIntrinsicRecords {
-            prototype: reserved_record(3)?,
-            constructor: reserved_record(3)?,
-            to_string: reserved_record(2)?,
-            value_of: reserved_record(2)?,
-        };
-        let string = PrimitiveIntrinsicRecords {
-            prototype: reserved_record(5)?,
-            constructor: reserved_record(3)?,
-            to_string: reserved_record(2)?,
-            value_of: reserved_record(2)?,
-        };
+        let boolean = PrimitiveIntrinsicRecords::try_new(3)?;
+        let number = PrimitiveIntrinsicRecords::try_new(3)?;
+        let bigint = BigIntIntrinsicRecords::try_new()?;
+        // `String.prototype` additionally carries `length` and its iterator.
+        let string = PrimitiveIntrinsicRecords::try_new(5)?;
         let mut array = ArrayIntrinsicRecords {
             prototype: reserved_record(8)?,
             constructor: reserved_record(3)?,
@@ -480,6 +528,7 @@ impl RealmRecords {
             errors,
             boolean,
             number,
+            bigint,
             string,
             array,
             iterators,
@@ -524,6 +573,16 @@ struct PrimitivePropertySpec<'a> {
     constructor_name: &'a JsString,
     to_string_length: i32,
     prototype_length: Option<i32>,
+}
+
+/// The inserted `BigInt` intrinsic identities.
+struct BigIntIntrinsicGraph {
+    prototype: ObjectId,
+    constructor: FunctionId,
+    to_string: FunctionId,
+    value_of: FunctionId,
+    as_int_n: FunctionId,
+    as_uint_n: FunctionId,
 }
 
 struct ArrayIntrinsicGraph {
@@ -588,6 +647,7 @@ struct RealmGraph {
     errors: ErrorIntrinsics,
     boolean: PrimitiveIntrinsicGraph,
     number: PrimitiveIntrinsicGraph,
+    bigint: BigIntIntrinsicGraph,
     string: PrimitiveIntrinsicGraph,
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
@@ -730,6 +790,10 @@ impl Runtime {
                 prototype: graph.number.prototype,
                 constructor: graph.number.constructor,
             },
+            bigint: BigIntIntrinsics {
+                prototype: graph.bigint.prototype,
+                constructor: graph.bigint.constructor,
+            },
             string: StringIntrinsics {
                 prototype: graph.string.prototype,
                 constructor: graph.string.constructor,
@@ -826,6 +890,7 @@ impl Runtime {
                 value_of: NativeFunctionKind::StringPrototypeValueOf,
             },
         );
+        let bigint = self.insert_bigint_intrinsics(&base, records.bigint);
         let array = self.insert_array_intrinsics(&base, records.array);
         let iterators = self.insert_iterator_intrinsics(&base, records.iterators);
         let symbol = self.insert_symbol_intrinsics(&base, records.symbol);
@@ -836,6 +901,7 @@ impl Runtime {
             errors,
             boolean,
             number,
+            bigint,
             string,
             array,
             iterators,
@@ -859,7 +925,8 @@ impl Runtime {
             .try_reserve_exact(
                 SYMBOL_STATIC_ATOM_START
                     + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len()
-                    + OBJECT_INTERNED_STATIC_COUNT,
+                    + OBJECT_INTERNED_STATIC_COUNT
+                    + BIGINT_INTERNED_STATICS.len(),
             )
             .is_err()
         {
@@ -904,6 +971,9 @@ impl Runtime {
                 interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
             }
             for literal in object_statics {
+                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
+            }
+            for literal in BIGINT_INTERNED_STATICS {
                 interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
             }
             Ok(())
@@ -1159,6 +1229,60 @@ impl Runtime {
             constructor,
             to_string,
             value_of,
+        }
+    }
+
+    /// Inserts the `BigInt` constructor, prototype, and methods.
+    ///
+    /// `BigInt.prototype` is an ordinary object, not a wrapper: it carries no
+    /// `[[BigIntData]]`, which is why `BigInt.prototype.valueOf()` throws
+    /// instead of returning `0n` (`quickjs.c:56014-56027`).
+    fn insert_bigint_intrinsics(
+        &mut self,
+        base: &RealmBase,
+        mut records: BigIntIntrinsicRecords,
+    ) -> BigIntIntrinsicGraph {
+        records
+            .prototype
+            .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
+        let prototype = self.insert_reserved_object(HeapObject::ordinary(records.prototype));
+        let constructor = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::BigIntConstructor,
+            records.constructor,
+        );
+        let to_string = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::BigIntPrototypeToString,
+            records.to_string,
+        );
+        let value_of = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::BigIntPrototypeValueOf,
+            records.value_of,
+        );
+        let signed_truncation = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::BigIntAsIntN,
+            records.as_int_n,
+        );
+        let unsigned_truncation = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::BigIntAsUintN,
+            records.as_uint_n,
+        );
+        BigIntIntrinsicGraph {
+            prototype,
+            constructor,
+            to_string,
+            value_of,
+            as_int_n: signed_truncation,
+            as_uint_n: unsigned_truncation,
         }
     }
 
@@ -1419,6 +1543,7 @@ impl Runtime {
             keys,
             names,
         )?;
+        self.publish_bigint_intrinsic_properties(&graph.bigint, &graph.dynamic_atoms, keys, names)?;
         self.publish_array_intrinsic_properties(&graph.array, keys, names)?;
         self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
         self.publish_global_value_properties(graph)?;
@@ -1430,6 +1555,7 @@ impl Runtime {
                 (&keys.object, graph.base.object_constructor),
                 (&keys.boolean, graph.boolean.constructor),
                 (&keys.number, graph.number.constructor),
+                (&keys.bigint, graph.bigint.constructor),
                 (&keys.string, graph.string.constructor),
                 (&keys.array, graph.array.constructor),
                 (&keys.symbol, graph.symbol.constructor),
@@ -1722,6 +1848,82 @@ impl Runtime {
             keys,
         )?;
         self.append_function_identity(graph.value_of, &names.value_of, 0, keys)
+    }
+
+    /// Publishes the `BigInt` prototype members and constructor statics.
+    ///
+    /// The pinned prototype carries exactly `toString`, `valueOf`, and
+    /// `[Symbol.toStringTag]` plus `constructor` (`quickjs.c:56128-56132`);
+    /// notably there is no `toLocaleString`. The constructor carries `asIntN`
+    /// and `asUintN`, each with arity 2.
+    fn publish_bigint_intrinsic_properties(
+        &mut self,
+        graph: &BigIntIntrinsicGraph,
+        dynamic_atoms: &[Atom],
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        {
+            let record = &mut self
+                .objects
+                .get_mut(graph.prototype)
+                .expect("new BigInt.prototype remains live")
+                .record;
+            record.append_data(
+                keys.constructor.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.constructor),
+            )?;
+            record.append_data(
+                keys.to_string.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.to_string),
+            )?;
+            record.append_data(
+                keys.value_of.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.value_of),
+            )?;
+            record.append_data(
+                keys.symbol_to_string_tag.clone(),
+                // The tag is non-writable and non-enumerable but configurable,
+                // which is the specification's descriptor for it.
+                IDENTITY_PROPERTY,
+                StoredValue::String(names.bigint.clone()),
+            )?;
+        }
+        self.append_constructor_identity(
+            graph.constructor,
+            StoredValue::Object(graph.prototype),
+            &names.bigint,
+            keys,
+        )?;
+        self.append_function_identity(graph.to_string, &names.to_string, 0, keys)?;
+        self.append_function_identity(graph.value_of, &names.value_of, 0, keys)?;
+        {
+            let signed_key =
+                PropertyKey::from_validated_atom(dynamic_atoms[BIGINT_STATIC_ATOM_START].clone());
+            let unsigned_key = PropertyKey::from_validated_atom(
+                dynamic_atoms[BIGINT_STATIC_ATOM_START + 1].clone(),
+            );
+            let record = &mut self
+                .functions
+                .get_mut(graph.constructor)
+                .expect("new BigInt constructor remains live")
+                .object;
+            record.append_data(
+                signed_key,
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.as_int_n),
+            )?;
+            record.append_data(
+                unsigned_key,
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.as_uint_n),
+            )?;
+        }
+        self.append_function_identity(graph.as_int_n, &names.as_int_n, 2, keys)?;
+        self.append_function_identity(graph.as_uint_n, &names.as_uint_n, 2, keys)
     }
 
     fn publish_array_intrinsic_properties(

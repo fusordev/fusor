@@ -82,6 +82,7 @@ fn reflection_target(
         },
         StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             let _ = runtime;
@@ -163,6 +164,9 @@ pub(super) fn object_constructor(
         StoredValue::Boolean(value) => {
             StoredValue::Object(runtime.allocate_boxed_boolean(realm, value)?)
         }
+        StoredValue::BigInt(value) => {
+            StoredValue::Object(runtime.allocate_boxed_bigint(realm, value)?)
+        }
         StoredValue::Number(value) => {
             StoredValue::Object(runtime.allocate_boxed_number(realm, value)?)
         }
@@ -211,6 +215,7 @@ fn primitive_prototype(
     let prototype = match value {
         StoredValue::Boolean(_) => HeapReference::Object(runtime.realm_boolean_prototype(realm)?),
         StoredValue::Number(_) => HeapReference::Object(runtime.realm_number_prototype(realm)?),
+        StoredValue::BigInt(_) => HeapReference::Object(runtime.realm_bigint_prototype(realm)?),
         StoredValue::String(_) => HeapReference::Object(runtime.realm_string_prototype(realm)?),
         StoredValue::Symbol(_) => HeapReference::Object(runtime.realm_symbol_prototype(realm)?),
         StoredValue::Undefined
@@ -255,6 +260,7 @@ pub(super) fn set_prototype_of(
         StoredValue::Undefined
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             return Err(NativeFailure::Abrupt(type_error(
@@ -427,7 +433,10 @@ pub(super) fn own_property_names(
         // is boxed so its index keys and `length` are reported.
         let elements = match &target {
             StoredValue::String(value) => string_key_values(value, listing)?,
-            StoredValue::Boolean(_) | StoredValue::Number(_) | StoredValue::Symbol(_) => Vec::new(),
+            StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
+            | StoredValue::Symbol(_) => Vec::new(),
             StoredValue::Undefined
             | StoredValue::Null
             | StoredValue::Function(_)

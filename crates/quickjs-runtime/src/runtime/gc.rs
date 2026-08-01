@@ -273,6 +273,7 @@ impl Runtime {
                 errors,
                 boolean,
                 number,
+                bigint,
                 string,
                 array,
                 symbol,
@@ -333,6 +334,18 @@ impl Runtime {
                 );
                 mark_heap_reference(
                     HeapReference::Function(number.constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Object(bigint.prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(bigint.constructor),
                     &mut marked_functions,
                     &mut marked_objects,
                     &mut work,

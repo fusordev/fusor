@@ -39,9 +39,9 @@ fn atom_failure_rolls_back_the_complete_installation() {
         "fail",
     );
     let atom_limits = AtomLimits::new(
-        PREDEFINED_ATOM_COUNT + 23,
-        PREDEFINED_DESCRIPTION_CODE_UNITS + 200,
-        PREDEFINED_INTERNER_SLOTS + 23,
+        PREDEFINED_ATOM_COUNT + 25,
+        PREDEFINED_DESCRIPTION_CODE_UNITS + 213,
+        PREDEFINED_INTERNER_SLOTS + 25,
     );
     let mut runtime =
         Runtime::try_new(RuntimeLimits::default().with_atom_limits(atom_limits)).expect("runtime");
@@ -130,8 +130,14 @@ fn complete_non_bigint_dynamic_operator_family_is_admitted_across_the_complete_g
         .expect("the complete non-BigInt dynamic operator family is supported");
 }
 
+/// A nested `BigInt` literal installs rather than failing closed.
+///
+/// This previously asserted the opposite: `push_bigint_i32` was admitted by the
+/// verifier but rejected at installation, so any function containing a `BigInt`
+/// literal was uninstallable. The value domain now executes it, and
+/// `crates/quickjs-runtime/tests/vm_bigint.rs` pins the observable behavior.
 #[test]
-fn unsupported_nested_bigint_is_rejected_before_runtime_mutation() {
+fn nested_bigint_literals_install_and_execute() {
     let authority = compile(
         "function outer(){\
             function child(){return 1n;}\
@@ -141,22 +147,10 @@ fn unsupported_nested_bigint_is_rejected_before_runtime_mutation() {
     );
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
-    let before = runtime.usage();
-    let error = {
-        let mut context = runtime.context(&realm).expect("context");
-        context
-            .instantiate(authority)
-            .expect_err("BigInt is deferred")
-    };
-    assert!(matches!(
-        error,
-        InstallError::UnsupportedOpcode {
-            function,
-            opcode: FinalOpcode::PushBigIntI32,
-            ..
-        } if function == FunctionTemplateId::new(1)
-    ));
-    assert_eq!(runtime.usage(), before);
+    let mut context = runtime.context(&realm).expect("context");
+    context
+        .instantiate(authority)
+        .expect("a BigInt literal is executable");
 }
 
 #[test]
@@ -244,7 +238,7 @@ fn long_lived_context_drains_dropped_roots_before_installation_limits() {
     let mut runtime = Runtime::try_new(
         RuntimeLimits::default()
             .with_max_public_roots(1)
-            .with_max_heap_functions(58),
+            .with_max_heap_functions(63),
     )
     .expect("runtime");
     let realm = runtime.create_realm().expect("realm");

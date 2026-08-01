@@ -197,6 +197,7 @@ fn instance_of_method_decision(
         }
         StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_)
         | StoredValue::Object(_) => Err(instanceof_exception(
@@ -273,6 +274,7 @@ fn ordinary_has_instance(
                 }
                 StoredValue::Boolean(_)
                 | StoredValue::Number(_)
+                | StoredValue::BigInt(_)
                 | StoredValue::String(_)
                 | StoredValue::Symbol(_)
                 | StoredValue::Object(_) => {
@@ -348,6 +350,7 @@ fn finish_ordinary_has_instance(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             return Err(instanceof_exception(
@@ -365,6 +368,7 @@ fn finish_ordinary_has_instance(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));

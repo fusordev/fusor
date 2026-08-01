@@ -50,7 +50,7 @@ const MAX_LIMBS: usize = (1024 * 1024) / LIMB_BITS as usize;
 
 /// A failure while producing a `BigInt`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BigIntError {
+pub enum BigIntError {
     /// The result needs more limbs than the pinned engine permits.
     ///
     /// The caller reports `RangeError: BigInt is too large to allocate`
@@ -97,7 +97,7 @@ impl From<TryReserveError> for BigIntError {
 
 /// An arbitrary-precision integer in the ECMAScript `BigInt` domain.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct JsBigInt {
+pub struct JsBigInt {
     /// Two's-complement limbs, least significant first, always normalized.
     limbs: Vec<u32>,
 }
@@ -105,13 +105,13 @@ pub(crate) struct JsBigInt {
 impl JsBigInt {
     /// Returns `0n`.
     #[must_use]
-    pub(crate) fn zero() -> Self {
+    pub fn zero() -> Self {
         Self { limbs: vec![0] }
     }
 
     /// Returns whether the value is zero.
     #[must_use]
-    pub(crate) fn is_zero(&self) -> bool {
+    pub fn is_zero(&self) -> bool {
         self.limbs.len() == 1 && self.limbs[0] == 0
     }
 
@@ -120,16 +120,16 @@ impl JsBigInt {
     /// The sign lives in the top bit of the most significant limb, which the
     /// normalization invariant keeps meaningful.
     #[must_use]
-    pub(crate) fn is_negative(&self) -> bool {
+    pub fn is_negative(&self) -> bool {
         self.top_limb() >> (LIMB_BITS - 1) == 1
     }
 
     /// Returns the most significant limb.
     fn top_limb(&self) -> u32 {
-        *self
-            .limbs
-            .last()
-            .expect("a normalized BigInt always has at least one limb")
+        // The normalization invariant keeps at least one limb, so the fallback
+        // is unreachable; using it rather than an unwrap keeps the public API
+        // panic-free.
+        self.limbs.last().copied().unwrap_or(0)
     }
 
     /// Returns the limb used to extend the value leftwards indefinitely.
@@ -163,7 +163,7 @@ impl JsBigInt {
 
     /// Creates a value from a signed 32-bit integer.
     #[must_use]
-    pub(crate) fn from_i32(value: i32) -> Self {
+    pub fn from_i32(value: i32) -> Self {
         Self {
             limbs: vec![value.cast_unsigned()],
         }
@@ -171,10 +171,8 @@ impl JsBigInt {
 
     /// Creates a value from a signed 64-bit integer.
     #[must_use]
-    pub(crate) fn from_i64(value: i64) -> Self {
-        let bits = value.cast_unsigned();
-        let low = u32::try_from(bits & u64::from(u32::MAX)).expect("masked to 32 bits");
-        let high = u32::try_from(bits >> LIMB_BITS).expect("shifted to 32 bits");
+    pub fn from_i64(value: i64) -> Self {
+        let (low, high) = split_u64(value.cast_unsigned());
         let mut limbs = vec![low, high];
         normalize(&mut limbs);
         Self { limbs }
@@ -182,18 +180,65 @@ impl JsBigInt {
 
     /// Creates a value from an unsigned 64-bit integer.
     #[must_use]
-    pub(crate) fn from_u64(value: u64) -> Self {
-        let low = u32::try_from(value & u64::from(u32::MAX)).expect("masked to 32 bits");
-        let high = u32::try_from(value >> LIMB_BITS).expect("shifted to 32 bits");
+    pub fn from_u64(value: u64) -> Self {
+        let (low, high) = split_u64(value);
         // A third zero limb keeps a value with the high bit set non-negative.
         let mut limbs = vec![low, high, 0];
         normalize(&mut limbs);
         Self { limbs }
     }
 
+    /// Creates a value from an exact integral binary64.
+    ///
+    /// A non-integral value and a `NaN` or infinity are distinct errors because
+    /// `BigInt(1.5)` and `BigInt(NaN)` report different messages
+    /// (`quickjs.c:55979-55981`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BigIntError::NotFinite`] for `NaN` or an infinity, and
+    /// [`BigIntError::NotAnInteger`] for a value with a fractional part.
+    pub fn from_f64(value: f64) -> Result<Self, BigIntError> {
+        if !value.is_finite() {
+            return Err(BigIntError::NotFinite);
+        }
+        // The comparison is deliberately exact: a value equal to its own
+        // truncation is integral, and no tolerance applies.
+        #[expect(
+            clippy::float_cmp,
+            reason = "integrality is an exact property, so an epsilon comparison would be wrong"
+        )]
+        let integral = value.trunc() == value;
+        if !integral {
+            return Err(BigIntError::NotAnInteger);
+        }
+        // Every integral binary64 below 2^63 fits an i64 exactly; larger ones
+        // are assembled from the significand and the exponent so no precision
+        // is invented.
+        if value.abs() < 9_223_372_036_854_775_808.0 {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the magnitude bound proves the truncated value fits the i64 domain exactly"
+            )]
+            let exact = value as i64;
+            return Ok(Self::from_i64(exact));
+        }
+        let bits = value.to_bits();
+        let negative = bits >> 63 == 1;
+        let biased_exponent = (bits >> 52) & 0x7ff;
+        let significand = (bits & ((1_u64 << 52) - 1)) | (1_u64 << 52);
+        // `exponent` is the power of two applied to the 53-bit significand.
+        // The biased exponent occupies 11 bits, so the widening is exact.
+        let exponent = biased_exponent.cast_signed() - 1023 - 52;
+        let magnitude = Self::from_u64(significand);
+        let shift = u64::try_from(exponent).map_err(|_| BigIntError::NotAnInteger)?;
+        let scaled = magnitude.shl(shift)?;
+        if negative { scaled.neg() } else { Ok(scaled) }
+    }
+
     /// Returns the value as an `i64` when it fits.
     #[must_use]
-    pub(crate) fn to_i64(&self) -> Option<i64> {
+    pub fn to_i64(&self) -> Option<i64> {
         if self.limbs.len() > 2 {
             return None;
         }
@@ -207,7 +252,7 @@ impl JsBigInt {
 
     /// Returns the value as a `u64` when it fits and is non-negative.
     #[must_use]
-    pub(crate) fn to_u64(&self) -> Option<u64> {
+    pub fn to_u64(&self) -> Option<u64> {
         if self.is_negative() || self.limbs.len() > 3 {
             return None;
         }
@@ -220,7 +265,12 @@ impl JsBigInt {
     }
 
     /// Returns the two's-complement negation.
-    pub(crate) fn neg(&self) -> Result<Self, BigIntError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the widened result exceeds the limb cap or its
+    /// storage cannot be reserved.
+    pub fn neg(&self) -> Result<Self, BigIntError> {
         // Negation is `!value + 1`, computed with one extra limb so the most
         // negative value of a width still widens correctly.
         let mut limbs = Vec::new();
@@ -229,14 +279,18 @@ impl JsBigInt {
         for index in 0..=self.limbs.len() {
             let inverted = u64::from(!self.limb(index));
             let sum = inverted + carry;
-            limbs.push(u32::try_from(sum & u64::from(u32::MAX)).expect("masked to 32 bits"));
+            limbs.push(split_u64(sum).0);
             carry = sum >> LIMB_BITS;
         }
         Self::from_limbs(limbs)
     }
 
     /// Returns the absolute value.
-    pub(crate) fn abs(&self) -> Result<Self, BigIntError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when negating the value exceeds the limb cap.
+    pub fn abs(&self) -> Result<Self, BigIntError> {
         if self.is_negative() {
             self.neg()
         } else {
@@ -245,12 +299,18 @@ impl JsBigInt {
     }
 
     /// Returns the sum.
-    pub(crate) fn add(&self, other: &Self) -> Result<Self, BigIntError> {
+    /// # Errors
+    ///
+    /// Returns an error when the sum exceeds the limb cap.
+    pub fn add(&self, other: &Self) -> Result<Self, BigIntError> {
         self.add_with_sign(other, false)
     }
 
     /// Returns the difference.
-    pub(crate) fn sub(&self, other: &Self) -> Result<Self, BigIntError> {
+    /// # Errors
+    ///
+    /// Returns an error when the difference exceeds the limb cap.
+    pub fn sub(&self, other: &Self) -> Result<Self, BigIntError> {
         self.add_with_sign(other, true)
     }
 
@@ -272,14 +332,18 @@ impl JsBigInt {
                 other.limb(index)
             });
             let sum = left + right + carry;
-            limbs.push(u32::try_from(sum & u64::from(u32::MAX)).expect("masked to 32 bits"));
+            limbs.push(split_u64(sum).0);
             carry = sum >> LIMB_BITS;
         }
         Self::from_limbs(limbs)
     }
 
     /// Returns the product.
-    pub(crate) fn mul(&self, other: &Self) -> Result<Self, BigIntError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the product exceeds the limb cap.
+    pub fn mul(&self, other: &Self) -> Result<Self, BigIntError> {
         if self.is_zero() || other.is_zero() {
             return Ok(Self::zero());
         }
@@ -298,15 +362,13 @@ impl JsBigInt {
                 let position = left_index + right_index;
                 let current = u64::from(product[position]);
                 let sum = current + u64::from(left_limb) * u64::from(right_limb) + carry;
-                product[position] =
-                    u32::try_from(sum & u64::from(u32::MAX)).expect("masked to 32 bits");
+                product[position] = split_u64(sum).0;
                 carry = sum >> LIMB_BITS;
             }
             let mut position = left_index + right.len();
             while carry != 0 {
                 let sum = u64::from(product[position]) + carry;
-                product[position] =
-                    u32::try_from(sum & u64::from(u32::MAX)).expect("masked to 32 bits");
+                product[position] = split_u64(sum).0;
                 carry = sum >> LIMB_BITS;
                 position += 1;
             }
@@ -326,7 +388,11 @@ impl JsBigInt {
     /// ECMAScript `BigInt` division truncates toward zero and the remainder takes
     /// the dividend's sign, which the pinned oracle confirms: `7n/2n` is `3n`,
     /// `(-7n)/2n` is `-3n`, and `(-7n)%2n` is `-1n`.
-    pub(crate) fn div_rem(&self, other: &Self) -> Result<(Self, Self), BigIntError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BigIntError::DivisionByZero`] when `other` is zero.
+    pub fn div_rem(&self, other: &Self) -> Result<(Self, Self), BigIntError> {
         if other.is_zero() {
             return Err(BigIntError::DivisionByZero);
         }
@@ -350,7 +416,12 @@ impl JsBigInt {
     }
 
     /// Returns `self` raised to `exponent`.
-    pub(crate) fn pow(&self, exponent: &Self) -> Result<Self, BigIntError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BigIntError::NegativeExponent`] for a negative exponent and
+    /// [`BigIntError::ResultTooLarge`] when the power exceeds the limb cap.
+    pub fn pow(&self, exponent: &Self) -> Result<Self, BigIntError> {
         if exponent.is_negative() {
             return Err(BigIntError::NegativeExponent);
         }
@@ -373,17 +444,27 @@ impl JsBigInt {
     }
 
     /// Returns the bitwise AND.
-    pub(crate) fn bitand(&self, other: &Self) -> Result<Self, BigIntError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the result's storage cannot be reserved.
+    pub fn bitand(&self, other: &Self) -> Result<Self, BigIntError> {
         self.bitwise(other, |left, right| left & right)
     }
 
     /// Returns the bitwise OR.
-    pub(crate) fn bitor(&self, other: &Self) -> Result<Self, BigIntError> {
+    /// # Errors
+    ///
+    /// Returns an error when the result's storage cannot be reserved.
+    pub fn bitor(&self, other: &Self) -> Result<Self, BigIntError> {
         self.bitwise(other, |left, right| left | right)
     }
 
     /// Returns the bitwise XOR.
-    pub(crate) fn bitxor(&self, other: &Self) -> Result<Self, BigIntError> {
+    /// # Errors
+    ///
+    /// Returns an error when the result's storage cannot be reserved.
+    pub fn bitxor(&self, other: &Self) -> Result<Self, BigIntError> {
         self.bitwise(other, |left, right| left ^ right)
     }
 
@@ -405,7 +486,11 @@ impl JsBigInt {
     /// Returns the bitwise complement.
     ///
     /// `~value` is `-value - 1`, so the oracle reports `~1n` as `-2n`.
-    pub(crate) fn not(&self) -> Result<Self, BigIntError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the result's storage cannot be reserved.
+    pub fn not(&self) -> Result<Self, BigIntError> {
         let mut limbs = Vec::new();
         limbs.try_reserve_exact(self.limbs.len())?;
         for &limb in &self.limbs {
@@ -415,13 +500,17 @@ impl JsBigInt {
     }
 
     /// Returns the value shifted left by `count` bits.
-    pub(crate) fn shl(&self, count: u64) -> Result<Self, BigIntError> {
+    /// # Errors
+    ///
+    /// Returns [`BigIntError::ResultTooLarge`] when the shifted value exceeds
+    /// the limb cap.
+    pub fn shl(&self, count: u64) -> Result<Self, BigIntError> {
         if self.is_zero() {
             return Ok(Self::zero());
         }
         let limb_shift = usize::try_from(count / u64::from(LIMB_BITS))
             .map_err(|_| BigIntError::ResultTooLarge)?;
-        let bit_shift = u32::try_from(count % u64::from(LIMB_BITS)).expect("modulo 32 fits u32");
+        let bit_shift = limb_bit_offset(count);
         if limb_shift > MAX_LIMBS {
             return Err(BigIntError::ResultTooLarge);
         }
@@ -451,7 +540,11 @@ impl JsBigInt {
     ///
     /// The shift is arithmetic, so the sign is preserved and `(-1n) >> 1n`
     /// stays `-1n`.
-    pub(crate) fn shr(&self, count: u64) -> Result<Self, BigIntError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the result's storage cannot be reserved.
+    pub fn shr(&self, count: u64) -> Result<Self, BigIntError> {
         let extension = self.sign_extension();
         // Shifting further than the value's width leaves only the sign.
         let Ok(limb_shift) = usize::try_from(count / u64::from(LIMB_BITS)) else {
@@ -460,7 +553,7 @@ impl JsBigInt {
         if limb_shift >= self.limbs.len() {
             return Self::from_limbs(vec![extension]);
         }
-        let bit_shift = u32::try_from(count % u64::from(LIMB_BITS)).expect("modulo 32 fits u32");
+        let bit_shift = limb_bit_offset(count);
         let remaining = self.limbs.len() - limb_shift;
         let mut limbs = Vec::new();
         limbs.try_reserve_exact(remaining)?;
@@ -477,8 +570,11 @@ impl JsBigInt {
     }
 
     /// Compares two values.
+    ///
+    /// This is the inherent form of [`Ord::cmp`]; both are provided because the
+    /// operator paths read it directly.
     #[must_use]
-    pub(crate) fn cmp(&self, other: &Self) -> Ordering {
+    pub fn compare(&self, other: &Self) -> Ordering {
         match (self.is_negative(), other.is_negative()) {
             (true, false) => return Ordering::Less,
             (false, true) => return Ordering::Greater,
@@ -507,7 +603,11 @@ impl JsBigInt {
     }
 
     /// Renders the value in `radix`, matching `BigInt.prototype.toString`.
-    pub(crate) fn to_string_radix(&self, radix: u32) -> Result<String, BigIntError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BigIntError::InvalidRadix`] unless `radix` is in `2..=36`.
+    pub fn to_string_radix(&self, radix: u32) -> Result<String, BigIntError> {
         if !(2..=36).contains(&radix) {
             return Err(BigIntError::InvalidRadix);
         }
@@ -520,7 +620,9 @@ impl JsBigInt {
         let mut digits = Vec::new();
         while !magnitude.iter().all(|&limb| limb == 0) {
             let remainder = divide_magnitude_by_small(&mut magnitude, radix);
-            let digit = u32::try_from(remainder).expect("a radix remainder is below 36");
+            // A remainder modulo the radix is below 36, so the narrowing is
+            // exact; the saturating fallback keeps the function total.
+            let digit = u32::try_from(remainder).unwrap_or(u32::MAX);
             digits.push(digit_char(digit));
             normalize_magnitude(&mut magnitude);
         }
@@ -540,7 +642,12 @@ impl JsBigInt {
     /// whitespace-only string is `0n`, and a `0x`/`0o`/`0b` prefix selects its
     /// radix when `radix` is 10. The oracle confirms `BigInt("0x10")` is `16n`
     /// and `BigInt("")` is `0n`.
-    pub(crate) fn from_str_radix(text: &str, radix: u32) -> Result<Self, BigIntError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BigIntError::InvalidRadix`] unless `radix` is in `2..=36`, and
+    /// [`BigIntError::InvalidLiteral`] when `text` is not a valid literal.
+    pub fn from_str_radix(text: &str, radix: u32) -> Result<Self, BigIntError> {
         if !(2..=36).contains(&radix) {
             return Err(BigIntError::InvalidRadix);
         }
@@ -561,15 +668,16 @@ impl JsBigInt {
             return Err(BigIntError::InvalidLiteral);
         }
         let mut value = Self::zero();
-        let multiplier =
-            Self::from_i32(i32::try_from(radix).expect("a radix between 2 and 36 fits an i32"));
+        // The radix was range-checked above, so it fits `i32`.
+        let multiplier = Self::from_i32(i32::try_from(radix).unwrap_or(10));
         for character in digits.chars() {
             let digit = character
                 .to_digit(radix)
                 .ok_or(BigIntError::InvalidLiteral)?;
             value = value.mul(&multiplier)?;
             value = value.add(&Self::from_i32(
-                i32::try_from(digit).expect("a radix digit fits an i32"),
+                // A digit is below the radix, and therefore below 36.
+                i32::try_from(digit).unwrap_or(0),
             ))?;
         }
         if negative { value.neg() } else { Ok(value) }
@@ -577,7 +685,11 @@ impl JsBigInt {
 
     /// Returns the low `bits` bits interpreted as a signed value, matching
     /// `BigInt.asIntN`.
-    pub(crate) fn as_int_n(&self, bits: u64) -> Result<Self, BigIntError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the truncation's storage cannot be reserved.
+    pub fn as_int_n(&self, bits: u64) -> Result<Self, BigIntError> {
         if bits == 0 {
             return Ok(Self::zero());
         }
@@ -602,7 +714,11 @@ impl JsBigInt {
     /// result to be non-negative, and V8 reports `18446744073709551615n`. The
     /// divergence is recorded as `QJS-BIGINT-001` in `PORTING.md`, and this
     /// implementation follows ECMAScript.
-    pub(crate) fn as_uint_n(&self, bits: u64) -> Result<Self, BigIntError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the truncation's storage cannot be reserved.
+    pub fn as_uint_n(&self, bits: u64) -> Result<Self, BigIntError> {
         if bits == 0 {
             return Ok(Self::zero());
         }
@@ -622,7 +738,7 @@ impl JsBigInt {
         for index in 0..limb_count {
             limbs.push(self.limb(index));
         }
-        let used = u32::try_from(bits % u64::from(LIMB_BITS)).expect("modulo 32 fits u32");
+        let used = limb_bit_offset(bits);
         if used != 0 {
             let last = limbs.len() - 1;
             limbs[last] &= u32::MAX >> (LIMB_BITS - used);
@@ -634,8 +750,20 @@ impl JsBigInt {
     /// Returns whether bit `index` of the two's-complement value is set.
     fn bit(&self, index: u64) -> bool {
         let limb_index = usize::try_from(index / u64::from(LIMB_BITS)).unwrap_or(usize::MAX);
-        let bit_index = u32::try_from(index % u64::from(LIMB_BITS)).expect("modulo 32 fits u32");
+        let bit_index = limb_bit_offset(index);
         (self.limb(limb_index) >> bit_index) & 1 == 1
+    }
+}
+
+impl Ord for JsBigInt {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.compare(other)
+    }
+}
+
+impl PartialOrd for JsBigInt {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -648,6 +776,29 @@ const fn promote_size_error(error: BigIntError) -> BigIntError {
         BigIntError::TooLarge => BigIntError::ResultTooLarge,
         other => other,
     }
+}
+
+/// Returns a bit count's offset within its limb.
+///
+/// The remainder is below `LIMB_BITS` by construction, so it always fits `u32`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a remainder modulo 32 is always below 32 and therefore fits u32"
+)]
+const fn limb_bit_offset(count: u64) -> u32 {
+    (count % LIMB_BITS as u64) as u32
+}
+
+/// Splits a 64-bit value into its low and high limb.
+///
+/// The truncating casts are exact by construction: the mask and the shift each
+/// leave exactly 32 bits.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the mask and shift each leave exactly the 32 bits the limb holds"
+)]
+const fn split_u64(value: u64) -> (u32, u32) {
+    (value as u32, (value >> LIMB_BITS) as u32)
 }
 
 /// Trims redundant sign limbs so the representation stays canonical.
@@ -762,7 +913,9 @@ fn subtract_magnitude(left: &mut [u32], right: &[u32]) {
 
 /// Returns the lowercase digit character for `digit`.
 fn digit_char(digit: u32) -> char {
-    char::from_digit(digit, 36).expect("a digit below 36 has a representation")
+    // Every digit reaching here is below the radix and therefore below 36; the
+    // fallback keeps the renderer total rather than panicking.
+    char::from_digit(digit, 36).unwrap_or('?')
 }
 
 /// Returns whether `character` is ECMAScript whitespace or a line terminator.
@@ -1154,13 +1307,13 @@ mod tests {
             for (right_index, right) in ordered.iter().enumerate() {
                 let expected = left_index.cmp(&right_index);
                 assert_eq!(
-                    parse(left).cmp(&parse(right)),
+                    parse(left).compare(&parse(right)),
                     expected,
                     "{left} vs {right}"
                 );
             }
         }
-        assert_eq!(parse("5").cmp(&parse("5")), Ordering::Equal);
+        assert_eq!(parse("5").compare(&parse("5")), Ordering::Equal);
     }
 
     #[test]

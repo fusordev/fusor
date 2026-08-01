@@ -28,9 +28,9 @@
 use super::{
     Arc, Atom, AtomError, BoxedPrimitive, ErrorIntrinsicKind, ExceptionKind, FunctionId,
     FunctionImplementation, HandleError, HandleKind, HeapObject, HeapReference, IntegrityLevel,
-    JsNumber, JsString, NativeFunctionKind, ObjectId, ObjectRecord, OwnProperty, PredefinedAtom,
-    PropertyDeletion, PropertyKey, PropertyLayout, PropertyLayoutKind, RealmId, RealmIntrinsics,
-    ReleaseMailbox, Runtime, RuntimeResource, SetPrototypeOutcome, StoredValue,
+    JsBigInt, JsNumber, JsString, NativeFunctionKind, ObjectId, ObjectRecord, OwnProperty,
+    PredefinedAtom, PropertyDeletion, PropertyKey, PropertyLayout, PropertyLayoutKind, RealmId,
+    RealmIntrinsics, ReleaseMailbox, Runtime, RuntimeResource, SetPrototypeOutcome, StoredValue,
     array_length_from_number, check_execution_limit, stale_heap_reference, usize_to_u64,
 };
 
@@ -218,6 +218,41 @@ impl Runtime {
                     });
                 }
                 Ok(number.prototype)
+            }
+        }
+    }
+
+    /// Returns the realm's `BigInt.prototype`.
+    ///
+    /// Unlike the Number and String prototypes this one is an ordinary object
+    /// rather than a wrapper: `BigInt.prototype` carries no `[[BigIntData]]`,
+    /// which is why `BigInt.prototype.valueOf()` throws instead of returning
+    /// `0n` (`quickjs.c:56014-56027`).
+    pub(crate) fn realm_bigint_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        match state.intrinsics {
+            RealmIntrinsics::Initializing => Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm BigInt intrinsics are not initialized",
+            }),
+            RealmIntrinsics::Ready { bigint, .. } => {
+                if self.objects.get(bigint.prototype).is_none() {
+                    return Err(crate::EngineFault::StaleHeapEdge {
+                        edge: "BigInt.prototype intrinsic",
+                        index: bigint.prototype.index(),
+                        generation: bigint.prototype.generation(),
+                    });
+                }
+                Ok(bigint.prototype)
             }
         }
     }
@@ -875,6 +910,70 @@ impl Runtime {
                 generation: object.generation(),
             })
             .map(|object| object.boxed_primitive().and_then(BoxedPrimitive::as_number))
+    }
+
+    /// Allocates an `Object(bigint)` wrapper.
+    pub(crate) fn allocate_boxed_bigint_with_prototype(
+        &mut self,
+        prototype: HeapReference,
+        value: Arc<JsBigInt>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.heap_reference_is_live(prototype) {
+            return Err(stale_heap_reference(prototype).into());
+        }
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let object = self
+            .objects
+            .try_insert(HeapObject::with_boxed_primitive(
+                ObjectRecord::empty(Some(prototype)),
+                BoxedPrimitive::BigInt(value),
+            ))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    /// Allocates an `Object(bigint)` wrapper inheriting `BigInt.prototype`.
+    pub(crate) fn allocate_boxed_bigint(
+        &mut self,
+        realm: RealmId,
+        value: Arc<JsBigInt>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let prototype = self.realm_bigint_prototype(realm)?;
+        self.allocate_boxed_bigint_with_prototype(HeapReference::Object(prototype), value)
+    }
+
+    /// Returns the wrapped `BigInt`, or `None` when `object` is not one.
+    pub(crate) fn boxed_bigint(
+        &self,
+        object: ObjectId,
+    ) -> Result<Option<Arc<JsBigInt>>, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+            .map(|object| {
+                object
+                    .boxed_primitive()
+                    .and_then(BoxedPrimitive::as_bigint)
+                    .map(Arc::clone)
+            })
     }
 
     pub(crate) fn allocate_boxed_string_with_prototype(

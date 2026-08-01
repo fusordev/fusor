@@ -207,6 +207,15 @@ pub(super) fn begin_object_prototype_to_string(
                 runtime, realm, *value, return_to, origin,
             );
         }
+        StoredValue::BigInt(value) => {
+            return begin_boxed_bigint_object_prototype_to_string(
+                runtime,
+                realm,
+                Arc::clone(value),
+                return_to,
+                origin,
+            );
+        }
         StoredValue::String(value) => {
             return begin_boxed_string_object_prototype_to_string(
                 runtime,
@@ -228,6 +237,8 @@ pub(super) fn begin_object_prototype_to_string(
                 ObjectPrototypeTag::Boolean
             } else if runtime.boxed_number(*object)?.is_some() {
                 ObjectPrototypeTag::Number
+            } else if runtime.boxed_bigint(*object)?.is_some() {
+                ObjectPrototypeTag::BigInt
             } else if runtime.boxed_string(*object)?.is_some() {
                 ObjectPrototypeTag::String
             } else if runtime.boxed_symbol(*object)?.is_some() {
@@ -319,6 +330,64 @@ fn begin_boxed_boolean_object_prototype_to_string(
             remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
             Err(EngineFault::RuntimeInvariant {
                 message: "Boolean boxing intrinsic Get produced a primitive property failure",
+            }
+            .into())
+        }
+    }
+}
+
+/// Tags an `Object(bigint)` through a throwaway wrapper.
+///
+/// The wrapper exists only so a user-supplied `Symbol.toStringTag` on
+/// `BigInt.prototype` is still consulted; it is removed again before the result
+/// becomes observable.
+fn begin_boxed_bigint_object_prototype_to_string(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    value: Arc<JsBigInt>,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let continuations = reserve_intrinsic_get_continuation()?;
+    let to_string_tag = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag);
+    let collection_pending = runtime.collection_pending;
+    let temporary = runtime.allocate_boxed_bigint(realm, value)?;
+    let receiver = StoredValue::Object(temporary);
+    let continuation = IntrinsicGetContinuation::ObjectPrototypeToString {
+        default_tag: ObjectPrototypeTag::BigInt,
+        temporary_receiver: Some(temporary),
+    };
+    let outcome = match read_heap_property_for_receiver(
+        runtime,
+        HeapReference::Object(temporary),
+        receiver,
+        &to_string_tag,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
+            return Err(error.into());
+        }
+    };
+    match outcome {
+        PropertyReadOutcome::Value(tag) => {
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
+            finish_object_prototype_to_string(ObjectPrototypeTag::BigInt, tag)
+        }
+        PropertyReadOutcome::Getter { function, receiver } => {
+            Ok(intrinsic_getter_call_with_reserved_continuation(
+                function,
+                receiver,
+                continuation,
+                return_to,
+                origin,
+                continuations,
+            ))
+        }
+        PropertyReadOutcome::Failed(_) => {
+            remove_unobservable_temporary_wrapper(runtime, temporary, collection_pending);
+            Err(EngineFault::RuntimeInvariant {
+                message: "BigInt boxing intrinsic Get produced a primitive property failure",
             }
             .into())
         }
@@ -508,6 +577,7 @@ pub(super) fn finish_object_prototype_to_string(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::Symbol(_)
         | StoredValue::Function(_)
         | StoredValue::Object(_) => JsString::from_utf8(default_tag.name())?,
@@ -570,6 +640,7 @@ fn native_function_name_to_string(
         StoredValue::Boolean(false) => Ok(JsString::from_utf8("false")?),
         StoredValue::Boolean(true) => Ok(JsString::from_utf8("true")?),
         StoredValue::Number(value) => Ok(value.to_javascript_string()?),
+        StoredValue::BigInt(value) => Ok(bigint_decimal_string(&value)?),
         StoredValue::String(value) => Ok(value),
         StoredValue::Symbol(_) => {
             let Some(origin) = origin else {
@@ -640,6 +711,7 @@ pub(super) fn dynamic_source_primitive_to_string(
         StoredValue::Boolean(false) => Ok(JsString::from_utf8("false")?),
         StoredValue::Boolean(true) => Ok(JsString::from_utf8("true")?),
         StoredValue::Number(value) => Ok(value.to_javascript_string()?),
+        StoredValue::BigInt(value) => Ok(bigint_decimal_string(&value)?),
         StoredValue::String(value) => Ok(value),
         StoredValue::Symbol(_) => Err(NativeFailure::Abrupt(PendingException {
             realm,
@@ -731,6 +803,7 @@ fn apply_dynamic_constructor_prototype(
         }
         StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             return Ok(completion);
@@ -748,6 +821,7 @@ fn apply_dynamic_constructor_prototype(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             let realm = runtime.function_realm(new_target)?;
@@ -847,6 +921,7 @@ pub(super) fn create_ordinary_constructor_receiver(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             let realm = runtime.function_realm(new_target)?;

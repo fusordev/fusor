@@ -34,11 +34,14 @@ use quickjs_bytecode::{
 };
 
 use crate::{
-    ArrayIndex, Context, DynamicFunctionCompileFailure, EngineFault, ExceptionKind, ExecutionError,
-    Function, HandleError, HandleKind, JsException, JsNumber, JsStackFrame, JsString,
-    JsStringError, JsValue, OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
-    PredefinedAtom, PropertyKey, PropertyLayout, Runtime, RuntimeError, RuntimeResource,
-    conversion::{number_to_int32, number_to_length, number_to_uint32, string_to_number},
+    ArrayIndex, BigIntError, Context, DynamicFunctionCompileFailure, EngineFault, ExceptionKind,
+    ExecutionError, Function, HandleError, HandleKind, JsBigInt, JsException, JsNumber,
+    JsStackFrame, JsString, JsStringError, JsValue, OrdinaryDynamicFunctionCompiler,
+    OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey, PropertyLayout, Runtime,
+    RuntimeError, RuntimeResource,
+    conversion::{
+        number_to_index, number_to_int32, number_to_length, number_to_uint32, string_to_number,
+    },
     define_property::{
         DefinitionDecision, PropertyDefinition, Requested, validate_and_apply_existing,
         validate_and_apply_new,
@@ -58,6 +61,7 @@ use crate::{
 
 mod aggregate_error;
 mod array_join;
+mod bigint_intrinsics;
 mod bindings;
 mod conversions;
 mod dynamic;
@@ -77,9 +81,9 @@ mod stack;
     reason = "private VM sibling modules share one interpreter implementation namespace"
 )]
 use {
-    aggregate_error::*, array_join::*, bindings::*, conversions::*, dynamic::*, error_stack::*,
-    errors::*, exceptions::*, execution::*, iterators::*, native::*, object_intrinsics::*,
-    properties::*, stack::*,
+    aggregate_error::*, array_join::*, bigint_intrinsics::*, bindings::*, conversions::*,
+    dynamic::*, error_stack::*, errors::*, exceptions::*, execution::*, iterators::*, native::*,
+    object_intrinsics::*, properties::*, stack::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -346,6 +350,7 @@ impl IntrinsicGetContinuation {
 #[derive(Clone, Copy)]
 enum ObjectPrototypeTag {
     Array,
+    BigInt,
     Boolean,
     Error,
     Function,
@@ -359,6 +364,7 @@ impl ObjectPrototypeTag {
     const fn name(self) -> &'static str {
         match self {
             Self::Array => "Array",
+            Self::BigInt => "BigInt",
             Self::Boolean => "Boolean",
             Self::Error => "Error",
             Self::Function => "Function",
@@ -794,6 +800,20 @@ enum OperatorPrimitiveTarget {
     ErrorToStringMessage(ErrorToStringContinuation),
     ArrayIteratorLength(ArrayIteratorNextContinuation),
     FunctionApplyLength(FunctionApplyContinuation),
+    /// `BigInt.prototype.toString`'s radix, awaiting `ToNumber`.
+    BigIntToString {
+        value: Arc<JsBigInt>,
+    },
+    /// `BigInt.asIntN`/`asUintN`'s bit count, awaiting `ToNumber`.
+    BigIntTruncationBits {
+        value: StoredValue,
+        truncation: BigIntTruncation,
+    },
+    /// `BigInt.asIntN`/`asUintN`'s value, awaiting `ToPrimitive`.
+    BigIntTruncationValue {
+        bits: u64,
+        truncation: BigIntTruncation,
+    },
     ArrayJoinSeparator(Box<ArrayJoinContinuation>),
     ArrayJoinElement(Box<ArrayJoinContinuation>),
     ArrayLengthWrite(ArrayLengthWriteState),
@@ -802,11 +822,16 @@ enum OperatorPrimitiveTarget {
 impl OperatorPrimitiveTarget {
     fn retained_values(&self) -> u64 {
         match self {
+            // A `BigInt` payload is not a frame value, so the BigInt targets
+            // retain nothing beyond the operand the caller already counted.
             Self::Unary { .. }
             | Self::NumberIntrinsic { new_target: None }
             | Self::StringIntrinsic { new_target: None }
             | Self::SymbolIntrinsic { .. }
-            | Self::StringIteratorIntrinsic => 0,
+            | Self::StringIteratorIntrinsic
+            | Self::BigIntToString { .. }
+            | Self::BigIntTruncationBits { .. }
+            | Self::BigIntTruncationValue { .. } => 0,
             Self::BinaryRight { .. }
             | Self::BinaryFinish { .. }
             | Self::EqualityFinish { .. }
@@ -952,10 +977,13 @@ fn trace_operator_primitive_target_roots(
     mark: &mut dyn FnMut(CollectionRoot),
 ) {
     match target {
+        // A `BigInt` payload is not a heap node, so these carry no roots.
         OperatorPrimitiveTarget::Unary { .. }
         | OperatorPrimitiveTarget::NumberToString { .. }
         | OperatorPrimitiveTarget::SymbolIntrinsic { .. }
-        | OperatorPrimitiveTarget::StringIteratorIntrinsic => {}
+        | OperatorPrimitiveTarget::StringIteratorIntrinsic
+        | OperatorPrimitiveTarget::BigIntToString { .. }
+        | OperatorPrimitiveTarget::BigIntTruncationValue { .. } => {}
         OperatorPrimitiveTarget::BinaryRight { right, .. } => {
             trace_stored_value_root(right, mark);
         }
@@ -984,6 +1012,10 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArrayJoinSeparator(state)
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
             trace_stored_value_root(state.target(), mark);
+        }
+        // The pending truncation operand is a real value and must be traced.
+        OperatorPrimitiveTarget::BigIntTruncationBits { value, .. } => {
+            trace_stored_value_root(value, mark);
         }
         OperatorPrimitiveTarget::ArrayLengthWrite(state) => {
             trace_stored_value_root(&state.base, mark);
@@ -1334,6 +1366,9 @@ fn normalize_receiver(
             .map(StoredValue::Object),
         StoredValue::Number(value) => runtime
             .allocate_boxed_number(realm, value)
+            .map(StoredValue::Object),
+        StoredValue::BigInt(value) => runtime
+            .allocate_boxed_bigint(realm, value)
             .map(StoredValue::Object),
         StoredValue::String(value) => runtime
             .allocate_boxed_string(realm, value)
@@ -2371,6 +2406,7 @@ fn execute_frame_loop(
                         | StoredValue::Null
                         | StoredValue::Boolean(_)
                         | StoredValue::Number(_)
+                        | StoredValue::BigInt(_)
                         | StoredValue::String(_)
                         | StoredValue::Symbol(_) => finished.receiver,
                     }

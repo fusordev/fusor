@@ -25,6 +25,8 @@
 
 //! Primitive conversion continuations, constructor intrinsics, and operators.
 
+use std::cmp::Ordering;
+
 #[allow(
     clippy::wildcard_imports,
     reason = "this private VM sibling participates in the shared interpreter implementation namespace"
@@ -53,6 +55,7 @@ pub(super) fn boolean_receiver_value(
         StoredValue::Undefined
         | StoredValue::Null
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_)
         | StoredValue::Function(_) => None,
@@ -84,6 +87,7 @@ pub(super) fn number_receiver_value(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::String(_)
+        | StoredValue::BigInt(_)
         | StoredValue::Symbol(_)
         | StoredValue::Function(_) => None,
     };
@@ -114,6 +118,7 @@ pub(super) fn string_receiver_value(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::Symbol(_)
         | StoredValue::Function(_) => None,
     };
@@ -144,6 +149,7 @@ pub(super) fn symbol_receiver_value(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Function(_) => None,
     };
@@ -294,6 +300,7 @@ pub(super) fn finish_array_constructor_after_prototype_get(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             let target_realm = runtime.function_realm(new_target)?;
@@ -496,6 +503,7 @@ fn finish_boolean_constructor_wrapper(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             let realm = runtime.function_realm(new_target)?;
@@ -521,6 +529,7 @@ fn finish_number_constructor_wrapper(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             let realm = runtime.function_realm(new_target)?;
@@ -546,6 +555,7 @@ fn finish_string_constructor_wrapper(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             let realm = runtime.function_realm(new_target)?;
@@ -841,6 +851,7 @@ fn use_primitive_conversion_property(
             }
             StoredValue::Boolean(_)
             | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
             | StoredValue::Object(_) => Err(primitive_conversion_type_error(
@@ -861,6 +872,7 @@ fn use_primitive_conversion_property(
             | StoredValue::Null
             | StoredValue::Boolean(_)
             | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
             | StoredValue::Object(_) => {
@@ -880,6 +892,7 @@ fn use_primitive_conversion_property(
             | StoredValue::Null
             | StoredValue::Boolean(_)
             | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
             | StoredValue::Object(_) => Err(primitive_conversion_type_error(
@@ -1353,6 +1366,7 @@ fn use_operator_primitive_property(
             }
             StoredValue::Boolean(_)
             | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
             | StoredValue::Object(_) => Err(primitive_conversion_type_error(
@@ -1370,6 +1384,7 @@ fn use_operator_primitive_property(
             | StoredValue::Null
             | StoredValue::Boolean(_)
             | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
             | StoredValue::Object(_) => {
@@ -1393,6 +1408,7 @@ fn use_operator_primitive_property(
             | StoredValue::Null
             | StoredValue::Boolean(_)
             | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
             | StoredValue::Object(_) => {
@@ -1462,7 +1478,13 @@ fn finish_operator_primitive_target(
             right,
             hint,
         } => {
-            let left = if binary_operator_converts_left_to_number_first(opcode) {
+            // The eager left conversion pins the operand order for the Number
+            // domain, but a `BigInt` must survive it so the operator can decide
+            // the domain from both operands. Converting it here would report
+            // `cannot convert bigint to number` even for `1n - 2n`.
+            let left = if binary_operator_converts_left_to_number_first(opcode)
+                && !matches!(value, StoredValue::BigInt(_))
+            {
                 StoredValue::Number(operator_to_number(value, realm, origin)?)
             } else {
                 value
@@ -1556,6 +1578,44 @@ fn finish_operator_primitive_target(
         }
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             finish_function_apply_length(runtime, state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::BigIntToString { value: receiver } => {
+            let radix = operator_to_number(value, realm, origin)?;
+            let radix = validated_radix(radix, realm, origin)?;
+            bigint_prototype_to_string(&receiver, radix, realm, origin)
+        }
+        OperatorPrimitiveTarget::BigIntTruncationBits {
+            value: pending_value,
+            truncation,
+        } => {
+            // `bits` is a Number here; `ToIndex` bounds it before it becomes a
+            // width, and then the value needs its own `ToBigInt`.
+            let bits = operator_to_number(value, realm, origin)?;
+            let Some(bits) = number_to_index(bits) else {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::RangeError,
+                        message: JsString::from_utf8("invalid array index")?,
+                    },
+                    origin: origin.clone(),
+                }));
+            };
+            begin_operator_primitive_conversion(
+                runtime,
+                pending_value,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::BigIntTruncationValue { bits, truncation },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::BigIntTruncationValue { bits, truncation } => {
+            let converted = to_bigint_from_primitive(&value, realm, origin)?;
+            let bits = JsBigInt::from_u64(bits);
+            bigint_truncate(&bits, &converted, truncation, realm, origin)
         }
         OperatorPrimitiveTarget::ArrayJoinSeparator(state)
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
@@ -1663,6 +1723,29 @@ fn invalid_array_length(
     }))
 }
 
+/// Validates a `toString` radix, which must lie in `2..=36`.
+fn validated_radix(
+    radix: JsNumber,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<u32, NativeFailure> {
+    let radix = saturated_i32_from_number(radix);
+    u32::try_from(radix)
+        .ok()
+        .filter(|radix| (2..=36).contains(radix))
+        .ok_or(())
+        .or_else(|()| {
+            Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::RangeError,
+                    message: JsString::from_utf8("radix must be between 2 and 36")?,
+                },
+                origin: origin.clone(),
+            }))
+        })
+}
+
 fn finish_number_to_string_radix(
     number: JsNumber,
     radix: JsNumber,
@@ -1719,6 +1802,11 @@ fn apply_unary_operator(
     realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
+    // A `BigInt` operand keeps the whole operation in the BigInt domain, except
+    // for unary `+`, which has no BigInt form at all.
+    if let StoredValue::BigInt(value) = &value {
+        return apply_bigint_unary_operator(opcode, value, realm, origin);
+    }
     let number = operator_to_number(value, realm, origin)?;
     let dispatch = match opcode {
         FinalOpcode::Plus => NativeDispatch::Immediate(StoredValue::Number(number)),
@@ -1807,6 +1895,11 @@ fn apply_addition(
         };
         return Ok(NativeDispatch::Immediate(StoredValue::String(value)));
     }
+    // String concatenation wins over the numeric domains, so the BigInt check
+    // comes after it: `1n + "s"` concatenates while `1n + 1` throws.
+    if let Some(dispatch) = apply_bigint_addition(&left, &right, realm, origin)? {
+        return Ok(dispatch);
+    }
     let left = operator_to_number(left, realm, origin)?;
     let right = operator_to_number(right, realm, origin)?;
     Ok(NativeDispatch::Immediate(StoredValue::Number(
@@ -1821,6 +1914,9 @@ fn apply_numeric_arithmetic(
     realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(dispatch) = apply_bigint_arithmetic(opcode, &left, &right, realm, origin)? {
+        return Ok(dispatch);
+    }
     let left = operator_to_number(left, realm, origin)?.as_f64();
     let right = operator_to_number(right, realm, origin)?.as_f64();
     let result = match opcode {
@@ -1851,6 +1947,9 @@ fn apply_numeric_bitwise(
     realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(dispatch) = apply_bigint_bitwise(opcode, &left, &right, realm, origin)? {
+        return Ok(dispatch);
+    }
     let left = operator_to_number(left, realm, origin)?;
     let right = operator_to_number(right, realm, origin)?;
     let shift = number_to_uint32(right) & 0x1f;
@@ -1902,6 +2001,36 @@ fn apply_relational(
             }
         },
         (left, right) => {
+            // Relational comparison is the one place the two numeric domains do
+            // mix: `1n < 2` is `true`. The comparison is mathematical, so a
+            // `BigInt` operand is compared exactly rather than rounded.
+            let comparison = bigint_relational_ordering(&left, &right, realm, origin)?;
+            if comparison != BigIntComparison::NotApplicable {
+                let ordering = match comparison {
+                    BigIntComparison::Ordered(ordering) => Some(ordering),
+                    // An unordered comparison makes every relational operator
+                    // `false`, which is the `NaN` behavior.
+                    BigIntComparison::Unordered => None,
+                    BigIntComparison::NotApplicable => unreachable!("checked above"),
+                };
+                let result = match opcode {
+                    FinalOpcode::Lt => ordering == Some(Ordering::Less),
+                    FinalOpcode::Lte => {
+                        matches!(ordering, Some(Ordering::Less | Ordering::Equal))
+                    }
+                    FinalOpcode::Gt => ordering == Some(Ordering::Greater),
+                    FinalOpcode::Gte => {
+                        matches!(ordering, Some(Ordering::Greater | Ordering::Equal))
+                    }
+                    _ => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "non-relational opcode reached BigInt comparison",
+                        }
+                        .into());
+                    }
+                };
+                return Ok(NativeDispatch::Immediate(StoredValue::Boolean(result)));
+            }
             let left = operator_to_number(left, realm, origin)?.as_f64();
             let right = operator_to_number(right, realm, origin)?.as_f64();
             match opcode {
@@ -1958,6 +2087,17 @@ pub(super) fn begin_abstract_equality(
                 | (StoredValue::Undefined, StoredValue::Null)
         ) {
             return Ok(NativeDispatch::Immediate(StoredValue::Boolean(!invert)));
+        }
+
+        // A `BigInt` compares across the domains by mathematical value, so the
+        // Boolean-to-Number rewrite below must not reach it: `0n == false` is
+        // `true` through the BigInt comparison, not through a rounded Number.
+        let comparison = bigint_relational_ordering(&left, &right, realm, &origin)?;
+        if comparison != BigIntComparison::NotApplicable {
+            let equal = comparison == BigIntComparison::Ordered(Ordering::Equal);
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(
+                equal ^ invert,
+            )));
         }
 
         match (&left, &right) {
@@ -2026,6 +2166,19 @@ const fn is_equality_conversion_primitive(value: &StoredValue) -> bool {
     )
 }
 
+/// Renders a `BigInt` as the decimal string `ToString` produces.
+///
+/// There is no `n` suffix: the suffix belongs to the literal grammar and to
+/// `console.log` formatting, not to `ToString`, so `String(1n)` is `"1"`.
+pub(super) fn bigint_decimal_string(value: &JsBigInt) -> Result<JsString, NativeFailure> {
+    let text = value
+        .to_string_radix(10)
+        .map_err(|_| EngineFault::RuntimeInvariant {
+            message: "decimal BigInt rendering rejected the base-10 radix",
+        })?;
+    Ok(JsString::from_utf8(&text)?)
+}
+
 pub(super) fn operator_to_number(
     value: StoredValue,
     realm: RealmId,
@@ -2037,6 +2190,13 @@ pub(super) fn operator_to_number(
         StoredValue::Boolean(true) => Ok(JsNumber::from_i32(1)),
         StoredValue::Number(value) => Ok(value),
         StoredValue::String(value) => Ok(string_to_number(&value)?),
+        // A `BigInt` never implicitly becomes a Number, which is what keeps the
+        // two numeric domains from silently mixing.
+        StoredValue::BigInt(_) => Err(primitive_conversion_type_error(
+            realm,
+            origin,
+            "cannot convert bigint to number",
+        )?),
         StoredValue::Symbol(_) => Err(primitive_conversion_type_error(
             realm,
             origin,
@@ -2060,6 +2220,7 @@ pub(super) fn operator_primitive_to_string(
         StoredValue::Boolean(false) => Ok(JsString::from_utf8("false")?),
         StoredValue::Boolean(true) => Ok(JsString::from_utf8("true")?),
         StoredValue::Number(value) => Ok(value.to_javascript_string()?),
+        StoredValue::BigInt(value) => Ok(bigint_decimal_string(&value)?),
         StoredValue::String(value) => Ok(value),
         StoredValue::Symbol(_) => Err(primitive_conversion_type_error(
             realm,
@@ -2245,6 +2406,9 @@ fn property_key_primitive_to_value(value: StoredValue) -> Result<StoredValue, Na
         StoredValue::Boolean(false) => StoredValue::String(JsString::from_utf8("false")?),
         StoredValue::Boolean(true) => StoredValue::String(JsString::from_utf8("true")?),
         StoredValue::Number(value) => StoredValue::String(value.to_javascript_string()?),
+        // `ToPropertyKey` stringifies a `BigInt`, so `o[1n]` addresses the same
+        // slot as `o[1]`.
+        StoredValue::BigInt(value) => StoredValue::String(bigint_decimal_string(&value)?),
         value @ (StoredValue::String(_) | StoredValue::Symbol(_)) => value,
         StoredValue::Function(_) | StoredValue::Object(_) => {
             return Err(EngineFault::RuntimeInvariant {
@@ -2272,6 +2436,7 @@ pub(super) fn computed_property_operand(
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::Function(_)
         | StoredValue::Object(_) => Err(EngineFault::RuntimeInvariant {
             message: "computed property operand was not a verified property-key value",
@@ -2295,6 +2460,7 @@ fn computed_method_name(value: &StoredValue) -> Result<JsString, NativeFailure> 
         | StoredValue::Null
         | StoredValue::Boolean(_)
         | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
         | StoredValue::Function(_)
         | StoredValue::Object(_) => Err(EngineFault::RuntimeInvariant {
             message: "computed method name was not a verified property-key value",
