@@ -297,6 +297,112 @@ fn array_destructuring_does_not_step_an_exhausted_iterator() {
 }
 
 #[test]
+fn nested_array_patterns_destructure_an_inner_iterator() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let [[a, b], c] = [[1, 2], 3];\
+            return a * 100 + b * 10 + c;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("nested array destructuring result");
+    assert_number(&result, 123);
+}
+
+#[test]
+fn nested_array_pattern_assignment_destructures_an_inner_iterator() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let a=0;let b=0;let c=0;\
+            [[a, b], c] = [[4, 5], 6];\
+            return a * 100 + b * 10 + c;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("nested array assignment result");
+    assert_number(&result, 456);
+}
+
+#[test]
+fn nested_array_pattern_with_default_and_rest() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let [[a = 9, ...rest], b] = [[1], 2];\
+            return a * 1000 + rest.length * 100 + b * 10;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("nested defaults and rest");
+    // `a` reads the inner first value (1, so the default is not evaluated),
+    // the inner rest array is empty, and `b` reads the outer second value.
+    assert_number(&result, 1020);
+}
+
+#[test]
+fn nested_array_pattern_default_applies_before_destructuring() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let [a, [b]] = [1, [2]];\
+            return a * 10 + b;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("nested default value");
+    assert_number(&result, 12);
+}
+
+#[test]
+fn nested_array_pattern_defaults_evaluate_when_value_is_undefined() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let [[a] = [7]] = [];\
+            return a;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("nested default on exhausted iterator");
+    assert_number(&result, 7);
+}
+
+#[test]
+fn nested_array_pattern_assignment_with_rest() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let a=0;let rest=null;\
+            [a, [...rest]] = [1, [2, 3]];\
+            return a * 100 + rest[0] * 10 + rest[1];",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("nested rest assignment");
+    assert_number(&result, 123);
+}
+
+#[test]
 fn array_destructuring_step_failures_do_not_call_return() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

@@ -4494,6 +4494,33 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
+        self.plan_array_destructuring_value(
+            pattern,
+            declaration_kind,
+            layout,
+            tree_layout,
+            constants,
+            flow,
+        )
+    }
+
+    /// Destructures an iterable value already on the stack through an array
+    /// pattern: `for_of_start`, then every element, elision, default, and
+    /// rest, then `iterator_close`. The value is consumed and the verified
+    /// record (possibly under an outer pattern's record) remains.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "array-pattern value destructuring carries the same explicit frame, tree, constant, and flow authority as every other pattern form"
+    )]
+    fn plan_array_destructuring_value<'pattern>(
+        &self,
+        pattern: &'pattern ArrayPattern<'arena>,
+        declaration_kind: VariableDeclarationKind,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
         self.plan_array_destructuring_elements(
             pattern.elements.iter(),
             pattern.rest.as_deref(),
@@ -4744,7 +4771,15 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     flow,
                 )
             }
-            BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_) => {
+            BindingPattern::ArrayPattern(pattern) => self.plan_array_destructuring_value(
+                pattern,
+                declaration_kind,
+                layout,
+                tree_layout,
+                constants,
+                flow,
+            ),
+            BindingPattern::ObjectPattern(_) => {
                 unsupported(UnsupportedLeafFeature::UnsupportedPattern, pattern.span())
             }
         }
@@ -4804,6 +4839,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         self.plan_assignment_target_value(
                             &default.binding,
                             work,
+                            flow,
                             layout,
                             tree_layout,
                         )?;
@@ -4844,7 +4880,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                                 span: Some(element.span()),
                             },
                         )?;
-                        self.plan_assignment_target_value(target, work, layout, tree_layout)?;
+                        self.plan_assignment_target_value(target, work, flow, layout, tree_layout)?;
                     }
                     work.push(ExpressionWork::Emit(PlannedInstruction::new(
                         FinalOpcode::Drop,
@@ -4871,6 +4907,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         &self,
         target: &'pattern AssignmentTarget<'arena>,
         work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+        flow: &mut PlannedControlFlow,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
     ) -> Result<(), LeafCompilationError> {
@@ -4902,8 +4939,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 }
                 Ok(())
             }
-            AssignmentTarget::ArrayAssignmentTarget(_)
-            | AssignmentTarget::ObjectAssignmentTarget(_)
+            AssignmentTarget::ArrayAssignmentTarget(pattern) => {
+                // `[a, [b]] = expr`: destructure the on-stack value with a
+                // nested iterator; the sequence emits `for_of_start`, the
+                // nested elements, and `iterator_close` around the target
+                // stores.
+                self.plan_array_assignment_elements(pattern, flow, work, layout, tree_layout)
+            }
+            AssignmentTarget::ObjectAssignmentTarget(_)
             | AssignmentTarget::StaticMemberExpression(_)
             | AssignmentTarget::ComputedMemberExpression(_)
             | AssignmentTarget::TSAsExpression(_)
@@ -4937,7 +4980,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         //
         // Work is a LIFO stack, so each item is pushed in reverse execution
         // order: the target store runs last, after the two exit drops.
-        self.plan_assignment_target_value(&rest.target, work, layout, tree_layout)?;
+        self.plan_assignment_target_value(&rest.target, work, flow, layout, tree_layout)?;
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::Drop,
             Operands::None,

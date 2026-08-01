@@ -526,7 +526,10 @@ A milestone is complete only when all of its checked items pass in CI.
         slot with `undefined`, and every later step yields
         `{ value: undefined, done: true }` without invoking `next()` again,
         so post-exhaustion elements, elisions, and rest bind exactly as the
-        spec requires. Nested and object patterns, member targets, and
+        spec requires. Nested array patterns recurse through the same
+        verified record shape: each nested value opens its own iterator,
+        and the outer record resumes with `for_of_next` offset zero after
+        the nested `iterator_close`. Object patterns, member targets, and
         iterator-destructuring heads remain fail-closed.
   - [x] Represent synthetic native caller frames. Each bytecode frame
         reached through `Function.prototype.call` or `Function.prototype.apply`
