@@ -535,8 +535,21 @@ A milestone is complete only when all of its checked items pass in CI.
         the incoming value, so the `for_of_next` temporary offset equals
         the reference depth, and member rest targets keep their reference
         slots below the fresh array with the loop offset advanced by the
-        same depth. Object patterns and iterator-destructuring heads remain
-        fail-closed.
+        same depth.
+  - [x] Execute ordinary object-pattern destructuring declarations and
+        assignments through the pinned `to_object`/`get_field2`/
+        `get_array_el2` shape. Declarations convert the initializer with
+        the new `to_object` opcode (boxing primitives and raising the exact
+        `cannot convert to object` TypeError for null/undefined), read each
+        static or computed property through `get_field2`/`get_array_el2`
+        with the source object retained below the value, bind identifiers,
+        defaults, and nested array/object patterns, and drop the source.
+        Assignments evaluate and duplicate the RHS, object-destructure
+        identifier or nested-pattern targets (including defaults), and keep
+        the original copy as the assignment expression value. Object
+        patterns also work as array-assignment elements. Object rest
+        (`{...rest}`), object-property member targets, and
+        iterator-destructuring heads remain fail-closed.
   - [x] Represent synthetic native caller frames. Each bytecode frame
         reached through `Function.prototype.call` or `Function.prototype.apply`
         records the pinned `call (native)` / `apply (native)` entry, including

@@ -4,12 +4,13 @@ use oxc_ast::{
     AstKind,
     ast::{
         Argument, ArrayAssignmentTarget, ArrayExpression, ArrayExpressionElement, ArrayPattern,
-        AssignmentExpression, AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetRest,
-        BindingIdentifier, BindingPattern, BindingRestElement, BlockStatement, CallExpression,
-        CatchClause, ComputedMemberExpression, ConditionalExpression, DoWhileStatement, Expression,
-        ExpressionStatement, ForInStatement, ForOfStatement, ForStatement, ForStatementInit,
-        ForStatementLeft, Function, FunctionBody, FunctionType, IdentifierReference, IfStatement,
-        LabelIdentifier, LabeledStatement, LogicalExpression, NewExpression, ObjectExpression,
+        AssignmentExpression, AssignmentTarget, AssignmentTargetMaybeDefault,
+        AssignmentTargetProperty, AssignmentTargetRest, BindingIdentifier, BindingPattern,
+        BindingRestElement, BlockStatement, CallExpression, CatchClause, ComputedMemberExpression,
+        ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForInStatement,
+        ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft, Function, FunctionBody,
+        FunctionType, IdentifierReference, IfStatement, LabelIdentifier, LabeledStatement,
+        LogicalExpression, NewExpression, ObjectAssignmentTarget, ObjectExpression, ObjectPattern,
         ObjectProperty, ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind,
         ReturnStatement, SequenceExpression, SimpleAssignmentTarget, Statement,
         StaticMemberExpression, SwitchStatement, ThrowStatement, TryStatement, UnaryExpression,
@@ -1363,6 +1364,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the literal/property candidate walk stays one exhaustive per-node audit"
+    )]
     fn record_node_literal_candidate(
         &self,
         node_id: NodeId,
@@ -1438,6 +1443,47 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     && let Some(key) = compiled_static_property_key(&property.key)?
                 {
                     record_property_candidate(owner, key.value, key.span, atom_candidates)?;
+                }
+            }
+            AstKind::ObjectPattern(pattern) => {
+                for property in &pattern.properties {
+                    if !property.computed
+                        && let Some(key) = compiled_static_property_key(&property.key)?
+                    {
+                        record_property_candidate(owner, key.value, key.span, atom_candidates)?;
+                    }
+                }
+            }
+            AstKind::ObjectAssignmentTarget(target) => {
+                for property in &target.properties {
+                    match property {
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(
+                            identifier,
+                        ) => {
+                            let key = compiler_identifier_string(
+                                identifier.binding.name.as_str(),
+                                identifier.binding.span,
+                            )?;
+                            record_property_candidate(
+                                owner,
+                                key,
+                                identifier.binding.span,
+                                atom_candidates,
+                            )?;
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+                            if !property.computed
+                                && let Some(key) = compiled_static_property_key(&property.name)?
+                            {
+                                record_property_candidate(
+                                    owner,
+                                    key.value,
+                                    key.span,
+                                    atom_candidates,
+                                )?;
+                            }
+                        }
+                    }
                 }
             }
             AstKind::StaticMemberExpression(member) => {
@@ -4361,7 +4407,33 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         flow,
                     );
                 }
-                BindingPattern::ObjectPattern(_) | BindingPattern::AssignmentPattern(_) => {
+                BindingPattern::ObjectPattern(pattern) => {
+                    let Some(initializer) = &declarator.init else {
+                        return unsupported(
+                            UnsupportedLeafFeature::UnsupportedDeclaration,
+                            declarator.span,
+                        );
+                    };
+                    if let Some(span) = anonymous_named_evaluation_span(initializer) {
+                        return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+                    }
+                    if pattern.rest.is_some() {
+                        return unsupported(
+                            UnsupportedLeafFeature::UnsupportedPattern,
+                            pattern.span,
+                        );
+                    }
+                    return self.plan_object_destructuring_declaration(
+                        pattern,
+                        initializer,
+                        declaration.kind,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    );
+                }
+                BindingPattern::AssignmentPattern(_) => {
                     return unsupported(
                         UnsupportedLeafFeature::UnsupportedDeclaration,
                         declarator.span,
@@ -4531,6 +4603,97 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             flow,
             pattern.span,
         )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "object-pattern declaration planning carries the same explicit frame, tree, constant, and flow authority as every other declaration form"
+    )]
+    fn plan_object_destructuring_declaration<'pattern, 'expression>(
+        &self,
+        pattern: &'pattern ObjectPattern<'arena>,
+        initializer: &'expression Expression<'arena>,
+        declaration_kind: VariableDeclarationKind,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
+        self.plan_object_destructuring_value(
+            pattern,
+            declaration_kind,
+            layout,
+            tree_layout,
+            constants,
+            flow,
+        )
+    }
+
+    /// Destructures an on-stack value through an object pattern: `to_object`,
+    /// then one `get_field2`/`get_array_el2` per property (the source object
+    /// stays below the read value), then `drop` the source. Object rest
+    /// (`{...rest}`) remains fail-closed in this slice.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "object-pattern value destructuring carries the same explicit frame, tree, constant, and flow authority as every other pattern form"
+    )]
+    fn plan_object_destructuring_value<'pattern>(
+        &self,
+        pattern: &'pattern ObjectPattern<'arena>,
+        declaration_kind: VariableDeclarationKind,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::ToObject,
+            Operands::None,
+            pattern.span,
+        ))?;
+        for property in &pattern.properties {
+            let span = property.span;
+            if property.computed {
+                let key = property.key.as_expression().ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "computed object-pattern key is an expression",
+                        span: Some(span),
+                    },
+                )?;
+                self.plan_expression(key, layout, tree_layout, constants, flow)?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::ToPropKey,
+                    Operands::None,
+                    key.span(),
+                ))?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::GetArrayEl2,
+                    Operands::None,
+                    span,
+                ))?;
+            } else {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::GetField2,
+                    Operands::Atom(constants.property_atom_index(property.key.span())?),
+                    span,
+                ))?;
+            }
+            self.plan_destructuring_pattern_value(
+                &property.value,
+                declaration_kind,
+                layout,
+                tree_layout,
+                constants,
+                flow,
+            )?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            pattern.span,
+        ))?;
+        Ok(())
     }
 
     #[allow(
@@ -4779,8 +4942,18 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 constants,
                 flow,
             ),
-            BindingPattern::ObjectPattern(_) => {
-                unsupported(UnsupportedLeafFeature::UnsupportedPattern, pattern.span())
+            BindingPattern::ObjectPattern(pattern) => {
+                if pattern.rest.is_some() {
+                    return unsupported(UnsupportedLeafFeature::UnsupportedPattern, pattern.span);
+                }
+                self.plan_object_destructuring_value(
+                    pattern,
+                    declaration_kind,
+                    layout,
+                    tree_layout,
+                    constants,
+                    flow,
+                )
             }
         }
     }
@@ -4932,31 +5105,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     ) -> Result<(), LeafCompilationError> {
         match target {
             AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-                let reference = self.lowered_reference(
-                    identifier.reference_id.get(),
-                    identifier.span,
-                    layout,
-                    tree_layout,
-                )?;
-                if !reference.access().writes() {
-                    return unsupported(
-                        UnsupportedLeafFeature::UnsupportedReference,
-                        identifier.span,
-                    );
-                }
-                match reference {
-                    LoweredReference::Frame { slot, .. } => {
-                        work.push(ExpressionWork::Emit(plan_put_slot(slot, identifier.span)));
-                    }
-                    LoweredReference::RealmGlobal { slot, .. } => {
-                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                            FinalOpcode::PutVar,
-                            Operands::VarRef(slot),
-                            identifier.span,
-                        )));
-                    }
-                }
-                Ok(())
+                self.plan_assignment_identifier_store(identifier, work, layout, tree_layout)
             }
             AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
                 // The base is evaluated by the reference prelude before the
@@ -4990,8 +5139,20 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     constants,
                 )
             }
-            AssignmentTarget::ObjectAssignmentTarget(_)
-            | AssignmentTarget::StaticMemberExpression(_)
+            AssignmentTarget::ObjectAssignmentTarget(pattern) => {
+                if pattern.rest.is_some() {
+                    return unsupported(UnsupportedLeafFeature::UnsupportedPattern, pattern.span);
+                }
+                self.plan_object_assignment_value(
+                    pattern,
+                    work,
+                    flow,
+                    layout,
+                    tree_layout,
+                    constants,
+                )
+            }
+            AssignmentTarget::StaticMemberExpression(_)
             | AssignmentTarget::ComputedMemberExpression(_)
             | AssignmentTarget::TSAsExpression(_)
             | AssignmentTarget::TSSatisfiesExpression(_)
@@ -5001,6 +5162,218 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 unsupported(UnsupportedLeafFeature::UnsupportedPattern, target.span())
             }
         }
+    }
+
+    /// Stores an already-evaluated value into an identifier reference target.
+    fn plan_assignment_identifier_store<'pattern>(
+        &self,
+        identifier: &'pattern IdentifierReference<'arena>,
+        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<(), LeafCompilationError> {
+        let reference = self.lowered_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            layout,
+            tree_layout,
+        )?;
+        if !reference.access().writes() {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedReference,
+                identifier.span,
+            );
+        }
+        match reference {
+            LoweredReference::Frame { slot, .. } => {
+                work.push(ExpressionWork::Emit(plan_put_slot(slot, identifier.span)));
+            }
+            LoweredReference::RealmGlobal { slot, .. } => {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PutVar,
+                    Operands::VarRef(slot),
+                    identifier.span,
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Pushes the `value === undefined` default machinery: when the value is
+    /// `undefined`, drop it and evaluate the initializer. Executes after the
+    /// property read and before the store.
+    fn push_object_property_default<'expression>(
+        init: &'expression Expression<'arena>,
+        span: Span,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let skip = flow.new_label(span)?;
+        work.push(ExpressionWork::Bind(skip.clone()));
+        if let Some(span) = anonymous_named_evaluation_span(init) {
+            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+        }
+        work.push(ExpressionWork::Visit(init));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            span,
+        )));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::IfFalse,
+            target: skip,
+            span,
+        });
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::StrictEq,
+            Operands::None,
+            span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Undefined,
+            Operands::None,
+            span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            span,
+        )));
+        Ok(())
+    }
+
+    /// Destructures an on-stack value through an object assignment pattern:
+    /// `to_object`, one `get_field2`/`get_array_el2` per property, then
+    /// `drop` the source. Property targets are identifier stores or nested
+    /// patterns (member targets stay fail-closed because their reference
+    /// would sit above the fetched value). Object rest stays fail-closed.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "object-pattern assignment stays one LIFO work-list transaction"
+    )]
+    fn plan_object_assignment_value<'pattern>(
+        &self,
+        pattern: &'pattern ObjectAssignmentTarget<'arena>,
+        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+        flow: &mut PlannedControlFlow,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+    ) -> Result<(), LeafCompilationError> {
+        if pattern.rest.is_some() {
+            return unsupported(UnsupportedLeafFeature::UnsupportedPattern, pattern.span);
+        }
+        // Work is a LIFO stack: the source drop runs last and `to_object`
+        // first; each property pushes its store, its default machinery, the
+        // property read, and any computed-key visits in reverse order.
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            pattern.span,
+        )));
+        for property in pattern.properties.iter().rev() {
+            match property {
+                AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(identifier) => {
+                    // `{a}` or `{a = default}`: the key is the binding name.
+                    self.plan_assignment_identifier_store(
+                        &identifier.binding,
+                        work,
+                        layout,
+                        tree_layout,
+                    )?;
+                    if let Some(init) = &identifier.init {
+                        Self::push_object_property_default(init, identifier.span, flow, work)?;
+                    }
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetField2,
+                        Operands::Atom(constants.property_atom_index(identifier.binding.span)?),
+                        identifier.span,
+                    )));
+                }
+                AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+                    let target = Self::assignment_element_target(&property.binding).ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "object assignment property binding is an assignment target",
+                            span: Some(property.span),
+                        },
+                    )?;
+                    match target {
+                        AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+                            self.plan_assignment_identifier_store(
+                                identifier,
+                                work,
+                                layout,
+                                tree_layout,
+                            )?;
+                        }
+                        AssignmentTarget::ArrayAssignmentTarget(_)
+                        | AssignmentTarget::ObjectAssignmentTarget(_) => {
+                            self.plan_assignment_target_value(
+                                target,
+                                work,
+                                flow,
+                                layout,
+                                tree_layout,
+                                constants,
+                            )?;
+                        }
+                        AssignmentTarget::StaticMemberExpression(_)
+                        | AssignmentTarget::ComputedMemberExpression(_)
+                        | AssignmentTarget::TSAsExpression(_)
+                        | AssignmentTarget::TSSatisfiesExpression(_)
+                        | AssignmentTarget::TSNonNullExpression(_)
+                        | AssignmentTarget::TSTypeAssertion(_)
+                        | AssignmentTarget::PrivateFieldExpression(_) => {
+                            return unsupported(
+                                UnsupportedLeafFeature::UnsupportedPattern,
+                                property.span,
+                            );
+                        }
+                    }
+                    if let AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(default) =
+                        &property.binding
+                    {
+                        Self::push_object_property_default(
+                            &default.init,
+                            default.span,
+                            flow,
+                            work,
+                        )?;
+                    }
+                    if property.computed {
+                        let key = property.name.as_expression().ok_or(
+                            LeafCompilationError::SemanticInvariant {
+                                invariant: "computed object assignment key is an expression",
+                                span: Some(property.span),
+                            },
+                        )?;
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::GetArrayEl2,
+                            Operands::None,
+                            property.span,
+                        )));
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::ToPropKey,
+                            Operands::None,
+                            key.span(),
+                        )));
+                        work.push(ExpressionWork::Visit(key));
+                    } else {
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::GetField2,
+                            Operands::Atom(constants.property_atom_index(property.name.span())?),
+                            property.span,
+                        )));
+                    }
+                }
+            }
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ToObject,
+            Operands::None,
+            pattern.span,
+        )));
+        Ok(())
     }
 
     /// Returns the assignment target underlying an element (skipping any
@@ -5025,11 +5398,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     ) -> Result<u8, LeafCompilationError> {
         match target {
             AssignmentTarget::AssignmentTargetIdentifier(_)
-            | AssignmentTarget::ArrayAssignmentTarget(_) => Ok(0),
+            | AssignmentTarget::ArrayAssignmentTarget(_)
+            | AssignmentTarget::ObjectAssignmentTarget(_) => Ok(0),
             AssignmentTarget::StaticMemberExpression(member) if !member.optional => Ok(1),
             AssignmentTarget::ComputedMemberExpression(member) if !member.optional => Ok(2),
-            AssignmentTarget::ObjectAssignmentTarget(_)
-            | AssignmentTarget::StaticMemberExpression(_)
+            AssignmentTarget::StaticMemberExpression(_)
             | AssignmentTarget::ComputedMemberExpression(_)
             | AssignmentTarget::TSAsExpression(_)
             | AssignmentTarget::TSSatisfiesExpression(_)
@@ -5051,7 +5424,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     ) -> Result<(), LeafCompilationError> {
         match target {
             AssignmentTarget::AssignmentTargetIdentifier(_)
-            | AssignmentTarget::ArrayAssignmentTarget(_) => Ok(()),
+            | AssignmentTarget::ArrayAssignmentTarget(_)
+            | AssignmentTarget::ObjectAssignmentTarget(_) => Ok(()),
             AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
                 work.push(ExpressionWork::Visit(&member.object));
                 Ok(())
@@ -5061,8 +5435,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 work.push(ExpressionWork::Visit(&member.object));
                 Ok(())
             }
-            AssignmentTarget::ObjectAssignmentTarget(_)
-            | AssignmentTarget::StaticMemberExpression(_)
+            AssignmentTarget::StaticMemberExpression(_)
             | AssignmentTarget::ComputedMemberExpression(_)
             | AssignmentTarget::TSAsExpression(_)
             | AssignmentTarget::TSSatisfiesExpression(_)
@@ -6356,6 +6729,24 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 tree_layout,
                 constants,
             )?;
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Dup,
+                Operands::None,
+                assignment.span,
+            )));
+            work.push(ExpressionWork::Visit(&assignment.right));
+            return Ok(());
+        }
+        if let AssignmentTarget::ObjectAssignmentTarget(pattern) = &assignment.left {
+            if assignment.operator != AssignmentOperator::Assign {
+                return unsupported(
+                    UnsupportedLeafFeature::UnsupportedExpression,
+                    assignment.span,
+                );
+            }
+            // The RHS is evaluated, duplicated, and object-destructured; the
+            // original copy remains as the assignment expression's value.
+            self.plan_object_assignment_value(pattern, work, flow, layout, tree_layout, constants)?;
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
                 FinalOpcode::Dup,
                 Operands::None,

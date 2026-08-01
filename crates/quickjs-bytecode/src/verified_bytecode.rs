@@ -5036,6 +5036,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetArrayEl2
             | FinalOpcode::PutField
             | FinalOpcode::PutArrayEl
+            | FinalOpcode::ToObject
             | FinalOpcode::ToPropKey
             | FinalOpcode::DefineField
             | FinalOpcode::DefineArrayEl

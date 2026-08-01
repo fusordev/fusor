@@ -567,6 +567,224 @@ fn global_undefined_nan_infinity_resolve_as_values() {
 }
 
 #[test]
+fn object_declaration_destructures_named_properties() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let {a, b} = {a: 10, b: 20};\
+            return a * 100 + b * 10;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object destructuring result");
+    assert_number(&result, 1200);
+}
+
+#[test]
+fn object_declaration_destructures_renamed_properties() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let {a: x, b: y} = {a: 3, b: 4};\
+            return x * 10 + y;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("renamed object destructuring");
+    assert_number(&result, 34);
+}
+
+#[test]
+fn object_declaration_defaults_replace_undefined_values() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let {a = 5, b = 9} = {a: 1};\
+            return a * 10 + b;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object default result");
+    assert_number(&result, 19);
+}
+
+#[test]
+fn object_declaration_computed_keys_resolve_properties() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let key='a';\
+            let {[key]: x, ['b']: y} = {a: 7, b: 8};\
+            return x * 10 + y;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("computed object key result");
+    assert_number(&result, 78);
+}
+
+#[test]
+fn object_declaration_nested_patterns() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let {a: [x, y], b: {c}} = {a: [1, 2], b: {c: 3}};\
+            return x * 100 + y * 10 + c;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("nested object destructuring");
+    assert_number(&result, 123);
+}
+
+#[test]
+fn object_assignment_destructures_named_properties() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let a=0;let b=0;\
+            ({a, b} = {a: 5, b: 6});\
+            return a * 10 + b;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object assignment result");
+    assert_number(&result, 56);
+}
+
+#[test]
+fn object_assignment_with_defaults_and_renames() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let x=0;let y=0;\
+            ({a: x, b: y = 9} = {a: 1});\
+            return x * 10 + y;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("renamed object assignment");
+    assert_number(&result, 19);
+}
+
+#[test]
+fn object_destructuring_boxes_primitive_values() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let {length} = 'abc';\
+            let {x} = 5;\
+            return length * 10 + (x===undefined?1:0);",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("primitive object destructuring");
+    // `'abc'` boxes to a String wrapper whose `length` reads 3; `5` boxes to
+    // a Number wrapper with no own `x`.
+    assert_number(&result, 31);
+}
+
+#[test]
+fn object_destructuring_invokes_getters() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let calls=0;\
+            let obj={\
+                get a(){calls++;return 42;}\
+            };\
+            let {a} = obj;\
+            return a * 100 + calls;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("getter object destructuring");
+    assert_number(&result, 4201);
+}
+
+#[test]
+fn object_destructuring_rejects_null_and_undefined() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let caught=0;\
+            try{let {a} = null;}catch(e){caught = e.message==='cannot convert to object'?1:0;}\
+            try{let {a} = undefined;}catch(e){caught += e.message==='cannot convert to object'?2:0;}\
+            return caught;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("null and undefined object destructuring");
+    assert_number(&result, 3);
+}
+
+#[test]
+fn object_assignment_expression_value_is_the_rhs() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let a=0;\
+            let result = ({a} = {a: 7});\
+            return result.a * 10 + a;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object assignment expression value");
+    assert_number(&result, 77);
+}
+
+#[test]
+fn object_pattern_as_an_array_assignment_element() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let a=0;let c=0;\
+            [a, {b: c}] = [1, {b: 2}];\
+            return a * 10 + c;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object-in-array destructuring");
+    assert_number(&result, 12);
+}
+
+#[test]
 fn array_destructuring_step_failures_do_not_call_return() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

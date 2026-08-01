@@ -181,6 +181,45 @@ pub(super) fn plan_frame(
     })
 }
 
+/// Implements the pinned `ToObject` conversion: objects and functions pass
+/// through, primitives are boxed into their realm wrapper, and `null` or
+/// `undefined` produce the exact `cannot convert to object` `TypeError`.
+/// Returns the converted object or a pending exception.
+fn to_object_value(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    value: StoredValue,
+    origin: JsStackFrame,
+) -> Result<Result<StoredValue, PendingException>, ExecutionError> {
+    match value {
+        StoredValue::Function(_) | StoredValue::Object(_) => Ok(Ok(value)),
+        StoredValue::Boolean(value) => {
+            let object = runtime.allocate_boxed_boolean(realm, value)?;
+            Ok(Ok(StoredValue::Object(object)))
+        }
+        StoredValue::Number(value) => {
+            let object = runtime.allocate_boxed_number(realm, value)?;
+            Ok(Ok(StoredValue::Object(object)))
+        }
+        StoredValue::String(value) => {
+            let object = runtime.allocate_boxed_string(realm, value)?;
+            Ok(Ok(StoredValue::Object(object)))
+        }
+        StoredValue::Symbol(value) => {
+            let object = runtime.allocate_boxed_symbol(realm, value)?;
+            Ok(Ok(StoredValue::Object(object)))
+        }
+        StoredValue::Undefined | StoredValue::Null => Ok(Err(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("cannot convert to object")?,
+            },
+            origin,
+        })),
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "failure-atomic frame allocation and initialization remain one transaction"
@@ -461,6 +500,15 @@ pub(super) fn execute_one(
         }
         FinalOpcode::PushFalse => push(frame, StoredValue::Boolean(false)),
         FinalOpcode::PushTrue => push(frame, StoredValue::Boolean(true)),
+        FinalOpcode::ToObject => {
+            let value = pop(frame)?;
+            let realm = code(runtime, frame.code)?.realm;
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            match to_object_value(runtime, realm, value, origin)? {
+                Ok(object) => push(frame, object),
+                Err(pending) => return Ok(Step::Abrupt(pending)),
+            }
+        }
         FinalOpcode::Object => {
             let realm = code(runtime, frame.code)?.realm;
             let prototype = runtime.realm_object_prototype(realm)?;
