@@ -545,26 +545,31 @@ A milestone is complete only when all of its checked items pass in CI.
         with the source object retained below the value, bind identifiers,
         defaults, and nested array/object patterns, and drop the source.
         Assignments evaluate and duplicate the RHS, object-destructure
-        identifier or nested-pattern targets (including defaults), and keep
-        the original copy as the assignment expression value. Object
-        patterns also work as array-assignment elements. Object rest
-        (`{...rest}`) lowers to the pinned exclude-list program: a fresh
-        `object` below the converted source records every destructured
-        static key (`swap; null; define_field; swap`) and computed key
-        (`perm3` rotation into one `to_propkey` plus `null;
-        define_array_el`), and the final `copy_data_properties` opcode
-        copies the remaining own enumerable string properties into a fresh
-        target before both source and list drop. The verifier admits the
-        packed `copy_data_properties` offsets and the object-definition
-        pass tracks the exclude list and converted keys through `swap` and
-        `perm3` rotations. The resumable VM snapshots the source through
-        the pinned for-in machinery (boxed String indices included), skips
-        keys present on the exclude list, reads each remaining property
-        through the ordinary observable path so accessors execute with the
-        exact receiver, and defines the values with the ordinary
-        writable/enumerable/configurable layout; getter suspension resumes
-        through a traced native continuation. Object-property member
-        targets and iterator-destructuring heads remain fail-closed.
+        identifier, member, or nested-pattern targets (including defaults),
+        and keep the original copy as the assignment expression value. A
+        member target evaluates its base and computed key after the property
+        read (the pinned QuickJS order, unlike array patterns) and rotates
+        the reference below the fetched value with the pinned
+        `swap`/`perm3` shape before the `put_field`/`put_array_el` store.
+        Object patterns also work as array-assignment elements. Object rest
+        (`{...rest}`) in both declarations and assignments lowers to the
+        pinned exclude-list program: a fresh `object` below the converted
+        source records every destructured static key
+        (`swap; null; define_field; swap`) and computed key (`perm3`
+        rotation into one `to_propkey` plus `null; define_array_el`), and
+        the final `copy_data_properties` opcode copies the remaining own
+        enumerable string properties into a fresh target (bound directly or
+        through a member reference) before both source and list drop. The
+        verifier admits the packed `copy_data_properties` offsets and the
+        object-definition pass tracks the exclude list and converted keys
+        through `swap` and `perm3` rotations. The resumable VM snapshots the
+        source through the pinned for-in machinery (boxed String indices
+        included), skips keys present on the exclude list, reads each
+        remaining property through the ordinary observable path so accessors
+        execute with the exact receiver, and defines the values with the
+        ordinary writable/enumerable/configurable layout; getter suspension
+        resumes through a traced native continuation.
+        Iterator-destructuring heads remain fail-closed.
   - [x] Represent synthetic native caller frames. Each bytecode frame
         reached through `Function.prototype.call` or `Function.prototype.apply`
         records the pinned `call (native)` / `apply (native)` entry, including

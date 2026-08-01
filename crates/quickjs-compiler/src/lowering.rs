@@ -5245,9 +5245,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 )
             }
             AssignmentTarget::ObjectAssignmentTarget(pattern) => {
-                if pattern.rest.is_some() {
-                    return unsupported(UnsupportedLeafFeature::UnsupportedPattern, pattern.span);
-                }
+                // `{a, ...rest} = expr`: destructure the on-stack value with
+                // the object read shape and the exclude-list rest collector.
                 self.plan_object_assignment_value(
                     pattern,
                     work,
@@ -5349,12 +5348,19 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     /// Destructures an on-stack value through an object assignment pattern:
     /// `to_object`, one `get_field2`/`get_array_el2` per property, then
-    /// `drop` the source. Property targets are identifier stores or nested
-    /// patterns (member targets stay fail-closed because their reference
-    /// would sit above the fetched value). Object rest stays fail-closed.
+    /// `drop` the source. Property targets are identifier stores, member
+    /// stores, or nested patterns. A member target evaluates its base (and
+    /// computed key) after the property read and rotates the reference below
+    /// the fetched value with the pinned `perm3`/`swap` shape before the
+    /// `put_field`/`put_array_el` store. Object rest (`{...rest}`) creates
+    /// the exclude list below the source right after conversion, records
+    /// every destructured key in it, and copies the remaining own enumerable
+    /// string properties into a fresh target before both list and source
+    /// drop. The original RHS copy stays below the whole sequence and
+    /// remains the assignment expression's value.
     #[allow(
         clippy::too_many_lines,
-        reason = "object-pattern assignment stays one LIFO work-list transaction"
+        reason = "object-pattern assignment stays one LIFO work-list transaction; member references and the exclude-list recording extend the same push sequence"
     )]
     fn plan_object_assignment_value<'pattern>(
         &self,
@@ -5365,17 +5371,45 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
     ) -> Result<(), LeafCompilationError> {
-        if pattern.rest.is_some() {
-            return unsupported(UnsupportedLeafFeature::UnsupportedPattern, pattern.span);
-        }
+        let has_rest = pattern.rest.is_some();
         // Work is a LIFO stack: the source drop runs last and `to_object`
         // first; each property pushes its store, its default machinery, the
-        // property read, and any computed-key visits in reverse order.
+        // property read, and any computed-key visits in reverse order. With
+        // object rest the exclude list sits below the converted source, so
+        // the recording rotations never touch the retained RHS copy.
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::Drop,
             Operands::None,
             pattern.span,
         )));
+        if let Some(rest) = pattern.rest.as_deref() {
+            // [rhsCopy, excludeList, source] -> target -> copy -> assign ->
+            // drop source -> drop exclude list.
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                rest.span,
+            )));
+            self.plan_assignment_target_value(
+                &rest.target,
+                work,
+                flow,
+                layout,
+                tree_layout,
+                constants,
+            )?;
+            Self::push_object_assignment_member_prelude(&rest.target, constants, work)?;
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::CopyDataProperties,
+                Operands::U8(Self::copy_data_properties_offsets(0, 1, 2)),
+                rest.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Object,
+                Operands::None,
+                rest.span,
+            )));
+        }
         for property in pattern.properties.iter().rev() {
             match property {
                 AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(identifier) => {
@@ -5394,6 +5428,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         Operands::Atom(constants.property_atom_index(identifier.binding.span)?),
                         identifier.span,
                     )));
+                    if has_rest {
+                        Self::push_object_rest_static_key_record(
+                            constants.property_atom_index(identifier.binding.span)?,
+                            identifier.span,
+                            work,
+                        );
+                    }
                 }
                 AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
                     let target = Self::assignment_element_target(&property.binding).ok_or(
@@ -5423,8 +5464,18 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                             )?;
                         }
                         AssignmentTarget::StaticMemberExpression(_)
-                        | AssignmentTarget::ComputedMemberExpression(_)
-                        | AssignmentTarget::TSAsExpression(_)
+                        | AssignmentTarget::ComputedMemberExpression(_) => {
+                            self.plan_assignment_target_value(
+                                target,
+                                work,
+                                flow,
+                                layout,
+                                tree_layout,
+                                constants,
+                            )?;
+                            Self::push_object_assignment_member_prelude(target, constants, work)?;
+                        }
+                        AssignmentTarget::TSAsExpression(_)
                         | AssignmentTarget::TSSatisfiesExpression(_)
                         | AssignmentTarget::TSNonNullExpression(_)
                         | AssignmentTarget::TSTypeAssertion(_)
@@ -5457,11 +5508,15 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                             Operands::None,
                             property.span,
                         )));
-                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                            FinalOpcode::ToPropKey,
-                            Operands::None,
-                            key.span(),
-                        )));
+                        if has_rest {
+                            Self::push_object_rest_computed_key_record(property.span, work);
+                        } else {
+                            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                                FinalOpcode::ToPropKey,
+                                Operands::None,
+                                key.span(),
+                            )));
+                        }
                         work.push(ExpressionWork::Visit(key));
                     } else {
                         work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -5469,9 +5524,32 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                             Operands::Atom(constants.property_atom_index(property.name.span())?),
                             property.span,
                         )));
+                        if has_rest {
+                            Self::push_object_rest_static_key_record(
+                                constants.property_atom_index(property.name.span())?,
+                                property.span,
+                                work,
+                            );
+                        }
                     }
                 }
             }
+        }
+        if has_rest {
+            // [rhsCopy, source] -> object -> swap -> [rhsCopy, excludeList,
+            // source]: the exclude list is created below the converted source
+            // immediately after conversion. Pushed before `to_object` so the
+            // LIFO work list runs the conversion first.
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                pattern.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Object,
+                Operands::None,
+                pattern.span,
+            )));
         }
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::ToObject,
@@ -5479,6 +5557,129 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             pattern.span,
         )));
         Ok(())
+    }
+
+    /// Records a static property key in the object-rest exclude list. The
+    /// list sits directly below the source, so the pinned rotation is
+    /// `[excludeList, source] -> swap -> [source, excludeList] -> null ->
+    /// define_field -> [source, excludeList] -> swap -> [excludeList,
+    /// source]`, exactly as the declaration path emits. Pushed in reverse
+    /// so it runs before the property read.
+    fn push_object_rest_static_key_record(
+        atom: AtomPoolIndex,
+        span: Span,
+        work: &mut Vec<ExpressionWork<'_, '_>>,
+    ) {
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::DefineField,
+            Operands::Atom(atom),
+            span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Null,
+            Operands::None,
+            span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            span,
+        )));
+    }
+
+    /// Records a computed property key in the object-rest exclude list:
+    /// `[excludeList, source, key] -> perm3 -> [source, excludeList, key] ->
+    /// to_propkey -> null -> define_array_el -> [source, excludeList, key]
+    /// -> perm3 -> [excludeList, key, source]`, converting the key exactly
+    /// once before `get_array_el2` reads from the source. Pushed in reverse
+    /// so it runs between the key evaluation and the read.
+    fn push_object_rest_computed_key_record(span: Span, work: &mut Vec<ExpressionWork<'_, '_>>) {
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Perm3,
+            Operands::None,
+            span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::DefineArrayEl,
+            Operands::None,
+            span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Null,
+            Operands::None,
+            span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ToPropKey,
+            Operands::None,
+            span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Perm3,
+            Operands::None,
+            span,
+        )));
+    }
+
+    /// Evaluates the member base and computed key of an object-assignment
+    /// target after the fetched value and rotates the reference below it:
+    /// static targets run `visit(base); swap`, computed targets run
+    /// `visit(base); visit(key); to_propkey; perm3; swap`, leaving
+    /// `[source, base, value]` / `[source, base, key, value]` for the
+    /// pinned `put_field`/`put_array_el` store.
+    fn push_object_assignment_member_prelude<'pattern>(
+        target: &'pattern AssignmentTarget<'arena>,
+        _constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        match target {
+            AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    member.span,
+                )));
+                work.push(ExpressionWork::Visit(&member.object));
+                Ok(())
+            }
+            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    member.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Perm3,
+                    Operands::None,
+                    member.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::ToPropKey,
+                    Operands::None,
+                    member.expression.span(),
+                )));
+                work.push(ExpressionWork::Visit(&member.expression));
+                work.push(ExpressionWork::Visit(&member.object));
+                Ok(())
+            }
+            AssignmentTarget::AssignmentTargetIdentifier(_)
+            | AssignmentTarget::ArrayAssignmentTarget(_)
+            | AssignmentTarget::ObjectAssignmentTarget(_) => Ok(()),
+            AssignmentTarget::StaticMemberExpression(_)
+            | AssignmentTarget::ComputedMemberExpression(_)
+            | AssignmentTarget::TSAsExpression(_)
+            | AssignmentTarget::TSSatisfiesExpression(_)
+            | AssignmentTarget::TSNonNullExpression(_)
+            | AssignmentTarget::TSTypeAssertion(_)
+            | AssignmentTarget::PrivateFieldExpression(_) => {
+                unsupported(UnsupportedLeafFeature::UnsupportedPattern, target.span())
+            }
+        }
     }
 
     /// Returns the assignment target underlying an element (skipping any

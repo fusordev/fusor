@@ -767,6 +767,175 @@ fn object_assignment_expression_value_is_the_rhs() {
 }
 
 #[test]
+fn object_assignment_static_member_targets_assign_through_the_reference() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let o={x:0,y:0};\
+            ({x: o.x, y: o.y} = {x: 3, y: 4});\
+            return o.x * 10 + o.y;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object static member destructuring result");
+    assert_number(&result, 34);
+}
+
+#[test]
+fn object_assignment_computed_member_targets_assign_through_the_reference() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let o={};let keys=['a','b'];\
+            ({a: o[keys[0]], b: o[keys[1]]} = {a: 7, b: 8});\
+            return o.a * 10 + o.b;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object computed member destructuring result");
+    assert_number(&result, 78);
+}
+
+#[test]
+fn object_assignment_member_target_with_default() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let o={x:0};\
+            ({x: o.x = 9} = {});\
+            return o.x;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object member default destructuring result");
+    assert_number(&result, 9);
+}
+
+#[test]
+fn object_assignment_member_targets_evaluate_bases_after_reading() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let order=[];\
+            let o={x:0};\
+            let src={get a(){order[order.length]=1;return 5;}};\
+            function base(){order[order.length]=2;return o;};\
+            ({a: base().x} = src);\
+            return o.x * 100 + order[0] * 10 + order[1];",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object member base ordering");
+    // The pinned QuickJS order reads the property from the source (the
+    // getter records 1) before evaluating the member base (records 2), then
+    // stores into the reference; the array-pattern counterpart evaluates
+    // the base before the step instead.
+    assert_number(&result, 512);
+}
+
+#[test]
+fn object_assignment_nested_patterns_with_member_targets() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let o={x:0};\
+            ({a: {b: o.x}} = {a: {b: 4}});\
+            return o.x;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object nested member destructuring");
+    assert_number(&result, 4);
+}
+
+#[test]
+fn object_assignment_rest_collects_remaining_properties() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let a=0;let rest;\
+            let result = ({a, ...rest} = {a: 1, b: 2, c: 3});\
+            return a * 1000 + rest.b * 100 + rest.c * 10 + (rest.a===undefined?1:0) + result.b * 10000;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object rest assignment result");
+    assert_number(&result, 21231);
+}
+
+#[test]
+fn object_assignment_rest_excludes_destructured_keys_including_computed() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let key='a';let x=0;let b=0;let rest;\
+            ({[key]: x, b, ...rest} = {a: 1, b: 2, c: 3});\
+            return x * 100 + b * 10 + rest.c + (rest.a===undefined?1:0) + (rest.b===undefined?1:0);",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("computed object rest assignment result");
+    assert_number(&result, 125);
+}
+
+#[test]
+fn object_assignment_rest_into_a_member_target() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let o={rest:null};\
+            ({a, ...o.rest} = {a: 1, b: 2, c: 3});\
+            return a * 1000 + o.rest.b * 100 + o.rest.c * 10 + (o.rest.a===undefined?1:0);",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object rest member target result");
+    assert_number(&result, 1231);
+}
+
+#[test]
+fn object_assignment_rest_with_defaults_and_nested_patterns() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let a=0;let x=0;let y=0;let rest;\
+            ({a = 9, b: [x, y], ...rest} = {b: [1, 2], c: 3});\
+            return a * 1000 + x * 100 + y * 10 + rest.c;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object rest assignment with defaults and nested");
+    assert_number(&result, 9123);
+}
+
+#[test]
 fn object_pattern_as_an_array_assignment_element() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
