@@ -197,6 +197,88 @@ pub(crate) fn number_to_int32(value: JsNumber) -> i32 {
     i32::from_ne_bytes(number_to_uint32(value).to_ne_bytes())
 }
 
+/// The largest integer binary64 represents exactly, which bounds `ToIndex` and
+/// `ToLength` (`MAX_SAFE_INTEGER`, `quickjs.c:13485`).
+pub(crate) const MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
+
+/// Applies ECMAScript `ToIntegerOrInfinity` to an already-converted Number.
+///
+/// `NaN` becomes `+0`, and every other finite value truncates toward zero.
+/// Infinities are preserved so a caller can distinguish an unbounded length
+/// from a saturated one.
+#[must_use]
+pub(crate) fn number_to_integer_or_infinity(value: JsNumber) -> f64 {
+    let value = value.as_f64();
+    if value.is_nan() {
+        return 0.0;
+    }
+    if value.is_infinite() {
+        return value;
+    }
+    value.trunc()
+}
+
+/// Applies ECMAScript `ToLength` to an already-converted Number.
+///
+/// The result is clamped into `0..=MAX_SAFE_INTEGER`, matching
+/// `JS_ToLengthFree` (`quickjs.c:13509`). This is deliberately distinct from
+/// the `ToUint32` length read that `js_get_length32` performs
+/// (`quickjs.c:41008`), which the array-iterator path keeps using.
+#[must_use]
+pub(crate) fn number_to_length(value: JsNumber) -> u64 {
+    let integer = number_to_integer_or_infinity(value);
+    if integer <= 0.0 {
+        return 0;
+    }
+    if integer >= max_safe_integer_as_f64() {
+        return MAX_SAFE_INTEGER;
+    }
+    // The value is a positive, finite, truncated double below 2^53, so it is
+    // exactly representable as a u64.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the preceding bounds prove the truncated value fits the u64 domain exactly"
+    )]
+    let clamped = integer as u64;
+    clamped
+}
+
+/// Applies ECMAScript `ToIndex` to an already-converted Number.
+///
+/// Returns `None` when the truncated value falls outside
+/// `0..=MAX_SAFE_INTEGER`, which the caller reports as
+/// `RangeError: invalid array index` (`quickjs.c:13498`). `NaN` and `undefined`
+/// convert to `0` rather than failing, which the pinned oracle confirms:
+/// `BigInt.asUintN(NaN, 5n)` is `0n`.
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "ToIndex is required by BigInt.asIntN/asUintN, whose BigInt domain is a separate milestone"
+)]
+pub(crate) fn number_to_index(value: JsNumber) -> Option<u64> {
+    let integer = number_to_integer_or_infinity(value);
+    if integer < 0.0 || integer > max_safe_integer_as_f64() {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the preceding bounds prove the truncated value fits the u64 domain exactly"
+    )]
+    let index = integer as u64;
+    Some(index)
+}
+
+/// Returns `MAX_SAFE_INTEGER` as an exact binary64 value.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "2^53 - 1 is exactly representable in binary64"
+)]
+fn max_safe_integer_as_f64() -> f64 {
+    MAX_SAFE_INTEGER as f64
+}
+
 fn parse_infinity(units: &mut Peekable<CodeUnits<'_>>, sign: Option<u8>) -> JsNumber {
     for expected in b"Infinity" {
         if units.next() != Some(u16::from(*expected)) {
@@ -443,7 +525,10 @@ fn significant_width(digit: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{number_to_int32, number_to_uint32, string_to_number};
+    use super::{
+        MAX_SAFE_INTEGER, max_safe_integer_as_f64, number_to_index, number_to_int32,
+        number_to_integer_or_infinity, number_to_length, number_to_uint32, string_to_number,
+    };
     use crate::{JsNumber, JsString};
 
     fn parse(input: &str) -> f64 {
@@ -596,5 +681,91 @@ mod tests {
             number_to_int32(JsNumber::from_f64(exponent_83_with_low_bit)),
             i32::MIN
         );
+    }
+
+    /// `ToIntegerOrInfinity` truncates toward zero, maps `NaN` to `+0`, and
+    /// preserves infinities.
+    #[test]
+    fn to_integer_or_infinity_truncates_toward_zero() {
+        for (input, expected) in [
+            (f64::NAN, 0.0),
+            (0.0, 0.0),
+            (-0.0, 0.0),
+            (1.9, 1.0),
+            (-1.9, -1.0),
+            (-0.5, -0.0),
+            (f64::INFINITY, f64::INFINITY),
+            (f64::NEG_INFINITY, f64::NEG_INFINITY),
+        ] {
+            let actual = number_to_integer_or_infinity(JsNumber::from_f64(input));
+            // Compare bit patterns so the assertion is exact, normalizing both
+            // signed zeros to `+0`. Truncation preserves the sign of a zero
+            // result (`Math.trunc(-0.5)` is `-0` in the pinned oracle), and
+            // every consumer here treats the two zeros alike.
+            let normalize = |value: f64| if value == 0.0 { 0.0 } else { value };
+            assert_eq!(
+                normalize(actual).to_bits(),
+                normalize(expected).to_bits(),
+                "ToIntegerOrInfinity({input}) produced {actual}, expected {expected}"
+            );
+        }
+    }
+
+    /// `ToLength` clamps into `0..=MAX_SAFE_INTEGER`.
+    ///
+    /// The pinned oracle exposes this through `Function.prototype.apply`:
+    /// `count.apply(null, {length: -5})` sees `0` arguments,
+    /// `{length: 1.9}` sees `1`, and `{length: NaN}` sees `0`.
+    #[test]
+    fn to_length_clamps_into_the_safe_integer_range() {
+        for (input, expected) in [
+            (f64::NAN, 0),
+            (-5.0, 0),
+            (-0.0, 0),
+            (0.0, 0),
+            (1.9, 1),
+            (3.0, 3),
+            (f64::INFINITY, MAX_SAFE_INTEGER),
+            (f64::NEG_INFINITY, 0),
+        ] {
+            assert_eq!(
+                number_to_length(JsNumber::from_f64(input)),
+                expected,
+                "ToLength({input})"
+            );
+        }
+        // The boundary itself is preserved rather than saturated away.
+        let boundary = max_safe_integer_as_f64();
+        assert_eq!(
+            number_to_length(JsNumber::from_f64(boundary)),
+            MAX_SAFE_INTEGER
+        );
+    }
+
+    /// `ToIndex` rejects a negative or too-large value and maps `NaN` to zero.
+    ///
+    /// The pinned oracle exposes this through `BigInt.asUintN`:
+    /// `BigInt.asUintN(NaN, 5n)` is `0n`, `BigInt.asUintN(1.5, 5n)` is `1n`,
+    /// and both `-1` and `2**53` raise `RangeError: invalid array index`.
+    #[test]
+    fn to_index_rejects_values_outside_the_safe_integer_range() {
+        assert_eq!(number_to_index(JsNumber::from_f64(f64::NAN)), Some(0));
+        assert_eq!(number_to_index(JsNumber::from_f64(1.5)), Some(1));
+        assert_eq!(number_to_index(JsNumber::from_f64(0.0)), Some(0));
+        assert_eq!(number_to_index(JsNumber::from_f64(-0.0)), Some(0));
+        assert_eq!(number_to_index(JsNumber::from_f64(8.0)), Some(8));
+        assert_eq!(
+            number_to_index(JsNumber::from_f64(max_safe_integer_as_f64())),
+            Some(MAX_SAFE_INTEGER)
+        );
+
+        assert_eq!(number_to_index(JsNumber::from_f64(-1.0)), None);
+        assert_eq!(number_to_index(JsNumber::from_f64(-1.5)), None);
+        assert_eq!(
+            number_to_index(JsNumber::from_f64(max_safe_integer_as_f64() + 1.0)),
+            None
+        );
+        assert_eq!(number_to_index(JsNumber::from_f64(f64::INFINITY)), None);
+        assert_eq!(number_to_index(JsNumber::from_f64(f64::NEG_INFINITY)), None);
     }
 }
