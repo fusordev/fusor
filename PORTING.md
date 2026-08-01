@@ -529,8 +529,14 @@ A milestone is complete only when all of its checked items pass in CI.
         spec requires. Nested array patterns recurse through the same
         verified record shape: each nested value opens its own iterator,
         and the outer record resumes with `for_of_next` offset zero after
-        the nested `iterator_close`. Object patterns, member targets, and
-        iterator-destructuring heads remain fail-closed.
+        the nested `iterator_close`. Assignment targets extend to static
+        and computed member expressions: the reference base and key are
+        evaluated before the step (the pinned QuickJS order) and sit below
+        the incoming value, so the `for_of_next` temporary offset equals
+        the reference depth, and member rest targets keep their reference
+        slots below the fresh array with the loop offset advanced by the
+        same depth. Object patterns and iterator-destructuring heads remain
+        fail-closed.
   - [x] Represent synthetic native caller frames. Each bytecode frame
         reached through `Function.prototype.call` or `Function.prototype.apply`
         records the pinned `call (native)` / `apply (native)` entry, including

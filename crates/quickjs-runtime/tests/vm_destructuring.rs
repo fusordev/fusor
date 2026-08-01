@@ -403,6 +403,126 @@ fn nested_array_pattern_assignment_with_rest() {
 }
 
 #[test]
+fn array_destructuring_static_member_targets_assign_through_the_reference() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let o={x:0,y:0};\
+            [o.x, o.y] = [3, 4];\
+            return o.x * 10 + o.y;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("static member destructuring result");
+    assert_number(&result, 34);
+}
+
+#[test]
+fn array_destructuring_computed_member_targets_assign_through_the_reference() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let o={};let keys=['a','b'];\
+            [o[keys[0]], o[keys[1]]] = [7, 8];\
+            return o.a * 10 + o.b;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("computed member destructuring result");
+    assert_number(&result, 78);
+}
+
+#[test]
+fn array_destructuring_member_target_with_default() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let o={x:0};\
+            [o.x = 9] = [];\
+            return o.x;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("member default destructuring result");
+    assert_number(&result, 9);
+}
+
+#[test]
+fn array_destructuring_member_rest_target_collects_into_the_reference() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let o={x:null};\
+            [o.x, ...o.rest] = [1, 2, 3];\
+            return o.x * 100 + o.rest[0] * 10 + o.rest[1];",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("member rest destructuring result");
+    assert_number(&result, 123);
+}
+
+#[test]
+fn array_destructuring_computed_member_rest_target() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let o={x:null};let key='rest';\
+            [o.x, ...o[key]] = [1, 2, 3];\
+            return o.x * 100 + o.rest[0] * 10 + o.rest[1];",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("computed member rest result");
+    assert_number(&result, 123);
+}
+
+#[test]
+fn array_destructuring_member_targets_evaluate_bases_before_values() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let order=[];\
+            let o={x:0};\
+            let iterable={\
+                [Symbol.iterator](){\
+                    order[order.length]=2;\
+                    let i=0;\
+                    return {next(){i++;return i===1?{done:false,value:5}:{done:true};}};\
+                }\
+            };\
+            [o.x] = iterable;\
+            order[order.length]=1;\
+            return o.x * 100 + order[0] * 10 + order[1];",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("member base ordering");
+    // The pinned QuickJS reference evaluates the member base before the
+    // iterator step: `o` is read (order 2) before the iterator is created
+    // (order 1), then the value is stored into `o.x`.
+    assert_number(&result, 521);
+}
+
+#[test]
 fn array_destructuring_step_failures_do_not_call_return() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

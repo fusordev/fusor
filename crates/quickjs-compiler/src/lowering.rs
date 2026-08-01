@@ -4787,6 +4787,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
 
     #[allow(
         clippy::too_many_arguments,
+        clippy::too_many_lines,
         reason = "array-pattern assignment planning carries the same explicit frame, tree, and flow authority as every other pattern form"
     )]
     fn plan_array_assignment_elements<'pattern>(
@@ -4796,6 +4797,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
     ) -> Result<(), LeafCompilationError> {
         // Work is a LIFO stack; the destructuring sequence runs after the
         // caller's `dup` of the RHS, so `iterator_close` is pushed first and
@@ -4807,7 +4809,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             pattern.span,
         )));
         if let Some(rest) = pattern.rest.as_deref() {
-            self.plan_assignment_rest_collection(rest, work, flow, layout, tree_layout)?;
+            self.plan_assignment_rest_collection(rest, work, flow, layout, tree_layout, constants)?;
         }
         for element in pattern.elements.iter().rev() {
             match element {
@@ -4829,6 +4831,19 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     )));
                 }
                 Some(element) => {
+                    // Member-expression targets evaluate their base (and
+                    // computed key) before the step so the reference sits
+                    // below the destructured value; the `for_of_next`
+                    // temporary offset is exactly that reference depth. The
+                    // reference prelude is therefore pushed last (executes
+                    // first), the store machinery first (executes last).
+                    let target = Self::assignment_element_target(element).ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "assignment target element is an assignment target",
+                            span: Some(element.span()),
+                        },
+                    )?;
+                    let depth = Self::assignment_target_depth(target)?;
                     if let AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(default) =
                         element
                     {
@@ -4842,6 +4857,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                             flow,
                             layout,
                             tree_layout,
+                            constants,
                         )?;
                         work.push(ExpressionWork::Bind(skip.clone()));
                         if let Some(span) = anonymous_named_evaluation_span(&default.init) {
@@ -4874,13 +4890,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                             default.span,
                         )));
                     } else {
-                        let target = element.as_assignment_target().ok_or(
-                            LeafCompilationError::SemanticInvariant {
-                                invariant: "assignment target element is an assignment target",
-                                span: Some(element.span()),
-                            },
+                        self.plan_assignment_target_value(
+                            target,
+                            work,
+                            flow,
+                            layout,
+                            tree_layout,
+                            constants,
                         )?;
-                        self.plan_assignment_target_value(target, work, flow, layout, tree_layout)?;
                     }
                     work.push(ExpressionWork::Emit(PlannedInstruction::new(
                         FinalOpcode::Drop,
@@ -4889,9 +4906,10 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     )));
                     work.push(ExpressionWork::Emit(PlannedInstruction::new(
                         FinalOpcode::ForOfNext,
-                        Operands::U8(0),
+                        Operands::U8(depth),
                         element.span(),
                     )));
+                    Self::plan_assignment_target_prelude(target, constants, work)?;
                 }
             }
         }
@@ -4910,6 +4928,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         flow: &mut PlannedControlFlow,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
     ) -> Result<(), LeafCompilationError> {
         match target {
             AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
@@ -4939,12 +4958,108 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 }
                 Ok(())
             }
+            AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
+                // The base is evaluated by the reference prelude before the
+                // `for_of_next` step; the store consumes it with the value.
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PutField,
+                    Operands::Atom(constants.property_atom_index(member.property.span)?),
+                    member.span,
+                )));
+                Ok(())
+            }
+            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PutArrayEl,
+                    Operands::None,
+                    member.span,
+                )));
+                Ok(())
+            }
             AssignmentTarget::ArrayAssignmentTarget(pattern) => {
                 // `[a, [b]] = expr`: destructure the on-stack value with a
                 // nested iterator; the sequence emits `for_of_start`, the
                 // nested elements, and `iterator_close` around the target
                 // stores.
-                self.plan_array_assignment_elements(pattern, flow, work, layout, tree_layout)
+                self.plan_array_assignment_elements(
+                    pattern,
+                    flow,
+                    work,
+                    layout,
+                    tree_layout,
+                    constants,
+                )
+            }
+            AssignmentTarget::ObjectAssignmentTarget(_)
+            | AssignmentTarget::StaticMemberExpression(_)
+            | AssignmentTarget::ComputedMemberExpression(_)
+            | AssignmentTarget::TSAsExpression(_)
+            | AssignmentTarget::TSSatisfiesExpression(_)
+            | AssignmentTarget::TSNonNullExpression(_)
+            | AssignmentTarget::TSTypeAssertion(_)
+            | AssignmentTarget::PrivateFieldExpression(_) => {
+                unsupported(UnsupportedLeafFeature::UnsupportedPattern, target.span())
+            }
+        }
+    }
+
+    /// Returns the assignment target underlying an element (skipping any
+    /// default wrapper).
+    fn assignment_element_target<'pattern>(
+        element: &'pattern AssignmentTargetMaybeDefault<'arena>,
+    ) -> Option<&'pattern AssignmentTarget<'arena>> {
+        match element {
+            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(default) => {
+                Some(&default.binding)
+            }
+            _ => element.as_assignment_target(),
+        }
+    }
+
+    /// Returns the number of reference slots a destructuring assignment
+    /// target keeps below the incoming value: identifiers and nested array
+    /// patterns keep none, static members keep their base, and computed
+    /// members keep their base and key.
+    fn assignment_target_depth(
+        target: &AssignmentTarget<'arena>,
+    ) -> Result<u8, LeafCompilationError> {
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(_)
+            | AssignmentTarget::ArrayAssignmentTarget(_) => Ok(0),
+            AssignmentTarget::StaticMemberExpression(member) if !member.optional => Ok(1),
+            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => Ok(2),
+            AssignmentTarget::ObjectAssignmentTarget(_)
+            | AssignmentTarget::StaticMemberExpression(_)
+            | AssignmentTarget::ComputedMemberExpression(_)
+            | AssignmentTarget::TSAsExpression(_)
+            | AssignmentTarget::TSSatisfiesExpression(_)
+            | AssignmentTarget::TSNonNullExpression(_)
+            | AssignmentTarget::TSTypeAssertion(_)
+            | AssignmentTarget::PrivateFieldExpression(_) => {
+                unsupported(UnsupportedLeafFeature::UnsupportedPattern, target.span())
+            }
+        }
+    }
+
+    /// Evaluates the member base and computed key of a destructuring
+    /// assignment target below the incoming value. Pushed last so it runs
+    /// before the element's `for_of_next` step.
+    fn plan_assignment_target_prelude<'pattern>(
+        target: &'pattern AssignmentTarget<'arena>,
+        _constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(_)
+            | AssignmentTarget::ArrayAssignmentTarget(_) => Ok(()),
+            AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
+                work.push(ExpressionWork::Visit(&member.object));
+                Ok(())
+            }
+            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
+                work.push(ExpressionWork::Visit(&member.expression));
+                work.push(ExpressionWork::Visit(&member.object));
+                Ok(())
             }
             AssignmentTarget::ObjectAssignmentTarget(_)
             | AssignmentTarget::StaticMemberExpression(_)
@@ -4970,6 +5085,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         flow: &mut PlannedControlFlow,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
     ) -> Result<(), LeafCompilationError> {
         // `[first, ...rest] = expr`: collect the remaining values into a
         // fresh array with the pinned `array_from; push index; for_of_next;
@@ -4979,8 +5095,18 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         // branch uses the certified for-of iteration shape.
         //
         // Work is a LIFO stack, so each item is pushed in reverse execution
-        // order: the target store runs last, after the two exit drops.
-        self.plan_assignment_target_value(&rest.target, work, flow, layout, tree_layout)?;
+        // order: the target store runs last, after the two exit drops. A
+        // member-expression rest target evaluates its base before the fresh
+        // array is materialized (pushed last, so it executes first), leaving
+        // `[base, array]` for the store.
+        self.plan_assignment_target_value(
+            &rest.target,
+            work,
+            flow,
+            layout,
+            tree_layout,
+            constants,
+        )?;
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::Drop,
             Operands::None,
@@ -5021,9 +5147,18 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             target: body,
             span: rest.span,
         });
+        // A member-expression rest target keeps its reference slots below
+        // the fresh array and cursor, so the loop `for_of_next` temporary
+        // offset is 2 (array and cursor) plus the reference depth.
+        let step_offset = u8::try_from(
+            2_usize.saturating_add(usize::from(Self::assignment_target_depth(&rest.target)?)),
+        )
+        .map_err(|_| LeafCompilationError::CapacityExceeded {
+            domain: "rest target reference depth",
+        })?;
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::ForOfNext,
-            Operands::U8(2),
+            Operands::U8(step_offset),
             rest.span,
         )));
         work.push(ExpressionWork::Bind(next));
@@ -5037,6 +5172,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Operands::NPop { argument_count: 0 },
             rest.span,
         )));
+        // The member base (and computed key) execute before `array_from`
+        // and stay below the fresh array for the store.
+        Self::plan_assignment_target_prelude(&rest.target, constants, work)?;
         Ok(())
     }
 
@@ -6210,7 +6348,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
             // The RHS is evaluated, duplicated, and destructured; the
             // original copy remains as the assignment expression's value.
-            self.plan_array_assignment_elements(pattern, flow, work, layout, tree_layout)?;
+            self.plan_array_assignment_elements(
+                pattern,
+                flow,
+                work,
+                layout,
+                tree_layout,
+                constants,
+            )?;
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
                 FinalOpcode::Dup,
                 Operands::None,
