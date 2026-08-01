@@ -6159,6 +6159,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                                 unary,
                                 layout,
                                 tree_layout,
+                                constants,
                                 &mut work,
                                 flow,
                             )?;
@@ -7025,8 +7026,26 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 )?));
                 continue;
             }
-            if key.value.code_units().eq("__proto__".encode_utf16()) {
-                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, key.span);
+            // `__proto__: value` in an object literal is a prototype
+            // mutation, not an own property. Only an object or `null` takes
+            // effect; every other value is silently ignored, which the pinned
+            // `OP_set_proto` handler enforces (`quickjs.c:19330-19341`).
+            // Shorthand and computed forms are ordinary own properties and are
+            // handled by their own planners.
+            if key.value.code_units().eq("__proto__".encode_utf16())
+                && !property.shorthand
+                && property.kind == PropertyKind::Init
+            {
+                if let Some(span) = anonymous_named_evaluation_span(&property.value) {
+                    return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+                }
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::SetProto,
+                    Operands::None,
+                    property.span,
+                )));
+                work.push(ExpressionWork::Visit(&property.value));
+                continue;
             }
             if let Some(span) = anonymous_named_evaluation_span(&property.value) {
                 return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
@@ -7591,6 +7610,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         unary: &'expression UnaryExpression<'arena>,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
@@ -7668,10 +7688,89 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 work.push(ExpressionWork::Visit(&unary.argument));
             }
             UnaryOperator::Delete => {
-                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, unary.span);
+                Self::plan_delete_expression(unary, constants, work)?;
             }
         }
         Ok(())
+    }
+
+    /// Lowers `delete` into the pinned `OP_delete` shape.
+    ///
+    /// `QuickJS` rewrites the preceding member read into a key push followed by
+    /// `OP_delete` (`quickjs.c:27395-27437`), so the operand order here is the
+    /// base object then the property key. `delete` of anything that is not a
+    /// member expression evaluates its operand for effect and yields `true`,
+    /// which is ECMAScript's non-Reference case; an unqualified identifier
+    /// operand is an early error the front end already rejects in strict code
+    /// and is not admitted here.
+    fn plan_delete_expression<'expression>(
+        unary: &'expression UnaryExpression<'arena>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let mut argument = &unary.argument;
+        while let Expression::ParenthesizedExpression(parenthesized) = argument {
+            argument = &parenthesized.expression;
+        }
+        match argument {
+            Expression::StaticMemberExpression(member) => {
+                if member.optional {
+                    return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+                }
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Delete,
+                    Operands::None,
+                    unary.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PushAtomValue,
+                    Operands::Atom(constants.property_atom_index(member.property.span)?),
+                    member.property.span,
+                )));
+                work.push(ExpressionWork::Visit(&member.object));
+                Ok(())
+            }
+            Expression::ComputedMemberExpression(member) => {
+                if member.optional {
+                    return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+                }
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Delete,
+                    Operands::None,
+                    unary.span,
+                )));
+                work.push(ExpressionWork::Visit(&member.expression));
+                work.push(ExpressionWork::Visit(&member.object));
+                Ok(())
+            }
+            // `delete identifier` is not a property delete: it consults the
+            // binding's own deletability. Strict code rejects it as an early
+            // error, and the admitted sloppy cases (`false` for a declared
+            // binding, `true` for a missing one) need the pinned
+            // `OP_delete_var` scope resolution rather than `OP_delete`. Until
+            // that lowering exists this stays fail-closed instead of silently
+            // reporting `true`.
+            Expression::Identifier(_) => {
+                unsupported(UnsupportedLeafFeature::UnsupportedExpression, unary.span)
+            }
+            _ => {
+                // ECMAScript's non-Reference case: the operand is evaluated
+                // for effect and `delete` yields `true`. The pinned oracle
+                // agrees (`delete (1 + 1)` is `true`).
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PushTrue,
+                    Operands::None,
+                    unary.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    argument.span(),
+                )));
+                work.push(ExpressionWork::Visit(argument));
+                Ok(())
+            }
+        }
     }
 
     fn plan_conditional_expression<'expression>(

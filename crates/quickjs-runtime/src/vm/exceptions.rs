@@ -196,6 +196,13 @@ pub(super) fn property_exception_at(
         PropertyFailure::NoSetter => JsString::from_utf8("no setter for property")?,
         PropertyFailure::NotConfigurable => JsString::from_utf8("property is not configurable")?,
         PropertyFailure::NonExtensible => JsString::from_utf8("object is not extensible")?,
+        // `delete` coerces its base with `ToObject`, so a nullish base reports
+        // the conversion failure rather than a property-read failure
+        // (`quickjs.c:10926`).
+        PropertyFailure::DeleteNull | PropertyFailure::DeleteUndefined => {
+            JsString::from_utf8("cannot convert to object")?
+        }
+        PropertyFailure::NotDeletable => JsString::from_utf8("could not delete property")?,
     };
     Ok(PendingException {
         realm,

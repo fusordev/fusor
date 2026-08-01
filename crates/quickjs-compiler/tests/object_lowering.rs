@@ -478,8 +478,10 @@ fn bigint_methods_and_accessors_keep_exact_values_names_and_raw_sources() {
     );
 }
 
+/// A `__proto__` method or accessor is an ordinary own property; only the
+/// `__proto__: value` data form is a prototype mutation.
 #[test]
-fn quoted_proto_methods_are_ordinary_while_quoted_proto_data_stays_fail_closed() {
+fn quoted_proto_methods_and_accessors_stay_ordinary_own_properties() {
     let tree = compile_tree(
         r#"function make(){return {"__proto__"(){return 1;},get "__proto__"(){return 2;},set "__proto__"(next){next;}};}"#,
         "make",
@@ -901,11 +903,6 @@ fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
             "key",
         ),
         (
-            "function make(object,key){return delete object[key];}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "object[key]",
-        ),
-        (
             "function make(key){return {[key]:function(){}};}",
             UnsupportedLeafFeature::InferredFunctionName,
             "function(){}",
@@ -921,19 +918,9 @@ fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
             "yield 1",
         ),
         (
-            "function make(value){return {__proto__:value};}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "__proto__",
-        ),
-        (
-            "function make(value){return {\"__proto__\":value};}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "\"__proto__\"",
-        ),
-        (
-            r#"function make(value){return {"__pro\u0074o__":value};}"#,
-            UnsupportedLeafFeature::UnsupportedExpression,
-            r#""__pro\u0074o__""#,
+            r#"function make(){return {"__proto__":function(){}};}"#,
+            UnsupportedLeafFeature::InferredFunctionName,
+            "function(){}",
         ),
         (
             "function make(){return {handler:function(){}};}",
@@ -992,4 +979,99 @@ fn anonymous_class_computed_data_properties_remain_fail_closed_before_lowering()
         },
     )
     .expect("front-end acceptance");
+}
+
+/// `delete` lowers to the pinned `OP_delete` shape: the base, then the key,
+/// then one `Delete`. `QuickJS` builds the same sequence by rewriting the
+/// preceding member read into a key push (`quickjs.c:27395-27437`).
+#[test]
+fn computed_delete_lowers_to_base_key_then_delete() {
+    let compiled = compile(
+        "function make(object,key){return delete object[key];}",
+        "make",
+    );
+    assert_eq!(
+        instructions(&compiled),
+        vec![
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::GetArg1, Operands::NoneArg),
+            (FinalOpcode::Delete, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+}
+
+/// A static `delete` pushes the property atom instead of evaluating a key
+/// expression, which is the `OP_get_field` rewrite in the pinned compiler.
+#[test]
+fn static_delete_pushes_the_property_atom_before_delete() {
+    let compiled = compile("function make(object){return delete object.field;}", "make");
+    let lowered = instructions(&compiled);
+    assert_eq!(lowered[0], (FinalOpcode::GetArg0, Operands::NoneArg));
+    assert!(matches!(
+        lowered[1],
+        (FinalOpcode::PushAtomValue, Operands::Atom(_))
+    ));
+    assert_eq!(lowered[2], (FinalOpcode::Delete, Operands::None));
+    assert_eq!(lowered[3], (FinalOpcode::Return, Operands::None));
+}
+
+/// `delete` of a non-reference still evaluates its operand and yields `true`.
+/// The pinned oracle reports `delete (1 + 1)` as `true`.
+#[test]
+fn deleting_a_non_reference_drops_the_operand_and_pushes_true() {
+    let compiled = compile("function make(value){return delete (value+1);}", "make");
+    let lowered = instructions(&compiled);
+    assert_eq!(lowered[0], (FinalOpcode::GetArg0, Operands::NoneArg));
+    let tail = &lowered[lowered.len() - 3..];
+    assert_eq!(tail[0], (FinalOpcode::Drop, Operands::None));
+    assert_eq!(tail[1], (FinalOpcode::PushTrue, Operands::None));
+    assert_eq!(tail[2], (FinalOpcode::Return, Operands::None));
+}
+
+/// `__proto__: value` lowers to `OP_set_proto`, which mutates the prototype
+/// and leaves the literal on the stack instead of defining an own property
+/// (`quickjs.c:19330-19341`). Quoted and escaped spellings are the same
+/// prototype mutation because the comparison is on cooked code units; the
+/// pinned oracle agrees for all three.
+#[test]
+fn proto_data_keys_lower_to_set_proto_in_every_spelling() {
+    for source in [
+        "function make(value){return {__proto__:value};}",
+        "function make(value){return {\"__proto__\":value};}",
+        r#"function make(value){return {"__pro\u0074o__":value};}"#,
+    ] {
+        let compiled = compile(source, "make");
+        assert_eq!(
+            instructions(&compiled),
+            vec![
+                (FinalOpcode::Object, Operands::None),
+                (FinalOpcode::GetArg0, Operands::NoneArg),
+                (FinalOpcode::SetProto, Operands::None),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            "{source}"
+        );
+    }
+}
+
+/// A computed `__proto__` key stays an ordinary own property, so it keeps the
+/// computed definition opcode rather than becoming a prototype mutation. The
+/// oracle reports `computed proto is own => __proto__`.
+#[test]
+fn a_computed_proto_key_still_defines_an_own_property() {
+    let compiled = compile("function make(key,value){return {[key]:value};}", "make");
+    let lowered = instructions(&compiled);
+    assert!(
+        lowered
+            .iter()
+            .all(|(opcode, _)| *opcode != FinalOpcode::SetProto),
+        "a computed key must not mutate the prototype: {lowered:?}"
+    );
+    assert!(
+        lowered
+            .iter()
+            .any(|(opcode, _)| *opcode == FinalOpcode::DefineArrayEl),
+        "a computed key defines an own property: {lowered:?}"
+    );
 }
