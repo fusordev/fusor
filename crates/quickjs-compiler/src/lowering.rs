@@ -1817,15 +1817,26 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 planning.constants,
                 flow,
             )?,
-            StatementWork::ForOfHead(left) => self.plan_for_of_head(left, planning.layout)?,
-            StatementWork::ForInAssignment(left) | StatementWork::ForOfAssignment(left) => self
-                .plan_for_in_assignment(
-                    left,
-                    planning.layout,
-                    planning.tree_layout,
-                    planning.constants,
-                    flow,
-                )?,
+            StatementWork::ForOfHead(left) => {
+                self.plan_for_of_head(left, planning.layout)?;
+            }
+            StatementWork::ForInAssignment(left) => self.plan_for_in_assignment(
+                left,
+                planning.layout,
+                planning.tree_layout,
+                planning.constants,
+                flow,
+            )?,
+            StatementWork::ForOfAssignment(left) => self.plan_for_of_assignment(
+                left,
+                planning.layout,
+                planning.tree_layout,
+                planning.constants,
+                flow,
+            )?,
+            StatementWork::ForOfRotate(scope) => {
+                self.plan_for_of_rotation(planning.executable, scope, planning.layout, flow)?;
+            }
             StatementWork::Expression(expression) => self.plan_expression(
                 expression,
                 planning.layout,
@@ -3131,6 +3142,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Operands::U8(0),
             statement.span,
         )));
+        work.push(StatementWork::ForOfRotate(scope));
         work.push(StatementWork::Bind(next));
         work.push(StatementWork::Emit(PlannedInstruction::new(
             FinalOpcode::ForOfStart,
@@ -4053,6 +4065,71 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    /// Re-arms the for-of loop scope's non-captured TDZ cells at the back
+    /// edge. Each iteration writes the head bindings (identifier or
+    /// destructuring) as fresh initializations; captured cells rotate through
+    /// `close_loc`, and the non-captured cells return to the uninitialized
+    /// state exactly like the captured rotation, so every iteration's write
+    /// is a valid initialization.
+    fn plan_for_of_rotation(
+        &self,
+        executable: ExecutableId,
+        scope: ScopeId,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let scoping = self.unit.semantic().scoping();
+        let mut rotated_locals = Vec::new();
+        for symbol in scoping.iter_bindings_in(scope) {
+            if scoping.symbol_scope_id(symbol) != scope {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "for-of rotation exact-scope binding belongs to that scope",
+                    span: Some(scoping.symbol_span(symbol)),
+                });
+            }
+            let declaration_span = scoping.symbol_span(symbol);
+            let binding = self.binding_for_identifier(Some(symbol), declaration_span)?;
+            let storage = self.planned.plan.binding(binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "for-of rotation compiler binding exists",
+                    span: Some(declaration_span),
+                },
+            )?;
+            if storage.executable() != executable {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "for-of rotation binding belongs to the selected executable",
+                    span: Some(declaration_span),
+                });
+            }
+            if storage.is_frame_captured() || !storage.policy().has_temporal_dead_zone() {
+                continue;
+            }
+            let FrameSlot::Local(slot) =
+                layout
+                    .slot(binding)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "for-of rotation TDZ binding has a frame slot",
+                        span: Some(declaration_span),
+                    })?
+            else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "for-of rotation TDZ binding uses a local slot",
+                    span: Some(declaration_span),
+                });
+            };
+            rotated_locals.push((slot, declaration_span));
+        }
+        rotated_locals.sort_unstable_by_key(|(slot, _)| slot.index());
+        for (slot, declaration_span) in rotated_locals {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::SetLocUninitialized,
+                Operands::Loc(slot.index()),
+                declaration_span,
+            ))?;
+        }
+        Ok(())
+    }
+
     fn validate_function_declaration(
         &self,
         function: &Function<'arena>,
@@ -4167,14 +4244,64 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
             return Ok(());
         };
-        let (_, initializer) = self.validate_for_in_declaration(declaration, layout)?;
-        if let Some(initializer) = initializer {
+        let pattern = Self::validate_for_of_declaration(declaration)?;
+        let BindingPattern::BindingIdentifier(identifier) = pattern else {
+            // Destructuring heads validate every binding when the
+            // per-iteration destructure binds it, exactly like the ordinary
+            // destructuring-declaration path.
+            return Ok(());
+        };
+        let binding = self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "for-of declared compiler binding exists",
+                    span: Some(identifier.span),
+                })?;
+        if storage.placement() == StoragePlacement::GlobalObject {
+            self.validate_realm_global_var_declaration(declaration.kind, storage, identifier.span)?;
+        } else {
+            let slot = layout
+                .slot(binding)
+                .ok_or(LeafCompilationError::Unsupported {
+                    feature: UnsupportedLeafFeature::UnsupportedBinding,
+                    span: identifier.span,
+                })?;
+            self.validate_declaration_storage(declaration.kind, binding, slot, identifier.span)?;
+        }
+        Ok(())
+    }
+
+    /// Validates the shared shape of a for-of declaration head: exactly one
+    /// `var`/`let`/`const` declarator with no initializer. Returns the
+    /// declarator's binding pattern.
+    fn validate_for_of_declaration<'declaration>(
+        declaration: &'declaration VariableDeclaration<'arena>,
+    ) -> Result<&'declaration BindingPattern<'arena>, LeafCompilationError> {
+        if declaration.declare
+            || !matches!(
+                declaration.kind,
+                VariableDeclarationKind::Var
+                    | VariableDeclarationKind::Let
+                    | VariableDeclarationKind::Const
+            )
+            || declaration.declarations.len() != 1
+        {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedDeclaration,
+                declaration.span,
+            );
+        }
+        let declarator = &declaration.declarations[0];
+        if let Some(initializer) = declarator.init.as_ref() {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "Oxc rejects initializers in for-of declarations",
                 span: Some(initializer.span()),
             });
         }
-        Ok(())
+        Ok(&declarator.id)
     }
 
     fn plan_for_in_assignment(
@@ -4260,6 +4387,80 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
         }
         Ok(())
+    }
+
+    /// Stores the per-iteration for-of value into the loop head. Identifier
+    /// and member heads share the for-in path; destructuring heads run the
+    /// declaration or assignment pattern machinery directly on the value
+    /// already on the stack (the loop's `for_of_next` step pushed it above
+    /// the verified record, whose offset stays zero).
+    fn plan_for_of_assignment(
+        &self,
+        left: &ForStatementLeft<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if let ForStatementLeft::VariableDeclaration(declaration) = left {
+            let pattern = Self::validate_for_of_declaration(declaration)?;
+            if matches!(pattern, BindingPattern::BindingIdentifier(_)) {
+                return self.plan_for_in_assignment(left, layout, tree_layout, constants, flow);
+            }
+            return self.plan_destructuring_pattern_value(
+                pattern,
+                declaration.kind,
+                layout,
+                tree_layout,
+                constants,
+                flow,
+            );
+        }
+        let target =
+            left.as_assignment_target()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "for-of non-declaration head is an assignment target",
+                    span: Some(left.span()),
+                })?;
+        match target {
+            AssignmentTarget::ArrayAssignmentTarget(_)
+            | AssignmentTarget::ObjectAssignmentTarget(_) => {
+                let mut work = Vec::new();
+                self.plan_assignment_target_value(
+                    target,
+                    &mut work,
+                    flow,
+                    layout,
+                    tree_layout,
+                    constants,
+                )?;
+                while let Some(task) = work.pop() {
+                    match task {
+                        ExpressionWork::Emit(instruction) => flow.emit(instruction)?,
+                        ExpressionWork::Branch { kind, target, span } => {
+                            flow.branch(kind, &target, span)?;
+                        }
+                        ExpressionWork::Bind(label) => flow.bind(&label)?,
+                        ExpressionWork::Visit(expression) => {
+                            self.plan_expression(expression, layout, tree_layout, constants, flow)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            AssignmentTarget::AssignmentTargetIdentifier(_)
+            | AssignmentTarget::StaticMemberExpression(_)
+            | AssignmentTarget::ComputedMemberExpression(_) => {
+                self.plan_for_in_assignment(left, layout, tree_layout, constants, flow)
+            }
+            AssignmentTarget::TSAsExpression(_)
+            | AssignmentTarget::TSSatisfiesExpression(_)
+            | AssignmentTarget::TSNonNullExpression(_)
+            | AssignmentTarget::TSTypeAssertion(_)
+            | AssignmentTarget::PrivateFieldExpression(_) => {
+                unsupported(UnsupportedLeafFeature::UnsupportedExpression, target.span())
+            }
+        }
     }
 
     fn validate_for_in_declaration<'declaration>(
@@ -8856,6 +9057,7 @@ enum StatementWork<'statement, 'arena> {
     ForInAssignment(&'statement ForStatementLeft<'arena>),
     ForOfHead(&'statement ForStatementLeft<'arena>),
     ForOfAssignment(&'statement ForStatementLeft<'arena>),
+    ForOfRotate(ScopeId),
     Declaration(&'statement VariableDeclaration<'arena>),
     Expression(&'statement Expression<'arena>),
     Emit(PlannedInstruction),

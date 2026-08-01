@@ -127,6 +127,134 @@ fn arrays_strings_targets_and_captured_lexicals_use_the_generic_for_of_protocol(
 }
 
 #[test]
+fn for_of_array_pattern_declaration_heads_destructure_each_value() {
+    let result = call_string(
+        "function run(){\
+            let output=\"\";\
+            for(let [a, b] of [[1, 2], [3, 4]]) output=output+a+b;\
+            return output;\
+        }",
+        "run",
+    );
+    assert_eq!(result, "1234");
+}
+
+#[test]
+fn for_of_array_rest_and_nested_pattern_heads() {
+    let result = call_string(
+        "function run(){\
+            let output=\"\";\
+            for(let [a, ...rest] of [[1, 2, 3]]) output=output+a+rest[0]+rest[1];\
+            for(let [a, [b, c]] of [[4, [5, 6]]]) output=output+a+b+c;\
+            return output;\
+        }",
+        "run",
+    );
+    assert_eq!(result, "123456");
+}
+
+#[test]
+fn for_of_object_pattern_heads_with_rest_and_defaults() {
+    let result = call_string(
+        "function run(){\
+            let output=\"\";\
+            for(let {x, y} of [{x:1, y:2}, {x:3, y:4}]) output=output+x+y;\
+            for(let {x, ...rest} of [{x:1, y:2, z:3}]) output=output+x+rest.y+rest.z;\
+            for(let {x = 9} of [{}, {x: 5}]) output=output+x;\
+            return output;\
+        }",
+        "run",
+    );
+    assert_eq!(result, "123412395");
+}
+
+#[test]
+fn for_of_assignment_pattern_heads_destructure_without_declaring() {
+    let result = call_string(
+        "function run(){\
+            let output=\"\";let a=0;let b=0;\
+            for([a, b] of [[7, 8]]) output=output+a+b;\
+            let o={x:0,y:0};\
+            for({x: o.x, y: o.y} of [{x: 9, y: 1}]) output=output+o.x+o.y;\
+            return output;\
+        }",
+        "run",
+    );
+    assert_eq!(result, "7891");
+}
+
+#[test]
+fn for_of_const_destructuring_heads_reinitialize_each_iteration() {
+    let result = call_string(
+        "function run(){\
+            let output=\"\";\
+            for(const [a, b] of [[1, 2], [3, 4]]) output=output+a+b;\
+            for(const {x} of [{x:5}, {x:6}]) output=output+x;\
+            for(const {x, ...rest} of [{x:7, y:8}]) output=output+x+rest.y;\
+            return output;\
+        }",
+        "run",
+    );
+    assert_eq!(result, "12345678");
+}
+
+#[test]
+fn for_of_destructuring_heads_rotate_captured_lexicals() {
+    let result = call_string(
+        "function run(){\
+            let first;let second;let index=0;\
+            for(let [value] of [[1], [2]]){\
+                if(index===0) first=function firstCapture(){return value;};\
+                else second=function secondCapture(){return value;};\
+                index++;\
+            }\
+            let obj;let i=0;\
+            for(let {x} of [{x:3}, {x:4}]){\
+                if(i===0) obj=function objCapture(){return x;};\
+                i++;\
+            }\
+            return \"\"+first()+second()+\"|\"+obj();\
+        }",
+        "run",
+    );
+    assert_eq!(result, "12|3");
+}
+
+#[test]
+fn for_of_destructuring_heads_honor_break_and_continue() {
+    let result = call_string(
+        "function run(){\
+            let output=\"\";\
+            for(let [a] of [[1], [2], [3]]){\
+                if(a===2) continue;\
+                if(a===3) break;\
+                output=output+a;\
+            }\
+            for(let {x} of [{x:4}, {x:5}]){\
+                if(x===5) break;\
+                output=output+x;\
+            }\
+            return output;\
+        }",
+        "run",
+    );
+    assert_eq!(result, "14");
+}
+
+#[test]
+fn for_of_var_pattern_heads_share_the_function_scope() {
+    let result = call_string(
+        "function run(){\
+            let output=\"\";\
+            for(var [a] of [[5]]) output=output+a;\
+            return output+a;\
+        }",
+        "run",
+    );
+    assert_eq!(result, "55");
+}
+
+#[test]
 fn for_of_reads_iterator_and_next_once_then_done_before_value() {
     let result = call_string(
         "function run(){\

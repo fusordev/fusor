@@ -261,28 +261,58 @@ fn labels_captures_and_finally_share_the_existing_cleanup_stack() {
 }
 
 #[test]
-fn destructuring_heads_remain_typed_fail_closed_at_the_pattern() {
-    for (source, name, expected, expected_feature) in [
-        (
-            "function declared(values){for(const [value] of values){}}",
-            "declared",
-            "[value]",
-            UnsupportedLeafFeature::UnsupportedDeclaration,
-        ),
-        (
-            "function assigned(values,value){for([value] of values){}}",
-            "assigned",
-            "[value]",
-            UnsupportedLeafFeature::UnsupportedExpression,
-        ),
-    ] {
-        let LeafCompilationError::Unsupported { feature, span } = compile_error(source, name)
-        else {
-            panic!("destructuring for-of head must fail closed");
-        };
-        assert_eq!(feature, expected_feature);
-        assert_eq!(&source[span.start as usize..span.end as usize], expected);
-    }
+fn destructuring_heads_emit_the_nested_verified_record_shape() {
+    let compiled = compile(
+        "function declared(values){\
+            for(const [value] of values){}\
+            for(const {x} of values){}\
+        }",
+        "declared",
+    );
+    let instructions = opcodes(&compiled);
+    // Each destructuring head opens its own nested iterator record on the
+    // loop value: two loops plus the array-pattern head's nested record.
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|(opcode, _)| *opcode == FinalOpcode::ForOfStart)
+            .count(),
+        3
+    );
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|(opcode, _)| *opcode == FinalOpcode::ForOfNext)
+            .count(),
+        3
+    );
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|(opcode, _)| *opcode == FinalOpcode::ToObject)
+            .count(),
+        1
+    );
+
+    let assigned = compile(
+        "function assigned(values,value){for([value] of values){}}",
+        "assigned",
+    );
+    let instructions = opcodes(&assigned);
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|(opcode, _)| *opcode == FinalOpcode::ForOfStart)
+            .count(),
+        2
+    );
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|(opcode, _)| *opcode == FinalOpcode::IteratorClose)
+            .count(),
+        2
+    );
 }
 
 #[test]

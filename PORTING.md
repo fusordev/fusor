@@ -478,10 +478,24 @@ A milestone is complete only when all of its checked items pass in CI.
         executes through the `apply` vertical below.
   - [x] Add ordinary synchronous `for-of` through the generic iterator
         substrate. Lowering emits the pinned three-slot iterator/next/catch
-        record, supports declaration, identifier, and static/computed member
-        heads, rotates captured lexical cells per iteration, and closes every
-        crossed iterator for break, outward continue, return, throw, and
-        finally. Whole-function verification gives every record a same-site
+        record, supports declaration, identifier, static/computed member,
+        and destructuring heads, rotates captured lexical cells per
+        iteration, and closes every crossed iterator for break, outward
+        continue, return, throw, and finally. Destructuring heads run the
+        declaration or assignment pattern machinery directly on the
+        loop value above the verified record: array patterns open their own
+        nested iterator (with rest and nested element patterns), object
+        patterns run the pinned `to_object`/`get_field2` shape (with rest,
+        defaults, and member targets), and the per-iteration binds rotate
+        captured cells exactly like identifier heads. The loop back edge
+        re-arms the head's non-captured TDZ cells at the verified `next`
+        label: one `set_loc_uninitialized` per cell follows the loop's
+        backward jump target, so every iteration's identifier or
+        destructuring write is a fresh initialization exactly like the
+        captured-cell `close_loc` rotation; the binding-policy pass admits
+        that single second activation only at a back-edge target and still
+        rejects straight-line repeated initialization. Whole-function
+        verification gives every record a same-site
         typed identity, admits only `ForOfNext` offset zero, certifies the exact
         return-preserving close rotation, and rejects forged, partial, copied,
         joined, stored, or terminal records. The iterative VM retains the
@@ -489,8 +503,8 @@ A milestone is complete only when all of its checked items pass in CI.
         close on natural exhaustion and step failures, distinguishes normal
         from exceptional `IteratorClose`, and roots suspended records through
         collection. The pinned 40-case iterator differential covers 51 strict
-        feature tags. Destructuring heads, `for await`, and async/generator
-        iterator consumers remain fail-closed.
+        feature tags. `for await` and async/generator iterator consumers remain
+        fail-closed.
   - [x] Execute call spread (`f(...args)`) and construction spread
         (`new C(...args)`) through the shared argument-array packing. Compiler
         lowering follows the pinned `array_from; push index; define_array_el /
@@ -569,7 +583,8 @@ A milestone is complete only when all of its checked items pass in CI.
         execute with the exact receiver, and defines the values with the
         ordinary writable/enumerable/configurable layout; getter suspension
         resumes through a traced native continuation.
-        Iterator-destructuring heads remain fail-closed.
+        Iterator-destructuring heads now execute through the for-of head
+        path above.
   - [x] Represent synthetic native caller frames. Each bytecode frame
         reached through `Function.prototype.call` or `Function.prototype.apply`
         records the pinned `call (native)` / `apply (native)` entry, including

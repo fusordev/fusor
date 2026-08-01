@@ -7308,6 +7308,51 @@ fn verify_binding_opcodes(
     internal_stack: &InternalStackCertificate,
 ) -> Result<(), BytecodeVerificationError> {
     let argument_count = flow.domains().argument_count() as usize;
+    // The for-of loop rotation re-arms the head's non-captured TDZ cells at
+    // the loop back edge (the `rotate` label targets exactly that
+    // instruction), so a second scope activation is admitted only at a
+    // backward jump target; straight-line repeated initialization stays
+    // rejected.
+    let instructions = flow.instructions();
+    let mut back_edge_targets = try_filled_vec(
+        id,
+        instructions.len(),
+        false,
+        BytecodeGraphResource::VariableDefinitions,
+    )?;
+    for (index, verified) in instructions.iter().enumerate() {
+        let index = u32::try_from(index).map_err(|_| {
+            BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::LimitExceeded {
+                    resource: BytecodeGraphResource::VariableDefinitions,
+                    limit: u64::from(u32::MAX),
+                    observed: u64::from(u32::MAX),
+                },
+            )
+        })?;
+        for target in [
+            verified.successors().branch_target(),
+            verified.successors().jump_target(),
+        ] {
+            if let Some(target) = target
+                && target.get() < index
+            {
+                back_edge_targets[target.get() as usize] = true;
+            }
+        }
+    }
+    // A rotation emits one activation per cell, and the loop label targets
+    // only the first, so extend the back-edge set over the contiguous
+    // activation run that starts at the target.
+    for index in 0..instructions.len().saturating_sub(1) {
+        if back_edge_targets[index]
+            && instructions[index + 1].decoded().instruction().opcode()
+                == FinalOpcode::SetLocUninitialized
+        {
+            back_edge_targets[index + 1] = true;
+        }
+    }
     let mut scope_activations = try_filled_vec(
         id,
         variables.len() - argument_count,
@@ -7371,7 +7416,9 @@ fn verify_binding_opcodes(
             if matches!(opcode, FinalOpcode::SetLocUninitialized) {
                 let count = &mut scope_activations[local as usize];
                 *count = count.saturating_add(1);
-                if *count > 1 {
+                // The for-of loop rotation is the single legitimate second
+                // activation, and it must sit at the loop back-edge target.
+                if *count > 2 || (*count == 2 && !back_edge_targets[index]) {
                     return Err(policy_error(
                         id,
                         BindingSlot::Local(local),
@@ -7405,7 +7452,9 @@ fn verify_binding_opcodes(
         let requires_scope_activation = definition.policy.temporal_dead_zone
             || definition.policy.initialization
                 == CompilerInitializationPolicy::FunctionAtScopeEntry;
-        if requires_scope_activation && activations != 1 {
+        // A for-of loop rotation adds exactly one back-edge re-arm to the
+        // entry activation, so both one and two activations are admitted.
+        if requires_scope_activation && !(activations == 1 || activations == 2) {
             return Err(policy_error(
                 id,
                 BindingSlot::Local(usize_to_u32(local)),
