@@ -1404,7 +1404,10 @@ impl Runtime {
             )?;
             record.append_data(
                 keys.symbol_has_instance.clone(),
-                METHOD_PROPERTY,
+                // QuickJS pins `Function.prototype[Symbol.hasInstance]` as
+                // non-writable and non-configurable (`quickjs.c:39511-39523`),
+                // matching the specification's frozen descriptor.
+                FROZEN_PROPERTY,
                 StoredValue::Function(graph.base.function_has_instance),
             )?;
         }

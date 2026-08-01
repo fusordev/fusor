@@ -1559,6 +1559,7 @@ impl Context<'_> {
                     self.runtime,
                     function_id,
                     native,
+                    receiver,
                     materialized,
                     limits,
                     compiler,
@@ -1568,18 +1569,24 @@ impl Context<'_> {
             let Some(bound) = node.bound() else {
                 break;
             };
+            let accumulated = owned_arguments.take();
+            let accumulated_len = accumulated.as_ref().map_or(arguments.len(), Vec::len);
             let mut merged = Vec::new();
             merged
-                .try_reserve_exact(bound.bound_arguments.len().saturating_add(arguments.len()))
+                .try_reserve_exact(bound.bound_arguments.len().saturating_add(accumulated_len))
                 .map_err(|_| ExecutionError::AllocationFailed {
                     resource: RuntimeResource::FrameValues,
-                    additional: bound.bound_arguments.len().saturating_add(arguments.len()),
+                    additional: bound.bound_arguments.len().saturating_add(accumulated_len),
                 })?;
             for argument in &bound.bound_arguments {
                 merged.push(argument.duplicate());
             }
-            for argument in arguments {
-                merged.push(argument.stored()?.duplicate());
+            if let Some(accumulated) = accumulated {
+                merged.extend(accumulated);
+            } else {
+                for argument in arguments {
+                    merged.push(argument.stored()?.duplicate());
+                }
             }
             owned_arguments = Some(merged);
             receiver = bound.bound_this.duplicate();

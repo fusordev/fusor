@@ -73,6 +73,27 @@ fn assert_number(value: &quickjs_runtime::JsValue, expected: i32) {
     assert!(actual.strict_equals(JsNumber::from_i32(expected)));
 }
 
+fn text(value: &quickjs_runtime::JsValue) -> String {
+    value
+        .as_string()
+        .expect("live value")
+        .expect("String")
+        .to_utf8_lossy()
+        .expect("UTF-8 result")
+}
+
+/// Runs `body` in a fresh runtime and renders its String completion.
+fn run_text(body: &str) -> String {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(&mut context, body);
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("ordering result");
+    text(&result)
+}
+
 #[test]
 fn array_declaration_destructures_an_iterator_in_order() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
@@ -516,10 +537,113 @@ fn array_destructuring_member_targets_evaluate_bases_before_values() {
     let result = context
         .call(&function, &[], ExecutionLimits::default())
         .expect("member base ordering");
-    // The pinned QuickJS reference evaluates the member base before the
-    // iterator step: `o` is read (order 2) before the iterator is created
-    // (order 1), then the value is stored into `o.x`.
+    // The iterator is acquired first (order 2 recorded inside
+    // `[Symbol.iterator]`), then the value is stored into `o.x`, and the
+    // trailing statement records order 1.
     assert_number(&result, 521);
+}
+
+/// Array-assignment member targets evaluate their base before the iterator
+/// step, and after the iterator is acquired.
+///
+/// ECMAScript pins this order in `IteratorDestructuringAssignmentEvaluation`
+/// for `AssignmentElement : DestructuringAssignmentTarget Initializer?`: the
+/// target reference is evaluated first, then `IteratorStepValue` runs. Its note
+/// states that "Left to right evaluation order is maintained by evaluating a
+/// `DestructuringAssignmentTarget` that is not a destructuring pattern prior to
+/// accessing the iterator or evaluating the `Initializer`." The pinned
+/// `QuickJS` reference agrees (`get_lvalue` precedes `OP_for_of_next`,
+/// `quickjs.c:26596-26612`), and both engines observe
+/// `getIterator,base,next0`.
+#[test]
+fn array_assignment_member_bases_evaluate_before_the_iterator_step() {
+    assert_eq!(
+        run_text(
+            "\
+            let order='';\
+            function base(){order+='base,';return {};}\
+            let iterable={\
+                [Symbol.iterator](){\
+                    order+='getIterator,';\
+                    let i=0;\
+                    return {next(){order+='next'+i+',';i++;return i===1?{done:false,value:5}:{done:true};}};\
+                }\
+            };\
+            [base().x] = iterable;\
+            return order;",
+        ),
+        "getIterator,base,next0,"
+    );
+}
+
+/// A computed member target evaluates its base, then its key, then steps the
+/// iterator.
+#[test]
+fn array_assignment_computed_keys_evaluate_before_the_iterator_step() {
+    assert_eq!(
+        run_text(
+            "\
+            let order='';\
+            function base(){order+='base,';return {};}\
+            function key(){order+='key,';return 'k';}\
+            let iterable={\
+                [Symbol.iterator](){\
+                    order+='getIterator,';\
+                    let i=0;\
+                    return {next(){order+='next'+i+',';i++;return i===1?{done:false,value:5}:{done:true};}};\
+                }\
+            };\
+            [base()[key()]] = iterable;\
+            return order;",
+        ),
+        "getIterator,base,key,next0,"
+    );
+}
+
+/// A rest target's reference is evaluated before the remaining iterator values
+/// are collected, exactly as `AssignmentRestElement` requires.
+#[test]
+fn array_assignment_rest_targets_evaluate_before_collecting_values() {
+    assert_eq!(
+        run_text(
+            "\
+            let order='';\
+            function base(){order+='base,';return {};}\
+            let iterable={\
+                [Symbol.iterator](){\
+                    order+='getIterator,';\
+                    let i=0;\
+                    return {next(){order+='next'+i+',';i++;return i===1?{done:false,value:5}:{done:true};}};\
+                }\
+            };\
+            [...base().r] = iterable;\
+            return order;",
+        ),
+        "getIterator,base,next0,next1,"
+    );
+}
+
+/// Multiple member targets interleave each base evaluation with its own step.
+#[test]
+fn array_assignment_member_bases_interleave_with_each_iterator_step() {
+    assert_eq!(
+        run_text(
+            "\
+            let order='';\
+            let o={};\
+            function base(tag){order+='base'+tag+',';return o;}\
+            let iterable={\
+                [Symbol.iterator](){\
+                    order+='getIterator,';\
+                    let i=0;\
+                    return {next(){i++;order+='next'+i+',';return i<=2?{done:false,value:i}:{done:true};}};\
+                }\
+            };\
+            [base(1).x, base(2).y] = iterable;\
+            return order+o.x+o.y;",
+        ),
+        "getIterator,base1,next1,base2,next2,12"
+    );
 }
 
 #[test]

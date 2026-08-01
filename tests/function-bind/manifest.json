@@ -116,8 +116,8 @@
     {
       "id": "instanceof-consults-a-custom-symbol-has-instance",
       "covers": ["instanceof-custom-symbol"],
-      "body": "function C() {}\nlet guard = { [Symbol.hasInstance](v) { return v > 2; } };\nC[Symbol.hasInstance] = guard[Symbol.hasInstance];\nreturn \"\" + (3 instanceof C) + \":\" + (1 instanceof C);",
-      "expect": {"kind": "string", "value": "true:false"}
+      "body": "function C() {}\nlet guard = { [Symbol.hasInstance](v) { return v > 2; } };\nC[Symbol.hasInstance] = guard[Symbol.hasInstance];\nlet custom = { [Symbol.hasInstance]: guard[Symbol.hasInstance] };\nreturn \"\" + (3 instanceof C) + \":\" + (new C() instanceof C) + \":\" + (3 instanceof custom) + \":\" + (1 instanceof custom) + \":\" + (typeof C[Symbol.hasInstance]);",
+      "expect": {"kind": "string", "value": "false:true:true:false:function"}
     },
     {
       "id": "instanceof-uses-symbol-has-instance-on-plain-objects",
@@ -130,6 +130,12 @@
       "covers": ["symbol-has-instance-native"],
       "body": "function C() {}\nreturn \"\" + Function.prototype[Symbol.hasInstance].call(1, {}) + \":\" + Function.prototype[Symbol.hasInstance].call(C, new C()) + \":\" + Function.prototype[Symbol.hasInstance].call(C, {});",
       "expect": {"kind": "string", "value": "false:true:false"}
+    },
+    {
+      "id": "function-prototype-has-instance-descriptor-is-frozen",
+      "covers": ["symbol-has-instance-descriptor"],
+      "body": "function strict() {\n  \"use strict\";\n  let f = Function.prototype.call;\n  try { f[Symbol.hasInstance] = 1; return \"assigned\"; }\n  catch (error) { return error.name + \":\" + error.message; }\n}\nfunction C() {}\nC[Symbol.hasInstance] = 1;\nreturn typeof C[Symbol.hasInstance] + \":\" + (new C() instanceof C) + \":\" + strict();",
+      "expect": {"kind": "string", "value": "function:true:TypeError:'Symbol.hasInstance' is read-only"}
     },
     {
       "id": "instanceof-unwraps-bound-functions",

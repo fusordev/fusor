@@ -199,6 +199,7 @@ const FUNCTION_BIND_REQUIRED_COVERAGE: &[&str] = &[
     "nonconstructable",
     "nonconstructor-name",
     "receiver-override",
+    "symbol-has-instance-descriptor",
     "symbol-has-instance-native",
     "target-validation-order",
     "typeof-bound",
@@ -1879,7 +1880,7 @@ mod tests {
             RuntimeDifferentialSuite::FunctionBind,
         )
         .expect("checked-in function-bind manifest");
-        assert_eq!(corpus.cases.len(), 20);
+        assert_eq!(corpus.cases.len(), 21);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use quickjs_frontend::{
     with_dynamic_function_source,
 };
 use quickjs_runtime::{
-    DynamicFunctionCompileFailure, ExecutionLimits, JsString, JsValue,
+    DynamicFunctionCompileFailure, ExecutionLimits, JsNumber, JsString, JsValue,
     OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, Runtime, RuntimeLimits,
 };
 
@@ -104,6 +104,46 @@ fn caught(body: &str) -> String {
 
 fn boolean(value: &JsValue) -> bool {
     value.as_boolean().expect("live value").expect("Boolean")
+}
+
+/// Runs `body`, converts its returned value into a function, and calls that
+/// function directly through the public host boundary with `arguments`.
+///
+/// Host calls take the `Context::call` bound-unwrapping path rather than the
+/// interpreter's call opcodes, so bound receivers and bound arguments must be
+/// accumulated there as well.
+fn host_call<T>(
+    body: &str,
+    arguments: &[f64],
+    inspect: impl FnOnce(&JsValue) -> T,
+) -> Result<T, String> {
+    let authority = TestCompiler
+        .compile(OrdinaryDynamicFunctionSource::new(
+            Arc::from([]),
+            JsString::from_utf8(body).expect("body"),
+        ))
+        .expect("dynamic Function authority");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context
+        .execute_dynamic_function_script(authority, ExecutionLimits::default())
+        .expect("dynamic Function Script")
+        .into_function()
+        .expect("dynamic Function");
+    let produced = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("bind operation")
+        .into_function()
+        .expect("produced function");
+    let arguments = arguments
+        .iter()
+        .map(|argument| context.number(JsNumber::from_f64(*argument)))
+        .collect::<Vec<_>>();
+    match context.call(&produced, &arguments, ExecutionLimits::default()) {
+        Ok(value) => Ok(inspect(&value)),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn string(value: &JsValue) -> String {
@@ -253,6 +293,104 @@ fn bound_native_targets_keep_native_dispatch() {
     );
 }
 
+/// The public host boundary must apply the bound receiver to native targets.
+///
+/// `Context::call` unwraps bound functions itself; a native target reached that
+/// way previously received an `undefined` receiver, which made
+/// `Function.prototype.call.bind(f)` behave like an unbound call.
+#[test]
+fn host_calls_pass_the_bound_receiver_to_native_targets() {
+    assert_eq!(
+        host_call(
+            "function f(a, b) { return \"\" + (a + b); }\n\
+             return Function.prototype.call.bind(f);",
+            &[0.0, 3.0, 4.0],
+            string,
+        ),
+        Ok("7".to_owned())
+    );
+    assert_eq!(
+        host_call(
+            "function f(a, b) { return a + \":\" + b; }\n\
+             return Function.prototype.apply.bind(f);",
+            &[],
+            string,
+        ),
+        Ok("undefined:undefined".to_owned())
+    );
+}
+
+/// The bound receiver also reaches bytecode targets through the host boundary.
+#[test]
+fn host_calls_pass_the_bound_receiver_to_bytecode_targets() {
+    assert_eq!(
+        host_call(
+            "function f() { return this.tag; }\n\
+             return f.bind({ tag: \"bound\" });",
+            &[],
+            string,
+        ),
+        Ok("bound".to_owned())
+    );
+}
+
+/// Nested binds accumulate every layer's bound arguments at the host boundary.
+///
+/// `f.bind(null, 1).bind(null, 2)` must reach `f` with `1, 2` followed by the
+/// host arguments; the outer layer's buffer previously replaced, rather than
+/// extended, the inner layer's arguments.
+#[test]
+fn host_calls_accumulate_nested_bound_arguments() {
+    assert_eq!(
+        host_call(
+            "function f(a, b, c) { return a + \":\" + b + \":\" + c; }\n\
+             return f.bind(null, 1).bind(null, 2);",
+            &[3.0],
+            string,
+        ),
+        Ok("1:2:3".to_owned())
+    );
+    assert_eq!(
+        host_call(
+            "function f(a, b, c, d) { return a + \":\" + b + \":\" + c + \":\" + d; }\n\
+             return f.bind(null, 1).bind(null, 2).bind(null, 3);",
+            &[4.0],
+            string,
+        ),
+        Ok("1:2:3:4".to_owned())
+    );
+}
+
+/// Nested binds over a native target keep both the arguments and the innermost
+/// bound receiver, which is the layer closest to the target.
+#[test]
+fn host_calls_accumulate_nested_bound_arguments_for_native_targets() {
+    assert_eq!(
+        host_call(
+            "function f(a, b, c) { return \"\" + (a + b + c); }\n\
+             return Function.prototype.call.bind(f).bind(null, null, 1);",
+            &[2.0, 3.0],
+            string,
+        ),
+        Ok("6".to_owned())
+    );
+}
+
+/// The receiver closest to the target wins for nested binds, exactly as the
+/// interpreter's bound dispatch already does.
+#[test]
+fn host_calls_use_the_innermost_bound_receiver() {
+    assert_eq!(
+        host_call(
+            "function f() { return this.tag; }\n\
+             return f.bind({ tag: \"inner\" }).bind({ tag: \"outer\" });",
+            &[],
+            string,
+        ),
+        Ok("inner".to_owned())
+    );
+}
+
 #[test]
 fn bound_construction_uses_bound_args_and_original_new_target() {
     assert_eq!(
@@ -325,20 +463,87 @@ fn instanceof_rejects_non_object_right_operands() {
     );
 }
 
+/// Custom `Symbol.hasInstance` methods are consulted on the right operand.
+///
+/// The inherited `Function.prototype[Symbol.hasInstance]` is non-writable, so
+/// an own property must be defined on the constructor rather than assigned
+/// through the inherited slot.
 #[test]
 fn instanceof_consults_a_custom_symbol_has_instance_method() {
     assert!(call(
         "function C() {}\n\
          let guard = { [Symbol.hasInstance](v) { return v > 2; } };\n\
-         C[Symbol.hasInstance] = guard[Symbol.hasInstance];\n\
-         return 3 instanceof C;",
+         let C2 = { [Symbol.hasInstance]: guard[Symbol.hasInstance] };\n\
+         return 3 instanceof C2;",
         boolean,
     ));
     assert!(!call(
         "function C() {}\n\
          let guard = { [Symbol.hasInstance](v) { return v > 2; } };\n\
-         C[Symbol.hasInstance] = guard[Symbol.hasInstance];\n\
-         return 1 instanceof C;",
+         let C2 = { [Symbol.hasInstance]: guard[Symbol.hasInstance] };\n\
+         return 1 instanceof C2;",
+        boolean,
+    ));
+}
+
+/// `Function.prototype[Symbol.hasInstance]` is non-writable, so a sloppy
+/// assignment through the inherited slot is silently discarded and every
+/// function keeps the ordinary `instanceof` behavior.
+#[test]
+fn sloppy_assignment_cannot_replace_inherited_has_instance() {
+    assert_eq!(
+        call(
+            "function C() {}\n\
+             C[Symbol.hasInstance] = 1;\n\
+             return typeof C[Symbol.hasInstance] + \":\" + (3 instanceof C) + \":\" + (new C() instanceof C);",
+            string,
+        ),
+        "function:false:true"
+    );
+    // A function value assigned through the inherited slot is dropped too, so
+    // the custom predicate never observes the operand.
+    assert_eq!(
+        call(
+            "function C() {}\n\
+             let guard = { [Symbol.hasInstance](v) { return v > 2; } };\n\
+             C[Symbol.hasInstance] = guard[Symbol.hasInstance];\n\
+             return \"\" + (3 instanceof C);",
+            string,
+        ),
+        "false"
+    );
+}
+
+/// A strict assignment through the inherited frozen slot throws the pinned
+/// `QuickJS` `read-only` `TypeError`.
+///
+/// The strict directive must lead the body, so this case builds its own
+/// `try`/`catch` instead of using the `caught` helper.
+#[test]
+fn strict_assignment_to_inherited_has_instance_throws() {
+    assert_eq!(
+        call(
+            "\"use strict\";\n\
+             try {\n\
+               let f = Function.prototype.call;\n\
+               f[Symbol.hasInstance] = 1;\n\
+               return \"assigned\";\n\
+             } catch (error) {\n\
+               return error.name + \":\" + error.message;\n\
+             }",
+            string,
+        ),
+        "TypeError:'Symbol.hasInstance' is read-only"
+    );
+}
+
+/// The frozen inherited descriptor still permits an own definition, which is
+/// how a constructor customizes `instanceof`.
+#[test]
+fn own_has_instance_definitions_override_the_frozen_inherited_slot() {
+    assert!(call(
+        "let C = { [Symbol.hasInstance](v) { return v > 2; } };\n\
+         return 3 instanceof C;",
         boolean,
     ));
 }

@@ -76,9 +76,18 @@ Known intentional parser differences:
   nested closures, expressions, statements, labels, `switch`, classic `for`,
   `for-in`, `for-of`, calls/spread, destructuring, and selected Error/native
   frame behavior. Compiler traversal and verification use explicit worklists.
+  Array-assignment member and rest targets evaluate their base and computed key
+  after the iterator is acquired and before the matching iterator step, which is
+  the order ECMAScript's IteratorDestructuringAssignmentEvaluation and the
+  pinned QuickJS reference (`quickjs.c:26596-26612`) both require; ordering
+  regressions observe `next`, base, and computed-key effects.
 - [x] Runtime installation, calls, exceptions, resumable native/bytecode
   dispatch, iterator close/error precedence, bounded resources, and
-  verified-frame stack traces for the admitted profile.
+  verified-frame stack traces for the admitted profile. Host calls
+  (`Context::call`) unwrap bound functions with the same observable result as
+  interpreter dispatch: the innermost bound receiver reaches native and bytecode
+  targets, and every bound layer's arguments accumulate before the caller's
+  arguments are appended once.
 - [ ] Complete verifier coverage, source/debug tables, dynamic `eval`, and
   remaining compiler/runtime opcode families.
 
@@ -86,7 +95,11 @@ Known intentional parser differences:
 
 - [x] UTF-16 strings (including lone surrogates), Numbers with signed zero and
   int32 fast paths, property-key/index recognition, atoms/symbols, descriptors,
-  bounded arenas, and iterative tracing/cycle reclamation foundations.
+  bounded arenas, and iterative tracing/cycle reclamation foundations. Realm
+  intrinsic descriptors follow the pinned upstream flags, including the
+  non-writable, non-configurable `Function.prototype[Symbol.hasInstance]`
+  (`quickjs.c:39511-39523`), so inherited `instanceof` behavior cannot be
+  replaced by assignment.
 - [x] First ordinary-object slice: object literals; data/accessor properties;
   ordinary reads/writes; receiver-aware calls; computed keys; and resumable
   getter/setter dispatch.

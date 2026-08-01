@@ -611,6 +611,7 @@ pub(super) fn execute_native_entry(
     runtime: &mut Runtime,
     function: FunctionId,
     native: NativeFunction,
+    receiver: StoredValue,
     arguments: Vec<StoredValue>,
     limits: ExecutionLimits,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
@@ -624,7 +625,7 @@ pub(super) fn execute_native_entry(
             additional: 1,
         })?;
     let inputs = CallInputs {
-        receiver: StoredValue::Undefined,
+        receiver,
         arguments: CallArguments::from_values(arguments),
         new_target: None,
     };
