@@ -39,8 +39,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 19;
-const REALM_FUNCTION_COUNT: usize = 44;
-const REALM_PROPERTY_COUNT: u64 = 198;
+const REALM_FUNCTION_COUNT: usize = 57;
+const REALM_PROPERTY_COUNT: u64 = 204;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -48,6 +48,96 @@ const DESCRIPTION_ATOM_INDEX: usize = 3;
 const IS_ERROR_ATOM_INDEX: usize = 4;
 const BIND_ATOM_INDEX: usize = 5;
 const SYMBOL_STATIC_ATOM_START: usize = 6;
+/// Index of the first `Object` static name in the realm's dynamic atom list.
+const OBJECT_STATIC_ATOM_START: usize =
+    SYMBOL_STATIC_ATOM_START + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len();
+
+/// The `Object` constructor's static methods.
+///
+/// Each entry pairs the property name with the native implementation and its
+/// reported `length`. A name that already has a predefined atom reuses it; the
+/// rest are interned during realm construction like the `Symbol` statics. The
+/// set is deliberately narrower than the pinned oracle's: only reflection
+/// operations the current profile can honor completely are installed, so an
+/// absent method fails closed as a missing property rather than behaving
+/// incorrectly.
+const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 10] = [
+    ObjectStaticMethod::predefined(
+        PredefinedAtom::GetPrototypeOf,
+        NativeFunctionKind::ObjectGetPrototypeOf,
+        1,
+    ),
+    ObjectStaticMethod::predefined(
+        PredefinedAtom::SetPrototypeOf,
+        NativeFunctionKind::ObjectSetPrototypeOf,
+        2,
+    ),
+    ObjectStaticMethod::predefined(
+        PredefinedAtom::PreventExtensions,
+        NativeFunctionKind::ObjectPreventExtensions,
+        1,
+    ),
+    ObjectStaticMethod::predefined(
+        PredefinedAtom::IsExtensible,
+        NativeFunctionKind::ObjectIsExtensible,
+        1,
+    ),
+    ObjectStaticMethod::predefined(PredefinedAtom::Keys, NativeFunctionKind::ObjectKeys, 1),
+    ObjectStaticMethod::interned("seal", NativeFunctionKind::ObjectSeal, 1),
+    ObjectStaticMethod::interned("freeze", NativeFunctionKind::ObjectFreeze, 1),
+    ObjectStaticMethod::interned("isSealed", NativeFunctionKind::ObjectIsSealed, 1),
+    ObjectStaticMethod::interned("isFrozen", NativeFunctionKind::ObjectIsFrozen, 1),
+    ObjectStaticMethod::interned(
+        "getOwnPropertyNames",
+        NativeFunctionKind::ObjectGetOwnPropertyNames,
+        1,
+    ),
+];
+
+/// The number of `Object` statics whose names must be interned at realm
+/// construction because they have no predefined atom.
+const OBJECT_INTERNED_STATIC_COUNT: usize = {
+    let mut count = 0;
+    let mut index = 0;
+    while index < OBJECT_STATIC_METHODS.len() {
+        if OBJECT_STATIC_METHODS[index].interned_name.is_some() {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+};
+
+/// One `Object` static method's name, implementation, and reported `length`.
+#[derive(Clone, Copy)]
+struct ObjectStaticMethod {
+    /// The predefined atom for this name, when one exists.
+    predefined_name: Option<PredefinedAtom>,
+    /// The literal name to intern when no predefined atom exists.
+    interned_name: Option<&'static str>,
+    kind: NativeFunctionKind,
+    length: i32,
+}
+
+impl ObjectStaticMethod {
+    const fn predefined(name: PredefinedAtom, kind: NativeFunctionKind, length: i32) -> Self {
+        Self {
+            predefined_name: Some(name),
+            interned_name: None,
+            kind,
+            length,
+        }
+    }
+
+    const fn interned(name: &'static str, kind: NativeFunctionKind, length: i32) -> Self {
+        Self {
+            predefined_name: None,
+            interned_name: Some(name),
+            kind,
+            length,
+        }
+    }
+}
 
 const DYNAMIC_SYMBOL_STATIC_PROPERTIES: [(&str, PredefinedAtom); 12] = [
     ("toPrimitive", PredefinedAtom::SymbolToPrimitive),
@@ -76,6 +166,8 @@ const ARRAY_LENGTH_PROPERTY: PropertyLayout = PropertyLayout::data(true, false, 
 struct RealmKeys {
     errors: [PropertyKey; ErrorIntrinsicKind::ALL.len()],
     function: PropertyKey,
+    object: PropertyKey,
+    join: PropertyKey,
     boolean: PropertyKey,
     number: PropertyKey,
     string: PropertyKey,
@@ -106,6 +198,8 @@ impl RealmKeys {
         Self {
             errors: ErrorIntrinsicKind::ALL.map(|kind| key(kind.predefined_atom())),
             function: key(PredefinedAtom::Function),
+            object: key(PredefinedAtom::Object),
+            join: key(PredefinedAtom::Join),
             boolean: key(PredefinedAtom::Boolean),
             number: key(PredefinedAtom::Number),
             string: key(PredefinedAtom::String),
@@ -143,6 +237,8 @@ impl RealmKeys {
 struct RealmNames {
     errors: [JsString; ErrorIntrinsicKind::ALL.len()],
     function: JsString,
+    object: JsString,
+    join: JsString,
     boolean: JsString,
     number: JsString,
     string: JsString,
@@ -176,6 +272,8 @@ impl RealmNames {
             errors: ErrorIntrinsicKind::ALL
                 .map(|kind| predefined_string(atoms, kind.predefined_atom())),
             function: predefined_string(atoms, PredefinedAtom::Function),
+            object: predefined_string(atoms, PredefinedAtom::Object),
+            join: predefined_string(atoms, PredefinedAtom::Join),
             boolean: predefined_string(atoms, PredefinedAtom::Boolean),
             number: predefined_string(atoms, PredefinedAtom::Number),
             string: predefined_string(atoms, PredefinedAtom::String),
@@ -212,6 +310,8 @@ struct RealmBaseRecords {
     object_prototype: ObjectRecord,
     function_prototype: ObjectRecord,
     function_constructor: ObjectRecord,
+    object_constructor: ObjectRecord,
+    object_statics: [ObjectRecord; OBJECT_STATIC_METHODS.len()],
     object_to_string: ObjectRecord,
     object_value_of: ObjectRecord,
     function_to_string: ObjectRecord,
@@ -242,6 +342,8 @@ struct PrimitiveIntrinsicRecords {
 struct ArrayIntrinsicRecords {
     prototype: ObjectRecord,
     constructor: ObjectRecord,
+    join: ObjectRecord,
+    to_string: ObjectRecord,
 }
 
 struct IteratorIntrinsicRecords {
@@ -284,10 +386,12 @@ impl RealmRecords {
         // Keep these reservations in the original transaction order so a
         // recoverable allocation failure reports the same `additional` value.
         let base = RealmBaseRecords {
-            global: reserved_record(15)?,
-            object_prototype: reserved_record(2)?,
+            global: reserved_record(16)?,
+            object_prototype: reserved_record(3)?,
             function_prototype: reserved_record(6)?,
             function_constructor: reserved_record(3)?,
+            object_constructor: reserved_record(3 + OBJECT_STATIC_METHODS.len())?,
+            object_statics: object_static_records()?,
             object_to_string: reserved_record(2)?,
             object_value_of: reserved_record(2)?,
             function_to_string: reserved_record(2)?,
@@ -336,8 +440,10 @@ impl RealmRecords {
             value_of: reserved_record(2)?,
         };
         let mut array = ArrayIntrinsicRecords {
-            prototype: reserved_record(6)?,
+            prototype: reserved_record(8)?,
             constructor: reserved_record(3)?,
+            join: reserved_record(2)?,
+            to_string: reserved_record(2)?,
         };
         array
             .prototype
@@ -388,6 +494,8 @@ struct RealmBase {
     global_object: ObjectId,
     function_prototype: FunctionId,
     function_constructor: FunctionId,
+    object_constructor: FunctionId,
+    object_statics: [FunctionId; OBJECT_STATIC_METHODS.len()],
     object_to_string: FunctionId,
     object_value_of: FunctionId,
     function_to_string: FunctionId,
@@ -421,6 +529,8 @@ struct PrimitivePropertySpec<'a> {
 struct ArrayIntrinsicGraph {
     prototype: ObjectId,
     constructor: FunctionId,
+    join: FunctionId,
+    to_string: FunctionId,
 }
 
 struct IteratorIntrinsicGraph {
@@ -449,6 +559,9 @@ struct SymbolIntrinsicGraph {
 
 impl RealmBase {
     fn rollback(self, runtime: &mut Runtime) {
+        for function in self.object_statics.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
         for function in [
             self.function_has_instance,
             self.function_bind,
@@ -457,6 +570,7 @@ impl RealmBase {
             self.function_to_string,
             self.object_value_of,
             self.object_to_string,
+            self.object_constructor,
             self.function_constructor,
             self.function_prototype,
         ] {
@@ -678,48 +792,7 @@ impl Runtime {
         records: RealmRecords,
         names: &RealmNames,
     ) -> Result<RealmGraph, RuntimeError> {
-        let mut dynamic_atoms = Vec::new();
-        dynamic_atoms
-            .try_reserve_exact(SYMBOL_STATIC_ATOM_START + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len())
-            .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, 18))?;
-        for name in [
-            &names.call,
-            &names.entries,
-            &names.key_for,
-            &names.description,
-            &names.is_error,
-            &names.bind,
-        ] {
-            match self.atoms.intern_string(name) {
-                Ok(atom) => dynamic_atoms.push(atom),
-                Err(error) => {
-                    for atom in dynamic_atoms.into_iter().rev() {
-                        self.atoms.rollback_interned_string(atom);
-                    }
-                    return Err(error.into());
-                }
-            }
-        }
-        for (name, _) in DYNAMIC_SYMBOL_STATIC_PROPERTIES {
-            let name = match JsString::from_utf8(name) {
-                Ok(name) => name,
-                Err(error) => {
-                    for atom in dynamic_atoms.into_iter().rev() {
-                        self.atoms.rollback_interned_string(atom);
-                    }
-                    return Err(AtomError::from(error).into());
-                }
-            };
-            match self.atoms.intern_string(&name) {
-                Ok(atom) => dynamic_atoms.push(atom),
-                Err(error) => {
-                    for atom in dynamic_atoms.into_iter().rev() {
-                        self.atoms.rollback_interned_string(atom);
-                    }
-                    return Err(error.into());
-                }
-            }
-        }
+        let dynamic_atoms = self.intern_realm_dynamic_atoms(names)?;
         let base = self.insert_realm_base(records.base);
 
         let errors = self.insert_error_intrinsics(&base, records.errors);
@@ -770,6 +843,103 @@ impl Runtime {
         })
     }
 
+    /// Interns every realm-local atom that has no predefined identity.
+    ///
+    /// The list order is the transaction's contract: the `Symbol` statics
+    /// follow the fixed leading names, and the interned `Object` statics follow
+    /// those, which is what `OBJECT_STATIC_ATOM_START` indexes. A failure at
+    /// any point rolls back every atom interned so far, so the runtime observes
+    /// no partial state.
+    fn intern_realm_dynamic_atoms(
+        &mut self,
+        names: &RealmNames,
+    ) -> Result<Vec<Atom>, RuntimeError> {
+        let mut dynamic_atoms = Vec::new();
+        if dynamic_atoms
+            .try_reserve_exact(
+                SYMBOL_STATIC_ATOM_START
+                    + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len()
+                    + OBJECT_INTERNED_STATIC_COUNT,
+            )
+            .is_err()
+        {
+            return Err(allocation_failed(RuntimeResource::ObjectProperties, 18));
+        }
+
+        let leading = [
+            &names.call,
+            &names.entries,
+            &names.key_for,
+            &names.description,
+            &names.is_error,
+            &names.bind,
+        ];
+        let symbol_statics = DYNAMIC_SYMBOL_STATIC_PROPERTIES.map(|(name, _)| name);
+        let object_statics = OBJECT_STATIC_METHODS
+            .into_iter()
+            .filter_map(|method| method.interned_name);
+
+        let intern = |atoms: &mut AtomTable,
+                      collected: &mut Vec<Atom>,
+                      name: &JsString|
+         -> Result<(), RuntimeError> {
+            let atom = atoms.intern_string(name)?;
+            collected.push(atom);
+            Ok(())
+        };
+
+        let interned = |atoms: &mut AtomTable,
+                        collected: &mut Vec<Atom>,
+                        literal: &str|
+         -> Result<(), RuntimeError> {
+            let name = JsString::from_utf8(literal).map_err(AtomError::from)?;
+            intern(atoms, collected, &name)
+        };
+
+        let outcome = (|| -> Result<(), RuntimeError> {
+            for name in leading {
+                intern(&mut self.atoms, &mut dynamic_atoms, name)?;
+            }
+            for literal in symbol_statics {
+                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
+            }
+            for literal in object_statics {
+                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = outcome {
+            for atom in dynamic_atoms.into_iter().rev() {
+                self.atoms.rollback_interned_string(atom);
+            }
+            return Err(error);
+        }
+        Ok(dynamic_atoms)
+    }
+
+    /// Inserts one reserved native function per `Object` static method.
+    ///
+    /// The result keeps `OBJECT_STATIC_METHODS` order so the publication step
+    /// can pair each function with its name and `length`.
+    fn insert_object_statics(
+        &mut self,
+        realm: RealmId,
+        function_prototype: FunctionId,
+        records: [ObjectRecord; OBJECT_STATIC_METHODS.len()],
+    ) -> [FunctionId; OBJECT_STATIC_METHODS.len()] {
+        let mut inserted = [None; OBJECT_STATIC_METHODS.len()];
+        for ((slot, method), record) in inserted.iter_mut().zip(OBJECT_STATIC_METHODS).zip(records)
+        {
+            *slot = Some(self.insert_reserved_native(
+                realm,
+                HeapReference::Function(function_prototype),
+                method.kind,
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every Object static was inserted"))
+    }
+
     fn insert_realm_base(&mut self, mut records: RealmBaseRecords) -> RealmBase {
         let object_prototype =
             self.insert_reserved_object(HeapObject::ordinary(records.object_prototype));
@@ -799,6 +969,14 @@ impl Runtime {
             NativeFunctionKind::OrdinaryFunctionConstructor,
             records.function_constructor,
         );
+        let object_constructor = self.insert_reserved_native(
+            realm,
+            HeapReference::Function(function_prototype),
+            NativeFunctionKind::ObjectConstructor,
+            records.object_constructor,
+        );
+        let object_statics =
+            self.insert_object_statics(realm, function_prototype, records.object_statics);
         let object_to_string = self.insert_reserved_native(
             realm,
             HeapReference::Function(function_prototype),
@@ -847,6 +1025,8 @@ impl Runtime {
             global_object,
             function_prototype,
             function_constructor,
+            object_constructor,
+            object_statics,
             object_to_string,
             object_value_of,
             function_to_string,
@@ -998,9 +1178,23 @@ impl Runtime {
             NativeFunctionKind::ArrayConstructor,
             records.constructor,
         );
+        let join = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ArrayPrototypeJoin,
+            records.join,
+        );
+        let to_string = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ArrayPrototypeToString,
+            records.to_string,
+        );
         ArrayIntrinsicGraph {
             prototype,
             constructor,
+            join,
+            to_string,
         }
     }
 
@@ -1233,6 +1427,7 @@ impl Runtime {
             graph.base.global_object,
             [
                 (&keys.function, graph.base.function_constructor),
+                (&keys.object, graph.base.object_constructor),
                 (&keys.boolean, graph.boolean.constructor),
                 (&keys.number, graph.number.constructor),
                 (&keys.string, graph.string.constructor),
@@ -1429,6 +1624,62 @@ impl Runtime {
         ] {
             self.append_function_identity(function, name, length, keys)?;
         }
+        self.publish_object_intrinsic_properties(graph, keys, names)
+    }
+
+    /// Publishes the `Object` constructor, its statics, and the
+    /// `Object.prototype.constructor` back edge.
+    ///
+    /// Only reflection operations the current profile can honor completely are
+    /// installed; the rest of the pinned surface stays absent so it fails
+    /// closed as a missing property instead of behaving incorrectly.
+    fn publish_object_intrinsic_properties(
+        &mut self,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        self.objects
+            .get_mut(graph.base.object_prototype)
+            .expect("new Object.prototype remains live")
+            .record
+            .append_data(
+                keys.constructor.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.base.object_constructor),
+            )?;
+        self.append_constructor_identity(
+            graph.base.object_constructor,
+            StoredValue::Object(graph.base.object_prototype),
+            &names.object,
+            keys,
+        )?;
+        let mut interned = OBJECT_STATIC_ATOM_START;
+        for (method, function) in OBJECT_STATIC_METHODS
+            .into_iter()
+            .zip(graph.base.object_statics)
+        {
+            let (key, name) = if let Some(atom) = method.predefined_name {
+                (
+                    self.predefined_property_key(atom),
+                    predefined_string(&self.atoms, atom),
+                )
+            } else {
+                let atom = graph.dynamic_atoms[interned].clone();
+                interned += 1;
+                let name = atom
+                    .description()
+                    .expect("interned Object static name has a description")
+                    .clone();
+                (PropertyKey::from_validated_atom(atom), name)
+            };
+            self.functions
+                .get_mut(graph.base.object_constructor)
+                .expect("new Object constructor remains live")
+                .object
+                .append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
+            self.append_function_identity(function, &name, method.length, keys)?;
+        }
         Ok(())
     }
 
@@ -1479,13 +1730,24 @@ impl Runtime {
         keys: &RealmKeys,
         names: &RealmNames,
     ) -> Result<(), TryReserveError> {
-        self.append_object_methods(graph.prototype, [(&keys.constructor, graph.constructor)])?;
+        self.append_object_methods(
+            graph.prototype,
+            [
+                (&keys.constructor, graph.constructor),
+                (&keys.join, graph.join),
+                (&keys.to_string, graph.to_string),
+            ],
+        )?;
         self.append_constructor_identity(
             graph.constructor,
             StoredValue::Object(graph.prototype),
             &names.array,
             keys,
-        )
+        )?;
+        // The pinned table reports `join` with length 1 and `toString` with
+        // length 0 (`quickjs.c:44557-44558`).
+        self.append_function_identity(graph.join, &names.join, 1, keys)?;
+        self.append_function_identity(graph.to_string, &names.to_string, 0, keys)
     }
 
     fn publish_iterator_intrinsic_properties(
@@ -1775,6 +2037,19 @@ fn reserved_record(capacity: usize) -> Result<ObjectRecord, RuntimeError> {
         .try_reserve_data(capacity)
         .map_err(|_| property_allocation_failed(capacity))?;
     Ok(record)
+}
+
+/// Reserves one record per `Object` static method.
+///
+/// Each static is an ordinary native function object carrying `length` and
+/// `name`, so every record reserves exactly two property slots.
+fn object_static_records() -> Result<[ObjectRecord; OBJECT_STATIC_METHODS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; OBJECT_STATIC_METHODS.len()] =
+        [const { None }; OBJECT_STATIC_METHODS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Object static record was reserved")))
 }
 
 const fn allocation_failed(resource: RuntimeResource, additional: usize) -> RuntimeError {

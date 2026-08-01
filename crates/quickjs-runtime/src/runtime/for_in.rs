@@ -26,8 +26,8 @@
 //! Bounded for-in iterator snapshots, prototype scans, and primitive boxing.
 
 use super::{
-    ForInAdvance, ForInIterator, ForInSnapshot, HeapObject, HeapReference, JsString, ObjectId,
-    PropertyKey, RealmId, Runtime, RuntimeResource, StoredValue, check_execution_limit,
+    ForInAdvance, ForInIterator, ForInSnapshot, HeapObject, HeapReference, JsString, KeyPhases,
+    ObjectId, PropertyKey, RealmId, Runtime, RuntimeResource, StoredValue, check_execution_limit,
     for_in_snapshot_work_upper_bound, usize_to_u64,
 };
 
@@ -385,12 +385,27 @@ impl Runtime {
         reference: HeapReference,
         replacing: usize,
     ) -> Result<(ForInSnapshot, u64), crate::ExecutionError> {
+        self.try_own_key_snapshot(reference, replacing, KeyPhases::FOR_IN)
+    }
+
+    /// Builds an ordered own-key snapshot for one object, charging it against
+    /// the same accounting `for-in` uses.
+    ///
+    /// The snapshot is a value, so a caller may run arbitrary JavaScript
+    /// between two keys without observing later shape mutations, which is what
+    /// `Object.keys` and `[[OwnPropertyKeys]]` consumers require.
+    pub(crate) fn try_own_key_snapshot(
+        &self,
+        reference: HeapReference,
+        replacing: usize,
+        phases: KeyPhases,
+    ) -> Result<(ForInSnapshot, u64), crate::ExecutionError> {
         let string_length = match reference {
             HeapReference::Function(_) => None,
             HeapReference::Object(object) => self.boxed_string(object)?.map(JsString::len),
         };
         let record = self.object_record(reference)?;
-        let count = record.for_in_candidate_count(string_length);
+        let count = record.own_key_candidate_count(string_length, phases);
         let observed = self
             .for_in_entries
             .saturating_sub(usize_to_u64(replacing))
@@ -400,14 +415,14 @@ impl Runtime {
             self.limits.max_for_in_entries,
             observed,
         )?;
-        let snapshot = record.try_for_in_snapshot(string_length).map_err(|_| {
-            crate::ExecutionError::AllocationFailed {
+        let snapshot = record
+            .try_own_key_snapshot(string_length, phases)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::ForInEntries,
                 additional: count,
-            }
-        })?;
+            })?;
         // Snapshot construction performs two count passes and separate numeric
-        // and string-key passes before its conservatively charged sort.
+        // and atom-key passes before its conservatively charged sort.
         let work = usize_to_u64(record.property_count())
             .saturating_mul(4)
             .saturating_add(usize_to_u64(snapshot.len()))

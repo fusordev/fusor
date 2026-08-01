@@ -27,11 +27,11 @@
 
 use super::{
     Arc, Atom, AtomError, BoxedPrimitive, ErrorIntrinsicKind, ExceptionKind, FunctionId,
-    FunctionImplementation, HandleError, HandleKind, HeapObject, HeapReference, JsNumber, JsString,
-    NativeFunctionKind, ObjectId, ObjectRecord, OwnProperty, PredefinedAtom, PropertyKey,
-    PropertyLayout, PropertyLayoutKind, RealmId, RealmIntrinsics, ReleaseMailbox, Runtime,
-    RuntimeResource, StoredValue, array_length_from_number, check_execution_limit,
-    stale_heap_reference, usize_to_u64,
+    FunctionImplementation, HandleError, HandleKind, HeapObject, HeapReference, IntegrityLevel,
+    JsNumber, JsString, NativeFunctionKind, ObjectId, ObjectRecord, OwnProperty, PredefinedAtom,
+    PropertyDeletion, PropertyKey, PropertyLayout, PropertyLayoutKind, RealmId, RealmIntrinsics,
+    ReleaseMailbox, Runtime, RuntimeResource, SetPrototypeOutcome, StoredValue,
+    array_length_from_number, check_execution_limit, stale_heap_reference, usize_to_u64,
 };
 
 impl Runtime {
@@ -588,6 +588,107 @@ impl Runtime {
         Ok(true)
     }
 
+    /// Applies ECMAScript `OrdinarySetPrototypeOf`.
+    ///
+    /// The same-value case succeeds before the extensibility test, so
+    /// re-assigning the current prototype of a non-extensible object is
+    /// permitted, exactly as the pinned `JS_SetPrototypeInternal` does
+    /// (`quickjs.c:7940`). A non-extensible object otherwise rejects, and a
+    /// prototype chain that would reach the target rejects as a cycle.
+    pub(crate) fn set_prototype_of(
+        &mut self,
+        target: HeapReference,
+        prototype: Option<HeapReference>,
+    ) -> Result<SetPrototypeOutcome, crate::EngineFault> {
+        let record = self.object_record(target)?;
+        if record.prototype() == prototype {
+            return Ok(SetPrototypeOutcome::Complete);
+        }
+        if !record.is_extensible() {
+            return Ok(SetPrototypeOutcome::NonExtensible);
+        }
+        if self.replace_prototype_checked(target, prototype)? {
+            Ok(SetPrototypeOutcome::Complete)
+        } else {
+            Ok(SetPrototypeOutcome::CyclicPrototype)
+        }
+    }
+
+    /// Applies ECMAScript `OrdinaryPreventExtensions`, which always succeeds
+    /// for an ordinary object.
+    pub(crate) fn prevent_extensions(
+        &mut self,
+        target: HeapReference,
+    ) -> Result<(), crate::EngineFault> {
+        self.object_record_mut(target)?.prevent_extensions();
+        Ok(())
+    }
+
+    /// Returns `[[IsExtensible]]` for an ordinary object.
+    pub(crate) fn is_extensible(&self, target: HeapReference) -> Result<bool, crate::EngineFault> {
+        Ok(self.object_record(target)?.is_extensible())
+    }
+
+    /// Applies ECMAScript `SetIntegrityLevel`.
+    ///
+    /// Both levels first prevent extensions, then clamp every own property's
+    /// attributes. Freezing additionally clears `writable` on data properties;
+    /// an accessor has no `writable` attribute, so only its `configurable`
+    /// attribute changes (`quickjs.c:40549`).
+    pub(crate) fn set_integrity_level(
+        &mut self,
+        target: HeapReference,
+        level: IntegrityLevel,
+    ) -> Result<(), crate::EngineFault> {
+        let record = self.object_record_mut(target)?;
+        record.prevent_extensions();
+        match level {
+            IntegrityLevel::Sealed => record.seal_own_properties(),
+            IntegrityLevel::Frozen => record.freeze_own_properties(),
+        }
+        Ok(())
+    }
+
+    /// Applies ECMAScript `TestIntegrityLevel`.
+    ///
+    /// An extensible object is neither sealed nor frozen regardless of its
+    /// properties, so an empty but extensible object reports `false`.
+    pub(crate) fn tests_integrity_level(
+        &self,
+        target: HeapReference,
+        level: IntegrityLevel,
+    ) -> Result<bool, crate::EngineFault> {
+        let record = self.object_record(target)?;
+        if record.is_extensible() {
+            return Ok(false);
+        }
+        Ok(match level {
+            IntegrityLevel::Sealed => record.own_properties_are_sealed(),
+            IntegrityLevel::Frozen => record.own_properties_are_frozen(),
+        })
+    }
+
+    /// Applies ECMAScript `[[Delete]]` for an ordinary object, keeping the
+    /// runtime's own-property accounting in step with the removal.
+    ///
+    /// An array's `length` property is not configurable, so a delete of it
+    /// reports `NotConfigurable`. Deleting an element never shortens the
+    /// cached array length; the element simply becomes an absent property,
+    /// which is what ECMAScript and the pinned `delete_property`
+    /// (`quickjs.c:9311`) both do.
+    pub(crate) fn delete_own_property(
+        &mut self,
+        target: HeapReference,
+        key: &PropertyKey,
+    ) -> Result<PropertyDeletion, crate::EngineFault> {
+        let deletion = self.object_record_mut(target)?.delete_own_property(key);
+        if deletion == PropertyDeletion::Deleted {
+            self.object_properties = self.object_properties.saturating_sub(1);
+            self.collection_pending = true;
+        }
+        Ok(deletion)
+    }
+
     pub(crate) fn object_record(
         &self,
         reference: HeapReference,
@@ -898,6 +999,28 @@ impl Runtime {
         self.object_properties += 1;
         self.collection_pending = true;
         Ok(())
+    }
+
+    /// Appends one own property described by a completed descriptor decision.
+    ///
+    /// This is the insertion half of `OrdinaryDefineOwnProperty`: the caller
+    /// has already validated compatibility and extensibility.
+    pub(crate) fn append_own_property(
+        &mut self,
+        reference: HeapReference,
+        key: PropertyKey,
+        property: OwnProperty,
+    ) -> Result<(), crate::ExecutionError> {
+        match property {
+            OwnProperty::Data { layout, value } => {
+                self.append_data_property(reference, key, layout, value)
+            }
+            OwnProperty::Accessor {
+                layout,
+                getter,
+                setter,
+            } => self.append_accessor_property(reference, key, layout, getter, setter),
+        }
     }
 
     pub(crate) fn append_accessor_property(
