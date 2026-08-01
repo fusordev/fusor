@@ -340,6 +340,7 @@ fn call_aggregate_function(
         continuations,
         pre_call: None,
         new_target: None,
+        native_caller: None,
     }))
 }
 

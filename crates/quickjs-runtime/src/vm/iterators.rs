@@ -72,6 +72,7 @@ pub(super) fn iterator_getter_call(
         continuations,
         pre_call,
         new_target: None,
+        native_caller: None,
     }))
 }
 

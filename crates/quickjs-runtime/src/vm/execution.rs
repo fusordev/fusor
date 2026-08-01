@@ -331,6 +331,7 @@ pub(super) fn create_frame(
         native_returns: Vec::new(),
         transient_cleanup_pending: false,
         ordinary_constructor: false,
+        native_caller: None,
         reserved_values: plan.reserved_values,
         arguments,
         locals,

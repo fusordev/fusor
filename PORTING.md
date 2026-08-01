@@ -507,11 +507,13 @@ A milestone is complete only when all of its checked items pass in CI.
         15-case call-spread differential covers 15 strict feature tags.
         Iterator destructuring, `for await`, and async/generator iterator
         consumers remain fail-closed.
-  - [ ] Represent synthetic native caller frames. In particular, each
-        `Function.prototype.call`/`apply` continuation is frame-accounted but
-        cannot yet render QuickJS's intervening `call (native)` or
-        `apply (native)` entry through the current verified-source-only
-        `JsStackFrame`.
+  - [x] Represent synthetic native caller frames. Each bytecode frame
+        reached through `Function.prototype.call` or `Function.prototype.apply`
+        records the pinned `call (native)` / `apply (native)` entry, including
+        argument-list getters resumed by apply, and error stacks render that
+        entry between the target function and its caller exactly as QuickJS's
+        native-frame backtrace does. Bound-target unwrapping preserves the
+        marker, while bytecode `apply` (call spread) intentionally carries none.
 - [ ] Deterministic debug/line tables.
 
 ### M3 — values and object model

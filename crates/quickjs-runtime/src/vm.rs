@@ -211,6 +211,7 @@ struct Frame {
     native_returns: Vec<NativeContinuation>,
     transient_cleanup_pending: bool,
     ordinary_constructor: bool,
+    native_caller: Option<SyntheticNativeFrame>,
     reserved_values: u64,
     arguments: Vec<FrameBinding>,
     locals: Vec<FrameBinding>,
@@ -218,6 +219,24 @@ struct Frame {
     own_cell_bindings: Vec<FrameBindingAddress>,
     environment: Vec<EnvironmentBinding>,
     stack: Vec<OperandStackEntry>,
+}
+
+/// The pinned `call (native)` / `apply (native)` entry `QuickJS` places
+/// between the target function and its caller when a bytecode function is
+/// reached through `Function.prototype.call` or `Function.prototype.apply`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SyntheticNativeFrame {
+    Call,
+    Apply,
+}
+
+impl SyntheticNativeFrame {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Call => "call",
+            Self::Apply => "apply",
+        }
+    }
 }
 
 struct DynamicFunctionReturn {
@@ -634,6 +653,7 @@ struct FunctionApplyContinuation {
     active_frame_values: u64,
     origin: JsStackFrame,
     new_target: Option<FunctionId>,
+    native_caller: Option<SyntheticNativeFrame>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -790,6 +810,7 @@ struct NativeCall {
     continuations: Vec<NativeContinuation>,
     pre_call: Option<NativePreCall>,
     new_target: Option<FunctionId>,
+    native_caller: Option<SyntheticNativeFrame>,
 }
 
 enum NativePreCall {
@@ -2023,6 +2044,7 @@ fn execute_frame_loop(
                     *active_frame_values,
                     execution_budget,
                     new_target,
+                    None,
                 );
                 let dispatch = match dispatch {
                     Ok(dispatch) => dispatch,

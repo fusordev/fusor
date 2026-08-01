@@ -567,6 +567,7 @@ fn resolve_native_dispatch_inner(
                 StoredValue::Object(create_ordinary_constructor_receiver(runtime, new_target)?);
             frame.ordinary_constructor = true;
         }
+        frame.native_caller = call.native_caller;
         attach_native_continuations(&mut frame, call.continuations)?;
         apply_native_pre_call(runtime, call.pre_call.as_ref())?;
         return Ok(NativeDispatch::Frame(frame));
@@ -774,6 +775,7 @@ pub(super) fn dispatch_native_call_with_frames(
             active_frame_values,
             execution_budget,
             None,
+            Some(SyntheticNativeFrame::Apply),
         ),
         NativeFunctionKind::FunctionPrototypeCall => {
             let origin = origin.unwrap_or_else(native_function_host_origin);
@@ -806,6 +808,7 @@ pub(super) fn dispatch_native_call_with_frames(
                 continuations,
                 pre_call: None,
                 new_target: None,
+                native_caller: Some(SyntheticNativeFrame::Call),
             }))
         }
         NativeFunctionKind::FunctionPrototypeBind => begin_function_bind(
@@ -1240,6 +1243,7 @@ pub(super) fn begin_function_apply(
     active_frame_values: u64,
     execution_budget: &mut ExecutionBudget,
     new_target: Option<FunctionId>,
+    native_caller: Option<SyntheticNativeFrame>,
 ) -> Result<NativeDispatch, NativeFailure> {
     let StoredValue::Function(target) = inputs.receiver else {
         return Err(function_apply_exception(
@@ -1253,7 +1257,15 @@ pub(super) fn begin_function_apply(
     let receiver = supplied.take_first_or_undefined();
     let array_like = supplied.take_first_or_undefined();
     if matches!(array_like, StoredValue::Undefined | StoredValue::Null) {
-        return function_apply_target_call(target, receiver, Vec::new(), return_to, origin, None);
+        return function_apply_target_call(
+            target,
+            receiver,
+            Vec::new(),
+            return_to,
+            origin,
+            None,
+            native_caller,
+        );
     }
     if !matches!(
         array_like,
@@ -1291,6 +1303,7 @@ pub(super) fn begin_function_apply(
         active_frame_values,
         origin,
         new_target,
+        native_caller,
     };
     let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
     charge_heap_property_lookup(runtime, &state.array_like, execution_budget)?;
@@ -1461,6 +1474,7 @@ fn advance_function_apply_indices(
         return_to,
         state.origin,
         state.new_target,
+        state.native_caller,
     )
 }
 
@@ -1504,6 +1518,7 @@ fn function_apply_getter_call(
     return_to: Option<CallReturn>,
 ) -> Result<NativeDispatch, NativeFailure> {
     let origin = state.origin.clone();
+    let native_caller = state.native_caller;
     let mut continuations = Vec::new();
     continuations
         .try_reserve_exact(1)
@@ -1521,6 +1536,7 @@ fn function_apply_getter_call(
         continuations,
         pre_call: None,
         new_target: None,
+        native_caller,
     }))
 }
 
@@ -1531,6 +1547,7 @@ fn function_apply_target_call(
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
     new_target: Option<FunctionId>,
+    native_caller: Option<SyntheticNativeFrame>,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut continuations = Vec::new();
     continuations
@@ -1549,6 +1566,7 @@ fn function_apply_target_call(
         continuations,
         pre_call: None,
         new_target,
+        native_caller,
     }))
 }
 

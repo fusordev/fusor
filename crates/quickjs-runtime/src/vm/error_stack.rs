@@ -50,16 +50,23 @@ impl ErrorStackSnapshot {
     /// Marks the function identities whose late-read names remain observable.
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         for site in &self.sites {
-            mark(CollectionRoot::Heap(HeapReference::Function(site.function)));
+            if let ErrorStackSite::Bytecode { function, .. } = site {
+                mark(CollectionRoot::Heap(HeapReference::Function(*function)));
+            }
         }
     }
 }
 
-struct ErrorStackSite {
-    function: FunctionId,
-    location: JsStackFrame,
-    line: u64,
-    column: u64,
+enum ErrorStackSite {
+    Bytecode {
+        function: FunctionId,
+        location: JsStackFrame,
+        line: u64,
+        column: u64,
+    },
+    /// The pinned `call (native)` / `apply (native)` entry between a target
+    /// bytecode function and its caller.
+    Native(SyntheticNativeFrame),
 }
 
 /// Captures the active JavaScript locations for a newly constructed Error.
@@ -98,12 +105,19 @@ pub(super) fn capture_error_stack(
         } else {
             active_frame_location(runtime, frame)?
         };
-        sites.push(ErrorStackSite {
+        sites.push(ErrorStackSite::Bytecode {
             function: frame.function,
             location,
             line: 0,
             column: 0,
         });
+        // QuickJS inserts the pinned `call (native)` / `apply (native)`
+        // entry between the target function and its caller whenever a
+        // bytecode function was reached through `Function.prototype.call`
+        // or `Function.prototype.apply`.
+        if let Some(caller) = frame.native_caller {
+            sites.push(ErrorStackSite::Native(caller));
+        }
     }
 
     populate_source_positions(&mut sites)?;
@@ -123,9 +137,23 @@ pub(super) fn render_error_stack(
 ) -> Result<JsString, ExecutionError> {
     let mut rendered = JsString::empty();
     for site in &snapshot.sites {
-        let name = stack_function_name(runtime, site.function)?;
-        let line = render_stack_line(&name, site.location.source_name(), site.line, site.column)?;
-        rendered = rendered.concat(&line)?;
+        match site {
+            ErrorStackSite::Bytecode {
+                function,
+                location,
+                line,
+                column,
+            } => {
+                let name = stack_function_name(runtime, *function)?;
+                let line = render_stack_line(&name, location.source_name(), *line, *column)?;
+                rendered = rendered.concat(&line)?;
+            }
+            ErrorStackSite::Native(kind) => {
+                rendered = rendered.concat(&JsString::from_utf8("    at ")?)?;
+                rendered = rendered.concat(&JsString::from_utf8(kind.label())?)?;
+                rendered = rendered.concat(&JsString::from_utf8(" (native)\n")?)?;
+            }
+        }
     }
     Ok(rendered)
 }
@@ -167,23 +195,33 @@ fn populate_source_positions(sites: &mut [ErrorStackSite]) -> Result<(), Executi
     let mut line = 1_u64;
     let mut column = 1_u64;
     for index in order {
-        let key = source_identity(&sites[index]);
+        let ErrorStackSite::Bytecode { location, .. } = &sites[index] else {
+            continue;
+        };
+        let key = stack_source_identity(location);
         if current_source != Some(key) {
             current_source = Some(key);
             scanned = 0;
             line = 1;
             column = 1;
         }
-        let offset = source_offset(&sites[index])?;
+        let offset = source_offset(location)?;
         advance_source_position(
-            sites[index].location.source_text(),
+            location.source_text(),
             &mut scanned,
             offset,
             &mut line,
             &mut column,
         )?;
-        sites[index].line = line;
-        sites[index].column = column;
+        if let ErrorStackSite::Bytecode {
+            line: site_line,
+            column: site_column,
+            ..
+        } = &mut sites[index]
+        {
+            *site_line = line;
+            *site_column = column;
+        }
     }
     Ok(())
 }
@@ -216,24 +254,25 @@ fn advance_source_position(
 }
 
 fn source_position_key(site: &ErrorStackSite) -> (*const u8, usize, u32) {
-    let source = site.location.source_text();
+    let ErrorStackSite::Bytecode { location, .. } = site else {
+        return (std::ptr::null(), 0, 0);
+    };
+    let source = location.source_text();
     (
         source.as_ptr(),
         source.len(),
-        site.location.source_span().start(),
+        location.source_span().start(),
     )
 }
 
-fn source_identity(site: &ErrorStackSite) -> (*const u8, usize) {
-    let source = site.location.source_text();
+fn stack_source_identity(location: &JsStackFrame) -> (*const u8, usize) {
+    let source = location.source_text();
     (source.as_ptr(), source.len())
 }
 
-fn source_offset(site: &ErrorStackSite) -> Result<usize, EngineFault> {
-    usize::try_from(site.location.source_span().start()).map_err(|_| {
-        EngineFault::RuntimeInvariant {
-            message: "verified Error stack source offset exceeds the host index domain",
-        }
+fn source_offset(location: &JsStackFrame) -> Result<usize, EngineFault> {
+    usize::try_from(location.source_span().start()).map_err(|_| EngineFault::RuntimeInvariant {
+        message: "verified Error stack source offset exceeds the host index domain",
     })
 }
 

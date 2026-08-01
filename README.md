@@ -129,10 +129,12 @@ async/generator iterator consumers, the remaining Number built-ins, the
 remaining String built-ins, serialized bytecode, every form of eval,
 destructuring-catch semantics, and complete Error compatibility remain
 deferred and fail closed. The Error checkpoint still lacks the `Object` and
-`Reflect` surface needed by several reflection/new-target probes, a global
-`undefined` binding, synthetic `call (native)`/`apply (native)` stack frames,
-deleted-stack rebuild for explicitly thrown branded Errors, and host
-observation that normalizes an escaping explicitly thrown Error object.
+`Reflect` surface needed by several reflection/new-target probes and a global
+`undefined` binding; it now renders the pinned `call (native)`/`apply (native)`
+entries for frames reached through `Function.prototype.call`/`apply`, while
+deleted-stack rebuild for explicitly thrown branded Errors and host
+observation that normalizes an escaping explicitly thrown Error object
+remain pending.
 Its strict differential corpus contains 35 cases and 59 feature tags; the
 current candidate matches 18 of 35 cases. Ordinary
 synchronous `try`/`catch`/`finally` now uses verified shared finalizer

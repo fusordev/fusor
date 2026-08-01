@@ -251,3 +251,71 @@ fn caught_engine_errors_are_branded_and_freeze_a_throw_site_stack() {
     );
     assert!(stack.starts_with("    at fail ("));
 }
+
+#[test]
+fn call_native_frames_appear_between_target_and_caller_in_error_stacks() {
+    let stack = call(
+        "\
+            function fail(){return null.value;}\
+            function caller(){return fail.call(null);}\
+            try{caller();}catch(error){return error.stack;}",
+        string,
+    );
+    let expected = "    at fail (<runtime Error>:";
+    assert!(stack.starts_with(expected), "target frame first: {stack:?}");
+    assert!(
+        stack.contains("    at call (native)\n"),
+        "synthetic call (native) frame: {stack:?}"
+    );
+    assert!(
+        stack.contains("    at caller (<runtime Error>:"),
+        "caller frame after native: {stack:?}"
+    );
+}
+
+#[test]
+fn apply_native_frames_appear_between_target_and_caller_in_error_stacks() {
+    let stack = call(
+        "\
+            function fail(){return null.value;}\
+            function caller(){return fail.apply(null, []);}\
+            try{caller();}catch(error){return error.stack;}",
+        string,
+    );
+    assert!(
+        stack.contains("    at fail (<runtime Error>:"),
+        "target frame first: {stack:?}"
+    );
+    assert!(
+        stack.contains("    at apply (native)\n"),
+        "synthetic apply (native) frame: {stack:?}"
+    );
+    assert!(
+        stack.contains("    at caller (<runtime Error>:"),
+        "caller frame after native: {stack:?}"
+    );
+}
+
+#[test]
+fn apply_getter_failures_keep_the_native_frame_below_the_getter() {
+    let stack = call(
+        "\
+            function fail(){return null.value;}\
+            let arrayLike={get length(){return 1;},get 0(){return fail.call(null);}};\
+            function caller(){return fail.apply(null, arrayLike);}\
+            try{caller();}catch(error){return error.stack;}",
+        string,
+    );
+    assert!(
+        stack.contains("    at fail (<runtime Error>:"),
+        "getter target frame first: {stack:?}"
+    );
+    assert!(
+        stack.contains("    at call (native)\n"),
+        "getter failure keeps call (native): {stack:?}"
+    );
+    assert!(
+        stack.contains("    at apply (native)\n"),
+        "getter failure keeps apply (native): {stack:?}"
+    );
+}

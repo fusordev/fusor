@@ -802,9 +802,9 @@ The current implementation keeps distinct domains:
   from arbitrary explicit `throw` values. Every record retains the origin
   function/bytecode PC/source artifact plus caller call sites while explicit
   frames unwind. Zero-value `Function.prototype.call` continuations preserve
-  the target and outer verified call site, but the current source-only
-  `JsStackFrame` cannot yet render QuickJS's intervening `call (native)` stack
-  entry;
+  the target and outer verified call site, and error-stack rendering now
+  inserts the pinned `call (native)` / `apply (native)` entries for frames
+  reached through those methods;
 - compile diagnostics: stable code, canonical message, severity, source span,
   labels, notes, and help;
 - verifier errors: function, bytecode PC, opcode, and violated invariant;
@@ -859,13 +859,15 @@ fails.
 Constructor-created errors append an own writable, non-enumerable,
 configurable `stack` after `message`, optional `cause`, and optional `errors`.
 The snapshot is headerless and contains only retained verified-bytecode frames
-in `    at name (file:line:column)` form. Locations are captured without Rust
+in `    at name (file:line:column)` form, plus the pinned synthetic
+`call (native)` / `apply (native)` entries when a frame was reached through
+`Function.prototype.call` or `Function.prototype.apply` (including argument
+getters resumed by apply). Locations are captured without Rust
 stack recursion, while function data names are read when the property is
 rendered. Snapshot site storage is reserved on constructor entry, so an
 uncatchable host allocation failure can precede the observable prototype,
 message, cause, or Aggregate iterator work that QuickJS performs before its
-backtrace allocation. Synthetic native-frame provenance, including intervening
-`Function.prototype.call` and `apply` frames, is still absent. Engine-created
+backtrace allocation. Engine-created
 errors freeze a headerless stack at the first exception-dispatch boundary,
 before iterator or finally unwinding, then materialize the matching realm-owned
 brand with own `message` and `stack` properties when caught. An escaping

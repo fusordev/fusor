@@ -414,6 +414,7 @@ pub(super) fn intrinsic_getter_call_with_reserved_continuation(
         continuations,
         pre_call: None,
         new_target: None,
+        native_caller: None,
     })
 }
 
@@ -921,6 +922,7 @@ fn function_source_method_call(
         continuations,
         pre_call: None,
         new_target: None,
+        native_caller: None,
     }))
 }
 
@@ -1128,6 +1130,7 @@ fn property_key_method_call(
         continuations,
         pre_call: None,
         new_target: None,
+        native_caller: None,
     }))
 }
 
@@ -1433,6 +1436,7 @@ fn operator_primitive_method_call(
         continuations,
         pre_call: None,
         new_target: None,
+        native_caller: None,
     }))
 }
 
@@ -2100,6 +2104,7 @@ fn finish_property_key_target(
                         continuations: Vec::new(),
                         pre_call: None,
                         new_target: None,
+                        native_caller: None,
                     }))
                 }
                 PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
@@ -2160,6 +2165,7 @@ fn finish_property_key_target(
                         continuations: Vec::new(),
                         pre_call: None,
                         new_target: None,
+                        native_caller: None,
                     }))
                 }
                 PropertyWriteOutcome::Failed(failure) => Err(NativeFailure::Abrupt(

@@ -192,6 +192,7 @@ fn instance_of_method_decision(
                 continuations,
                 pre_call: None,
                 new_target: None,
+                native_caller: None,
             }))
         }
         StoredValue::Boolean(_)
@@ -267,6 +268,7 @@ fn ordinary_has_instance(
                         continuations,
                         pre_call: None,
                         new_target: None,
+                        native_caller: None,
                     }));
                 }
                 StoredValue::Boolean(_)
