@@ -692,11 +692,14 @@ A milestone is complete only when all of its checked items pass in CI.
         strict 35-case, 59-feature-tag Error differential currently matches 18
         candidate cases; the other observations require the pending
         `Object`/`Reflect` surface, the global `undefined` binding, or
-        normalization of an escaping explicitly thrown Error object. Snapshot
-        storage is also reserved at constructor entry, so only uncatchable host
-        allocation-failure ordering differs from QuickJS's end-of-constructor
-        backtrace build. Direct eval remains deferred and outside this
-        checkpoint.
+        normalization of an escaping explicitly thrown Error object. The
+        global `undefined`/`NaN`/`Infinity` value properties now exist as
+        pinned non-writable global-object data, so `undefined`-dependent
+        observations resolve through the constructor-realm global object.
+        Snapshot storage is also reserved at constructor entry, so only
+        uncatchable host allocation-failure ordering differs from QuickJS's
+        end-of-constructor backtrace build. Direct eval remains deferred and
+        outside this checkpoint.
 - [ ] Number, BigInt, String, RegExp, Date, JSON, and structured data.
 - [ ] Collections, ArrayBuffer, TypedArray, DataView, Atomics, and shared data.
 - [ ] Resizable/transferable ArrayBuffer, iterator helpers, Set methods,

@@ -1227,6 +1227,7 @@ impl Runtime {
         )?;
         self.publish_array_intrinsic_properties(&graph.array, keys, names)?;
         self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
+        self.publish_global_value_properties(graph)?;
         self.publish_symbol_intrinsic_properties(&graph.symbol, graph, keys, names)?;
         self.append_object_methods(
             graph.base.global_object,
@@ -1238,6 +1239,38 @@ impl Runtime {
                 (&keys.array, graph.array.constructor),
                 (&keys.symbol, graph.symbol.constructor),
             ],
+        )
+    }
+
+    /// Installs the pinned global value properties `undefined`, `NaN`, and
+    /// `Infinity` as non-writable, non-enumerable, non-configurable data
+    /// properties on the realm's global object, matching `QuickJS`'s
+    /// `js_global_data` entries. The compiler lowers these names as
+    /// constructor-realm global references, so the reads resolve through the
+    /// global object exactly like any other realm-global binding.
+    fn publish_global_value_properties(
+        &mut self,
+        graph: &RealmGraph,
+    ) -> Result<(), TryReserveError> {
+        let undefined_key = self.predefined_property_key(PredefinedAtom::Undefined);
+        let nan_key = self.predefined_property_key(PredefinedAtom::Nan);
+        let infinity_key = self.predefined_property_key(PredefinedAtom::Infinity);
+        let record = &mut self
+            .objects
+            .get_mut(graph.base.global_object)
+            .expect("new realm global object remains live")
+            .record;
+        let frozen = FROZEN_PROPERTY;
+        record.append_data(undefined_key, frozen, StoredValue::Undefined)?;
+        record.append_data(
+            nan_key,
+            frozen,
+            StoredValue::Number(JsNumber::from_f64(f64::NAN)),
+        )?;
+        record.append_data(
+            infinity_key,
+            frozen,
+            StoredValue::Number(JsNumber::from_f64(f64::INFINITY)),
         )
     }
 

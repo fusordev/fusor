@@ -523,6 +523,50 @@ fn array_destructuring_member_targets_evaluate_bases_before_values() {
 }
 
 #[test]
+fn captured_cells_coexist_with_realm_global_references() {
+    // Regression: a function whose nested closure captures a local cell and
+    // that also references the realm-global `undefined` name used to break
+    // the captured cell's environment wiring.
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let calls=0;\
+            let iterable={\
+                [Symbol.iterator](){\
+                    return {next(){calls++;return {done:true};}};\
+                }\
+            };\
+            let [a, b] = iterable;\
+            return calls + (calls===undefined?1:0) + (a===undefined?10:0) + (b===undefined?1:0);",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("realm-global and capture result");
+    // `next()` runs once, `undefined` resolves through the global object,
+    // and the exhausted destructured bindings are `undefined`.
+    assert_number(&result, 12);
+}
+
+#[test]
+fn global_undefined_nan_infinity_resolve_as_values() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            return (undefined===undefined?1:0) + (NaN!==NaN?1:0) + (Infinity>1e308?1:0);",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("global value properties");
+    assert_number(&result, 3);
+}
+
+#[test]
 fn array_destructuring_step_failures_do_not_call_return() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
