@@ -17,7 +17,17 @@
 mod arena;
 mod array_index;
 mod atom;
+// The BigInt value domain lands in stages: the arithmetic core is complete and
+// tested first, then `StoredValue` grows its variant and the operators stop
+// failing closed. Until that second stage, nothing outside the module's own
+// tests constructs a `JsBigInt`.
+#[allow(
+    dead_code,
+    reason = "the BigInt arithmetic core is verified independently before the value domain is wired into StoredValue"
+)]
+mod bigint;
 mod conversion;
+mod define_property;
 mod error;
 mod host;
 mod ids;
