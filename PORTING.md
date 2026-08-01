@@ -54,8 +54,15 @@ dependencies. See [ARCHITECTURE.md](ARCHITECTURE.md) for trust boundaries and
   source-order static requests, import attributes, and binding roles.
 - [x] Differential parser and Function-constructor manifests, including
   closed goal/feature/claim validation and a pinned compiler oracle.
-- [ ] Expand the parser ledger to exhaustive QuickJS grammar and early-error
-  coverage; record and regression-test each intentional Oxc difference.
+- [x] The parser ledger is exhaustive and closed in four dimensions: parse
+  goals, frontend claims, QuickJS grammar productions, and QuickJS parser
+  diagnostics. Productions are enumerated from the pinned parser's own dispatch
+  structure and each must be exercised by a fixture the oracle accepts. Every
+  `SyntaxError` the pinned front end can raise while compiling a source text is
+  either provoked by a fixture or recorded as unreachable with a reason; the
+  observed oracle message is matched against the pinned format string on every
+  run. Each intentional Oxc difference keeps an ID, rationale, and regression
+  fixture.
 
 Known intentional parser differences:
 
@@ -63,6 +70,14 @@ Known intentional parser differences:
   QuickJS-derived layer owns pattern grammar.
 - `QJS-OXC-002`: chained labels may accept a `continue` target that QuickJS
   rejects; a post-semantic check supplies the pinned QuickJS rejection.
+- `QJS-OXC-003`: pinned QuickJS caps parser recursion near 695 nested
+  parentheses and reports `stack overflow` (`quickjs.c:22720`); the frontend
+  parses the same source on its isolated stack, since the bound is a QuickJS
+  resource limit rather than ECMAScript grammar.
+- `QJS-OXC-004`: pinned QuickJS rejects an instance field named `prototype`
+  (`quickjs.c:25396`), which its own source marks as inconsistent with the
+  specification; the frontend follows ECMAScript, which reserves `prototype`
+  only for static fields.
 
 ### Compiler, bytecode, and execution
 
@@ -161,8 +176,11 @@ cargo doc --workspace --no-deps
 
 Run the applicable `cargo xtask *-differential` corpus against the pinned
 QuickJS oracle for parser, dynamic Function, Number radix, control flow,
-function apply/bind, iterators, call spread, and Errors. The parser manifest
-is an expanding compatibility gate, not proof of exhaustive grammar coverage.
+function apply/bind, iterators, call spread, and Errors. The parser manifest is
+a closed compatibility gate: it fails when a pinned grammar production has no
+accepted fixture, when a reachable pinned diagnostic has no fixture, when a
+fixture declares an unreachable one, or when an observed oracle message does not
+match the pinned format string.
 
 ## Engineering rules
 

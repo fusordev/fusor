@@ -5,7 +5,9 @@
 mod control_flow_differential;
 mod dynamic_function_differential;
 mod number_radix_differential;
+mod parser_diagnostics;
 mod parser_differential;
+mod parser_productions;
 
 use control_flow_differential::{
     CANDIDATE_WORKER_COMMAND, CallSpreadDifferentialOptions, ControlFlowDifferentialOptions,

@@ -1,9 +1,11 @@
 //! Differential checks for the Oxc/QuickJS syntax boundary.
 
+use crate::parser_diagnostics::{DiagnosticReach, PINNED_DIAGNOSTICS, PinnedDiagnostic};
+use crate::parser_productions::{PINNED_PRODUCTIONS, PinnedProduction, ProductionGoals};
 use crate::{ProgramOutput, Status};
 use crate::{collect_javascript_files, run_program_with_arguments_bounded, validate_executable};
 use quickjs_frontend::{
-    Allocator, CompilationGoal, FrontendOptions, GlobalScriptGoal, ParseMode, parse,
+    CompilationGoal, FrontendOptions, GlobalScriptGoal, ParseMode, with_parsed_program,
 };
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,7 +22,12 @@ const EXPECTED_EVAL_POLICY: &str = "excluded-user-deferred";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const MANIFEST_SCHEMA_VERSION: u64 = 1;
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_FIXTURE_BYTES: usize = 64 * 1024;
+/// The largest fixture the harness reads.
+///
+/// The bound is generous enough for the pinned parser's own resource limits:
+/// provoking `Too many call arguments` requires more than 65535 arguments
+/// (`quickjs.c:27143`), and each argument needs at least a digit and a comma.
+const MAX_FIXTURE_BYTES: usize = 256 * 1024;
 const MAX_ORACLE_FIXTURE_STREAM_BYTES: usize = 16 * 1024;
 const MAX_ORACLE_VERSION_STREAM_BYTES: usize = 16 * 1024;
 const ASYNC_SCRIPT_ORACLE: &str =
@@ -74,6 +81,7 @@ struct ParserFixture {
     goal: ParserGoal,
     candidate_expectation: Expectation,
     oracle_expectation: Expectation,
+    diagnostic: Option<DeclaredDiagnostic>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -217,10 +225,11 @@ enum ParserClaim {
     ProfileAcceptedEs2025,
     ProfileRejectedOutsideTarget,
     ProfileRegexpPatternDelegation,
+    ProfileParserResourceLimits,
 }
 
 impl ParserClaim {
-    const ALL: [Self; 31] = [
+    const ALL: [Self; 32] = [
         Self::LexicalCommentsHashbangHtml,
         Self::LexicalIdentifiersKeywordsUnicode,
         Self::LexicalLiteralsTokenization,
@@ -252,6 +261,7 @@ impl ParserClaim {
         Self::ProfileAcceptedEs2025,
         Self::ProfileRejectedOutsideTarget,
         Self::ProfileRegexpPatternDelegation,
+        Self::ProfileParserResourceLimits,
     ];
 
     const fn manifest_name(self) -> &'static str {
@@ -291,6 +301,7 @@ impl ParserClaim {
             Self::ProfileAcceptedEs2025 => "profile.accepted-es2025",
             Self::ProfileRejectedOutsideTarget => "profile.rejected-outside-target",
             Self::ProfileRegexpPatternDelegation => "profile.regexp-pattern-delegation",
+            Self::ProfileParserResourceLimits => "profile.parser-resource-limits",
         }
     }
 
@@ -325,7 +336,8 @@ impl ParserClaim {
             | Self::ModuleEarlyErrors => ParserFamily::Modules,
             Self::ProfileAcceptedEs2025
             | Self::ProfileRejectedOutsideTarget
-            | Self::ProfileRegexpPatternDelegation => ParserFamily::TargetProfile,
+            | Self::ProfileRegexpPatternDelegation
+            | Self::ProfileParserResourceLimits => ParserFamily::TargetProfile,
         }
     }
 
@@ -338,7 +350,8 @@ impl ParserClaim {
             | Self::StatementLexicalPlacementCollisions
             | Self::ModuleEarlyErrors
             | Self::ProfileRejectedOutsideTarget
-            | Self::ProfileRegexpPatternDelegation => matches!(expectation, Expectation::Reject),
+            | Self::ProfileRegexpPatternDelegation
+            | Self::ProfileParserResourceLimits => matches!(expectation, Expectation::Reject),
             Self::FunctionForms | Self::ClassObjectLiterals | Self::ProfileAcceptedEs2025 => {
                 matches!(expectation, Expectation::Accept)
             }
@@ -368,7 +381,150 @@ impl ParserClaim {
     }
 }
 
-const REQUIRED_CLAIM_POLARITIES: usize = ParserClaim::ALL.len() * 2 - 11;
+/// Every claim/polarity pair the corpus must cover.
+///
+/// Derived from the claim table so adding a claim cannot silently weaken the
+/// required coverage.
+const fn required_claim_polarities() -> usize {
+    let mut required = 0;
+    let mut index = 0;
+    while index < ParserClaim::ALL.len() {
+        let claim = ParserClaim::ALL[index];
+        if claim.allows_quickjs_expectation(Expectation::Accept) {
+            required += 1;
+        }
+        if claim.allows_quickjs_expectation(Expectation::Reject) {
+            required += 1;
+        }
+        index += 1;
+    }
+    required
+}
+
+const REQUIRED_CLAIM_POLARITIES: usize = required_claim_polarities();
+
+/// Every pinned diagnostic the corpus is required to provoke.
+fn reachable_pinned_diagnostics() -> usize {
+    PINNED_DIAGNOSTICS
+        .iter()
+        .filter(|diagnostic| matches!(diagnostic.reach, DiagnosticReach::Reachable))
+        .count()
+}
+
+/// A pinned diagnostic declared by a rejecting corpus fixture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DeclaredDiagnostic {
+    entry: &'static PinnedDiagnostic,
+}
+
+impl DeclaredDiagnostic {
+    fn from_manifest(value: &str, location: &str) -> Result<Self, String> {
+        PINNED_DIAGNOSTICS
+            .iter()
+            .find(|entry| entry.id == value)
+            .map(|entry| Self { entry })
+            .ok_or_else(|| {
+                format!("{location} contains unknown pinned QuickJS diagnostic `{value}`")
+            })
+    }
+
+    /// Reports whether an observed oracle message matches the pinned text.
+    ///
+    /// `%c`, `%s`, and `%.*s` are the pinned format's runtime substitutions, so
+    /// they match any run of characters (`%c` matches exactly one). Every other
+    /// character must match literally, which keeps a fixture from claiming a
+    /// diagnostic the oracle did not actually report.
+    fn matches_observed(self, observed: &str) -> bool {
+        matches_pinned_message(self.entry.message, observed)
+    }
+}
+
+/// Matches an observed oracle message against a pinned format string.
+fn matches_pinned_message(pinned: &str, observed: &str) -> bool {
+    let (literal, rest) = next_pinned_segment(pinned);
+    let Some(remaining) = observed.strip_prefix(literal) else {
+        return false;
+    };
+    match rest {
+        PinnedTail::End => remaining.is_empty(),
+        PinnedTail::SingleCharacter(tail) => {
+            let mut characters = remaining.chars();
+            characters
+                .next()
+                .is_some_and(|_| matches_pinned_message(tail, characters.as_str()))
+        }
+        PinnedTail::AnyCharacters(tail) => (0..=remaining.len())
+            .filter(|end| remaining.is_char_boundary(*end))
+            .any(|end| matches_pinned_message(tail, &remaining[end..])),
+    }
+}
+
+/// What follows the literal prefix of a pinned format string.
+enum PinnedTail<'pinned> {
+    End,
+    SingleCharacter(&'pinned str),
+    AnyCharacters(&'pinned str),
+}
+
+/// Splits a pinned format string into its literal prefix and next substitution.
+fn next_pinned_segment(pinned: &str) -> (&str, PinnedTail<'_>) {
+    let mut search = 0;
+    while let Some(offset) = pinned[search..].find('%') {
+        let start = search + offset;
+        let tail = &pinned[start..];
+        if let Some(rest) = tail.strip_prefix("%.*s") {
+            return (&pinned[..start], PinnedTail::AnyCharacters(rest));
+        }
+        if let Some(rest) = tail.strip_prefix("%s") {
+            return (&pinned[..start], PinnedTail::AnyCharacters(rest));
+        }
+        if let Some(rest) = tail.strip_prefix("%c") {
+            return (&pinned[..start], PinnedTail::SingleCharacter(rest));
+        }
+        search = start + '%'.len_utf8();
+    }
+    (pinned, PinnedTail::End)
+}
+
+/// A pinned grammar production declared by a corpus fixture.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DeclaredProduction {
+    id: &'static str,
+}
+
+impl DeclaredProduction {
+    fn from_manifest(value: &str, location: &str) -> Result<Self, String> {
+        PINNED_PRODUCTIONS
+            .iter()
+            .find(|production| production.id == value)
+            .map(|production| Self { id: production.id })
+            .ok_or_else(|| {
+                format!("{location} contains unknown pinned QuickJS grammar production `{value}`")
+            })
+    }
+
+    fn entry(self) -> &'static PinnedProduction {
+        PINNED_PRODUCTIONS
+            .iter()
+            .find(|production| production.id == self.id)
+            .expect("a declared production comes from the pinned table")
+    }
+}
+
+impl ProductionGoals {
+    /// Reports whether a parse goal admits the production.
+    const fn admits(self, goal: ParserGoal) -> bool {
+        match self {
+            Self::Any => true,
+            Self::ModuleOnly => matches!(goal, ParserGoal::Module),
+            Self::SloppyOnly => matches!(goal, ParserGoal::Script | ParserGoal::AsyncScript),
+            Self::AwaitCapable => matches!(
+                goal,
+                ParserGoal::Module | ParserGoal::AsyncScript | ParserGoal::StrictAsyncScript
+            ),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DifferenceDirection {
@@ -401,6 +557,8 @@ struct ParserCoverage {
     families: usize,
     claims: usize,
     claim_polarities: usize,
+    diagnostics: usize,
+    productions: usize,
     differences: usize,
 }
 
@@ -440,16 +598,33 @@ pub(crate) fn run_parser_differential(options: &ParserDifferentialOptions) -> Re
         let candidate = observe_candidate(fixture)?;
         let oracle = observe_oracle(&options.oracle, fixture, options.timeout)?;
 
-        if fixture.candidate_expectation.matches(candidate.accepted)
-            && fixture.oracle_expectation.matches(oracle.accepted)
+        if !fixture.candidate_expectation.matches(candidate.accepted)
+            || !fixture.oracle_expectation.matches(oracle.accepted)
         {
-            passed += 1;
-        } else {
             failures.push(format_failure(fixture, &oracle, &candidate));
+            continue;
         }
+        if let Some(diagnostic) = fixture.diagnostic {
+            let observed = oracle
+                .detail
+                .strip_prefix("SyntaxError:")
+                .map_or(oracle.detail.as_str(), str::trim);
+            let observed = observed.lines().next().unwrap_or_default().trim();
+            if !diagnostic.matches_observed(observed) {
+                failures.push(format!(
+                    "--- {}\ndeclared pinned diagnostic: {} ({})\npinned message: {}\nQuickJS reported: {observed}",
+                    fixture.path.display(),
+                    diagnostic.entry.id,
+                    diagnostic.entry.sites.join(", "),
+                    diagnostic.entry.message
+                ));
+                continue;
+            }
+        }
+        passed += 1;
     }
     println!(
-        "parser coverage: {}/{} goals, {}/{} families, {}/{} claims, {}/{} required claim polarities, {} intentional difference(s)",
+        "parser coverage: {}/{} goals, {}/{} families, {}/{} claims, {}/{} required claim polarities, {}/{} grammar productions, {}/{} pinned diagnostics, {} intentional difference(s)",
         corpus.coverage.goals,
         REQUIRED_GOALS.len(),
         corpus.coverage.families,
@@ -458,6 +633,10 @@ pub(crate) fn run_parser_differential(options: &ParserDifferentialOptions) -> Re
         ParserClaim::ALL.len(),
         corpus.coverage.claim_polarities,
         REQUIRED_CLAIM_POLARITIES,
+        corpus.coverage.productions,
+        PINNED_PRODUCTIONS.len(),
+        corpus.coverage.diagnostics,
+        reachable_pinned_diagnostics(),
         corpus.coverage.differences,
     );
 
@@ -500,7 +679,7 @@ fn collect_parser_fixtures(corpus: &Path) -> Result<Vec<ParserFixture>, String> 
 }
 
 fn load_parser_corpus(corpus: &Path) -> Result<ParserCorpus, String> {
-    let fixtures = collect_parser_fixtures(corpus)?;
+    let mut fixtures = collect_parser_fixtures(corpus)?;
     for fixture in &fixtures {
         validate_parser_fixture_source(fixture)?;
     }
@@ -510,7 +689,10 @@ fn load_parser_corpus(corpus: &Path) -> Result<ParserCorpus, String> {
     for (index, case) in cases.iter().enumerate() {
         validation.validate_case(index, case)?;
     }
-    let coverage = validation.finish()?;
+    let (coverage, diagnostics) = validation.finish()?;
+    for (index, diagnostic) in diagnostics {
+        fixtures[index].diagnostic = Some(diagnostic);
+    }
     Ok(ParserCorpus { fixtures, coverage })
 }
 
@@ -571,14 +753,21 @@ fn read_parser_fixture_source(path: &Path) -> Result<String, String> {
     })
 }
 
+/// Reports whether a fixture uses the excluded `eval` identifier.
+///
+/// The scan parses through the isolated frontend context so a deeply nested
+/// fixture cannot exhaust the caller's stack; a fixture the front end rejects
+/// falls back to a raw spelling scan.
 fn contains_eval_identifier(source: &str, goal: ParserGoal) -> bool {
-    let allocator = Allocator::new();
-    match parse(&allocator, source, goal.candidate_options()) {
-        Ok(parsed) => parsed.semantic().nodes().iter().any(|node| {
+    let parsed = with_parsed_program(source, goal.candidate_options(), |unit| {
+        unit.semantic().nodes().iter().any(|node| {
             node.kind()
                 .identifier_name()
                 .is_some_and(|name| name.as_str() == "eval")
-        }),
+        })
+    });
+    match parsed {
+        Ok(found) => found,
         Err(_) => contains_raw_eval_identifier(source),
     }
 }
@@ -728,6 +917,9 @@ struct ManifestValidation<'fixture> {
     covered_families: BTreeSet<ParserFamily>,
     covered_claims: BTreeSet<ParserClaim>,
     covered_claim_polarities: BTreeSet<(ParserClaim, Expectation)>,
+    covered_diagnostics: BTreeSet<&'static str>,
+    covered_productions: BTreeSet<&'static str>,
+    fixture_diagnostics: Vec<(usize, DeclaredDiagnostic)>,
     differences: usize,
 }
 
@@ -758,6 +950,9 @@ impl<'fixture> ManifestValidation<'fixture> {
             covered_families: BTreeSet::new(),
             covered_claims: BTreeSet::new(),
             covered_claim_polarities: BTreeSet::new(),
+            covered_diagnostics: BTreeSet::new(),
+            covered_productions: BTreeSet::new(),
+            fixture_diagnostics: Vec::new(),
             differences: 0,
         })
     }
@@ -774,6 +969,8 @@ impl<'fixture> ManifestValidation<'fixture> {
                 "frontend",
                 "families",
                 "claims",
+                "productions",
+                "diagnostic",
                 "evidence",
                 "difference",
             ],
@@ -825,6 +1022,15 @@ impl<'fixture> ManifestValidation<'fixture> {
         let families = parse_families(case, &location)?;
         let claims = parse_claims(case, &location)?;
         validate_case_claims(&relative, &families, &claims, quickjs, goal)?;
+        let productions = parse_productions(case, &location, goal, quickjs, &relative)?;
+        let diagnostic = Self::validate_case_diagnostic(
+            case.get("diagnostic")
+                .expect("exact_object checked the diagnostic field"),
+            quickjs,
+            &claims,
+            &relative,
+            &location,
+        )?;
         validate_evidence(case, &location)?;
         validate_difference(
             case.get("difference")
@@ -845,10 +1051,82 @@ impl<'fixture> ManifestValidation<'fixture> {
             self.covered_claim_polarities.insert((*claim, quickjs));
         }
         self.covered_claims.extend(claims);
+        for production in productions {
+            self.covered_productions.insert(production.id);
+        }
+        if let Some(diagnostic) = diagnostic {
+            self.covered_diagnostics.insert(diagnostic.entry.id);
+            self.fixture_diagnostics.push((fixture_index, diagnostic));
+        }
         Ok(())
     }
 
-    fn finish(self) -> Result<ParserCoverage, String> {
+    /// Validates the pinned diagnostic a rejecting fixture declares.
+    ///
+    /// Every fixture the oracle rejects must name exactly the diagnostic it
+    /// provokes, and accepted fixtures must not name one. The declared
+    /// diagnostic must also agree with the fixture's claims, so a fixture cannot
+    /// claim one early-error surface while provoking another.
+    fn validate_case_diagnostic(
+        value: &Value,
+        quickjs: Expectation,
+        claims: &BTreeSet<ParserClaim>,
+        relative: &Path,
+        location: &str,
+    ) -> Result<Option<DeclaredDiagnostic>, String> {
+        if value.is_null() {
+            return if matches!(quickjs, Expectation::Reject) {
+                Err(format!(
+                    "parser manifest case {} must declare the pinned QuickJS diagnostic it provokes",
+                    relative.display()
+                ))
+            } else {
+                Ok(None)
+            };
+        }
+        if matches!(quickjs, Expectation::Accept) {
+            return Err(format!(
+                "parser manifest case {} must not declare a diagnostic because QuickJS accepts it",
+                relative.display()
+            ));
+        }
+        let declared = value
+            .as_str()
+            .ok_or_else(|| format!("{location} field `diagnostic` must be a string or null"))?;
+        let diagnostic =
+            DeclaredDiagnostic::from_manifest(declared, &format!("{location} field `diagnostic`"))?;
+        if let DiagnosticReach::Unreachable(reason) = diagnostic.entry.reach {
+            return Err(format!(
+                "parser manifest case {} declares diagnostic `{declared}`, which the ledger records as unreachable: {reason}",
+                relative.display()
+            ));
+        }
+        let expected = diagnostic
+            .entry
+            .claims
+            .iter()
+            .map(|claim| {
+                ParserClaim::from_manifest(
+                    claim,
+                    &format!("pinned diagnostic `{declared}` claim table"),
+                )
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if !expected.is_subset(claims) {
+            let missing = expected
+                .difference(claims)
+                .map(|claim| claim.manifest_name())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "parser manifest case {} declares diagnostic `{declared}` but omits its required claim(s) [{missing}]",
+                relative.display()
+            ));
+        }
+        Ok(Some(diagnostic))
+    }
+
+    fn finish(self) -> Result<(ParserCoverage, Vec<(usize, DeclaredDiagnostic)>), String> {
         if let Some((relative, _)) = self.actual.first_key_value() {
             return Err(format!(
                 "parser fixture {} is not declared in manifest.json",
@@ -898,13 +1176,46 @@ impl<'fixture> ManifestValidation<'fixture> {
             .iter()
             .filter(|(claim, expectation)| claim.allows_quickjs_expectation(*expectation))
             .count();
-        Ok(ParserCoverage {
-            goals: self.covered_goals.len(),
-            families: self.covered_families.len(),
-            claims: self.covered_claims.len(),
-            claim_polarities,
-            differences: self.differences,
-        })
+        for diagnostic in &PINNED_DIAGNOSTICS {
+            let covered = self.covered_diagnostics.contains(diagnostic.id);
+            match diagnostic.reach {
+                DiagnosticReach::Reachable if !covered => {
+                    return Err(format!(
+                        "parser manifest has no fixture for reachable pinned diagnostic `{}` ({})",
+                        diagnostic.id,
+                        diagnostic.sites.join(", ")
+                    ));
+                }
+                DiagnosticReach::Unreachable(reason) if covered => {
+                    return Err(format!(
+                        "parser manifest declares unreachable pinned diagnostic `{}`: {reason}",
+                        diagnostic.id
+                    ));
+                }
+                _ => {}
+            }
+        }
+        for production in &PINNED_PRODUCTIONS {
+            if !self.covered_productions.contains(production.id) {
+                return Err(format!(
+                    "parser manifest has no accepted fixture for pinned grammar production `{}` ({})",
+                    production.id,
+                    production.sites.join(", ")
+                ));
+            }
+        }
+        Ok((
+            ParserCoverage {
+                goals: self.covered_goals.len(),
+                families: self.covered_families.len(),
+                claims: self.covered_claims.len(),
+                claim_polarities,
+                diagnostics: self.covered_diagnostics.len(),
+                productions: self.covered_productions.len(),
+                differences: self.differences,
+            },
+            self.fixture_diagnostics,
+        ))
     }
 }
 
@@ -1060,6 +1371,62 @@ fn parse_claims(
         }
     }
     Ok(claims)
+}
+
+/// Parses the grammar productions a fixture declares.
+///
+/// Only fixtures the pinned oracle accepts may declare productions: rejection
+/// does not prove the grammar is parsed. A declared production must also be
+/// legal under the fixture's parse goal, so `import` forms cannot be claimed by
+/// a Script fixture and `with` cannot be claimed by a strict one.
+fn parse_productions(
+    object: &Map<String, Value>,
+    location: &str,
+    goal: ParserGoal,
+    quickjs: Expectation,
+    relative: &Path,
+) -> Result<BTreeSet<DeclaredProduction>, String> {
+    let values = object
+        .get("productions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{location} field `productions` must be an array"))?;
+    if matches!(quickjs, Expectation::Reject) {
+        return if values.is_empty() {
+            Ok(BTreeSet::new())
+        } else {
+            Err(format!(
+                "parser manifest case {} must not declare grammar productions because QuickJS rejects it",
+                relative.display()
+            ))
+        };
+    }
+    if values.is_empty() {
+        return Err(format!(
+            "parser manifest case {} must declare the grammar productions it exercises",
+            relative.display()
+        ));
+    }
+    let mut productions = BTreeSet::new();
+    for (index, value) in values.iter().enumerate() {
+        let value = value.as_str().ok_or_else(|| {
+            format!("{location} field `productions` item {index} must be a string")
+        })?;
+        let production =
+            DeclaredProduction::from_manifest(value, &format!("{location} field `productions`"))?;
+        if !production.entry().goals.admits(goal) {
+            return Err(format!(
+                "parser manifest case {} declares production `{value}`, which parser goal `{}` does not admit",
+                relative.display(),
+                goal.manifest_name()
+            ));
+        }
+        if !productions.insert(production) {
+            return Err(format!(
+                "{location} field `productions` contains duplicate `{value}`"
+            ));
+        }
+    }
+    Ok(productions)
 }
 
 fn validate_evidence(object: &Map<String, Value>, location: &str) -> Result<(), String> {
@@ -1261,6 +1628,7 @@ fn classify_fixture(corpus: &Path, path: PathBuf) -> Result<ParserFixture, Strin
         goal,
         candidate_expectation,
         oracle_expectation,
+        diagnostic: None,
     })
 }
 
@@ -1270,11 +1638,16 @@ struct Observation {
     detail: String,
 }
 
+/// Observes the Oxc front end on a fixture.
+///
+/// Parsing runs through the crate's isolated frontend context, which is the
+/// path embedders use and the only one with a bounded, documented stack. A
+/// deeply nested fixture would otherwise exhaust the harness thread's stack
+/// before the front end could report a verdict.
 fn observe_candidate(fixture: &ParserFixture) -> Result<Observation, String> {
     let source = validate_parser_fixture_source(fixture)?;
-    let allocator = Allocator::new();
-    match parse(&allocator, &source, fixture.goal.candidate_options()) {
-        Ok(_) => Ok(Observation {
+    match with_parsed_program(&source, fixture.goal.candidate_options(), |_| ()) {
+        Ok(()) => Ok(Observation {
             accepted: true,
             detail: "accepted".to_owned(),
         }),
@@ -1435,8 +1808,9 @@ fn format_failure(
 #[cfg(test)]
 mod tests {
     use super::{
-        Expectation, MAX_FIXTURE_BYTES, REQUIRED_CLAIM_POLARITIES, classify_fixture,
-        classify_oracle_output, load_parser_corpus, observe_candidate,
+        DiagnosticReach, Expectation, MAX_FIXTURE_BYTES, PINNED_DIAGNOSTICS, PINNED_PRODUCTIONS,
+        PinnedDiagnostic, REQUIRED_CLAIM_POLARITIES, classify_fixture, classify_oracle_output,
+        load_parser_corpus, matches_pinned_message, observe_candidate,
         strict_async_oracle_insertion, validate_difference,
     };
     use crate::{ProgramOutput, Status};
@@ -1461,6 +1835,7 @@ mod tests {
                 goal: super::ParserGoal::Module,
                 candidate_expectation: Expectation::Reject,
                 oracle_expectation: Expectation::Reject,
+                diagnostic: None,
             })
         );
         assert_eq!(
@@ -1473,6 +1848,7 @@ mod tests {
                 goal: super::ParserGoal::AsyncScript,
                 candidate_expectation: Expectation::Reject,
                 oracle_expectation: Expectation::Accept,
+                diagnostic: None,
             })
         );
     }
@@ -1663,15 +2039,50 @@ mod tests {
             json!("candidate-accept/script/source.js"),
         );
         case.insert("quickjs".to_owned(), json!("reject"));
-        case.get_mut("claims")
+        case.insert(
+            "diagnostic".to_owned(),
+            json!("unexpected-token-in-expression"),
+        );
+        let claims = case
+            .get_mut("claims")
             .and_then(Value::as_array_mut)
-            .expect("claims array")
-            .retain(|claim| {
-                !matches!(
-                    claim.as_str(),
-                    Some("function.forms" | "class.object-literals")
-                )
-            });
+            .expect("claims array");
+        claims.retain(|claim| {
+            !matches!(
+                claim.as_str(),
+                Some("function.forms" | "class.object-literals")
+            )
+        });
+        claims.push(json!("lexical.malformed-token-rejections"));
+        // The case flips to a QuickJS rejection, which may not declare grammar
+        // productions; they move to another accepting case of the same goal.
+        let moved = case
+            .insert("productions".to_owned(), json!([]))
+            .expect("productions array");
+        let cases = manifest["cases"].as_array_mut().expect("cases array");
+        for production in moved.as_array().expect("productions array") {
+            let id = production.as_str().expect("production id");
+            let entry = PINNED_PRODUCTIONS
+                .iter()
+                .find(|candidate| candidate.id == id)
+                .expect("moved productions come from the pinned table");
+            let recipient = cases
+                .iter_mut()
+                .find(|case| {
+                    case["quickjs"] == "accept"
+                        && case["path"] != "candidate-accept/script/source.js"
+                        && super::ParserGoal::from_manifest(
+                            case["goal"].as_str().expect("case goal"),
+                            "synthetic case goal",
+                        )
+                        .is_ok_and(|goal| entry.goals.admits(goal))
+                })
+                .expect("another accepting case admits the moved production");
+            recipient["productions"]
+                .as_array_mut()
+                .expect("productions array")
+                .push(production.clone());
+        }
         fs::create_dir_all(missing.path().join("candidate-accept/script"))
             .expect("create difference fixture directory");
         fs::rename(
@@ -1800,7 +2211,8 @@ mod tests {
 
         let missing_family = TestCorpus::new(&valid_manifest());
         let mut manifest = missing_family.manifest();
-        for case in manifest["cases"].as_array_mut().expect("cases array") {
+        let cases = manifest["cases"].as_array_mut().expect("cases array");
+        for case in cases.iter_mut() {
             case["families"]
                 .as_array_mut()
                 .expect("families array")
@@ -1815,9 +2227,21 @@ mod tests {
                             "profile.accepted-es2025"
                                 | "profile.rejected-outside-target"
                                 | "profile.regexp-pattern-delegation"
+                                | "profile.parser-resource-limits"
                         )
                     )
                 });
+        }
+        // Cases whose only claims were target-profile claims no longer describe
+        // anything, so they are dropped rather than left with empty lists.
+        let removed = cases
+            .iter()
+            .filter(|case| case["claims"].as_array().is_some_and(Vec::is_empty))
+            .map(|case| case["path"].as_str().expect("case path").to_owned())
+            .collect::<Vec<_>>();
+        cases.retain(|case| !case["claims"].as_array().is_some_and(Vec::is_empty));
+        for path in removed {
+            fs::remove_file(missing_family.path().join(path)).expect("remove fixture");
         }
         missing_family.write_manifest(&manifest);
         let error = load_parser_corpus(missing_family.path()).expect_err("family coverage");
@@ -1833,43 +2257,44 @@ mod tests {
         let coverage = load_parser_corpus(complete.path())
             .expect("single-polarity exceptions and all required pairs are valid")
             .coverage;
-        assert_eq!(coverage.claims, 31);
+        assert_eq!(coverage.claims, super::ParserClaim::ALL.len());
         assert_eq!(coverage.claim_polarities, REQUIRED_CLAIM_POLARITIES);
+        assert_eq!(coverage.diagnostics, super::reachable_pinned_diagnostics());
 
+        // `lexical.asi-ambiguity` is not required by any pinned diagnostic, so
+        // removing it isolates the claim-polarity rule from the diagnostic rule.
         let missing_accept = TestCorpus::new(&valid_manifest());
         let mut manifest = missing_accept.manifest();
         manifest["cases"][0]["claims"]
             .as_array_mut()
             .expect("claims array")
-            .retain(|claim| claim != "expression.operators-assignment");
+            .retain(|claim| claim != "lexical.asi-ambiguity");
         missing_accept.write_manifest(&manifest);
         let error =
             load_parser_corpus(missing_accept.path()).expect_err("accept polarity is required");
         assert!(
             error.contains(
-                "claim `expression.operators-assignment` is missing required QuickJS accept coverage"
+                "claim `lexical.asi-ambiguity` is missing required QuickJS accept coverage"
             ),
             "{error}"
         );
 
         let missing_reject = TestCorpus::new(&valid_manifest());
         let mut manifest = missing_reject.manifest();
-        let reject_case = manifest["cases"]
-            .as_array_mut()
-            .expect("cases array")
-            .iter_mut()
-            .find(|case| case["quickjs"] == "reject")
-            .expect("reject case");
-        reject_case["claims"]
-            .as_array_mut()
-            .expect("claims array")
-            .retain(|claim| claim != "expression.operators-assignment");
+        for case in manifest["cases"].as_array_mut().expect("cases array") {
+            if case["quickjs"] == "reject" {
+                case["claims"]
+                    .as_array_mut()
+                    .expect("claims array")
+                    .retain(|claim| claim != "lexical.asi-ambiguity");
+            }
+        }
         missing_reject.write_manifest(&manifest);
         let error =
             load_parser_corpus(missing_reject.path()).expect_err("reject polarity is required");
         assert!(
             error.contains(
-                "claim `expression.operators-assignment` is missing required QuickJS reject coverage"
+                "claim `lexical.asi-ambiguity` is missing required QuickJS reject coverage"
             ),
             "{error}"
         );
@@ -2057,7 +2482,7 @@ mod tests {
         .expect("write oversized fixture");
         let error =
             load_parser_corpus(oversized.path()).expect_err("oversized fixture must fail closed");
-        assert!(error.contains("65536-byte limit"), "{error}");
+        assert!(error.contains("262144-byte limit"), "{error}");
 
         let non_utf8 = TestCorpus::new(&valid_manifest());
         fs::write(
@@ -2068,6 +2493,363 @@ mod tests {
         let error =
             load_parser_corpus(non_utf8.path()).expect_err("non-UTF-8 fixture must fail closed");
         assert!(error.contains("is not valid UTF-8"), "{error}");
+    }
+
+    #[test]
+    fn pinned_message_wildcards_match_only_the_substituted_text() {
+        assert!(matches_pinned_message("expecting '%c'", "expecting ';'"));
+        assert!(matches_pinned_message("expecting '%c'", "expecting ')'"));
+        assert!(!matches_pinned_message("expecting '%c'", "expecting ';;'"));
+        assert!(!matches_pinned_message("expecting '%c'", "expecting ''"));
+        assert!(matches_pinned_message(
+            "'%s' is a reserved identifier",
+            "'enum' is a reserved identifier"
+        ));
+        assert!(!matches_pinned_message(
+            "'%s' is a reserved identifier",
+            "'enum' is a reserved word"
+        ));
+        assert!(matches_pinned_message(
+            "unexpected token in expression: '%.*s'",
+            "unexpected token in expression: '@'"
+        ));
+        assert!(matches_pinned_message(
+            "a declaration in the head of a for-%s loop can't have an initializer",
+            "a declaration in the head of a for-in loop can't have an initializer"
+        ));
+        assert!(matches_pinned_message("stack overflow", "stack overflow"));
+        assert!(!matches_pinned_message(
+            "stack overflow",
+            "stack overflowed"
+        ));
+        assert!(matches_pinned_message(
+            "\"use strict\" not allowed in function with default or destructuring parameter",
+            "\"use strict\" not allowed in function with default or destructuring parameter"
+        ));
+    }
+
+    #[test]
+    fn pinned_diagnostic_table_is_a_closed_well_formed_vocabulary() {
+        let mut ids = BTreeSet::new();
+        let mut sites = BTreeSet::new();
+        for diagnostic in &PINNED_DIAGNOSTICS {
+            assert!(
+                ids.insert(diagnostic.id),
+                "duplicate diagnostic id `{}`",
+                diagnostic.id
+            );
+            assert!(
+                !diagnostic.message.is_empty(),
+                "diagnostic `{}` has no pinned message",
+                diagnostic.id
+            );
+            assert!(
+                !diagnostic.sites.is_empty(),
+                "diagnostic `{}` records no call site",
+                diagnostic.id
+            );
+            assert!(
+                !diagnostic.claims.is_empty(),
+                "diagnostic `{}` records no claim",
+                diagnostic.id
+            );
+            for claim in diagnostic.claims {
+                super::ParserClaim::from_manifest(claim, "diagnostic claim table").unwrap_or_else(
+                    |error| {
+                        panic!(
+                            "diagnostic `{}` claim is not a ledger claim: {error}",
+                            diagnostic.id
+                        )
+                    },
+                );
+            }
+            for site in diagnostic.sites {
+                assert!(
+                    site.starts_with("quickjs.c:"),
+                    "diagnostic `{}` site `{site}` is not a pinned anchor",
+                    diagnostic.id
+                );
+                assert!(
+                    sites.insert(*site),
+                    "call site `{site}` is claimed by more than one diagnostic"
+                );
+            }
+            if let DiagnosticReach::Unreachable(reason) = diagnostic.reach {
+                assert!(
+                    !reason.trim().is_empty(),
+                    "unreachable diagnostic `{}` records no reason",
+                    diagnostic.id
+                );
+            }
+        }
+        assert!(
+            super::reachable_pinned_diagnostics() < PINNED_DIAGNOSTICS.len(),
+            "the ledger must record which pinned diagnostics are unreachable"
+        );
+    }
+
+    #[test]
+    fn manifest_requires_a_matching_diagnostic_on_every_rejecting_case() {
+        let missing = TestCorpus::new(&valid_manifest());
+        let mut manifest = missing.manifest();
+        let reject = manifest["cases"]
+            .as_array_mut()
+            .expect("cases array")
+            .iter_mut()
+            .find(|case| case["quickjs"] == "reject")
+            .expect("reject case");
+        reject["diagnostic"] = Value::Null;
+        missing.write_manifest(&manifest);
+        let error = load_parser_corpus(missing.path()).expect_err("diagnostic is required");
+        assert!(
+            error.contains("must declare the pinned QuickJS diagnostic it provokes"),
+            "{error}"
+        );
+
+        let on_accept = TestCorpus::new(&valid_manifest());
+        let mut manifest = on_accept.manifest();
+        let accept = manifest["cases"]
+            .as_array_mut()
+            .expect("cases array")
+            .iter_mut()
+            .find(|case| case["quickjs"] == "accept")
+            .expect("accept case");
+        accept["diagnostic"] = json!("unexpected-character");
+        on_accept.write_manifest(&manifest);
+        let error = load_parser_corpus(on_accept.path())
+            .expect_err("accepted fixtures must not declare a diagnostic");
+        assert!(
+            error.contains("must not declare a diagnostic because QuickJS accepts it"),
+            "{error}"
+        );
+
+        let unknown = TestCorpus::new(&valid_manifest());
+        let mut manifest = unknown.manifest();
+        manifest["cases"]
+            .as_array_mut()
+            .expect("cases array")
+            .iter_mut()
+            .find(|case| case["quickjs"] == "reject")
+            .expect("reject case")["diagnostic"] = json!("not-a-pinned-diagnostic");
+        unknown.write_manifest(&manifest);
+        let error =
+            load_parser_corpus(unknown.path()).expect_err("unknown diagnostics must fail closed");
+        assert!(
+            error.contains("unknown pinned QuickJS diagnostic `not-a-pinned-diagnostic`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_unreachable_diagnostics_and_missing_reachable_ones() {
+        let unreachable = PINNED_DIAGNOSTICS
+            .iter()
+            .find(|diagnostic| matches!(diagnostic.reach, DiagnosticReach::Unreachable(_)))
+            .expect("the ledger records unreachable diagnostics");
+        let declared = TestCorpus::new(&valid_manifest());
+        let mut manifest = declared.manifest();
+        manifest["cases"]
+            .as_array_mut()
+            .expect("cases array")
+            .iter_mut()
+            .find(|case| case["quickjs"] == "reject")
+            .expect("reject case")["diagnostic"] = json!(unreachable.id);
+        declared.write_manifest(&manifest);
+        let error = load_parser_corpus(declared.path())
+            .expect_err("unreachable diagnostics must not be declared");
+        assert!(
+            error.contains("the ledger records as unreachable"),
+            "{error}"
+        );
+
+        let dropped = TestCorpus::new(&valid_manifest());
+        let mut manifest = dropped.manifest();
+        let cases = manifest["cases"].as_array_mut().expect("cases array");
+        let index = cases
+            .iter()
+            .position(|case| case["diagnostic"] == "unexpected-character")
+            .expect("generated diagnostic case");
+        let removed = cases.remove(index);
+        fs::remove_file(
+            dropped
+                .path()
+                .join(removed["path"].as_str().expect("case path")),
+        )
+        .expect("remove diagnostic fixture");
+        dropped.write_manifest(&manifest);
+        let error = load_parser_corpus(dropped.path())
+            .expect_err("reachable diagnostics require a fixture");
+        assert!(
+            error.contains("no fixture for reachable pinned diagnostic `unexpected-character`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn manifest_requires_a_diagnostic_to_carry_its_ledger_claims() {
+        let corpus = TestCorpus::new(&valid_manifest());
+        let mut manifest = corpus.manifest();
+        let cases = manifest["cases"].as_array_mut().expect("cases array");
+        let case = cases
+            .iter_mut()
+            .find(|case| case["diagnostic"] == "unexpected-character")
+            .expect("generated diagnostic case");
+        case["claims"] = json!(["lexical.literals-tokenization"]);
+        case["families"] = json!(["source-lexical"]);
+        corpus.write_manifest(&manifest);
+        let error = load_parser_corpus(corpus.path())
+            .expect_err("a declared diagnostic pins its required claims");
+        assert!(
+            error.contains("omits its required claim(s) [lexical.malformed-token-rejections]"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pinned_production_table_is_a_closed_well_formed_vocabulary() {
+        let mut ids = BTreeSet::new();
+        for production in &PINNED_PRODUCTIONS {
+            assert!(
+                ids.insert(production.id),
+                "duplicate production id `{}`",
+                production.id
+            );
+            assert!(
+                !production.grammar.is_empty(),
+                "production `{}` names no grammar",
+                production.id
+            );
+            assert!(
+                !production.sites.is_empty(),
+                "production `{}` records no parser anchor",
+                production.id
+            );
+            for site in production.sites {
+                assert!(
+                    site.starts_with("quickjs.c:"),
+                    "production `{}` site `{site}` is not a pinned anchor",
+                    production.id
+                );
+            }
+            assert!(
+                super::REQUIRED_GOALS
+                    .into_iter()
+                    .any(|goal| production.goals.admits(goal)),
+                "production `{}` is admitted by no parser goal",
+                production.id
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_requires_accepted_coverage_for_every_grammar_production() {
+        let dropped = TestCorpus::new(&valid_manifest());
+        let mut manifest = dropped.manifest();
+        for case in manifest["cases"].as_array_mut().expect("cases array") {
+            case["productions"]
+                .as_array_mut()
+                .expect("productions array")
+                .retain(|production| production != "statement.switch");
+        }
+        dropped.write_manifest(&manifest);
+        let error = load_parser_corpus(dropped.path())
+            .expect_err("every production needs accepted coverage");
+        assert!(
+            error.contains("no accepted fixture for pinned grammar production `statement.switch`"),
+            "{error}"
+        );
+
+        let unknown = TestCorpus::new(&valid_manifest());
+        let mut manifest = unknown.manifest();
+        manifest["cases"]
+            .as_array_mut()
+            .expect("cases array")
+            .iter_mut()
+            .find(|case| case["quickjs"] == "accept")
+            .expect("accept case")["productions"]
+            .as_array_mut()
+            .expect("productions array")
+            .push(json!("not-a-pinned-production"));
+        unknown.write_manifest(&manifest);
+        let error =
+            load_parser_corpus(unknown.path()).expect_err("unknown productions must fail closed");
+        assert!(
+            error.contains("unknown pinned QuickJS grammar production `not-a-pinned-production`"),
+            "{error}"
+        );
+
+        let empty = TestCorpus::new(&valid_manifest());
+        let mut manifest = empty.manifest();
+        manifest["cases"]
+            .as_array_mut()
+            .expect("cases array")
+            .iter_mut()
+            .find(|case| case["quickjs"] == "accept")
+            .expect("accept case")["productions"] = json!([]);
+        empty.write_manifest(&manifest);
+        let error = load_parser_corpus(empty.path())
+            .expect_err("accepted fixtures must declare productions");
+        assert!(
+            error.contains("must declare the grammar productions it exercises"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_productions_a_goal_cannot_admit() {
+        let module_in_script = TestCorpus::new(&valid_manifest());
+        let mut manifest = module_in_script.manifest();
+        manifest["cases"]
+            .as_array_mut()
+            .expect("cases array")
+            .iter_mut()
+            .find(|case| case["quickjs"] == "accept" && case["goal"] == "script")
+            .expect("accepting Script case")["productions"]
+            .as_array_mut()
+            .expect("productions array")
+            .push(json!("module.import-declaration"));
+        module_in_script.write_manifest(&manifest);
+        let error = load_parser_corpus(module_in_script.path())
+            .expect_err("Module productions require the Module goal");
+        assert!(
+            error.contains("which parser goal `script` does not admit"),
+            "{error}"
+        );
+
+        let sloppy_in_strict = TestCorpus::new(&valid_manifest());
+        let mut manifest = sloppy_in_strict.manifest();
+        manifest["cases"]
+            .as_array_mut()
+            .expect("cases array")
+            .iter_mut()
+            .find(|case| case["quickjs"] == "accept" && case["goal"] == "strict-script")
+            .expect("accepting strict Script case")["productions"]
+            .as_array_mut()
+            .expect("productions array")
+            .push(json!("statement.with"));
+        sloppy_in_strict.write_manifest(&manifest);
+        let error = load_parser_corpus(sloppy_in_strict.path())
+            .expect_err("sloppy-only productions require a sloppy goal");
+        assert!(
+            error.contains("which parser goal `strict-script` does not admit"),
+            "{error}"
+        );
+
+        let on_rejection = TestCorpus::new(&valid_manifest());
+        let mut manifest = on_rejection.manifest();
+        manifest["cases"]
+            .as_array_mut()
+            .expect("cases array")
+            .iter_mut()
+            .find(|case| case["quickjs"] == "reject")
+            .expect("reject case")["productions"] = json!(["statement.block"]);
+        on_rejection.write_manifest(&manifest);
+        let error = load_parser_corpus(on_rejection.path())
+            .expect_err("rejections do not prove grammar coverage");
+        assert!(
+            error.contains("must not declare grammar productions because QuickJS rejects it"),
+            "{error}"
+        );
     }
 
     fn difference(id: &str, direction: &str) -> Value {
@@ -2081,7 +2863,7 @@ mod tests {
 
     #[allow(clippy::too_many_lines)]
     fn valid_manifest() -> Value {
-        json!({
+        let mut manifest = json!({
             "schema": 1,
             "quickjs_release": "2026-06-04",
             "eval": "excluded-user-deferred",
@@ -2210,6 +2992,7 @@ mod tests {
                         "profile.regexp-pattern-delegation"
                     ],
                     "evidence": ["quickjs/test262_errors.txt:1-58"],
+                    "diagnostic": "unexpected-token-in-expression",
                     "difference": null
                 },
                 {
@@ -2225,6 +3008,7 @@ mod tests {
                         "module.early-errors"
                     ],
                     "evidence": ["quickjs/test262.conf:53"],
+                    "diagnostic": "invalid-export-syntax",
                     "difference": null
                 },
                 {
@@ -2235,9 +3019,137 @@ mod tests {
                     "families": ["bindings"],
                     "claims": ["binding.strict-mode-early-errors"],
                     "evidence": ["quickjs/quickjs.c:36210"],
+                    "diagnostic": "strict-invalid-variable-name",
                     "difference": null
                 }
             ]
+        });
+        for case in manifest["cases"].as_array_mut().expect("cases array") {
+            let object = case.as_object_mut().expect("case object");
+            if !object.contains_key("diagnostic") {
+                object.insert("diagnostic".to_owned(), Value::Null);
+            }
+            object.entry("productions").or_insert_with(|| json!([]));
+        }
+        // The synthetic corpus must satisfy the closed production vocabulary, so
+        // every pinned production is spread across the accepting cases whose goal
+        // admits it, and every accepting case receives at least one.
+        for (next, production) in PINNED_PRODUCTIONS.iter().enumerate() {
+            let cases = manifest["cases"].as_array_mut().expect("cases array");
+            let admitting = cases
+                .iter()
+                .enumerate()
+                .filter(|(_, case)| {
+                    case["quickjs"] == "accept"
+                        && super::ParserGoal::from_manifest(
+                            case["goal"].as_str().expect("case goal"),
+                            "synthetic case goal",
+                        )
+                        .is_ok_and(|goal| production.goals.admits(goal))
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            assert!(
+                !admitting.is_empty(),
+                "no accepting case admits production `{}`",
+                production.id
+            );
+            let index = admitting[next % admitting.len()];
+            cases[index]["productions"]
+                .as_array_mut()
+                .expect("productions array")
+                .push(json!(production.id));
+        }
+        for case in manifest["cases"].as_array_mut().expect("cases array") {
+            if case["quickjs"] != "accept"
+                || !case["productions"]
+                    .as_array()
+                    .expect("productions array")
+                    .is_empty()
+            {
+                continue;
+            }
+            let goal = super::ParserGoal::from_manifest(
+                case["goal"].as_str().expect("case goal"),
+                "synthetic case goal",
+            )
+            .expect("synthetic goals are ledger goals");
+            let production = PINNED_PRODUCTIONS
+                .iter()
+                .find(|production| production.goals.admits(goal))
+                .expect("every goal admits some production");
+            case["productions"]
+                .as_array_mut()
+                .expect("productions array")
+                .push(json!(production.id));
+        }
+        let covered = manifest["cases"]
+            .as_array()
+            .expect("cases array")
+            .iter()
+            .filter_map(|case| case["diagnostic"].as_str().map(str::to_owned))
+            .collect::<BTreeSet<_>>();
+        let cases = manifest["cases"].as_array_mut().expect("cases array");
+        for diagnostic in &PINNED_DIAGNOSTICS {
+            if !matches!(diagnostic.reach, DiagnosticReach::Reachable)
+                || covered.contains(diagnostic.id)
+            {
+                continue;
+            }
+            cases.push(diagnostic_case(diagnostic));
+        }
+        manifest
+    }
+
+    /// Builds a minimal rejecting case that covers one pinned diagnostic.
+    ///
+    /// The synthetic corpus must satisfy the ledger's closed diagnostic
+    /// requirement, so every reachable diagnostic the hand-written cases do not
+    /// already declare gets a generated case with a goal its claims permit.
+    fn diagnostic_case(diagnostic: &PinnedDiagnostic) -> Value {
+        let claims = diagnostic
+            .claims
+            .iter()
+            .map(|claim| {
+                super::ParserClaim::from_manifest(claim, "diagnostic claim table")
+                    .expect("pinned diagnostic claims are ledger claims")
+            })
+            .collect::<BTreeSet<_>>();
+        let goal = [
+            super::ParserGoal::Script,
+            super::ParserGoal::StrictScript,
+            super::ParserGoal::Module,
+        ]
+        .into_iter()
+        .find(|goal| claims.iter().all(|claim| claim.allows_goal(*goal)))
+        .expect("every pinned diagnostic claim set permits some goal");
+        let families = claims
+            .iter()
+            .map(|claim| claim.family().manifest_name())
+            .collect::<BTreeSet<_>>();
+        let extension = if matches!(goal, super::ParserGoal::Module) {
+            "mjs"
+        } else {
+            "js"
+        };
+        json!({
+            "path": format!(
+                "reject/{}/{}.{extension}",
+                goal.manifest_name(),
+                diagnostic.id
+            ),
+            "goal": goal.manifest_name(),
+            "quickjs": "reject",
+            "frontend": "reject",
+            "families": families.into_iter().collect::<Vec<_>>(),
+            "claims": claims
+                .iter()
+                .map(|claim| claim.manifest_name())
+                .collect::<Vec<_>>(),
+            "productions": [],
+            "diagnostic": diagnostic.id,
+            "evidence": diagnostic.sites,
+            "difference": null
         })
     }
 

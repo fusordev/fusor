@@ -73,8 +73,11 @@ cargo xtask dynamic-function-differential \\
   --oracle /path/to/quickjs-2026-06-04/qjsc
 ```
 
-Additional corpora cover Number radix conversion, control flow,
-`Function.prototype.apply`/`bind`, iterators, call spread, and Errors. Their
+The parser corpus is a closed ledger: it fails when a pinned QuickJS grammar
+production has no accepted fixture, when a diagnostic the pinned front end can
+raise has no fixture, or when the oracle's message stops matching the pinned
+text. Additional corpora cover Number radix conversion, control flow,
+`Function.prototype.apply`/`bind`, iterators, call spread, and Errors. Those
 manifests are expanding compatibility gates, not claims of exhaustive QuickJS
 coverage.
 

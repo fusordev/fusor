@@ -208,6 +208,58 @@ fn preserves_valid_chained_continue_targets_ending_in_an_iteration() {
     }
 }
 
+/// `QJS-OXC-003`: pinned `QuickJS` caps parser recursion around 695 nested
+/// parentheses and reports `stack overflow` (`quickjs.c:22720`). That bound is
+/// a `QuickJS` resource limit rather than ECMAScript grammar, so this front end
+/// keeps parsing well-formed deeply nested sources on its isolated stack. The
+/// difference is recorded in `tests/parser/manifest.json` and reproduced by
+/// `candidate-accept/script/parser-stack-overflow.js`.
+#[test]
+fn accepts_nesting_deeper_than_the_pinned_quickjs_parser_recursion_limit() {
+    // The pinned oracle already reports `stack overflow` at 696 nested
+    // parentheses, so this depth is unambiguously past its limit.
+    const DEPTH: usize = 4_000;
+
+    let mut source = String::with_capacity(2 * DEPTH + 2);
+    source.extend(std::iter::repeat_n('(', DEPTH));
+    source.push('1');
+    source.extend(std::iter::repeat_n(')', DEPTH));
+    source.push(';');
+
+    with_parsed_program(&source, FrontendOptions::new(ParseMode::Script), |unit| {
+        assert!(!unit.semantic().nodes().is_empty());
+    })
+    .expect("deeply nested parentheses remain valid ECMAScript");
+}
+
+/// `QJS-OXC-004`: pinned `QuickJS` rejects an instance field named `prototype`
+/// with `invalid field name` (`quickjs.c:25396`), a check its own source marks
+/// `XXX: spec: not consistent with method name checks`. ECMAScript reserves
+/// `constructor` for instance fields and `prototype` for static ones only, so
+/// this front end accepts the instance field and still rejects the forms the
+/// specification forbids.
+#[test]
+fn accepts_an_instance_field_named_prototype_and_rejects_the_reserved_forms() {
+    let allocator = Allocator::new();
+    parse(
+        &allocator,
+        "class C { prototype = 1; }",
+        FrontendOptions::new(ParseMode::Script),
+    )
+    .expect("ECMAScript reserves `prototype` only for static class fields");
+
+    for source in [
+        "class C { static prototype = 1; }",
+        "class C { static prototype() {} }",
+        "class C { constructor = 1; }",
+        "class C { static constructor = 1; }",
+    ] {
+        let allocator = Allocator::new();
+        parse(&allocator, source, FrontendOptions::new(ParseMode::Script))
+            .expect_err("the specification forbids this class element name");
+    }
+}
+
 #[test]
 fn handles_many_chained_labels_and_continues_without_rewalking_each_chain() {
     const LABEL_COUNT: usize = 1_024;
