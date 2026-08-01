@@ -9,10 +9,11 @@ mod parser_differential;
 
 use control_flow_differential::{
     CANDIDATE_WORKER_COMMAND, ControlFlowDifferentialOptions, DEFAULT_CONTROL_FLOW_CORPUS,
-    DEFAULT_ERROR_CORPUS, DEFAULT_FUNCTION_APPLY_CORPUS, DEFAULT_ITERATOR_CORPUS,
-    ErrorDifferentialOptions, FunctionApplyDifferentialOptions, IteratorDifferentialOptions,
-    MAX_CONTROL_FLOW_TIMEOUT_MS, run_control_flow_candidate_worker, run_control_flow_differential,
-    run_error_differential, run_function_apply_differential, run_iterator_differential,
+    DEFAULT_ERROR_CORPUS, DEFAULT_FUNCTION_APPLY_CORPUS, DEFAULT_FUNCTION_BIND_CORPUS,
+    DEFAULT_ITERATOR_CORPUS, ErrorDifferentialOptions, FunctionApplyDifferentialOptions,
+    FunctionBindDifferentialOptions, IteratorDifferentialOptions, MAX_CONTROL_FLOW_TIMEOUT_MS,
+    run_control_flow_candidate_worker, run_control_flow_differential, run_error_differential,
+    run_function_apply_differential, run_function_bind_differential, run_iterator_differential,
 };
 use dynamic_function_differential::{
     DynamicFunctionDifferentialOptions, run_dynamic_function_differential,
@@ -106,6 +107,16 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Ok(Args::FunctionBindDifferential(options)) => {
+            match run_function_bind_differential(&options) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::FAILURE,
+                Err(error) => {
+                    eprintln!("xtask: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Ok(Args::IteratorDifferential(options)) => match run_iterator_differential(&options) {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::FAILURE,
@@ -140,6 +151,7 @@ Usage:
   cargo xtask control-flow-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask error-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask function-apply-differential --oracle QJS_PATH [OPTIONS]
+  cargo xtask function-bind-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask iterator-differential --oracle QJS_PATH [OPTIONS]
 
 Options:
@@ -179,6 +191,7 @@ enum Args {
     ControlFlowDifferential(ControlFlowDifferentialOptions),
     ErrorDifferential(ErrorDifferentialOptions),
     FunctionApplyDifferential(FunctionApplyDifferentialOptions),
+    FunctionBindDifferential(FunctionBindDifferentialOptions),
     IteratorDifferential(IteratorDifferentialOptions),
     ControlFlowCandidateWorker,
 }
@@ -233,6 +246,10 @@ impl Args {
             "function-apply-differential" => {
                 parse_function_apply_differential_options(arguments.into_iter())
                     .map(Self::FunctionApplyDifferential)
+            }
+            "function-bind-differential" => {
+                parse_function_bind_differential_options(arguments.into_iter())
+                    .map(Self::FunctionBindDifferential)
             }
             "iterator-differential" => parse_iterator_differential_options(arguments.into_iter())
                 .map(Self::IteratorDifferential),
@@ -443,6 +460,41 @@ fn parse_function_apply_differential_options(
     }
 
     Ok(FunctionApplyDifferentialOptions {
+        oracle: oracle.ok_or("missing required --oracle PATH")?,
+        corpus,
+        timeout,
+    })
+}
+
+fn parse_function_bind_differential_options(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<FunctionBindDifferentialOptions, String> {
+    let mut oracle = None;
+    let mut corpus = PathBuf::from(DEFAULT_FUNCTION_BIND_CORPUS);
+    let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    while let Some(option) = arguments.next() {
+        match option.to_string_lossy().as_ref() {
+            "--oracle" => oracle = Some(required_path(&mut arguments, "--oracle")?),
+            "--corpus" => corpus = required_path(&mut arguments, "--corpus")?,
+            "--timeout-ms" => {
+                timeout = required_timeout(&mut arguments)?;
+                let milliseconds = timeout.as_millis();
+                if milliseconds == 0 || milliseconds > u128::from(MAX_CONTROL_FLOW_TIMEOUT_MS) {
+                    return Err(format!(
+                        "function-bind --timeout-ms must be between 1 and {MAX_CONTROL_FLOW_TIMEOUT_MS}"
+                    ));
+                }
+            }
+            unknown => {
+                return Err(format!(
+                    "unknown function-bind-differential option `{unknown}`"
+                ));
+            }
+        }
+    }
+
+    Ok(FunctionBindDifferentialOptions {
         oracle: oracle.ok_or("missing required --oracle PATH")?,
         corpus,
         timeout,
@@ -820,6 +872,7 @@ mod tests {
     use crate::control_flow_differential::ControlFlowDifferentialOptions;
     use crate::control_flow_differential::ErrorDifferentialOptions;
     use crate::control_flow_differential::FunctionApplyDifferentialOptions;
+    use crate::control_flow_differential::FunctionBindDifferentialOptions;
     use crate::control_flow_differential::IteratorDifferentialOptions;
     use crate::dynamic_function_differential::DynamicFunctionDifferentialOptions;
     use crate::number_radix_differential::NumberRadixDifferentialOptions;
@@ -1033,6 +1086,24 @@ mod tests {
                 FunctionApplyDifferentialOptions {
                     oracle: PathBuf::from("/tmp/qjs"),
                     corpus: PathBuf::from("tests/function-apply/manifest.json"),
+                    timeout: Duration::from_secs(5),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn function_bind_differential_uses_the_pinned_corpus_by_default() {
+        let arguments = ["function-bind-differential", "--oracle", "/tmp/qjs"]
+            .into_iter()
+            .map(OsString::from);
+
+        assert_eq!(
+            Args::parse(arguments),
+            Ok(Args::FunctionBindDifferential(
+                FunctionBindDifferentialOptions {
+                    oracle: PathBuf::from("/tmp/qjs"),
+                    corpus: PathBuf::from("tests/function-bind/manifest.json"),
                     timeout: Duration::from_secs(5),
                 }
             ))

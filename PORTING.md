@@ -423,8 +423,29 @@ A milestone is complete only when all of its checked items pass in CI.
           left-to-right accessor/prototype/mutation behavior. Keep the
           collector iterative, GC-traced, frame/value bounded, and charged
           against the same execution budget as its target.
-    - [ ] Add persistent global lexical collision checks and
-          `Function.prototype.bind`/`Symbol.hasInstance`.
+    - [x] Add realm-owned `Function.prototype.bind` producing verified bound
+          functions with exact descriptors, native source, and
+          nonconstructability. Bound calls override the receiver with the
+          bound `this` and prepend bound arguments at every dispatch boundary
+          (bytecode calls, native continuations, and host calls); construction
+          substitutes the target as `newTarget` and reports the bound
+          function's own name for non-constructable targets. Length follows
+          the pinned QuickJS rules: own-property presence decides zero, exact
+          signed 32-bit and truncating binary64 subtraction saturate at zero,
+          `NaN` and non-Number values become zero, and bound-of-bound chains
+          and native targets read through the own `length` property. The
+          `"bound "` name prefix concatenates the raw target name without
+          conversion. Bound-function edges (target, `this`, arguments)
+          participate in iterative cycle collection.
+    - [x] Execute the `instanceof` operator resumably with exact
+          `Symbol.hasInstance` method lookup and invocation (including on
+          plain objects), the pinned `invalid 'instanceof' right operand` and
+          `operand 'prototype' property is not an object` errors, iterative
+          bound-target unwrapping through the full operator, and the ordinary
+          prototype chain walk. Realm-owned
+          `Function.prototype[Symbol.hasInstance]` runs the ordinary path
+          without an initial method lookup.
+    - [ ] Add persistent global lexical collision checks.
 - [ ] General abrupt completion, catch/throw/finally, rooted exception values,
       stack traces, remaining iterator-protocol consumers, and generators.
   - [x] First escaping exception path: local/captured TDZ access returns a

@@ -39,14 +39,15 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 19;
-const REALM_FUNCTION_COUNT: usize = 42;
-const REALM_PROPERTY_COUNT: u64 = 192;
+const REALM_FUNCTION_COUNT: usize = 44;
+const REALM_PROPERTY_COUNT: u64 = 198;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
 const DESCRIPTION_ATOM_INDEX: usize = 3;
 const IS_ERROR_ATOM_INDEX: usize = 4;
-const SYMBOL_STATIC_ATOM_START: usize = 5;
+const BIND_ATOM_INDEX: usize = 5;
+const SYMBOL_STATIC_ATOM_START: usize = 6;
 
 const DYNAMIC_SYMBOL_STATIC_PROPERTIES: [(&str, PredefinedAtom); 12] = [
     ("toPrimitive", PredefinedAtom::SymbolToPrimitive),
@@ -94,6 +95,7 @@ struct RealmKeys {
     symbol_iterator: PropertyKey,
     symbol_to_primitive: PropertyKey,
     symbol_to_string_tag: PropertyKey,
+    symbol_has_instance: PropertyKey,
     for_key: PropertyKey,
     split: PropertyKey,
 }
@@ -129,6 +131,9 @@ impl RealmKeys {
             symbol_to_string_tag: PropertyKey::from_validated_symbol(
                 atoms.predefined(PredefinedAtom::SymbolToStringTag),
             ),
+            symbol_has_instance: PropertyKey::from_validated_symbol(
+                atoms.predefined(PredefinedAtom::SymbolHasInstance),
+            ),
             for_key: key(PredefinedAtom::For),
             split: key(PredefinedAtom::Split),
         }
@@ -148,6 +153,8 @@ struct RealmNames {
     value_of: JsString,
     apply: JsString,
     call: JsString,
+    bind: JsString,
+    has_instance: JsString,
     values: JsString,
     keys: JsString,
     entries: JsString,
@@ -179,6 +186,8 @@ impl RealmNames {
             value_of: predefined_string(atoms, PredefinedAtom::ValueOf),
             apply: predefined_string(atoms, PredefinedAtom::Apply),
             call: JsString::from_utf8("call").map_err(AtomError::from)?,
+            bind: JsString::from_utf8("bind").map_err(AtomError::from)?,
+            has_instance: JsString::from_utf8("[Symbol.hasInstance]").map_err(AtomError::from)?,
             values: predefined_string(atoms, PredefinedAtom::Values),
             keys: predefined_string(atoms, PredefinedAtom::Keys),
             entries: JsString::from_utf8("entries").map_err(AtomError::from)?,
@@ -208,6 +217,8 @@ struct RealmBaseRecords {
     function_to_string: ObjectRecord,
     function_call: ObjectRecord,
     function_apply: ObjectRecord,
+    function_bind: ObjectRecord,
+    function_has_instance: ObjectRecord,
 }
 
 struct ErrorIntrinsicRecords {
@@ -282,6 +293,8 @@ impl RealmRecords {
             function_to_string: reserved_record(2)?,
             function_call: reserved_record(2)?,
             function_apply: reserved_record(2)?,
+            function_bind: reserved_record(2)?,
+            function_has_instance: reserved_record(2)?,
         };
         let error_records = |prototype_properties, constructor_properties| {
             Ok::<_, RuntimeError>(ErrorIntrinsicRecords {
@@ -380,6 +393,8 @@ struct RealmBase {
     function_to_string: FunctionId,
     function_call: FunctionId,
     function_apply: FunctionId,
+    function_bind: FunctionId,
+    function_has_instance: FunctionId,
 }
 
 struct PrimitiveIntrinsicGraph {
@@ -435,6 +450,8 @@ struct SymbolIntrinsicGraph {
 impl RealmBase {
     fn rollback(self, runtime: &mut Runtime) {
         for function in [
+            self.function_has_instance,
+            self.function_bind,
             self.function_apply,
             self.function_call,
             self.function_to_string,
@@ -663,14 +680,15 @@ impl Runtime {
     ) -> Result<RealmGraph, RuntimeError> {
         let mut dynamic_atoms = Vec::new();
         dynamic_atoms
-            .try_reserve_exact(5 + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len())
-            .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, 17))?;
+            .try_reserve_exact(SYMBOL_STATIC_ATOM_START + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len())
+            .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, 18))?;
         for name in [
             &names.call,
             &names.entries,
             &names.key_for,
             &names.description,
             &names.is_error,
+            &names.bind,
         ] {
             match self.atoms.intern_string(name) {
                 Ok(atom) => dynamic_atoms.push(atom),
@@ -811,6 +829,18 @@ impl Runtime {
             NativeFunctionKind::FunctionPrototypeApply,
             records.function_apply,
         );
+        let function_bind = self.insert_reserved_native(
+            realm,
+            HeapReference::Function(function_prototype),
+            NativeFunctionKind::FunctionPrototypeBind,
+            records.function_bind,
+        );
+        let function_has_instance = self.insert_reserved_native(
+            realm,
+            HeapReference::Function(function_prototype),
+            NativeFunctionKind::FunctionPrototypeHasInstance,
+            records.function_has_instance,
+        );
         RealmBase {
             realm,
             object_prototype,
@@ -822,6 +852,8 @@ impl Runtime {
             function_to_string,
             function_call,
             function_apply,
+            function_bind,
+            function_has_instance,
         }
     }
 
@@ -1332,6 +1364,16 @@ impl Runtime {
                 METHOD_PROPERTY,
                 StoredValue::Function(graph.base.function_apply),
             )?;
+            record.append_data(
+                PropertyKey::from_validated_atom(graph.dynamic_atoms[BIND_ATOM_INDEX].clone()),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.base.function_bind),
+            )?;
+            record.append_data(
+                keys.symbol_has_instance.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.base.function_has_instance),
+            )?;
         }
 
         self.append_constructor_identity(
@@ -1346,6 +1388,8 @@ impl Runtime {
             (graph.base.function_to_string, &names.to_string, 0),
             (graph.base.function_call, &names.call, 1),
             (graph.base.function_apply, &names.apply, 2),
+            (graph.base.function_bind, &names.bind, 1),
+            (graph.base.function_has_instance, &names.has_instance, 1),
         ] {
             self.append_function_identity(function, name, length, keys)?;
         }

@@ -29,6 +29,7 @@ use std::time::Duration;
 pub(crate) const DEFAULT_CONTROL_FLOW_CORPUS: &str = "tests/control-flow/manifest.json";
 pub(crate) const DEFAULT_ERROR_CORPUS: &str = "tests/error/manifest.json";
 pub(crate) const DEFAULT_FUNCTION_APPLY_CORPUS: &str = "tests/function-apply/manifest.json";
+pub(crate) const DEFAULT_FUNCTION_BIND_CORPUS: &str = "tests/function-bind/manifest.json";
 pub(crate) const DEFAULT_ITERATOR_CORPUS: &str = "tests/iterator/manifest.json";
 pub(crate) const MAX_CONTROL_FLOW_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const CANDIDATE_WORKER_COMMAND: &str = "__control-flow-candidate-worker";
@@ -178,6 +179,31 @@ const FUNCTION_APPLY_REQUIRED_COVERAGE: &[&str] = &[
     "target-validation-order",
 ];
 
+const FUNCTION_BIND_REQUIRED_COVERAGE: &[&str] = &[
+    "argument-prepending",
+    "bound-construction",
+    "bound-length-rules",
+    "bound-name-rules",
+    "bound-tostring",
+    "call-apply-forwarding",
+    "instanceof-bound-unwrap",
+    "instanceof-custom-symbol",
+    "instanceof-nonobject-right",
+    "instanceof-ordinary",
+    "instanceof-plain-object-symbol",
+    "instanceof-primitive-left",
+    "metadata-writable-enumerable",
+    "native-source",
+    "native-target-binding",
+    "nonconstructable",
+    "nonconstructor-name",
+    "receiver-override",
+    "symbol-has-instance-native",
+    "target-validation-order",
+    "typeof-bound",
+    "new-target-substitution",
+];
+
 const ERROR_REQUIRED_COVERAGE: &[&str] = &[
     "aggregate-call",
     "aggregate-acquisition-abrupt",
@@ -300,6 +326,7 @@ enum RuntimeDifferentialSuite {
     ControlFlow,
     Error,
     FunctionApply,
+    FunctionBind,
     Iterator,
 }
 
@@ -309,6 +336,7 @@ impl RuntimeDifferentialSuite {
             Self::ControlFlow => "control-flow",
             Self::Error => "error",
             Self::FunctionApply => "function-apply",
+            Self::FunctionBind => "function-bind",
             Self::Iterator => "iterator",
         }
     }
@@ -318,6 +346,7 @@ impl RuntimeDifferentialSuite {
             Self::ControlFlow => REQUIRED_COVERAGE,
             Self::Error => ERROR_REQUIRED_COVERAGE,
             Self::FunctionApply => FUNCTION_APPLY_REQUIRED_COVERAGE,
+            Self::FunctionBind => FUNCTION_BIND_REQUIRED_COVERAGE,
             Self::Iterator => ITERATOR_REQUIRED_COVERAGE,
         }
     }
@@ -339,6 +368,13 @@ pub(crate) struct ErrorDifferentialOptions {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct FunctionApplyDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct FunctionBindDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -408,6 +444,17 @@ pub(crate) fn run_function_apply_differential(
         &options.corpus,
         options.timeout,
         RuntimeDifferentialSuite::FunctionApply,
+    )
+}
+
+pub(crate) fn run_function_bind_differential(
+    options: &FunctionBindDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::FunctionBind,
     )
 }
 
@@ -1636,6 +1683,26 @@ mod tests {
         })
     }
 
+    fn complete_function_bind_manifest() -> Value {
+        let cases = super::FUNCTION_BIND_REQUIRED_COVERAGE
+            .iter()
+            .enumerate()
+            .map(|(index, feature)| {
+                json!({
+                    "id": format!("bind-case-{index}"),
+                    "covers": [feature],
+                    "body": "return \"ok\";",
+                    "expect": {"kind": "string", "value": "ok"}
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "schema": 1,
+            "quickjs_release": EXPECTED_MANIFEST_RELEASE,
+            "cases": cases
+        })
+    }
+
     fn complete_error_manifest() -> Value {
         let cases = super::ERROR_REQUIRED_COVERAGE
             .iter()
@@ -1708,6 +1775,51 @@ mod tests {
             super::FUNCTION_APPLY_REQUIRED_COVERAGE.len()
         );
         assert_eq!(corpus.cases[0].id, "apply-case-0");
+    }
+
+    #[test]
+    fn accepts_a_complete_function_bind_manifest_with_its_own_coverage_contract() {
+        let manifest = complete_function_bind_manifest();
+        let corpus = parse_corpus_for_suite(
+            &serde_json::to_vec(&manifest).expect("serialize manifest"),
+            "function-bind.json",
+            RuntimeDifferentialSuite::FunctionBind,
+        )
+        .expect("valid Function.prototype.bind manifest");
+        assert_eq!(
+            corpus.cases.len(),
+            super::FUNCTION_BIND_REQUIRED_COVERAGE.len()
+        );
+        assert_eq!(corpus.cases[0].id, "bind-case-0");
+    }
+
+    #[test]
+    fn function_bind_manifest_rejects_cross_suite_coverage_tags() {
+        let mut manifest = complete_function_bind_manifest();
+        manifest["cases"][0]["covers"][0] = Value::String("labeled-break".to_owned());
+        assert!(
+            parse_corpus_for_suite(
+                &serde_json::to_vec(&manifest).expect("serialize manifest"),
+                "function-bind.json",
+                RuntimeDifferentialSuite::FunctionBind,
+            )
+            .expect_err("cross-suite coverage tag")
+            .contains("unknown feature")
+        );
+    }
+
+    #[test]
+    fn checked_in_function_bind_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/function-bind/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in function-bind manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::FunctionBind,
+        )
+        .expect("checked-in function-bind manifest");
+        assert_eq!(corpus.cases.len(), 20);
     }
 
     #[test]

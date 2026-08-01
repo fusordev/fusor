@@ -25,6 +25,8 @@
 
 //! Native intrinsic dispatch and resumable Function.prototype.apply execution.
 
+use super::instanceof::{advance_instance_of, begin_function_has_instance};
+
 #[allow(
     clippy::wildcard_imports,
     reason = "this private VM sibling participates in the shared interpreter implementation namespace"
@@ -254,6 +256,9 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::FunctionApply(state) => {
                 advance_function_apply(runtime, state, Some(value), return_to, execution_budget)?
             }
+            NativeContinuation::FunctionBind(state) => {
+                advance_function_bind(runtime, state, Some(value), return_to, execution_budget)?
+            }
             NativeContinuation::PropertyKey(state) => advance_property_key_conversion(
                 runtime,
                 state,
@@ -315,6 +320,9 @@ pub(super) fn resume_native_continuations(
             }
             NativeContinuation::IteratorClose(state) => {
                 advance_iterator_close(state, value, return_to)?
+            }
+            NativeContinuation::InstanceOf(state) => {
+                advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
             NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
         };
@@ -399,7 +407,7 @@ fn resolve_native_dispatch_inner(
     saw_temporary_receiver: &mut bool,
 ) -> Result<NativeDispatch, NativeFailure> {
     loop {
-        let NativeDispatch::Call(call) = dispatch else {
+        let NativeDispatch::Call(mut call) = dispatch else {
             return Ok(dispatch);
         };
         *saw_temporary_receiver |=
@@ -420,16 +428,44 @@ fn resolve_native_dispatch_inner(
             runtime.limits.max_active_frame_values,
             suspended_values,
         )?;
-        let native = runtime
+        let node = runtime
             .functions
             .get(call.function)
             .ok_or(EngineFault::StaleHeapEdge {
                 edge: "function",
                 index: call.function.index(),
                 generation: call.function.generation(),
-            })?
-            .native()
-            .copied();
+            })?;
+        let native = node.native().copied();
+        if native.is_none()
+            && let Some(bound) = node.bound()
+        {
+            let target = bound.target;
+            let mut arguments = Vec::new();
+            arguments
+                .try_reserve_exact(
+                    bound
+                        .bound_arguments
+                        .len()
+                        .saturating_add(call.arguments.values.len()),
+                )
+                .map_err(|_| ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::FrameValues,
+                    additional: bound
+                        .bound_arguments
+                        .len()
+                        .saturating_add(call.arguments.values.len()),
+                })?;
+            for argument in &bound.bound_arguments {
+                arguments.push(argument.duplicate());
+            }
+            arguments.extend(call.arguments.into_remaining_values());
+            call.function = target;
+            call.receiver = bound.bound_this.duplicate();
+            call.arguments = CallArguments::from_values(arguments);
+            dispatch = NativeDispatch::Call(call);
+            continue;
+        }
         if let Some(native) = native {
             apply_native_pre_call(runtime, call.pre_call.as_ref())?;
             let outcome = dispatch_native_call_with_frames(
@@ -749,6 +785,27 @@ pub(super) fn dispatch_native_call_with_frames(
                 continuations,
                 pre_call: None,
             }))
+        }
+        NativeFunctionKind::FunctionPrototypeBind => begin_function_bind(
+            runtime,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::FunctionPrototypeHasInstance => {
+            let mut arguments = inputs.arguments;
+            let value = arguments.take_first_or_undefined();
+            begin_function_has_instance(
+                runtime,
+                native.realm,
+                value,
+                inputs.receiver,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
         }
         NativeFunctionKind::OrdinaryFunctionConstructor => {
             let Some(compiler) = compiler else {
@@ -1481,4 +1538,245 @@ fn function_apply_exception(
         },
         origin,
     }))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "bind admission keeps callable validation, retained-value preflight, and native work budget explicit"
+)]
+fn begin_function_bind(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(target) = inputs.receiver else {
+        return Err(function_apply_exception(
+            realm,
+            ExceptionKind::TypeError,
+            "not a function",
+            origin,
+        )?);
+    };
+    let mut supplied = inputs.arguments;
+    let bound_this = supplied.take_first_or_undefined();
+    let bound_arguments = supplied.into_remaining_values();
+    let state = FunctionBindContinuation {
+        target,
+        bound_this,
+        bound_arguments,
+        length: JsNumber::from_i32(0),
+        realm,
+        stage: FunctionBindStage::AwaitLengthValue,
+        origin,
+    };
+    let target_value = StoredValue::Function(target);
+    let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
+    let has_length = runtime
+        .object_record(HeapReference::Function(target))
+        .map_err(NativeFailure::from)?
+        .own_property(&length_key)
+        .is_some();
+    if !has_length {
+        return bind_name_read(runtime, state, return_to, execution_budget);
+    }
+    charge_heap_property_lookup(runtime, &target_value, execution_budget)?;
+    match read_static_property(runtime, realm, &target_value, &length_key)? {
+        PropertyReadOutcome::Value(value) => {
+            bind_length_value(runtime, state, &value, return_to, execution_budget)
+        }
+        PropertyReadOutcome::Getter { function, receiver } => {
+            let origin = state.origin.clone();
+            iterator_getter_call(
+                function,
+                receiver,
+                NativeContinuation::FunctionBind(state),
+                return_to,
+                origin,
+                None,
+            )
+        }
+        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
+            message: "bind target length read failed",
+        }
+        .into()),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "bind admission keeps callable validation, retained-value preflight, and native work budget explicit"
+)]
+fn advance_function_bind(
+    runtime: &mut Runtime,
+    state: FunctionBindContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(value) = completion else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "bind continuation resumed without a getter completion",
+        }
+        .into());
+    };
+    match state.stage {
+        FunctionBindStage::AwaitLengthValue => {
+            bind_length_value(runtime, state, &value, return_to, execution_budget)
+        }
+        FunctionBindStage::AwaitNameValue => bind_name_value(runtime, state, value, return_to),
+    }
+}
+
+fn bind_length_value(
+    runtime: &mut Runtime,
+    mut state: FunctionBindContinuation,
+    value: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let argument_count = u32::try_from(state.bound_arguments.len()).unwrap_or(u32::MAX);
+    let length = match value {
+        StoredValue::Number(number) => {
+            let mut length = number.as_f64().trunc();
+            if length.is_nan() || length <= f64::from(argument_count) {
+                length = 0.0;
+            } else {
+                length -= f64::from(argument_count);
+            }
+            JsNumber::from_f64(length)
+        }
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::Function(_)
+        | StoredValue::Object(_) => JsNumber::from_i32(0),
+    };
+    state.length = length;
+    state.stage = FunctionBindStage::AwaitNameValue;
+    bind_name_read(runtime, state, return_to, execution_budget)
+}
+
+fn bind_name_read(
+    runtime: &mut Runtime,
+    mut state: FunctionBindContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = FunctionBindStage::AwaitNameValue;
+    let target_value = StoredValue::Function(state.target);
+    let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
+    charge_heap_property_lookup(runtime, &target_value, execution_budget)?;
+    match read_static_property(runtime, state.realm, &target_value, &name_key)? {
+        PropertyReadOutcome::Value(value) => bind_name_value(runtime, state, value, return_to),
+        PropertyReadOutcome::Getter { function, receiver } => {
+            let origin = state.origin.clone();
+            iterator_getter_call(
+                function,
+                receiver,
+                NativeContinuation::FunctionBind(state),
+                return_to,
+                origin,
+                None,
+            )
+        }
+        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
+            message: "bind target name read failed",
+        }
+        .into()),
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "bound-function allocation keeps limit checks, property construction, and publication atomic"
+)]
+fn bind_name_value(
+    runtime: &mut Runtime,
+    state: FunctionBindContinuation,
+    value: StoredValue,
+    _return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let name = match value {
+        StoredValue::String(value) => value,
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::Function(_)
+        | StoredValue::Object(_) => JsString::empty(),
+    };
+    let name = JsString::from_utf8("bound ")?.concat(&name)?;
+    let prototype = runtime
+        .realm_function_prototype(state.realm)
+        .map_err(NativeFailure::from)?;
+    check_execution_limit(
+        RuntimeResource::HeapFunctions,
+        runtime.limits.max_heap_functions,
+        usize_to_u64(runtime.functions.len()).saturating_add(1),
+    )?;
+    check_execution_limit(
+        RuntimeResource::ObjectProperties,
+        runtime.limits.max_object_properties,
+        runtime.object_properties.saturating_add(2),
+    )?;
+    runtime
+        .functions
+        .try_reserve(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::HeapFunctions,
+            additional: 1,
+        })?;
+    let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
+    let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
+    let mut object = crate::object::ObjectRecord::empty(Some(HeapReference::Function(prototype)));
+    object
+        .try_reserve_data(2)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::ObjectProperties,
+            additional: 2,
+        })?;
+    object
+        .append_data(
+            length_key,
+            PropertyLayout::data(false, false, true),
+            StoredValue::Number(state.length),
+        )
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::ObjectProperties,
+            additional: 1,
+        })?;
+    object
+        .append_data(
+            name_key,
+            PropertyLayout::data(false, false, true),
+            StoredValue::String(name),
+        )
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::ObjectProperties,
+            additional: 1,
+        })?;
+    let function = runtime
+        .functions
+        .try_insert(HeapFunction {
+            implementation: FunctionImplementation::Bound(BoundFunction {
+                target: state.target,
+                bound_this: state.bound_this,
+                bound_arguments: state.bound_arguments,
+            }),
+            object,
+            public_roots: 0,
+        })
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::HeapFunctions,
+            additional: 1,
+        })?;
+    runtime.object_properties = runtime.object_properties.saturating_add(2);
+    runtime.collection_pending = true;
+    Ok(NativeDispatch::Immediate(StoredValue::Function(function)))
 }

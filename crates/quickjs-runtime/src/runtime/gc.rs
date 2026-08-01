@@ -424,6 +424,28 @@ impl Runtime {
                                 }
                             }
                         }
+                        if let FunctionImplementation::Bound(bound) = &function.implementation {
+                            mark_heap_reference(
+                                HeapReference::Function(bound.target),
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                            mark_stored_value(
+                                &bound.bound_this,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                            for argument in &bound.bound_arguments {
+                                mark_stored_value(
+                                    argument,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                        }
                         mark_object_record(
                             &function.object,
                             &mut marked_functions,

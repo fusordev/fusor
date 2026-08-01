@@ -1,0 +1,141 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "metadata-writable-and-nonenumerable",
+      "covers": ["metadata-writable-enumerable"],
+      "body": "let b = Function.prototype.bind;\nlet listed = false;\nfor (let k in Function.prototype) if (k === \"bind\") listed = true;\nFunction.prototype.bind = 1;\nlet writable = Function.prototype.bind === 1;\nFunction.prototype.bind = b;\nreturn b.name + \":\" + b.length + \":\" + listed + \":\" + writable;",
+      "expect": {"kind": "string", "value": "bind:1:false:true"}
+    },
+    {
+      "id": "native-source-text",
+      "covers": ["native-source"],
+      "body": "return Function.prototype.bind.toString() === \"function bind() {\\n    [native code]\\n}\";",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "bind-is-not-constructable",
+      "covers": ["nonconstructable"],
+      "body": "return new Function.prototype.bind();",
+      "expect": {
+        "kind": "throw",
+        "name": "TypeError",
+        "message": "bind is not a constructor"
+      }
+    },
+    {
+      "id": "target-callability-precedes-everything",
+      "covers": ["target-validation-order"],
+      "body": "return Function.prototype.bind.call({}, null);",
+      "expect": {
+        "kind": "throw",
+        "name": "TypeError",
+        "message": "not a function"
+      }
+    },
+    {
+      "id": "bound-length-uses-the-exact-quickjs-rules",
+      "covers": ["bound-length-rules"],
+      "body": "function f(a, b, c) {}\nfunction g(a, b) {}\nlet inner = g.bind(null, 1);\nreturn f.bind(null).length + \":\" + f.bind(null, 1).length + \":\" + f.bind(null, 1, 2, 3).length + \":\" + inner.length + \":\" + inner.bind(null).length + \":\" + Function.prototype.apply.bind(null).length;",
+      "expect": {"kind": "string", "value": "3:2:0:1:1:2"}
+    },
+    {
+      "id": "bound-name-is-bound-prefixed",
+      "covers": ["bound-name-rules"],
+      "body": "function f() {}\nreturn f.bind(null).name + \":\" + f.bind(null).bind(null).name;",
+      "expect": {"kind": "string", "value": "bound f:bound bound f"}
+    },
+    {
+      "id": "bound-this-overrides-call-receiver",
+      "covers": ["receiver-override"],
+      "body": "function f() { return this.tag; }\nlet receiver = { tag: \"bound\" };\nreturn f.bind(receiver).call({ tag: \"other\" });",
+      "expect": {"kind": "string", "value": "bound"}
+    },
+    {
+      "id": "bound-arguments-are-prepended",
+      "covers": ["argument-prepending"],
+      "body": "function f(a, b) { return a + \":\" + b; }\nreturn f.bind(null, 1)(2);",
+      "expect": {"kind": "string", "value": "1:2"}
+    },
+    {
+      "id": "bound-functions-forward-through-call-and-apply",
+      "covers": ["call-apply-forwarding"],
+      "body": "function f(a, b) { return this.tag + \":\" + a + \":\" + b; }\nlet bound = f.bind({ tag: \"b\" }, 1);\nreturn bound.call({ tag: \"other\" }, 2) + \"|\" + bound.apply({ tag: \"other\" }, [2]);",
+      "expect": {"kind": "string", "value": "b:1:2|b:1:2"}
+    },
+    {
+      "id": "bound-native-targets-keep-native-dispatch",
+      "covers": ["native-target-binding"],
+      "body": "function f(a, b) { return \"\" + (a + b); }\nfunction g(a, b) { return a + \":\" + b; }\nreturn Function.prototype.call.bind(f)(null, 3, 4) + \"|\" + Function.prototype.apply.bind(g)(null, [\"x\", \"y\"]);",
+      "expect": {"kind": "string", "value": "7|x:y"}
+    },
+    {
+      "id": "bound-construction-prepends-arguments",
+      "covers": ["bound-construction"],
+      "body": "function C(a, b) { this.sum = a + b; }\nreturn \"\" + new (C.bind(null, 2))(3).sum;",
+      "expect": {"kind": "string", "value": "5"}
+    },
+    {
+      "id": "bound-construction-substitutes-the-new-target",
+      "covers": ["bound-construction", "new-target-substitution"],
+      "body": "function C() { this.tag = \"c\"; }\nlet bound = C.bind(null);\nreturn \"\" + ((new bound()) instanceof C);",
+      "expect": {"kind": "string", "value": "true"}
+    },
+    {
+      "id": "bound-nonconstructor-throws-with-the-bound-name",
+      "covers": ["nonconstructor-name"],
+      "body": "return new (Function.prototype.apply.bind(null))();",
+      "expect": {
+        "kind": "throw",
+        "name": "TypeError",
+        "message": "bound apply is not a constructor"
+      }
+    },
+    {
+      "id": "bound-functions-are-functions-with-native-source",
+      "covers": ["typeof-bound", "bound-tostring"],
+      "body": "function f() {}\nlet bound = f.bind(null);\nreturn typeof bound + \":\" + (bound.toString().length === \"function bound f() {\\n    [native code]\\n}\".length);",
+      "expect": {"kind": "string", "value": "function:true"}
+    },
+    {
+      "id": "instanceof-uses-the-ordinary-prototype-chain",
+      "covers": ["instanceof-ordinary", "instanceof-primitive-left"],
+      "body": "function C() {}\nlet c = new C();\nreturn (c instanceof C) + \":\" + ({} instanceof C) + \":\" + (1 instanceof C) + \":\" + (null instanceof C);",
+      "expect": {"kind": "string", "value": "true:false:false:false"}
+    },
+    {
+      "id": "instanceof-rejects-non-callable-right-operands",
+      "covers": ["instanceof-nonobject-right"],
+      "body": "function check(value) { try { return \"\" + (value instanceof 1); } catch (error) { return error.name + \":\" + error.message; } }\nreturn check({}) + \"|\" + check(1) + \"|\" + check(null);",
+      "expect": {
+        "kind": "string",
+        "value": "TypeError:invalid 'instanceof' right operand|TypeError:invalid 'instanceof' right operand|TypeError:invalid 'instanceof' right operand"
+      }
+    },
+    {
+      "id": "instanceof-consults-a-custom-symbol-has-instance",
+      "covers": ["instanceof-custom-symbol"],
+      "body": "function C() {}\nlet guard = { [Symbol.hasInstance](v) { return v > 2; } };\nC[Symbol.hasInstance] = guard[Symbol.hasInstance];\nreturn \"\" + (3 instanceof C) + \":\" + (1 instanceof C);",
+      "expect": {"kind": "string", "value": "true:false"}
+    },
+    {
+      "id": "instanceof-uses-symbol-has-instance-on-plain-objects",
+      "covers": ["instanceof-plain-object-symbol"],
+      "body": "let guard = { [Symbol.hasInstance](v) { return v === 7; } };\nreturn \"\" + (7 instanceof guard) + \":\" + (8 instanceof guard);",
+      "expect": {"kind": "string", "value": "true:false"}
+    },
+    {
+      "id": "function-prototype-has-instance-runs-the-ordinary-path",
+      "covers": ["symbol-has-instance-native"],
+      "body": "function C() {}\nreturn \"\" + Function.prototype[Symbol.hasInstance].call(1, {}) + \":\" + Function.prototype[Symbol.hasInstance].call(C, new C()) + \":\" + Function.prototype[Symbol.hasInstance].call(C, {});",
+      "expect": {"kind": "string", "value": "false:true:false"}
+    },
+    {
+      "id": "instanceof-unwraps-bound-functions",
+      "covers": ["instanceof-bound-unwrap"],
+      "body": "function C() {}\nreturn \"\" + (new C() instanceof C.bind(null)) + \":\" + ({} instanceof C.bind(null));",
+      "expect": {"kind": "string", "value": "true:false"}
+    }
+  ]
+}

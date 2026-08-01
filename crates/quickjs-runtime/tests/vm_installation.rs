@@ -39,9 +39,9 @@ fn atom_failure_rolls_back_the_complete_installation() {
         "fail",
     );
     let atom_limits = AtomLimits::new(
-        PREDEFINED_ATOM_COUNT + 17,
-        PREDEFINED_DESCRIPTION_CODE_UNITS + 151,
-        PREDEFINED_INTERNER_SLOTS + 17,
+        PREDEFINED_ATOM_COUNT + 18,
+        PREDEFINED_DESCRIPTION_CODE_UNITS + 155,
+        PREDEFINED_INTERNER_SLOTS + 18,
     );
     let mut runtime =
         Runtime::try_new(RuntimeLimits::default().with_atom_limits(atom_limits)).expect("runtime");
@@ -160,37 +160,43 @@ fn unsupported_nested_bigint_is_rejected_before_runtime_mutation() {
 }
 
 #[test]
-fn object_operators_remain_rejected_before_runtime_mutation() {
-    for (source, expected) in [
-        (
-            "function outer(){function child(left,right){return left in right;}return 0;}",
-            FinalOpcode::In,
-        ),
-        (
-            "function outer(){function child(left,right){return left instanceof right;}return 0;}",
-            FinalOpcode::InstanceOf,
-        ),
-    ] {
-        let authority = compile(source, "outer");
-        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-        let realm = runtime.create_realm().expect("realm");
-        let before = runtime.usage();
-        let error = {
-            let mut context = runtime.context(&realm).expect("context");
-            context
-                .instantiate(authority)
-                .expect_err("object operators remain deferred")
-        };
-        assert!(matches!(
-            error,
-            InstallError::UnsupportedOpcode {
-                function,
-                opcode,
-                ..
-            } if function == FunctionTemplateId::new(1) && opcode == expected
-        ));
-        assert_eq!(runtime.usage(), before);
-    }
+fn in_operator_remains_rejected_before_runtime_mutation() {
+    let authority = compile(
+        "function outer(){function child(left,right){return left in right;}return 0;}",
+        "outer",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let before = runtime.usage();
+    let error = {
+        let mut context = runtime.context(&realm).expect("context");
+        context
+            .instantiate(authority)
+            .expect_err("in operator remains deferred")
+    };
+    assert!(matches!(
+        error,
+        InstallError::UnsupportedOpcode {
+            function,
+            opcode: FinalOpcode::In,
+            ..
+        } if function == FunctionTemplateId::new(1)
+    ));
+    assert_eq!(runtime.usage(), before);
+}
+
+#[test]
+fn instanceof_is_admitted_across_the_complete_graph() {
+    let authority = compile(
+        "function outer(){function child(left,right){return left instanceof right;}return 0;}",
+        "outer",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    context
+        .instantiate(authority)
+        .expect("instanceof is admitted");
 }
 
 #[test]
@@ -238,7 +244,7 @@ fn long_lived_context_drains_dropped_roots_before_installation_limits() {
     let mut runtime = Runtime::try_new(
         RuntimeLimits::default()
             .with_max_public_roots(1)
-            .with_max_heap_functions(43),
+            .with_max_heap_functions(45),
     )
     .expect("runtime");
     let realm = runtime.create_realm().expect("realm");

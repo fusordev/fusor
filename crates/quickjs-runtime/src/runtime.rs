@@ -333,6 +333,8 @@ pub(crate) enum NativeFunctionKind {
     FunctionPrototype,
     FunctionPrototypeApply,
     FunctionPrototypeCall,
+    FunctionPrototypeBind,
+    FunctionPrototypeHasInstance,
     OrdinaryFunctionConstructor,
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
@@ -389,6 +391,15 @@ pub(crate) struct NativeFunction {
 pub(crate) enum FunctionImplementation {
     Bytecode(BytecodeFunction),
     Native(NativeFunction),
+    Bound(BoundFunction),
+}
+
+/// One `Function.prototype.bind` result: a callable/constructable function
+/// whose own receiver and leading arguments override the target's call.
+pub(crate) struct BoundFunction {
+    pub(crate) target: FunctionId,
+    pub(crate) bound_this: StoredValue,
+    pub(crate) bound_arguments: Vec<StoredValue>,
 }
 
 pub(crate) struct HeapFunction {
@@ -404,13 +415,23 @@ impl HeapFunction {
             FunctionImplementation::Native(_) => Err(crate::EngineFault::RuntimeInvariant {
                 message: "native function reached the bytecode execution path",
             }),
+            FunctionImplementation::Bound(_) => Err(crate::EngineFault::RuntimeInvariant {
+                message: "bound function reached the bytecode execution path",
+            }),
         }
     }
 
     pub(crate) const fn native(&self) -> Option<&NativeFunction> {
         match &self.implementation {
-            FunctionImplementation::Bytecode(_) => None,
+            FunctionImplementation::Bytecode(_) | FunctionImplementation::Bound(_) => None,
             FunctionImplementation::Native(function) => Some(function),
+        }
+    }
+
+    pub(crate) fn bound(&self) -> Option<&BoundFunction> {
+        match &self.implementation {
+            FunctionImplementation::Bytecode(_) | FunctionImplementation::Native(_) => None,
+            FunctionImplementation::Bound(bound) => Some(bound),
         }
     }
 }
@@ -892,6 +913,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Neq
             | FinalOpcode::StrictEq
             | FinalOpcode::StrictNeq
+            | FinalOpcode::InstanceOf
             | FinalOpcode::And
             | FinalOpcode::Xor
             | FinalOpcode::Or

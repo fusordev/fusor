@@ -523,27 +523,39 @@ impl Runtime {
 
     pub(crate) fn function_realm(
         &self,
-        function: FunctionId,
+        mut function: FunctionId,
     ) -> Result<RealmId, crate::EngineFault> {
-        let function = self
-            .functions
-            .get(function)
-            .ok_or(crate::EngineFault::StaleHeapEdge {
-                edge: "function",
-                index: function.index(),
-                generation: function.generation(),
-            })?;
-        match &function.implementation {
-            FunctionImplementation::Bytecode(bytecode) => {
-                self.code.get(bytecode.code).map(|code| code.realm).ok_or(
-                    crate::EngineFault::StaleHeapEdge {
-                        edge: "installed code",
-                        index: bytecode.code.index(),
-                        generation: bytecode.code.generation(),
-                    },
-                )
+        let mut remaining = self.functions.len().saturating_add(1);
+        loop {
+            let node =
+                self.functions
+                    .get(function)
+                    .ok_or_else(|| crate::EngineFault::StaleHeapEdge {
+                        edge: "function",
+                        index: function.index(),
+                        generation: function.generation(),
+                    })?;
+            match &node.implementation {
+                FunctionImplementation::Bytecode(bytecode) => {
+                    return self.code.get(bytecode.code).map(|code| code.realm).ok_or(
+                        crate::EngineFault::StaleHeapEdge {
+                            edge: "installed code",
+                            index: bytecode.code.index(),
+                            generation: bytecode.code.generation(),
+                        },
+                    );
+                }
+                FunctionImplementation::Native(native) => return Ok(native.realm),
+                FunctionImplementation::Bound(bound) => {
+                    if remaining == 0 {
+                        return Err(crate::EngineFault::RuntimeInvariant {
+                            message: "bound-function target chain exceeds the heap size",
+                        });
+                    }
+                    remaining -= 1;
+                    function = bound.target;
+                }
             }
-            FunctionImplementation::Native(native) => Ok(native.realm),
         }
     }
 

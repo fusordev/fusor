@@ -13,11 +13,11 @@ use quickjs_runtime::{
 };
 
 const REALM_ERROR_GRAPH_OBJECTS: u64 = 19;
-const REALM_ERROR_GRAPH_FUNCTIONS: u64 = 42;
-const REALM_ERROR_GRAPH_PROPERTIES: u64 = 192;
-const REALM_DYNAMIC_ATOMS: u32 = 17;
-const REALM_DYNAMIC_ATOM_CODE_UNITS: u64 = 151;
-const REALM_DYNAMIC_INTERNER_SLOTS: u32 = 17;
+const REALM_ERROR_GRAPH_FUNCTIONS: u64 = 44;
+const REALM_ERROR_GRAPH_PROPERTIES: u64 = 198;
+const REALM_DYNAMIC_ATOMS: u32 = 18;
+const REALM_DYNAMIC_ATOM_CODE_UNITS: u64 = 155;
+const REALM_DYNAMIC_INTERNER_SLOTS: u32 = 18;
 
 fn compile_dynamic(body: &str) -> Arc<VerifiedBytecode> {
     let parameters = [];
@@ -111,16 +111,16 @@ fn error_realm_graph_limit_failures_are_atomic_and_runtime_is_reusable() {
             38,
         ),
         (
-            RuntimeLimits::default().with_max_heap_functions(83),
+            RuntimeLimits::default().with_max_heap_functions(87),
             RuntimeResource::HeapFunctions,
-            83,
-            84,
+            87,
+            88,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(383),
+            RuntimeLimits::default().with_max_object_properties(395),
             RuntimeResource::ObjectProperties,
-            383,
-            384,
+            395,
+            396,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");

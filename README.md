@@ -176,9 +176,22 @@ verified-bytecode getters and methods resume on the same iterative frame
 vector, and throws stop conversion before parsing. `call` preserves the target
 realm's strict/sloppy receiver rules and forwards the Oxc compiler service when
 its target is the ordinary `Function` constructor. Sloppy Boolean, Number, and
-String boxing is implemented; sloppy Symbol receiver boxing, persistent global
-lexical collisions, `Function.prototype.bind`, and `Symbol.hasInstance`
-remain fail-closed.
+String boxing is implemented; sloppy Symbol receiver boxing and persistent
+global lexical collisions remain fail-closed.
+Realm-owned `Function.prototype.bind` now produces verified bound functions
+with exact descriptors, native source, and nonconstructability. Bound
+functions keep the pinned QuickJS `length` rules (own-property check, integer
+and truncating-binary64 subtraction, `NaN`/non-Number to zero, bound-of-bound
+chaining, native targets) and the `"bound "` name prefix without conversion.
+Calls override the receiver with the bound `this` and prepend bound arguments;
+construction substitutes the target as `newTarget` and throws the bound-name
+`TypeError` for non-constructable targets. Bound-function edges (target, `this`,
+arguments) participate in iterative cycle collection. The `instanceof`
+operator executes resumably: `Symbol.hasInstance` method lookup and invocation,
+the exact non-callable right-operand and non-object `prototype` `TypeError`s,
+bound-target unwrapping through the full operator, and the ordinary prototype
+chain walk. `Function.prototype[Symbol.hasInstance]` runs the ordinary path
+without an initial method lookup.
 Per-session compilation-count and generated-source limits bound nested
 construction. No dynamic-Function path uses eval or captures a caller lexical
 frame.

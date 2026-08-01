@@ -4787,7 +4787,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(194))
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(200))
         .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
@@ -4809,8 +4809,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 194,
-            observed: 195,
+            limit: 200,
+            observed: 201,
         }
     ));
     let failed = runtime.usage();
@@ -6139,6 +6139,354 @@ fn append_apply_list_data(runtime: &mut Runtime, list: ObjectId, length: JsNumbe
             )
             .expect("list element");
     }
+}
+
+fn function_prototype_bind_native(
+    runtime: &mut Runtime,
+    realm: RealmId,
+) -> (FunctionId, NativeFunction) {
+    let function_prototype = runtime
+        .realm_function_prototype(realm)
+        .expect("Function.prototype");
+    let name_key = runtime
+        .property_key_from_string(&JsString::from_utf8("bind").expect("bind name"))
+        .expect("bind key");
+    let StoredValue::Function(bind) = read_heap_property(
+        runtime,
+        HeapReference::Function(function_prototype),
+        &name_key,
+    )
+    .expect("Function.prototype.bind") else {
+        panic!("Function.prototype.bind must be callable");
+    };
+    let native = runtime
+        .functions
+        .get(bind)
+        .and_then(HeapFunction::native)
+        .copied()
+        .expect("native Function.prototype.bind");
+    (bind, native)
+}
+
+fn bind_target(
+    runtime: &mut Runtime,
+    bind: FunctionId,
+    native: NativeFunction,
+    target: FunctionId,
+    arguments: Vec<StoredValue>,
+) -> Result<FunctionId, ExecutionError> {
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
+    let dispatch = match dispatch_native_call(
+        runtime,
+        bind,
+        native,
+        CallInputs {
+            receiver: StoredValue::Function(target),
+            arguments: CallArguments::from_values(arguments),
+            new_target: None,
+        },
+        None,
+        Some(native_function_host_origin()),
+        0,
+        0,
+        None,
+        &mut budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(_) | NativeFailure::AbruptAfterTransient(_)) => {
+            panic!("bind failed with an abrupt completion")
+        }
+        Err(NativeFailure::Execution(error)) => return Err(error),
+    };
+    let NativeDispatch::Immediate(StoredValue::Function(bound)) = dispatch else {
+        panic!("bind must return its bound function immediately");
+    };
+    Ok(bound)
+}
+
+fn bound_own_length(runtime: &Runtime, bound: FunctionId) -> JsNumber {
+    let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
+    let Some(OwnProperty::Data {
+        value: StoredValue::Number(length),
+        ..
+    }) = runtime
+        .functions
+        .get(bound)
+        .expect("bound function")
+        .object
+        .own_property(&length_key)
+    else {
+        panic!("bound function must have an own numeric length");
+    };
+    length
+}
+
+fn bound_own_name(runtime: &Runtime, bound: FunctionId) -> String {
+    let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
+    let Some(OwnProperty::Data {
+        value: StoredValue::String(name),
+        ..
+    }) = runtime
+        .functions
+        .get(bound)
+        .expect("bound function")
+        .object
+        .own_property(&name_key)
+    else {
+        panic!("bound function must have an own string name");
+    };
+    name.to_utf8_lossy().expect("UTF-8 name")
+}
+
+#[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "bind length expectations are exact binary64 values from the pinned QuickJS rules"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "every QuickJS bind-length rule stays one explicit table in the regression test"
+)]
+fn bind_length_uses_the_exact_quickjs_number_rules() {
+    let target_authority = compile_test_function("function target(a, b, c) {}", "target");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let target = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(target_authority)
+        .expect("target");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let target_id = target.id().expect("target id");
+    let (bind, native) = function_prototype_bind_native(&mut runtime, realm_id);
+    let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
+
+    // The instantiated root function carries no own name/length metadata, so
+    // the missing-property rule (QuickJS: no own `length` -> 0) applies.
+    let bound = bind_target(
+        &mut runtime,
+        bind,
+        native,
+        target_id,
+        vec![StoredValue::Undefined],
+    )
+    .expect("plain bind");
+    assert_eq!(bound_own_length(&runtime, bound).as_f64(), 0.0);
+    assert_eq!(
+        bound_own_name(&runtime, bound),
+        "bound ",
+        "missing name becomes the empty string"
+    );
+
+    let set_target_length = |runtime: &mut Runtime, value: StoredValue| {
+        let record = &mut runtime.functions.get_mut(target_id).expect("target").object;
+        if !record.replace_existing_data(&length_key, value.duplicate()) {
+            record
+                .append_data(
+                    length_key.clone(),
+                    PropertyLayout::data(false, false, true),
+                    value,
+                )
+                .expect("target length");
+        }
+    };
+    set_target_length(&mut runtime, StoredValue::Number(JsNumber::from_i32(3)));
+    let bound = bind_target(
+        &mut runtime,
+        bind,
+        native,
+        target_id,
+        vec![StoredValue::Undefined],
+    )
+    .expect("three-argument bind");
+    assert_eq!(bound_own_length(&runtime, bound).as_f64(), 3.0);
+    let bound = bind_target(
+        &mut runtime,
+        bind,
+        native,
+        target_id,
+        vec![
+            StoredValue::Undefined,
+            StoredValue::Number(JsNumber::from_i32(1)),
+        ],
+    )
+    .expect("one bound argument");
+    assert_eq!(bound_own_length(&runtime, bound).as_f64(), 2.0);
+    let bound = bind_target(
+        &mut runtime,
+        bind,
+        native,
+        target_id,
+        vec![
+            StoredValue::Undefined,
+            StoredValue::Number(JsNumber::from_i32(1)),
+            StoredValue::Number(JsNumber::from_i32(2)),
+            StoredValue::Number(JsNumber::from_i32(3)),
+        ],
+    )
+    .expect("excess bound arguments");
+    assert_eq!(bound_own_length(&runtime, bound).as_f64(), 0.0);
+
+    set_target_length(&mut runtime, StoredValue::Number(JsNumber::from_f64(2.9)));
+    let bound = bind_target(
+        &mut runtime,
+        bind,
+        native,
+        target_id,
+        vec![
+            StoredValue::Undefined,
+            StoredValue::Number(JsNumber::from_i32(1)),
+        ],
+    )
+    .expect("fractional length bind");
+    assert_eq!(bound_own_length(&runtime, bound).as_f64(), 1.0);
+
+    set_target_length(
+        &mut runtime,
+        StoredValue::Number(JsNumber::from_f64(f64::NAN)),
+    );
+    let bound = bind_target(
+        &mut runtime,
+        bind,
+        native,
+        target_id,
+        vec![StoredValue::Undefined],
+    )
+    .expect("NaN length bind");
+    assert_eq!(bound_own_length(&runtime, bound).as_f64(), 0.0);
+
+    set_target_length(
+        &mut runtime,
+        StoredValue::String(JsString::from_utf8("abc").expect("string length")),
+    );
+    let bound = bind_target(
+        &mut runtime,
+        bind,
+        native,
+        target_id,
+        vec![StoredValue::Undefined],
+    )
+    .expect("string length bind");
+    assert_eq!(bound_own_length(&runtime, bound).as_f64(), 0.0);
+
+    set_target_length(&mut runtime, StoredValue::Undefined);
+    let bound = bind_target(
+        &mut runtime,
+        bind,
+        native,
+        target_id,
+        vec![StoredValue::Undefined],
+    )
+    .expect("undefined length bind");
+    assert_eq!(bound_own_length(&runtime, bound).as_f64(), 0.0);
+}
+
+#[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "the host-call result is an exact binary64 constant"
+)]
+fn bind_public_prototype_call_and_host_dispatch_share_one_bound_function() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let (bind, native) = function_prototype_bind_native(&mut runtime, realm_id);
+    let target_authority = compile_test_function("function target() { return 19; }", "target");
+    let target = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(target_authority)
+        .expect("target");
+    let target_id = target.id().expect("target id");
+    let bound = bind_target(
+        &mut runtime,
+        bind,
+        native,
+        target_id,
+        vec![StoredValue::Undefined],
+    )
+    .expect("bound target");
+    let bound_value = runtime
+        .public_value(StoredValue::Function(bound))
+        .expect("bound root");
+    let mut context = runtime.context(&realm).expect("context");
+    let result = context
+        .call(
+            &bound_value.into_function().expect("bound function"),
+            &[],
+            ExecutionLimits::default(),
+        )
+        .expect("bound call");
+    assert_eq!(
+        result
+            .as_number()
+            .expect("live result")
+            .expect("number")
+            .as_f64(),
+        19.0
+    );
+}
+
+#[test]
+fn bound_function_edges_keep_target_this_and_arguments_live_until_collection() {
+    let target_authority = compile_test_function("function target(value) { return 0; }", "target");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = runtime.context(&realm).expect("context").realm;
+    let target = runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(target_authority)
+        .expect("target");
+    let target_id = target.id().expect("target id");
+    let (bind, native) = function_prototype_bind_native(&mut runtime, realm_id);
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+    let receiver = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("bound this");
+    let argument = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("bound argument");
+    let bound = bind_target(
+        &mut runtime,
+        bind,
+        native,
+        target_id,
+        vec![StoredValue::Object(receiver), StoredValue::Object(argument)],
+    )
+    .expect("bound target");
+    drop(target);
+    let bound_root = runtime
+        .public_value(StoredValue::Function(bound))
+        .expect("bound root");
+
+    let report = runtime
+        .collect_cycles()
+        .expect("collection with only bound edges");
+    assert_eq!(
+        report.functions(),
+        0,
+        "the bound function must keep its target alive"
+    );
+    assert_eq!(report.objects(), 0);
+    assert!(runtime.functions.get(target_id).is_some());
+    assert!(runtime.objects.get(receiver).is_some());
+    assert!(runtime.objects.get(argument).is_some());
+
+    drop(bound_root);
+    runtime.collect_cycles().expect("post-root collection");
+    assert!(
+        runtime.functions.get(bound).is_none(),
+        "the unrooted bound function must be reclaimed"
+    );
+    assert!(
+        runtime.functions.get(target_id).is_none(),
+        "the bound target must be reclaimed with its bound function"
+    );
+    assert!(runtime.objects.get(receiver).is_none());
+    assert!(runtime.objects.get(argument).is_none());
 }
 
 fn assert_execution_engine_error(

@@ -25,6 +25,8 @@
 
 //! Frame planning, construction, and verified-bytecode opcode execution.
 
+use super::instanceof::begin_instance_of;
+
 #[allow(
     clippy::wildcard_imports,
     reason = "this private VM sibling participates in the shared interpreter implementation namespace"
@@ -1583,6 +1585,29 @@ pub(super) fn execute_one(
                     execution_budget,
                 )
             };
+            return native_step(dispatch, return_to);
+        }
+        FinalOpcode::InstanceOf => {
+            let realm = code(runtime, frame.code)?.realm;
+            let right = pop(frame)?;
+            let left = pop(frame)?;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            let dispatch = begin_instance_of(
+                runtime,
+                left,
+                right,
+                realm,
+                Some(return_to),
+                origin,
+                execution_budget,
+            );
             return native_step(dispatch, return_to);
         }
         FinalOpcode::Lnot => {

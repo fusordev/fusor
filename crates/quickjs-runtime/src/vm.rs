@@ -42,11 +42,12 @@ use crate::{
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     object::OwnProperty,
     runtime::{
-        ArrayDefineOutcome, ArrayLengthWriteOutcome, BindingCell, BytecodeFunction, CollectionRoot,
-        EnvironmentBinding, ForInAdvance, FrameBindingAddress, FunctionImplementation,
-        HeapFunction, InstalledCode, InstalledConstant, InstalledRoot, InstalledTemplate,
-        NativeFunction, NativeFunctionKind, PreparedIteratorResultPlan, RealmGlobalBindingState,
-        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
+        ArrayDefineOutcome, ArrayLengthWriteOutcome, BindingCell, BoundFunction, BytecodeFunction,
+        CollectionRoot, EnvironmentBinding, ForInAdvance, FrameBindingAddress,
+        FunctionImplementation, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
+        InstalledTemplate, NativeFunction, NativeFunctionKind, PreparedIteratorResultPlan,
+        RealmGlobalBindingState, array_length_from_number, check_execution_limit,
+        global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -59,6 +60,7 @@ mod error_stack;
 mod errors;
 mod exceptions;
 mod execution;
+mod instanceof;
 mod iterators;
 mod native;
 mod properties;
@@ -228,6 +230,7 @@ struct DynamicFunctionReturn {
 enum NativeContinuation {
     FunctionSource(FunctionSourceContinuation),
     FunctionApply(FunctionApplyContinuation),
+    FunctionBind(FunctionBindContinuation),
     PropertyKey(PropertyKeyContinuation),
     OperatorPrimitive(OperatorPrimitiveContinuation),
     IntrinsicGet(IntrinsicGetContinuation),
@@ -240,6 +243,7 @@ enum NativeContinuation {
     ForOfClose(ForOfCloseContinuation),
     IteratorAppend(IteratorAppendContinuation),
     IteratorClose(IteratorCloseContinuation),
+    InstanceOf(InstanceOfContinuation),
     FunctionCall,
 }
 
@@ -249,6 +253,7 @@ impl NativeContinuation {
             Self::FunctionSource(state) => usize_to_u64(state.arguments.len())
                 .saturating_add(u64::from(state.construction.is_some())),
             Self::FunctionApply(state) => state.retained_values(),
+            Self::FunctionBind(state) => state.retained_values(),
             Self::PropertyKey(state) => state.retained_values(),
             Self::OperatorPrimitive(state) => state.retained_values(),
             Self::IntrinsicGet(state) => state.retained_values(),
@@ -261,6 +266,7 @@ impl NativeContinuation {
             Self::ForOfClose(state) => state.retained_values(),
             Self::IteratorAppend(state) => state.retained_values(),
             Self::IteratorClose(state) => state.retained_values(),
+            Self::InstanceOf(state) => state.retained_values(),
             Self::FunctionCall => 0,
         }
     }
@@ -629,6 +635,37 @@ struct FunctionApplyContinuation {
     origin: JsStackFrame,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FunctionBindStage {
+    AwaitLengthValue,
+    AwaitNameValue,
+}
+
+struct FunctionBindContinuation {
+    target: FunctionId,
+    bound_this: StoredValue,
+    bound_arguments: Vec<StoredValue>,
+    length: JsNumber,
+    realm: RealmId,
+    stage: FunctionBindStage,
+    origin: JsStackFrame,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InstanceOfStage {
+    MethodRead,
+    MethodCall,
+    PrototypeRead,
+}
+
+struct InstanceOfContinuation {
+    value: StoredValue,
+    target: StoredValue,
+    realm: RealmId,
+    stage: InstanceOfStage,
+    origin: JsStackFrame,
+}
+
 struct ArrayLengthWriteState {
     base: StoredValue,
     name: JsString,
@@ -640,6 +677,22 @@ struct ArrayLengthWriteState {
 impl FunctionApplyContinuation {
     fn retained_values(&self) -> u64 {
         3_u64.saturating_add(usize_to_u64(self.arguments.len()))
+    }
+}
+
+impl FunctionBindContinuation {
+    fn retained_values(&self) -> u64 {
+        2_u64.saturating_add(usize_to_u64(self.bound_arguments.len()))
+    }
+}
+
+impl InstanceOfContinuation {
+    #[allow(
+        clippy::unused_self,
+        reason = "the continuation keeps one uniform retained-values shape for every suspended value pair"
+    )]
+    fn retained_values(&self) -> u64 {
+        2
     }
 }
 
@@ -877,6 +930,22 @@ fn trace_function_apply_roots(
     }
 }
 
+fn trace_function_bind_roots(
+    state: &FunctionBindContinuation,
+    mark: &mut dyn FnMut(CollectionRoot),
+) {
+    mark(CollectionRoot::Heap(HeapReference::Function(state.target)));
+    trace_stored_value_root(&state.bound_this, mark);
+    for argument in &state.bound_arguments {
+        trace_stored_value_root(argument, mark);
+    }
+}
+
+fn trace_instance_of_roots(state: &InstanceOfContinuation, mark: &mut dyn FnMut(CollectionRoot)) {
+    trace_stored_value_root(&state.value, mark);
+    trace_stored_value_root(&state.target, mark);
+}
+
 fn trace_native_continuation_roots(
     continuation: &NativeContinuation,
     mark: &mut dyn FnMut(CollectionRoot),
@@ -892,6 +961,9 @@ fn trace_native_continuation_roots(
         }
         NativeContinuation::FunctionApply(state) => {
             trace_function_apply_roots(state, mark);
+        }
+        NativeContinuation::FunctionBind(state) => {
+            trace_function_bind_roots(state, mark);
         }
         NativeContinuation::PropertyKey(state) => {
             trace_stored_value_root(&state.receiver, mark);
@@ -966,6 +1038,9 @@ fn trace_native_continuation_roots(
             if let PendingExceptionPayload::ThrownValue(value) = &state.original.payload {
                 trace_stored_value_root(value, mark);
             }
+        }
+        NativeContinuation::InstanceOf(state) => {
+            trace_instance_of_roots(state, mark);
         }
         NativeContinuation::FunctionCall => {}
     }
@@ -1335,6 +1410,10 @@ impl Context<'_> {
         )
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "host-call admission keeps native, bound, and bytecode dispatch plus their failure paths in one audited boundary"
+    )]
     fn call_with_optional_dynamic_function_compiler(
         &mut self,
         function: &Function,
@@ -1374,40 +1453,75 @@ impl Context<'_> {
             }
         }
 
-        if let Some(native) = self
-            .runtime
-            .functions
-            .get(function_id)
-            .and_then(HeapFunction::native)
-            .copied()
-        {
-            let mut owned_arguments = Vec::new();
-            owned_arguments
-                .try_reserve_exact(arguments.len())
+        let mut function_id = function_id;
+        let mut receiver = StoredValue::Undefined;
+        let mut owned_arguments: Option<Vec<StoredValue>> = None;
+        loop {
+            let node =
+                self.runtime
+                    .functions
+                    .get(function_id)
+                    .ok_or(EngineFault::StaleHeapEdge {
+                        edge: "function",
+                        index: function_id.index(),
+                        generation: function_id.generation(),
+                    })?;
+            if let Some(native) = node.native().copied() {
+                let materialized = if let Some(arguments) = owned_arguments {
+                    arguments
+                } else {
+                    let mut stored: Vec<StoredValue> = Vec::new();
+                    stored.try_reserve_exact(arguments.len()).map_err(|_| {
+                        ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::FrameValues,
+                            additional: arguments.len(),
+                        }
+                    })?;
+                    for argument in arguments {
+                        stored.push(argument.stored()?.duplicate());
+                    }
+                    stored
+                };
+                let value = execute_native_entry(
+                    self.runtime,
+                    function_id,
+                    native,
+                    materialized,
+                    limits,
+                    compiler,
+                )?;
+                return self.runtime.public_value(value);
+            }
+            let Some(bound) = node.bound() else {
+                break;
+            };
+            let mut merged = Vec::new();
+            merged
+                .try_reserve_exact(bound.bound_arguments.len().saturating_add(arguments.len()))
                 .map_err(|_| ExecutionError::AllocationFailed {
                     resource: RuntimeResource::FrameValues,
-                    additional: arguments.len(),
+                    additional: bound.bound_arguments.len().saturating_add(arguments.len()),
                 })?;
-            for argument in arguments {
-                owned_arguments.push(argument.stored()?.duplicate());
+            for argument in &bound.bound_arguments {
+                merged.push(argument.duplicate());
             }
-            let value = execute_native_entry(
-                self.runtime,
-                function_id,
-                native,
-                owned_arguments,
-                limits,
-                compiler,
-            )?;
-            return self.runtime.public_value(value);
+            for argument in arguments {
+                merged.push(argument.stored()?.duplicate());
+            }
+            owned_arguments = Some(merged);
+            receiver = bound.bound_this.duplicate();
+            function_id = bound.target;
         }
 
         let plan = plan_frame(self.runtime, function_id, 0, 0)?;
         let frame = create_frame(
             self.runtime,
             plan,
-            StoredValue::Undefined,
-            FrameArguments::Public(arguments),
+            receiver,
+            match owned_arguments {
+                Some(arguments) => FrameArguments::Owned(CallArguments::from_values(arguments)),
+                None => FrameArguments::Public(arguments),
+            },
             None,
             None,
         )?;
@@ -1567,7 +1681,7 @@ fn execute_frame_loop(
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<StoredValue, ExecutionError> {
-    loop {
+    'frames: loop {
         execution_budget.charge_instructions(1)?;
         let frame = frames.last_mut().ok_or(EngineFault::MissingInstruction {
             function: FunctionTemplateId::new(0),
@@ -1582,17 +1696,96 @@ fn execute_frame_loop(
                 return_to,
                 source_pc,
             } => {
+                let mut function = function;
+                let mut inputs = inputs;
                 let construction = inputs.is_construction();
-                let native = runtime
-                    .functions
-                    .get(function)
-                    .ok_or(EngineFault::StaleHeapEdge {
-                        edge: "function",
-                        index: function.index(),
-                        generation: function.generation(),
-                    })?
-                    .native()
-                    .copied();
+                let mut native = None;
+                loop {
+                    let node =
+                        runtime
+                            .functions
+                            .get(function)
+                            .ok_or(EngineFault::StaleHeapEdge {
+                                edge: "function",
+                                index: function.index(),
+                                generation: function.generation(),
+                            })?;
+                    if let Some(value) = node.native().copied() {
+                        native = Some(value);
+                        break;
+                    }
+                    let Some(bound) = node.bound() else {
+                        break;
+                    };
+                    if construction && !function_is_constructor(runtime, function)? {
+                        let caller = frames.last().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?;
+                        let origin = instruction_location(runtime, caller, source_pc)?;
+                        let operation_realm = code(runtime, caller.code)?.realm;
+                        let pending = PendingException {
+                            realm: operation_realm,
+                            payload: PendingExceptionPayload::EngineError {
+                                kind: ExceptionKind::TypeError,
+                                message: function_not_constructor_message(runtime, function)?,
+                            },
+                            origin,
+                        };
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
+                        continue 'frames;
+                    }
+                    let target = bound.target;
+                    let materialized = take_call_inputs(
+                        frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?,
+                        function,
+                        inputs,
+                    )?;
+                    let mut arguments = Vec::new();
+                    arguments
+                        .try_reserve_exact(
+                            bound
+                                .bound_arguments
+                                .len()
+                                .saturating_add(materialized.arguments.values.len()),
+                        )
+                        .map_err(|_| ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::FrameValues,
+                            additional: bound
+                                .bound_arguments
+                                .len()
+                                .saturating_add(materialized.arguments.values.len()),
+                        })?;
+                    for argument in &bound.bound_arguments {
+                        arguments.push(argument.duplicate());
+                    }
+                    arguments.extend(materialized.arguments.into_remaining_values());
+                    let new_target = match materialized.new_target {
+                        Some(current) if current == function => Some(target),
+                        other => other,
+                    };
+                    let receiver = if new_target.is_some() {
+                        materialized.receiver
+                    } else {
+                        bound.bound_this.duplicate()
+                    };
+                    inputs = CallInputSource::Prepared(CallInputs {
+                        receiver,
+                        arguments: CallArguments::from_values(arguments),
+                        new_target,
+                    });
+                    function = target;
+                }
                 let caller = frames.last().ok_or(EngineFault::MissingInstruction {
                     function: FunctionTemplateId::new(0),
                     instruction: 0,
@@ -1719,7 +1912,7 @@ fn execute_frame_loop(
                     }
                     continue;
                 }
-                if construction && !bytecode_function_is_constructor(runtime, function)? {
+                if construction && !function_is_constructor(runtime, function)? {
                     let pending = PendingException {
                         realm: operation_realm,
                         payload: PendingExceptionPayload::EngineError {

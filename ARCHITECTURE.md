@@ -972,6 +972,21 @@ engine Error objects are part of the current cumulative slice. Synthetic
 native stack frames, deleted-stack rebuild for explicitly thrown Errors, and
 escaping-Error host normalization remain open.
 
+The current cumulative slice also includes `Function.prototype.bind` with
+verified bound functions, the resumable `instanceof` operator, and
+`Function.prototype[Symbol.hasInstance]`. Bound-function dispatch unwraps
+iteratively at every call boundary (verified bytecode calls, native
+continuations, and host calls), prepends bound arguments, overrides the
+receiver, and substitutes the target as `newTarget` during construction.
+Bound functions carry exact QuickJS `length`/`name` metadata rules, and their
+target/`this`/argument edges are traced by the same iterative cycle
+collector. `instanceof` executes through a resumable `@@hasInstance`
+method-lookup/call state machine with iterative bound-target unwrapping and an
+ordinary bounded prototype-chain walk; the operator's non-callable
+right-operand and non-object `prototype` errors match the pinned messages.
+Persistent global lexical environments and their collision checks remain
+open.
+
 The planned asynchronous slice creates a host timer Promise. A Tokio wakeup
 must be observed on the runtime owner, the FIFO job queue must drain
 deterministically, and a cancelled operation's late completion must be ignored.

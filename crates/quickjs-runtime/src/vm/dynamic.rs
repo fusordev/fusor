@@ -762,6 +762,50 @@ fn apply_dynamic_constructor_prototype(
     Ok(completion)
 }
 
+pub(super) fn function_is_constructor(
+    runtime: &Runtime,
+    mut function: FunctionId,
+) -> Result<bool, ExecutionError> {
+    let mut remaining = runtime.functions.len().saturating_add(1);
+    loop {
+        let node = runtime
+            .functions
+            .get(function)
+            .ok_or(EngineFault::StaleHeapEdge {
+                edge: "function",
+                index: function.index(),
+                generation: function.generation(),
+            })?;
+        match &node.implementation {
+            FunctionImplementation::Bytecode(bytecode) => {
+                let template = code(runtime, bytecode.code)?
+                    .authority
+                    .function(bytecode.template)
+                    .ok_or(EngineFault::InvalidClosureEnvironment {
+                        function: bytecode.template,
+                    })?;
+                return Ok(template
+                    .function()
+                    .control_flow()
+                    .function_header()
+                    .flags()
+                    .has_prototype());
+            }
+            FunctionImplementation::Native(native) => return Ok(native.kind.is_constructor()),
+            FunctionImplementation::Bound(bound) => {
+                if remaining == 0 {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "bound-function target chain exceeds the heap size",
+                    }
+                    .into());
+                }
+                remaining -= 1;
+                function = bound.target;
+            }
+        }
+    }
+}
+
 pub(super) fn bytecode_function_is_constructor(
     runtime: &Runtime,
     function: FunctionId,

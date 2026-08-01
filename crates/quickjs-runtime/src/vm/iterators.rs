@@ -47,7 +47,7 @@ fn iterator_exception(
     }))
 }
 
-fn iterator_getter_call(
+pub(super) fn iterator_getter_call(
     function: FunctionId,
     receiver: StoredValue,
     continuation: NativeContinuation,
