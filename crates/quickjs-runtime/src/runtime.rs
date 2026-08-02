@@ -368,6 +368,38 @@ impl NumberFormat {
     }
 }
 
+/// Which by-copy builder a continuation is performing.
+///
+/// These are the ES2023 change-by-copy methods that answer a fresh dense
+/// Array: holes in the receiver become present `undefined` elements, because
+/// the pinned oracle reads with `JS_TryGetPropertyInt64`, which reports an
+/// absent index as `undefined` (`quickjs.c:9115-9142`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayByCopy {
+    With,
+    ToReversed,
+    ToSpliced,
+}
+
+impl ArrayByCopy {
+    /// Returns the reported `length` of the installed function.
+    pub(crate) const fn arity(self) -> i32 {
+        match self {
+            Self::With | Self::ToSpliced => 2,
+            Self::ToReversed => 0,
+        }
+    }
+
+    /// Returns the property name this method is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::With => "with",
+            Self::ToReversed => "toReversed",
+            Self::ToSpliced => "toSpliced",
+        }
+    }
+}
+
 /// Which reduction a continuation is performing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArrayReduction {
@@ -723,6 +755,9 @@ pub(crate) enum NativeFunctionKind {
     ArrayPrototypeReduction(ArrayReduction),
     /// `Array.prototype.splice`.
     ArrayPrototypeSplice,
+    /// One `Array.prototype` change-by-copy method sharing the resumable
+    /// dense snapshot read.
+    ArrayPrototypeByCopy(ArrayByCopy),
     ArrayConstructor,
     SymbolConstructor,
     SymbolPrototypeToString,

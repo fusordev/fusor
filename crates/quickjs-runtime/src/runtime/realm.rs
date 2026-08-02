@@ -28,7 +28,8 @@
 use std::collections::TryReserveError;
 
 use super::{
-    Arc, Arena, ArrayCallback, ArrayCopier, ArrayIntrinsics, ArrayMutator, ArrayReduction,
+    Arc, Arena, ArrayByCopy, ArrayCallback, ArrayCopier, ArrayIntrinsics, ArrayMutator,
+    ArrayReduction,
     ArraySearch, ArrayState, Atom, AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics,
     BoxedPrimitive, Context, ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId,
     FunctionImplementation, HandleError, HandleKind, HashMap, HeapFunction, HeapObject,
@@ -215,6 +216,19 @@ const NUMBER_FORMAT_ATOM_START: usize = ARRAY_COPIER_ATOM_START + ARRAY_COPIER_M
 /// Index of the `Array.prototype.splice` name in the dynamic atoms.
 const ARRAY_SPLICE_ATOM_START: usize = ARRAY_REDUCTION_ATOM_START + ARRAY_REDUCTION_METHODS.len();
 
+/// Index of the first `Array.prototype` change-by-copy name in the dynamic
+/// atoms.
+const ARRAY_BY_COPY_ATOM_START: usize = ARRAY_SPLICE_ATOM_START + 1;
+
+/// The `Array.prototype` change-by-copy methods this profile installs.
+///
+/// `with` and `toSpliced` report arity 2 and `toReversed` reports 0, which the
+/// pinned oracle confirms.
+const ARRAY_BY_COPY_METHODS: [ArrayByCopy; 3] = [
+    ArrayByCopy::With,
+    ArrayByCopy::ToReversed,
+    ArrayByCopy::ToSpliced,
+];
 
 
 /// The `Array.prototype` reductions this profile installs.
@@ -723,6 +737,7 @@ struct RealmRecords {
     array_callbacks: [ObjectRecord; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [ObjectRecord; ARRAY_REDUCTION_METHODS.len()],
     array_splice: ObjectRecord,
+    array_by_copies: [ObjectRecord; ARRAY_BY_COPY_METHODS.len()],
     array_is_array: ObjectRecord,
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
@@ -801,7 +816,8 @@ impl RealmRecords {
                     + NUMBER_FORMAT_METHODS.len()
                     + ARRAY_CALLBACK_METHODS.len()
                     + ARRAY_REDUCTION_METHODS.len()
-                    + 1,
+                    + 1
+                    + ARRAY_BY_COPY_METHODS.len(),
             )?,
             constructor: reserved_record(3)?,
             join: reserved_record(2)?,
@@ -854,6 +870,7 @@ impl RealmRecords {
             array_callbacks: array_callback_records()?,
             array_reductions: array_reduction_records()?,
             array_splice: reserved_record(2)?,
+            array_by_copies: array_by_copy_records()?,
             array_is_array: reserved_record(2)?,
             array,
             iterators,
@@ -988,6 +1005,7 @@ struct RealmGraph {
     array_callbacks: [FunctionId; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [FunctionId; ARRAY_REDUCTION_METHODS.len()],
     array_splice: FunctionId,
+    array_by_copies: [FunctionId; ARRAY_BY_COPY_METHODS.len()],
     array_is_array: FunctionId,
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
@@ -1003,6 +1021,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         debug_assert!(runtime.functions.remove(self.array_is_array).is_some());
+        for function in self.array_by_copies.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
         debug_assert!(runtime.functions.remove(self.array_splice).is_some());
         for function in self.array_reductions.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
@@ -1280,6 +1301,7 @@ impl Runtime {
             NativeFunctionKind::ArrayPrototypeSplice,
             records.array_splice,
         );
+        let array_by_copies = self.insert_array_by_copies(&base, records.array_by_copies);
         let array_is_array = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -1305,6 +1327,7 @@ impl Runtime {
             array_callbacks,
             array_reductions,
             array_splice,
+            array_by_copies,
             array_is_array,
             array,
             iterators,
@@ -1432,6 +1455,9 @@ impl Runtime {
                 interned(&mut self.atoms, &mut dynamic_atoms, reduction.name())?;
             }
             interned(&mut self.atoms, &mut dynamic_atoms, "splice")?;
+            for method in ARRAY_BY_COPY_METHODS {
+                interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
+            }
             Ok(())
         })();
         if let Err(error) = outcome {
@@ -1706,6 +1732,28 @@ impl Runtime {
             to_string,
             value_of,
         }
+    }
+
+    /// Inserts one native function per `Array.prototype` change-by-copy method.
+    fn insert_array_by_copies(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; ARRAY_BY_COPY_METHODS.len()],
+    ) -> [FunctionId; ARRAY_BY_COPY_METHODS.len()] {
+        let mut inserted = [None; ARRAY_BY_COPY_METHODS.len()];
+        for ((slot, method), record) in inserted
+            .iter_mut()
+            .zip(ARRAY_BY_COPY_METHODS)
+            .zip(records)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::ArrayPrototypeByCopy(method),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every Array by-copy function was inserted"))
     }
 
     /// Inserts one native function per `Array.prototype` reduction.
@@ -2825,6 +2873,29 @@ impl Runtime {
                 )?;
             self.append_function_identity(function, &name, arity, keys)?;
         }
+
+        for (method, (function, atom)) in ARRAY_BY_COPY_METHODS.into_iter().zip(
+            graph
+                .array_by_copies
+                .into_iter()
+                .zip(&graph.dynamic_atoms[ARRAY_BY_COPY_ATOM_START..]),
+        ) {
+            let atom = atom.clone();
+            let name = atom
+                .description()
+                .expect("interned Array by-copy name has a description")
+                .clone();
+            self.objects
+                .get_mut(graph.array.prototype)
+                .expect("new Array.prototype remains live")
+                .record
+                .append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            self.append_function_identity(function, &name, method.arity(), keys)?;
+        }
         Ok(())
     }
 
@@ -3292,6 +3363,16 @@ fn array_mutator_records() -> Result<[ObjectRecord; ARRAY_MUTATOR_METHODS.len()]
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Array mutator record was reserved")))
+}
+
+/// Reserves one record per `Array.prototype` change-by-copy method.
+fn array_by_copy_records() -> Result<[ObjectRecord; ARRAY_BY_COPY_METHODS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; ARRAY_BY_COPY_METHODS.len()] =
+        [const { None }; ARRAY_BY_COPY_METHODS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Array by-copy record was reserved")))
 }
 
 /// Reserves one record per `Array.prototype` search.
