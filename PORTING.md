@@ -114,6 +114,16 @@ Known intentional runtime differences:
   interpreter dispatch: the innermost bound receiver reaches native and bytecode
   targets, and every bound layer's arguments accumulate before the caller's
   arguments are appended once.
+- [x] Host interrupts: an embedder-installed handler is polled on a decrementing
+  counter rather than on every instruction, reproducing `js_poll_interrupts` and
+  its `JS_INTERRUPT_COUNTER_INIT` of 10,000 (`quickjs.c:512`, `quickjs.c:7877`).
+  Fuel and interrupts stay separate because they answer different questions: fuel
+  is a pre-committed deterministic budget, while an interrupt is a decision the
+  host makes during execution, which is what makes wall-clock deadlines and user
+  cancellation expressible. Upstream marks an interrupt uncatchable
+  (`quickjs.c:7861`); this port preserves that structurally by reporting
+  `ExecutionError::Interrupted` instead of a `JsException`, so it bypasses the
+  JavaScript unwinder by construction.
 - [ ] Complete verifier coverage, source/debug tables, dynamic `eval`, and
   remaining compiler/runtime opcode families.
 
@@ -164,12 +174,30 @@ Known intentional runtime differences:
   `Object(bigint)` wrapper with `[object BigInt]` tagging, and a realm-owned
   non-constructable `BigInt` with `toString`, `valueOf`,
   `[Symbol.toStringTag]`, `asIntN`, and `asUintN`.
-- [ ] Remaining conversions (`ToNumeric` for typed arrays, the narrow integer
-  conversions, `CanonicalNumericIndexString`), remaining String/Number/Array
-  method surface, shape sharing/transition interning, remaining exotics
-  (`Object.defineProperty`'s resumable descriptor read, arguments, Proxy),
-  dense indexed storage, deterministic finalization, limits/interrupts, and
-  diagnostics.
+- [x] Complete numeric conversions: the modular narrow conversions (`ToInt8`,
+  `ToUint8`, `ToInt16`, `ToUint16`) share `ToUint32` and a truncation, while
+  `ToUint8Clamp` saturates and rounds half to even because upstream uses `lrint`
+  (`quickjs.c:13381`). `ToNumeric` admits a `BigInt` where `ToNumber` rejects one
+  (`quickjs.c:13025`), and the `Number` constructor is its only caller
+  (`quickjs.c:44595`), so `Number(1n)` is `1` while `1n | 0` still throws. The
+  supporting `JsBigInt::to_f64` takes the top 54 significant bits and folds the
+  remainder into a sticky flag, so `Number(9007199254740993n)` is
+  `9007199254740992` and an out-of-range magnitude becomes a signed infinity.
+  `CanonicalNumericIndexString` accepts only the exact `ToString` spelling, with
+  `"-0"` answered directly (`quickjs.c:3675`).
+- [x] `String.prototype` methods that need no `RegExp` or Unicode tables: `at`,
+  `charAt`, `charCodeAt`, `codePointAt`, `concat`, `endsWith`, `includes`,
+  `indexOf`, `lastIndexOf`, `padEnd`, `padStart`, `repeat`, `slice`,
+  `startsWith`, `substr`, `substring`, `trim`, `trimEnd`, `trimStart`,
+  `isWellFormed`, and `toWellFormed`. They share one resumable state machine
+  because they share one shape: `RequireObjectCoercible`, then `ToString` of the
+  receiver, then each declared argument left to right, and every one of those
+  steps can re-enter the interpreter. The pinned oracle fixes that order, logging
+  `recv,arg,pos` for `indexOf` with side-effecting conversions. Indices remain
+  UTF-16 code-unit indices, so a lone surrogate stays observable.
+- [ ] Remaining String/Number/Array method surface, shape sharing/transition
+  interning, remaining exotics (arguments, Proxy), dense indexed storage,
+  deterministic finalization, and diagnostics.
 
 ### Built-ins and asynchronous semantics
 
