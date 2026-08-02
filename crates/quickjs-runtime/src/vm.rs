@@ -673,7 +673,8 @@ enum PropertyKeyTarget {
         target: StoredValue,
         realm: RealmId,
     },
-    /// `Object.prototype.hasOwnProperty`'s key, awaiting `ToPropertyKey`.
+    /// `Object.prototype.hasOwnProperty` or `Object.hasOwn` key, awaiting
+    /// `ToPropertyKey` after each entry point's required target validation.
     HasOwnProperty {
         target: StoredValue,
         realm: RealmId,

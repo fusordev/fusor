@@ -79,6 +79,14 @@ impl KeyPhases {
         symbols: false,
     };
 
+    /// The symbol phase only, which is what
+    /// `Object.getOwnPropertySymbols` projects.
+    pub(crate) const SYMBOL_KEYS: Self = Self {
+        indices: false,
+        strings: false,
+        symbols: true,
+    };
+
     /// All three `[[OwnPropertyKeys]]` phases, used by `Reflect.ownKeys`.
     pub(crate) const ALL: Self = Self {
         indices: true,

@@ -501,10 +501,13 @@ pub(super) enum KeyListing {
     EnumerableOnly,
     /// `Object.getOwnPropertyNames`: every own string-keyed property.
     AllStringKeys,
+    /// `Object.getOwnPropertySymbols`: every own symbol-keyed property.
+    AllSymbolKeys,
 }
 
-/// `Object.keys(target)` and `Object.getOwnPropertyNames(target)`.
-pub(super) fn own_property_names(
+/// `Object.keys(target)`, `Object.getOwnPropertyNames(target)`, and
+/// `Object.getOwnPropertySymbols(target)`.
+pub(super) fn own_property_keys(
     runtime: &mut Runtime,
     realm: RealmId,
     argument: Option<StoredValue>,
@@ -523,7 +526,8 @@ pub(super) fn own_property_names(
     )?
     else {
         // A primitive other than a string has no own keys. A primitive string
-        // is boxed so its index keys and `length` are reported.
+        // is boxed so its index keys and `length` are reported by the string
+        // projections; no primitive wrapper has own Symbol keys.
         let elements = match &target {
             StoredValue::String(value) => string_key_values(value, listing)?,
             StoredValue::Boolean(_)
@@ -545,7 +549,11 @@ pub(super) fn own_property_names(
         let array = runtime.allocate_array(realm, elements)?;
         return Ok(NativeDispatch::Immediate(StoredValue::Object(array)));
     };
-    let (snapshot, work) = runtime.try_own_key_snapshot(reference, 0, KeyPhases::STRING_KEYS)?;
+    let phases = match listing {
+        KeyListing::EnumerableOnly | KeyListing::AllStringKeys => KeyPhases::STRING_KEYS,
+        KeyListing::AllSymbolKeys => KeyPhases::SYMBOL_KEYS,
+    };
+    let (snapshot, work) = runtime.try_own_key_snapshot(reference, 0, phases)?;
     execution_budget.charge_instructions(work)?;
     let mut elements = Vec::new();
     elements
@@ -561,7 +569,20 @@ pub(super) fn own_property_names(
         if matches!(listing, KeyListing::EnumerableOnly) && !candidate.enumerable() {
             continue;
         }
-        elements.push(StoredValue::String(property_key_string(candidate.key())?));
+        elements.push(match listing {
+            KeyListing::EnumerableOnly | KeyListing::AllStringKeys => {
+                StoredValue::String(property_key_string(candidate.key())?)
+            }
+            KeyListing::AllSymbolKeys => StoredValue::Symbol(
+                candidate
+                    .key()
+                    .as_atom()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "own Symbol key is not atom-backed",
+                    })?
+                    .clone(),
+            ),
+        });
     }
     let array = runtime.allocate_array(realm, elements)?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(array)))
@@ -575,6 +596,9 @@ fn string_key_values(
     value: &JsString,
     listing: KeyListing,
 ) -> Result<Vec<StoredValue>, NativeFailure> {
+    if matches!(listing, KeyListing::AllSymbolKeys) {
+        return Ok(Vec::new());
+    }
     let length = value.len();
     let mut elements = Vec::new();
     let reserved = usize::try_from(length)
@@ -593,6 +617,102 @@ fn string_key_values(
         elements.push(StoredValue::String(JsString::from_utf8("length")?));
     }
     Ok(elements)
+}
+
+/// `Object.getOwnPropertyDescriptors(O)`.
+///
+/// The ordinary-object profile has no Proxy `[[OwnPropertyKeys]]` or
+/// `[[GetOwnProperty]]` hooks yet, so the complete admitted operation is
+/// synchronous: snapshot every key, allocate the result, re-read each own
+/// property, and materialize the descriptor when it remains present.
+pub(super) fn get_own_property_descriptors(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    argument: Option<StoredValue>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let target = argument.unwrap_or(StoredValue::Undefined);
+    if matches!(target, StoredValue::Undefined | StoredValue::Null) {
+        return Err(NativeFailure::Abrupt(type_error(
+            realm,
+            Some(origin),
+            "getOwnPropertyDescriptors",
+            "cannot convert to object",
+        )?));
+    }
+
+    let keys = if let Some(reference) = target.heap_reference() {
+        let (snapshot, work) = runtime.try_own_key_snapshot(reference, 0, KeyPhases::ALL)?;
+        execution_budget.charge_instructions(work)?;
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(snapshot.len())
+            .map_err(|_| ExecutionError::AllocationFailed {
+                resource: RuntimeResource::FrameValues,
+                additional: snapshot.len(),
+            })?;
+        for index in 0..snapshot.len() {
+            keys.push(
+                snapshot
+                    .get(index)
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "own-key snapshot shrank during descriptor aggregation",
+                    })?
+                    .key()
+                    .clone(),
+            );
+        }
+        keys
+    } else if let StoredValue::String(value) = &target {
+        let keys = primitive_string_own_keys(runtime, value)?;
+        execution_budget.charge_instructions(usize_to_u64(keys.len()).saturating_add(1))?;
+        keys
+    } else {
+        execution_budget.charge_instructions(1)?;
+        Vec::new()
+    };
+
+    let result = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+    let result_reference = HeapReference::Object(result);
+    let result_property = PropertyLayout::data(true, true, true);
+    for key in keys {
+        let Some(own) = resolve_own_property(runtime, realm, &target, &key, origin)? else {
+            continue;
+        };
+        let descriptor = build_descriptor_object(runtime, realm, own)?;
+        runtime.append_data_property(
+            result_reference,
+            key,
+            result_property,
+            StoredValue::Object(descriptor),
+        )?;
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(result)))
+}
+
+/// Builds the virtual own-key list produced by a primitive String wrapper.
+fn primitive_string_own_keys(
+    runtime: &Runtime,
+    value: &JsString,
+) -> Result<Vec<PropertyKey>, NativeFailure> {
+    let length = value.len();
+    let capacity = usize::try_from(length)
+        .unwrap_or(usize::MAX)
+        .saturating_add(1);
+    let mut keys = Vec::new();
+    keys.try_reserve_exact(capacity)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: capacity,
+        })?;
+    for index in 0..length {
+        let index = ArrayIndex::new(index).ok_or(EngineFault::RuntimeInvariant {
+            message: "primitive String key reached the non-index u32 maximum",
+        })?;
+        keys.push(PropertyKey::from_index(index));
+    }
+    keys.push(runtime.predefined_property_key(PredefinedAtom::Length));
+    Ok(keys)
 }
 
 /// Renders one own key as the string `Object.keys` reports.

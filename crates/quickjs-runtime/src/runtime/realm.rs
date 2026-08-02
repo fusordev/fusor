@@ -41,8 +41,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 21;
-const REALM_FUNCTION_COUNT: usize = 136;
-const REALM_PROPERTY_COUNT: u64 = 454;
+const REALM_FUNCTION_COUNT: usize = 140;
+const REALM_PROPERTY_COUNT: u64 = 466;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -51,6 +51,9 @@ const IS_ERROR_ATOM_INDEX: usize = 4;
 const BIND_ATOM_INDEX: usize = 5;
 const SYMBOL_STATIC_ATOM_START: usize = 6;
 /// Index of the first `Object` static name in the realm's dynamic atom list.
+const OBJECT_STATIC_ATOM_START: usize =
+    SYMBOL_STATIC_ATOM_START + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len();
+
 /// Index of the first `BigInt` static name in the realm's dynamic atom list.
 ///
 /// The `BigInt` statics are interned immediately after the `Object` statics, so
@@ -59,9 +62,6 @@ const BIGINT_STATIC_ATOM_START: usize = OBJECT_STATIC_ATOM_START + OBJECT_INTERN
 
 /// The `BigInt` static names that have no predefined atom.
 const BIGINT_INTERNED_STATICS: [&str; 2] = ["asIntN", "asUintN"];
-
-const OBJECT_STATIC_ATOM_START: usize =
-    SYMBOL_STATIC_ATOM_START + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len();
 
 /// Index of the first `String.prototype` method name in the dynamic atom list.
 ///
@@ -318,7 +318,8 @@ const ARRAY_SEARCH_METHODS: [(&str, ArraySearch); 3] = [
 /// Index of the first `Array.prototype` search name in the dynamic atom list.
 const ARRAY_SEARCH_ATOM_START: usize = STRING_FROM_ATOM_START + STRING_FROM_STATICS.len();
 
-/// The `Object` constructor's static methods.
+/// The admitted `Object` constructor static methods in `QuickJS` property-table
+/// order.
 ///
 /// Each entry pairs the property name with the native implementation and its
 /// reported `length`. A name that already has a predefined atom reuses it; the
@@ -327,7 +328,8 @@ const ARRAY_SEARCH_ATOM_START: usize = STRING_FROM_ATOM_START + STRING_FROM_STAT
 /// operations the current profile can honor completely are installed, so an
 /// absent method fails closed as a missing property rather than behaving
 /// incorrectly.
-const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 13] = [
+const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 17] = [
+    ObjectStaticMethod::interned("create", NativeFunctionKind::ObjectCreate, 2),
     ObjectStaticMethod::predefined(
         PredefinedAtom::GetPrototypeOf,
         NativeFunctionKind::ObjectGetPrototypeOf,
@@ -339,38 +341,47 @@ const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 13] = [
         2,
     ),
     ObjectStaticMethod::predefined(
-        PredefinedAtom::PreventExtensions,
-        NativeFunctionKind::ObjectPreventExtensions,
-        1,
+        PredefinedAtom::DefineProperty,
+        NativeFunctionKind::ObjectDefineProperty,
+        3,
     ),
-    ObjectStaticMethod::predefined(
-        PredefinedAtom::IsExtensible,
-        NativeFunctionKind::ObjectIsExtensible,
-        1,
-    ),
-    ObjectStaticMethod::predefined(PredefinedAtom::Keys, NativeFunctionKind::ObjectKeys, 1),
-    ObjectStaticMethod::interned("seal", NativeFunctionKind::ObjectSeal, 1),
-    ObjectStaticMethod::interned("freeze", NativeFunctionKind::ObjectFreeze, 1),
-    ObjectStaticMethod::interned("isSealed", NativeFunctionKind::ObjectIsSealed, 1),
-    ObjectStaticMethod::interned("isFrozen", NativeFunctionKind::ObjectIsFrozen, 1),
     ObjectStaticMethod::interned(
         "getOwnPropertyNames",
         NativeFunctionKind::ObjectGetOwnPropertyNames,
         1,
     ),
+    ObjectStaticMethod::interned(
+        "getOwnPropertySymbols",
+        NativeFunctionKind::ObjectGetOwnPropertySymbols,
+        1,
+    ),
+    ObjectStaticMethod::predefined(PredefinedAtom::Keys, NativeFunctionKind::ObjectKeys, 1),
     ObjectStaticMethod::predefined(
-        PredefinedAtom::DefineProperty,
-        NativeFunctionKind::ObjectDefineProperty,
-        3,
+        PredefinedAtom::IsExtensible,
+        NativeFunctionKind::ObjectIsExtensible,
+        1,
+    ),
+    ObjectStaticMethod::predefined(
+        PredefinedAtom::PreventExtensions,
+        NativeFunctionKind::ObjectPreventExtensions,
+        1,
     ),
     ObjectStaticMethod::predefined(
         PredefinedAtom::GetOwnPropertyDescriptor,
         NativeFunctionKind::ObjectGetOwnPropertyDescriptor,
         2,
     ),
-    // Arity 2 matches the pinned oracle even though the descriptors argument is
-    // not admitted; the reported `length` is part of the observable shape.
-    ObjectStaticMethod::interned("create", NativeFunctionKind::ObjectCreate, 2),
+    ObjectStaticMethod::interned(
+        "getOwnPropertyDescriptors",
+        NativeFunctionKind::ObjectGetOwnPropertyDescriptors,
+        1,
+    ),
+    ObjectStaticMethod::interned("is", NativeFunctionKind::ObjectIs, 2),
+    ObjectStaticMethod::interned("seal", NativeFunctionKind::ObjectSeal, 1),
+    ObjectStaticMethod::interned("freeze", NativeFunctionKind::ObjectFreeze, 1),
+    ObjectStaticMethod::interned("isSealed", NativeFunctionKind::ObjectIsSealed, 1),
+    ObjectStaticMethod::interned("isFrozen", NativeFunctionKind::ObjectIsFrozen, 1),
+    ObjectStaticMethod::interned("hasOwn", NativeFunctionKind::ObjectHasOwn, 2),
 ];
 
 /// The number of `Object` statics whose names must be interned at realm
@@ -2547,12 +2558,11 @@ impl Runtime {
                 METHOD_PROPERTY,
                 StoredValue::Function(graph.base.object_constructor),
             )?;
-        self.append_constructor_identity(
-            graph.base.object_constructor,
-            StoredValue::Object(graph.base.object_prototype),
-            &names.object,
-            keys,
-        )?;
+        // QuickJS publishes `Object.length` and `Object.name` before its
+        // method table, then appends `Object.prototype` after that table.
+        // Keeping this order makes `[[OwnPropertyKeys]]` match the pinned
+        // constructor shape while retaining the specification descriptors.
+        self.append_function_identity(graph.base.object_constructor, &names.object, 1, keys)?;
         let mut interned = OBJECT_STATIC_ATOM_START;
         for (method, function) in OBJECT_STATIC_METHODS
             .into_iter()
@@ -2579,6 +2589,15 @@ impl Runtime {
                 .append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
             self.append_function_identity(function, &name, method.length, keys)?;
         }
+        self.functions
+            .get_mut(graph.base.object_constructor)
+            .expect("new Object constructor remains live")
+            .object
+            .append_data(
+                keys.prototype.clone(),
+                CONSTRUCTOR_PROTOTYPE_PROPERTY,
+                StoredValue::Object(graph.base.object_prototype),
+            )?;
         Ok(())
     }
 

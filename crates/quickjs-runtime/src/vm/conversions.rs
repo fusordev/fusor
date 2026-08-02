@@ -2568,9 +2568,9 @@ fn finish_property_key_target(
         | PropertyKeyTarget::ReflectOwnPropertyDescriptor { target, realm } => {
             own_property_descriptor(runtime, realm, &target, &property.key, origin)
         }
-        // `hasOwnProperty` and `propertyIsEnumerable` share one own-property
-        // resolution with `getOwnPropertyDescriptor`, so all three agree on
-        // every exotic case.
+        // `Object.hasOwn`, `hasOwnProperty`, and `propertyIsEnumerable` share
+        // one own-property resolution with `getOwnPropertyDescriptor`, so all
+        // four agree on every admitted exotic case.
         PropertyKeyTarget::HasOwnProperty { target, realm } => {
             let own = resolve_own_property(runtime, realm, &target, &property.key, origin)?;
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(

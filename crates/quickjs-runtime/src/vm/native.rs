@@ -1025,19 +1025,72 @@ pub(super) fn dispatch_native_call_with_frames(
                 origin.as_ref(),
             )
         }
-        NativeFunctionKind::ObjectKeys | NativeFunctionKind::ObjectGetOwnPropertyNames => {
-            let listing = if native.kind == NativeFunctionKind::ObjectKeys {
-                KeyListing::EnumerableOnly
-            } else {
-                KeyListing::AllStringKeys
+        NativeFunctionKind::ObjectKeys
+        | NativeFunctionKind::ObjectGetOwnPropertyNames
+        | NativeFunctionKind::ObjectGetOwnPropertySymbols => {
+            let listing = match native.kind {
+                NativeFunctionKind::ObjectKeys => KeyListing::EnumerableOnly,
+                NativeFunctionKind::ObjectGetOwnPropertyNames => KeyListing::AllStringKeys,
+                NativeFunctionKind::ObjectGetOwnPropertySymbols => KeyListing::AllSymbolKeys,
+                _ => unreachable!("the dispatch arm admits only Object own-key listings"),
             };
             let mut arguments = inputs.arguments;
-            own_property_names(
+            own_property_keys(
                 runtime,
                 native.realm,
                 arguments.take_first(),
                 listing,
                 origin.as_ref(),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectGetOwnPropertyDescriptors => {
+            let mut arguments = inputs.arguments;
+            get_own_property_descriptors(
+                runtime,
+                native.realm,
+                arguments.take_first(),
+                &origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectIs => {
+            let mut arguments = inputs.arguments;
+            let first = arguments.take_first_or_undefined();
+            let second = arguments.take_first_or_undefined();
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(
+                first.same_value(&second),
+            )))
+        }
+        NativeFunctionKind::ObjectHasOwn => {
+            let mut arguments = inputs.arguments;
+            let target = arguments.take_first_or_undefined();
+            let key = arguments.take_first_or_undefined();
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            // `Object.hasOwn` performs `ToObject(O)` before
+            // `ToPropertyKey(P)`, so a nullish target throws without running
+            // observable key coercion. Non-nullish primitives are resolved by
+            // the shared boxed-own-property path after conversion.
+            if matches!(target, StoredValue::Undefined | StoredValue::Null) {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    realm: native.realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("cannot convert to object")?,
+                    },
+                    origin,
+                }));
+            }
+            begin_property_key_conversion(
+                runtime,
+                key,
+                PropertyKeyTarget::HasOwnProperty {
+                    target,
+                    realm: native.realm,
+                },
+                native.realm,
+                return_to,
+                origin,
                 execution_budget,
             )
         }

@@ -331,9 +331,17 @@ incorrectly, so no script can observe a wrong result.
   construction paths and script-thrown Error observation through ordinary
   JavaScript property reads: 35/35 cases and all 59 required feature tags match
   the pinned oracle.
-- [ ] Complete remaining Object/Function and exotic reflection semantics
-  (including Proxy), then remaining built-ins, RegExp/Date/JSON, collections,
-  binary data,
+- [x] Extend ordinary `Object` reflection with `Object.is`, `Object.hasOwn`,
+  `Object.getOwnPropertySymbols`, and `Object.getOwnPropertyDescriptors`, with
+  the specification `SameValue` comparison, `ToObject`-before-`ToPropertyKey`
+  ordering, symbol-only own-key projection, primitive String exotic keys, fresh
+  descriptor materialization, exact built-in identities, and pinned constructor
+  property order.
+- [ ] Complete the remaining `Object` statics (`assign`, `defineProperties`,
+  `values`, `entries`, `fromEntries`, `groupBy`, and the descriptor-bearing
+  `Object.create` form), remaining Function/legacy properties, and exotic
+  reflection semantics (including Proxy), then remaining built-ins,
+  RegExp/Date/JSON, collections, binary data,
   Atomics, Unicode tables, promises, async functions/generators, weak
   references, and finalization registries.
 - [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide

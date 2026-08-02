@@ -41,6 +41,11 @@
 //! gOPN of array => [0,1,length]
 //! keys after delete => [b,c,a]
 //! keys independent => [true]
+//! Object statics shape => [true]
+//! Object.is SameValue => [true]
+//! Object.hasOwn ordering => [true]
+//! gOPS symbol phase => [true]
+//! gOPDs materializes descriptors => [true]
 //! proto ctor => [true]
 //! ```
 
@@ -447,6 +452,134 @@ fn object_keys_returns_an_independent_array() {
          first[0]=\"changed\";\
          return first!==second&&second[0]===\"a\"&&o.a===1;"
     ));
+}
+
+/// ECMA-262 20.1.2 installs these `Object` statics with ordinary built-in
+/// identities. Their relative own-property order follows the pinned `QuickJS`
+/// constructor table while methods outside the admitted profile remain absent.
+#[test]
+fn the_extended_object_reflection_statics_have_the_specification_shape() {
+    assert!(boolean(
+        "var specs=[['is',2],['hasOwn',2],['getOwnPropertySymbols',1],\
+          ['getOwnPropertyDescriptors',1]];\
+         for(var i=0;i<specs.length;i++){\
+           var name=specs[i][0],method=Object[name];\
+           var descriptor=Object.getOwnPropertyDescriptor(Object,name);\
+           if(typeof method!=='function'||method.name!==name||\
+              method.length!==specs[i][1]||!descriptor.writable||\
+              descriptor.enumerable||!descriptor.configurable){return false;}\
+         }return true;"
+    ));
+    assert_eq!(
+        text("return Object.getOwnPropertyNames(Object).join(',');"),
+        "length,name,create,getPrototypeOf,setPrototypeOf,defineProperty,\
+getOwnPropertyNames,getOwnPropertySymbols,keys,isExtensible,preventExtensions,\
+getOwnPropertyDescriptor,getOwnPropertyDescriptors,is,seal,freeze,isSealed,\
+isFrozen,hasOwn,prototype"
+    );
+}
+
+/// `Object.is` is exactly ECMA-262 `SameValue`: unlike strict equality it
+/// equates NaNs and distinguishes the two signed zeros while retaining object
+/// and Symbol identity.
+#[test]
+fn object_is_uses_same_value() {
+    assert!(boolean(
+        "var object={};var symbol=Symbol('s');\
+         return Object.is(NaN,NaN)&&!Object.is(0,-0)&&Object.is(-0,-0)&&\
+           Object.is(object,object)&&!Object.is({}, {})&&\
+           Object.is(symbol,symbol)&&!Object.is(Symbol('s'),symbol)&&\
+           Object.is()&&!Object.is(undefined,null);"
+    ));
+}
+
+/// ECMA-262 `Object.hasOwn` applies `ToObject(O)` before `ToPropertyKey(P)`.
+/// This differs from `Object.prototype.hasOwnProperty`, whose key conversion
+/// precedes the receiver conversion.
+#[test]
+fn object_has_own_boxes_primitives_and_preserves_conversion_order() {
+    assert!(boolean(
+        "var inherited={x:1};var object=Object.create(inherited);object.y=2;\
+         return Object.hasOwn(object,'y')&&!Object.hasOwn(object,'x')&&\
+           Object.hasOwn('ab',0)&&Object.hasOwn('ab','length')&&\
+           !Object.hasOwn(5,'valueOf');"
+    ));
+    assert_eq!(
+        text(
+            "var log='';function keyToString(){log=log+'k';return 'x';}\
+             var key={toString:keyToString};\
+             try{Object.hasOwn(null,key);}catch(error){log=log+'e';}\
+             var object={x:1};var found=Object.hasOwn(object,key);\
+             return log+'|'+found;"
+        ),
+        "ek|true"
+    );
+    assert_eq!(
+        type_error_message("return Object.hasOwn(undefined,'x');"),
+        "cannot convert to object"
+    );
+}
+
+/// `Object.getOwnPropertySymbols` projects only the symbol phase of
+/// `[[OwnPropertyKeys]]`, retaining creation order and returning a fresh Array.
+#[test]
+fn get_own_property_symbols_reports_only_symbol_keys_in_order() {
+    assert!(boolean(
+        "var first=Symbol('first'),second=Symbol('second');var object={x:1};\
+         object[second]=2;object[first]=1;delete object[second];object[second]=3;\
+         var a=Object.getOwnPropertySymbols(object);\
+         var b=Object.getOwnPropertySymbols(object);\
+         return a!==b&&a.length===2&&a[0]===first&&a[1]===second&&\
+           b[0]===first&&Object.getOwnPropertySymbols('ab').length===0;"
+    ));
+    assert_eq!(
+        type_error_message("return Object.getOwnPropertySymbols(null);"),
+        "cannot convert to object"
+    );
+}
+
+/// `Object.getOwnPropertyDescriptors` snapshots all own keys, materializes one
+/// fresh descriptor per still-present property, and defines those descriptor
+/// values as ordinary mutable properties on a fresh ordinary result object.
+#[test]
+fn get_own_property_descriptors_materializes_all_descriptor_kinds() {
+    assert!(boolean(
+        "var symbol=Symbol('s');function getter(){return 7;}function setter(v){}\
+         var object={};Object.defineProperty(object,'data',{value:3,writable:false,\
+           enumerable:true,configurable:false});\
+         Object.defineProperty(object,'accessor',{get:getter,set:setter,\
+           enumerable:false,configurable:true});object[symbol]=9;\
+         var descriptors=Object.getOwnPropertyDescriptors(object);\
+         var keys=Reflect.ownKeys(descriptors);\
+         var data=descriptors.data,accessor=descriptors.accessor;\
+         var resultDescriptor=Object.getOwnPropertyDescriptor(descriptors,'data');\
+         data.value=11;\
+         return Object.getPrototypeOf(descriptors)===Object.prototype&&\
+           keys.length===3&&keys[0]==='data'&&keys[1]==='accessor'&&keys[2]===symbol&&\
+           data.value===11&&object.data===3&&!data.writable&&data.enumerable&&\
+           !data.configurable&&accessor.get===getter&&accessor.set===setter&&\
+           !accessor.enumerable&&accessor.configurable&&\
+           resultDescriptor.writable&&resultDescriptor.enumerable&&\
+           resultDescriptor.configurable&&descriptors[symbol].value===9;"
+    ));
+}
+
+/// Primitive Strings expose virtual index and `length` own properties to
+/// `ToObject`; other non-nullish primitives produce an empty descriptor map.
+#[test]
+fn get_own_property_descriptors_observes_primitive_string_exotics() {
+    assert!(boolean(
+        "var descriptors=Object.getOwnPropertyDescriptors('ab');\
+         var zero=descriptors[0],length=descriptors.length;\
+         return Reflect.ownKeys(descriptors).join(',')==='0,1,length'&&\
+           zero.value==='a'&&!zero.writable&&zero.enumerable&&!zero.configurable&&\
+           length.value===2&&!length.writable&&!length.enumerable&&!length.configurable&&\
+           Reflect.ownKeys(Object.getOwnPropertyDescriptors(5)).length===0;"
+    ));
+    assert_eq!(
+        type_error_message("return Object.getOwnPropertyDescriptors(null);"),
+        "cannot convert to object"
+    );
 }
 
 /// ECMA-262 28.1 defines `%Reflect%` as a non-callable ordinary object whose
