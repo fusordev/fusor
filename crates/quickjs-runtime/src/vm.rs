@@ -79,6 +79,7 @@ mod error_stack;
 mod errors;
 mod exceptions;
 mod execution;
+mod from_entries;
 mod instanceof;
 mod iterators;
 mod native;
@@ -96,8 +97,8 @@ use {
     aggregate_error::*, array_callbacks::*, array_copiers::*, array_join::*, array_mutators::*,
     array_search::*, bigint_intrinsics::*, bindings::*, conversions::*,
     define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*, exceptions::*,
-    execution::*, iterators::*, native::*, object_intrinsics::*, properties::*, reflect::*,
-    stack::*, string_methods::*,
+    execution::*, from_entries::*, iterators::*, native::*, object_intrinsics::*, properties::*,
+    reflect::*, stack::*, string_methods::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -282,6 +283,7 @@ enum NativeContinuation {
     OperatorPrimitive(OperatorPrimitiveContinuation),
     IntrinsicGet(IntrinsicGetContinuation),
     AggregateError(AggregateErrorContinuation),
+    FromEntries(Box<FromEntriesContinuation>),
     ErrorConstructor(ErrorConstructorContinuation),
     ErrorToString(ErrorToStringContinuation),
     ArrayIteratorNext(ArrayIteratorNextContinuation),
@@ -320,6 +322,7 @@ impl NativeContinuation {
             Self::OperatorPrimitive(state) => state.retained_values(),
             Self::IntrinsicGet(state) => state.retained_values(),
             Self::AggregateError(state) => state.retained_values(),
+            Self::FromEntries(state) => state.retained_values(),
             Self::ErrorConstructor(state) => state.retained_values(),
             Self::ErrorToString(state) => state.retained_values(),
             Self::ArrayIteratorNext(state) => state.retained_values(),
@@ -1293,6 +1296,7 @@ fn trace_native_continuation_roots(
             }
         },
         NativeContinuation::AggregateError(state) => state.trace_roots(mark),
+        NativeContinuation::FromEntries(state) => state.trace_roots(mark),
         NativeContinuation::ErrorConstructor(state) => state.trace_roots(mark),
         NativeContinuation::ErrorToString(state) => state.trace_roots(mark),
         NativeContinuation::ArrayIteratorNext(state) => {

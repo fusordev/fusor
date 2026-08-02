@@ -147,6 +147,7 @@ pub(super) fn take_iterator_abrupt_handler(
         matches!(
             continuation,
             NativeContinuation::AggregateError(_)
+                | NativeContinuation::FromEntries(_)
                 | NativeContinuation::IteratorAppend(_)
                 | NativeContinuation::IteratorClose(_)
         )
@@ -170,6 +171,9 @@ pub(super) fn resume_iterator_abrupt_continuations(
         let resumed = match handler {
             NativeContinuation::AggregateError(state) => {
                 resume_aggregate_error_abrupt(runtime, state, pending, return_to, execution_budget)
+            }
+            NativeContinuation::FromEntries(state) => {
+                resume_from_entries_abrupt(runtime, *state, pending, return_to, execution_budget)
             }
             handler => {
                 resume_iterator_abrupt(runtime, handler, pending, return_to, execution_budget)
@@ -301,6 +305,9 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::FromEntries(state) => {
+                advance_from_entries(runtime, *state, value, return_to, execution_budget)?
+            }
             NativeContinuation::ErrorConstructor(state) => {
                 advance_error_constructor(runtime, state, value, return_to, execution_budget)?
             }
@@ -1115,6 +1122,17 @@ pub(super) fn dispatch_native_call_with_frames(
                 native.realm,
                 target,
                 arguments.into_remaining_values(),
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectFromEntries => {
+            let mut arguments = inputs.arguments;
+            begin_from_entries(
+                runtime,
+                arguments.take_first_or_undefined(),
+                native.realm,
                 return_to,
                 origin.unwrap_or_else(native_function_host_origin),
                 execution_budget,

@@ -408,6 +408,7 @@ pub(super) fn dispatch_pending_exception(
                 matches!(
                     continuation,
                     NativeContinuation::AggregateError(_)
+                        | NativeContinuation::FromEntries(_)
                         | NativeContinuation::IteratorAppend(_)
                         | NativeContinuation::IteratorClose(_)
                 )

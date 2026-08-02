@@ -345,7 +345,12 @@ Known intentional runtime differences:
   first mutation, then define in key order with partial completion only during
   the application phase. Getter re-entry, Symbols, descriptor validation, and
   Array `length` conversion retain ordinary specification behavior.
-- [ ] Complete the remaining `Object` statics (`fromEntries` and `groupBy`),
+- [x] Implement `Object.fromEntries` as an iterative, resumable
+  `AddEntriesFromIterable`: allocate the ordinary result before iterator
+  acquisition, read entry indices `0` then `1` before `ToPropertyKey`, define
+  full data properties for String and Symbol keys, and perform exceptional
+  `IteratorClose` while preserving the original abrupt completion.
+- [ ] Complete the remaining `Object.groupBy` static,
   remaining Function/legacy properties, and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date/JSON, collections, binary data,

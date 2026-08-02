@@ -462,7 +462,7 @@ fn the_extended_object_reflection_statics_have_the_specification_shape() {
     assert!(boolean(
         "var specs=[['is',2],['hasOwn',2],['getOwnPropertySymbols',1],\
           ['getOwnPropertyDescriptors',1],['values',1],['entries',1],['assign',2],\
-          ['defineProperties',2]];\
+          ['defineProperties',2],['fromEntries',1]];\
          for(var i=0;i<specs.length;i++){\
            var name=specs[i][0],method=Object[name];\
            var descriptor=Object.getOwnPropertyDescriptor(Object,name);\
@@ -476,7 +476,7 @@ fn the_extended_object_reflection_statics_have_the_specification_shape() {
         "length,name,create,getPrototypeOf,setPrototypeOf,defineProperty,defineProperties,\
 getOwnPropertyNames,getOwnPropertySymbols,keys,values,entries,isExtensible,preventExtensions,\
 getOwnPropertyDescriptor,getOwnPropertyDescriptors,is,assign,seal,freeze,isSealed,\
-isFrozen,hasOwn,prototype"
+isFrozen,fromEntries,hasOwn,prototype"
     );
 }
 
@@ -551,6 +551,77 @@ fn object_define_properties_applies_in_order_with_partial_completion() {
         ),
         "2|false|vv"
     );
+}
+
+/// `Object.fromEntries` creates one fresh ordinary object, converts every key
+/// with `ToPropertyKey`, accepts Symbols, and overwrites duplicate values
+/// through fully writable, enumerable, configurable data properties.
+#[test]
+fn object_from_entries_creates_data_properties() {
+    assert!(boolean(
+        "var symbol=Symbol('s');var result=Object.fromEntries([\
+           ['a',1],[symbol,2],[{toString:function key(){return 'a';}},3],\
+           ['__proto__',4]]);\
+         var descriptor=Object.getOwnPropertyDescriptor(result,'a');\
+         return Object.getPrototypeOf(result)===Object.prototype&&result.a===3&&\
+           result[symbol]===2&&Object.hasOwn(result,'__proto__')&&result.__proto__===4&&\
+           descriptor.writable&&descriptor.enumerable&&descriptor.configurable;"
+    ));
+}
+
+/// Entry index `0` and `1` are read before `ToPropertyKey` runs, preserving
+/// the `AddEntriesFromIterable` order across getter and conversion re-entry.
+#[test]
+fn object_from_entries_preserves_entry_and_key_conversion_order() {
+    assert_eq!(
+        text(
+            "var log='',step=0;var key={toString:function keyString(){log=log+'k';return 'x';}};\
+             var entry={};function readKey(){log=log+'0';return key;}\
+             function readValue(){log=log+'1';return 7;}\
+             Object.defineProperty(entry,'0',{get:readKey});\
+             Object.defineProperty(entry,'1',{get:readValue});\
+             var iterator={next:function next(){\
+               return step++===0?{done:false,value:entry}:{done:true};}};\
+             var iterable={};iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
+             var result=Object.fromEntries(iterable);return log+'|'+result.x;"
+        ),
+        "01k|7"
+    );
+}
+
+/// Every abrupt completion after iterator acquisition performs
+/// `IteratorClose`, while a throwing close preserves the original exception.
+#[test]
+fn object_from_entries_closes_on_abrupt_completion() {
+    assert!(boolean(
+        "var original={},secondary={},closed=false,step=0;var entry={};\
+         function readKey(){throw original;}\
+         Object.defineProperty(entry,'0',{get:readKey});entry[1]=1;\
+         var iterator={next:function next(){return step++===0?\
+           {done:false,value:entry}:{done:true};},\
+           return:function close(){closed=true;throw secondary;}};\
+         var iterable={};iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
+         try{Object.fromEntries(iterable);}catch(error){return error===original&&closed;}\
+         return false;"
+    ));
+    assert!(boolean(
+        "var closed=false,step=0;var iterator={\
+           next:function next(){return step++===0?{done:false,value:1}:{done:true};},\
+           return:function close(){closed=true;return {};}};\
+         var iterable={};iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
+         try{Object.fromEntries(iterable);}catch(error){\
+           return error instanceof TypeError&&closed;}return false;"
+    ));
+    assert!(boolean(
+        "var original={},closed=false,step=0;\
+         var key={toString:function keyString(){throw original;}};\
+         var iterator={next:function next(){return step++===0?\
+           {done:false,value:[key,1]}:{done:true};},\
+           return:function close(){closed=true;return {};}};\
+         var iterable={};iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
+         try{Object.fromEntries(iterable);}catch(error){return error===original&&closed;}\
+         return false;"
+    ));
 }
 
 /// `Object.is` is exactly ECMA-262 `SameValue`: unlike strict equality it
