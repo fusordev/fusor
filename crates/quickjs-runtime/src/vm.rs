@@ -301,6 +301,7 @@ enum NativeContinuation {
     ArrayReduction(Box<ArrayReductionContinuation>),
     ArraySplice(Box<ArraySpliceContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
+    DefineProperties(Box<DefinePropertiesContinuation>),
     InstanceOf(InstanceOfContinuation),
     /// Ignore an accessor setter's return value and complete `Reflect.set`
     /// with the internal-method success Boolean.
@@ -338,6 +339,7 @@ impl NativeContinuation {
             Self::ArrayReduction(_) => ArrayReductionContinuation::retained_values(),
             Self::ArraySplice(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
+            Self::DefineProperties(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
             Self::ReflectSet | Self::FunctionCall => 0,
         }
@@ -1341,6 +1343,7 @@ fn trace_native_continuation_roots(
         }
         NativeContinuation::EnumerableOwnProperties(state) => state.trace_roots(mark),
         NativeContinuation::ObjectAssign(state) => state.trace_roots(mark),
+        NativeContinuation::DefineProperties(state) => state.trace_roots(mark),
         NativeContinuation::InstanceOf(state) => {
             trace_instance_of_roots(state, mark);
         }

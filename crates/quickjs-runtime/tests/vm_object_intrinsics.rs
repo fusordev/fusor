@@ -461,7 +461,8 @@ fn object_keys_returns_an_independent_array() {
 fn the_extended_object_reflection_statics_have_the_specification_shape() {
     assert!(boolean(
         "var specs=[['is',2],['hasOwn',2],['getOwnPropertySymbols',1],\
-          ['getOwnPropertyDescriptors',1],['values',1],['entries',1],['assign',2]];\
+          ['getOwnPropertyDescriptors',1],['values',1],['entries',1],['assign',2],\
+          ['defineProperties',2]];\
          for(var i=0;i<specs.length;i++){\
            var name=specs[i][0],method=Object[name];\
            var descriptor=Object.getOwnPropertyDescriptor(Object,name);\
@@ -472,10 +473,83 @@ fn the_extended_object_reflection_statics_have_the_specification_shape() {
     ));
     assert_eq!(
         text("return Object.getOwnPropertyNames(Object).join(',');"),
-        "length,name,create,getPrototypeOf,setPrototypeOf,defineProperty,\
+        "length,name,create,getPrototypeOf,setPrototypeOf,defineProperty,defineProperties,\
 getOwnPropertyNames,getOwnPropertySymbols,keys,values,entries,isExtensible,preventExtensions,\
 getOwnPropertyDescriptor,getOwnPropertyDescriptors,is,assign,seal,freeze,isSealed,\
 isFrozen,hasOwn,prototype"
+    );
+}
+
+/// `Object.defineProperties` converts every selected descriptor before it
+/// applies the first definition. A later invalid descriptor therefore leaves
+/// the target untouched even though all preceding descriptor getters ran.
+#[test]
+fn object_define_properties_collects_before_applying() {
+    assert_eq!(
+        text(
+            "var log='',target={},properties={};\
+             function readA(){log=log+'A';return {value:1};}\
+             function readB(){log=log+'B';return {get:1};}\
+             Object.defineProperty(properties,'a',{get:readA,enumerable:true});\
+             Object.defineProperty(properties,'b',{get:readB,enumerable:true});\
+             try{Object.defineProperties(target,properties);}catch(error){\
+               return log+'|'+error.name+'|'+Object.hasOwn(target,'a');}\
+             return 'missing error';"
+        ),
+        "AB|TypeError|false"
+    );
+    assert_eq!(
+        text(
+            "var log='',properties={};function read(){log=log+'g';return {value:1};}\
+             Object.defineProperty(properties,'x',{get:read,enumerable:true});\
+             try{Object.defineProperties(1,properties);}catch(error){}return log;"
+        ),
+        ""
+    );
+    assert_eq!(
+        type_error_message("return Object.defineProperties({},null);"),
+        "cannot convert to object"
+    );
+}
+
+/// The own-key list is snapshotted once while descriptor enumerability and
+/// values are re-read per key after getter re-entry. String and Symbol keys
+/// retain `[[OwnPropertyKeys]]` order in the application phase.
+#[test]
+fn object_define_properties_snapshots_keys_and_rechecks_descriptors() {
+    assert!(boolean(
+        "var symbol=Symbol('s'),properties={},target={};\
+         function first(){delete properties.deleted;properties.added={value:4};\
+           Object.defineProperty(properties,'hidden',{enumerable:true});return {value:1};}\
+         Object.defineProperty(properties,'a',{get:first,enumerable:true});\
+         Object.defineProperty(properties,'hidden',{value:{value:2},configurable:true});\
+         properties.deleted={value:3};properties[symbol]={value:5,enumerable:true};\
+         Object.defineProperties(target,properties);\
+         return target.a===1&&target.hidden===2&&!Object.hasOwn(target,'deleted')&&\
+           !Object.hasOwn(target,'added')&&target[symbol]===5&&\
+           Reflect.ownKeys(target).map(function(key){return typeof key==='symbol'?'s':key;}).join(',')==='a,hidden,s';"
+    ));
+}
+
+/// Once collection succeeds, definitions are applied in key order. An abrupt
+/// later definition preserves earlier completed properties and Array length
+/// definitions reuse the resumable `ArraySetLength` conversion.
+#[test]
+fn object_define_properties_applies_in_order_with_partial_completion() {
+    assert!(boolean(
+        "var target={};Object.defineProperty(target,'fixed',{value:1});\
+         try{Object.defineProperties(target,{before:{value:2},fixed:{value:3},after:{value:4}});}\
+         catch(error){return error instanceof TypeError&&target.before===2&&\
+           target.fixed===1&&!Object.hasOwn(target,'after');}return false;"
+    ));
+    assert_eq!(
+        text(
+            "var log='';function lengthValue(){log=log+'v';return 2;}\
+             var array=[1,2,3];Object.defineProperties(array,{\
+               length:{value:{valueOf:lengthValue},writable:false}});\
+             return array.length+'|'+Object.getOwnPropertyDescriptor(array,'length').writable+'|'+log;"
+        ),
+        "2|false|vv"
     );
 }
 

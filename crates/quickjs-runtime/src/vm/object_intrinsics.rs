@@ -206,17 +206,15 @@ pub(super) fn get_prototype_of(
     Ok(NativeDispatch::Immediate(heap_reference_value(prototype)))
 }
 
-/// Applies `Object.create` for the one-argument form.
-///
-/// The second `propertyDescriptors` argument is not admitted: honoring it means
-/// running `ToPropertyDescriptor` per key, which is resumable work this entry
-/// point cannot perform, so it fails closed rather than silently ignoring the
-/// descriptors.
+/// Applies `Object.create`, delegating its optional descriptor map to the
+/// shared resumable `ObjectDefineProperties` operation after allocation.
 pub(super) fn object_create(
     runtime: &mut Runtime,
     realm: RealmId,
     mut arguments: CallArguments,
-    origin: Option<&JsStackFrame>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let requested = arguments.take_first_or_undefined();
     // Only `null` and an object are prototypes; the oracle reports every other
@@ -233,22 +231,27 @@ pub(super) fn object_create(
         | StoredValue::Symbol(_) => {
             return Err(NativeFailure::Abrupt(type_error(
                 realm,
-                origin,
+                Some(&origin),
                 "create",
                 "not a prototype",
             )?));
         }
     };
-    if !matches!(arguments.take_first_or_undefined(), StoredValue::Undefined) {
-        return Err(NativeFailure::Abrupt(type_error(
-            realm,
-            origin,
-            "create",
-            "property descriptors are not supported",
-        )?));
-    }
     let object = runtime.allocate_ordinary_object_with_optional_prototype(prototype)?;
-    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+    let target = StoredValue::Object(object);
+    let descriptors = arguments.take_first_or_undefined();
+    if matches!(descriptors, StoredValue::Undefined) {
+        return Ok(NativeDispatch::Immediate(target));
+    }
+    begin_define_properties(
+        runtime,
+        realm,
+        target,
+        descriptors,
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 /// Applies `Object.prototype.isPrototypeOf`.
@@ -1097,7 +1100,7 @@ pub(super) fn advance_object_assign(
                         return Err(NativeFailure::Abrupt(property_exception_at(
                             state.realm,
                             state.origin,
-                            object_assign_property_name(&key).as_ref(),
+                            property_key_name(&key).as_ref(),
                             failure,
                         )?));
                     }
@@ -1153,7 +1156,7 @@ fn object_assign_set(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<ObjectAssignSet, NativeFailure> {
-    let name = object_assign_property_name(&key);
+    let name = property_key_name(&key);
     if is_array_length_target(runtime, &state.target, &key)? {
         let conversion = array_length_write_target(
             state.target.duplicate(),
@@ -1309,7 +1312,7 @@ fn charge_object_assign_lookup(
     }
 }
 
-fn object_assign_property_name(key: &PropertyKey) -> Option<JsString> {
+pub(super) fn property_key_name(key: &PropertyKey) -> Option<JsString> {
     if let Some(index) = key.as_index() {
         return index_string(index.get()).ok();
     }
@@ -1402,7 +1405,7 @@ pub(super) fn get_own_property_descriptors(
 }
 
 /// Builds the virtual own-key list produced by a primitive String wrapper.
-fn primitive_string_own_keys(
+pub(super) fn primitive_string_own_keys(
     runtime: &Runtime,
     value: &JsString,
 ) -> Result<Vec<PropertyKey>, NativeFailure> {

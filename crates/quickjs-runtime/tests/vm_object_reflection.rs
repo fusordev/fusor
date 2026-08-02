@@ -385,27 +385,52 @@ fn object_create_rejects_a_non_prototype() {
     }
 }
 
-/// The descriptors argument is refused rather than silently ignored.
-///
-/// Honoring it means running `ToPropertyDescriptor` per key, which this entry
-/// point cannot do resumably, so it fails closed. This is a deliberate profile
-/// narrowing rather than a behavior difference: the pinned oracle accepts the
-/// argument, so the divergence is recorded as `QJS-CREATE-001` in `PORTING.md`.
+/// The optional descriptors argument delegates to the same two-phase
+/// `ObjectDefineProperties` operation as `Object.defineProperties`.
 #[test]
-fn object_create_refuses_property_descriptors() {
+fn object_create_applies_property_descriptors() {
+    assert_all(&[
+        (
+            "(function(){\
+                const p={inherited:1};\
+                const o=Object.create(p,{x:{value:2,enumerable:true},\
+                    hidden:{value:3,writable:true}});\
+                return Object.getPrototypeOf(o)===p&&o.x===2&&o.hidden===3&&\
+                    Object.keys(o).join(',')==='x';\
+            })()",
+            "true",
+        ),
+        (
+            "(function(){\
+                const marker={};function read(){throw marker;}\
+                const descriptors={};\
+                Object.defineProperty(descriptors,'x',{get:read,enumerable:true});\
+                try{Object.create({},descriptors);}catch(error){return error===marker;}\
+                return false;\
+            })()",
+            "true",
+        ),
+    ]);
     assert_throws(
-        "return Object.create({}, {x:{value:1}});",
+        "return Object.create({}, null);",
         ExceptionKind::TypeError,
-        "property descriptors are not supported",
+        "cannot convert to object",
     );
+    assert_all(&[(
+        "(function(){\
+            let log='';const descriptors={};function read(){log+='g';return {value:1};}\
+            Object.defineProperty(descriptors,'x',{get:read,enumerable:true});\
+            try{Object.create(1,descriptors);}catch(error){}return log;\
+        })()",
+        "",
+    )]);
 }
 
 /// `Object.create` carries the pinned `name`, `length`, and descriptors.
 #[test]
 fn object_create_has_the_pinned_shape() {
     assert_all(&[
-        // Arity 2 matches the oracle even though the second argument is
-        // refused, because `length` is part of the observable shape.
+        // Arity 2 covers the prototype and optional descriptor map.
         ("Object.create.length", "2"),
         ("Object.create.name", "create"),
         (

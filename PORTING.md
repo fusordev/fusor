@@ -90,17 +90,6 @@ Known intentional runtime differences:
   specification is the authority where the two disagree, this port follows
   ECMAScript. Widths below 64 agree with both engines.
 
-Known intentional profile narrowings. These are not behavior differences: the
-narrowed surface fails closed with a structured error rather than answering
-incorrectly, so no script can observe a wrong result.
-
-- `QJS-CREATE-001`: `Object.create` admits only its prototype argument. Honoring
-  `propertyDescriptors` means running `ToPropertyDescriptor` for each key, which
-  is resumable work this entry point cannot perform, so a present second
-  argument reports `TypeError: property descriptors are not supported` instead of
-  being silently ignored. The reported `length` stays `2` to match the pinned
-  oracle, because arity is part of the observable shape.
-
 ### Compiler, bytecode, and execution
 
 - [x] Complete opcode metadata, checked codec/disassembly, typed operands,
@@ -222,7 +211,8 @@ incorrectly, so no script can observe a wrong result.
   distinction `Array.prototype.indexOf` relies on. `isPrototypeOf` starts its
   walk at the candidate's prototype, so nothing precedes itself, and charges the
   shared budget per link. `Object.create` represents a null prototype rather than
-  substituting one; see `QJS-CREATE-001` for its narrowed descriptors argument.
+  substituting one and delegates its descriptor map to the same two-phase
+  `ObjectDefineProperties` operation as `Object.defineProperties`.
 - [x] `Array.prototype.push`, `pop`, `shift`, `unshift`, `reverse`, and `fill` as
   one resumable driver. Each reads `length` once with `ToLength`, performs a
   planned sequence of element steps, and writes `length` back; every read, write,
@@ -349,8 +339,13 @@ incorrectly, so no script can observe a wrong result.
   primitive String and Symbol copying, and resumable getter/strict-setter
   re-entry. Failures preserve already committed writes, and Array `length`
   targets reuse the ordinary nested conversion and shrink machinery.
-- [ ] Complete the remaining `Object` statics (`defineProperties`, `fromEntries`,
-  `groupBy`, and the descriptor-bearing `Object.create` form),
+- [x] Implement `Object.defineProperties` and descriptor-bearing
+  `Object.create` through one resumable two-phase `ObjectDefineProperties`
+  machine: snapshot and convert every current enumerable descriptor before the
+  first mutation, then define in key order with partial completion only during
+  the application phase. Getter re-entry, Symbols, descriptor validation, and
+  Array `length` conversion retain ordinary specification behavior.
+- [ ] Complete the remaining `Object` statics (`fromEntries` and `groupBy`),
   remaining Function/legacy properties, and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date/JSON, collections, binary data,
