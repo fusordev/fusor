@@ -40,8 +40,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 98;
-const REALM_PROPERTY_COUNT: u64 = 338;
+const REALM_FUNCTION_COUNT: usize = 99;
+const REALM_PROPERTY_COUNT: u64 = 341;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -246,7 +246,7 @@ const ARRAY_SEARCH_ATOM_START: usize = STRING_FROM_ATOM_START + STRING_FROM_STAT
 /// operations the current profile can honor completely are installed, so an
 /// absent method fails closed as a missing property rather than behaving
 /// incorrectly.
-const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 12] = [
+const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 13] = [
     ObjectStaticMethod::predefined(
         PredefinedAtom::GetPrototypeOf,
         NativeFunctionKind::ObjectGetPrototypeOf,
@@ -287,6 +287,9 @@ const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 12] = [
         NativeFunctionKind::ObjectGetOwnPropertyDescriptor,
         2,
     ),
+    // Arity 2 matches the pinned oracle even though the descriptors argument is
+    // not admitted; the reported `length` is part of the observable shape.
+    ObjectStaticMethod::interned("create", NativeFunctionKind::ObjectCreate, 2),
 ];
 
 /// The number of `Object` statics whose names must be interned at realm

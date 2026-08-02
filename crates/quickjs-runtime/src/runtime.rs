@@ -522,6 +522,7 @@ pub(crate) enum NativeFunctionKind {
     ObjectGetOwnPropertyNames,
     ObjectDefineProperty,
     ObjectGetOwnPropertyDescriptor,
+    ObjectCreate,
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
     ObjectPrototypeHasOwnProperty,

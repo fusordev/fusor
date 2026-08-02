@@ -935,6 +935,9 @@ pub(super) fn dispatch_native_call_with_frames(
                 origin.as_ref(),
             )
         }
+        NativeFunctionKind::ObjectCreate => {
+            object_create(runtime, native.realm, inputs.arguments, origin.as_ref())
+        }
         NativeFunctionKind::ObjectSetPrototypeOf => {
             set_prototype_of(runtime, native.realm, inputs.arguments, origin.as_ref())
         }

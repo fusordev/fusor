@@ -327,3 +327,98 @@ fn the_reflection_methods_have_the_pinned_shape() {
         ),
     ]);
 }
+/// `Object.create` installs the requested prototype, including none at all.
+///
+/// Oracle:
+///
+/// ```console
+/// $ /private/tmp/quickjs-2026-06-04/qjs -e 'console.log(\
+///     Object.getPrototypeOf(Object.create(null)), Object.create({a:1}).a);'
+/// null 1
+/// ```
+#[test]
+fn object_create_installs_the_requested_prototype() {
+    assert_all(&[
+        // A null prototype is represented rather than substituted, so the
+        // result inherits nothing at all.
+        ("Object.getPrototypeOf(Object.create(null))", "null"),
+        ("Object.create(null).a", "undefined"),
+        (
+            "(function(){const p={a:1};return Object.getPrototypeOf(Object.create(p))===p;})()",
+            "true",
+        ),
+        // The new object inherits rather than owning.
+        ("Object.create({a:1}).a", "1"),
+        (
+            "Object.prototype.hasOwnProperty.call(Object.create({a:1}),'a')",
+            "false",
+        ),
+        ("Object.keys(Object.create({a:1})).length", "0"),
+        ("typeof Object.create({})", "object"),
+        // A function is a valid prototype. A declaration is used because this
+        // profile does not yet infer a name for an anonymous function
+        // expression bound to a `const`.
+        (
+            "(function(){\
+                function f(){}\
+                return Object.getPrototypeOf(Object.create(f))===f;\
+            })()",
+            "true",
+        ),
+        ("Object.create(Array.prototype) instanceof Array", "true"),
+        ("Object.isExtensible(Object.create(null))", "true"),
+    ]);
+}
+
+/// Only `null` and an object are prototypes.
+///
+/// Every other argument, including an absent one, reports
+/// `TypeError: not a prototype`.
+#[test]
+fn object_create_rejects_a_non_prototype() {
+    for argument in ["1", "'a'", "true", "undefined", ""] {
+        assert_throws(
+            &format!("return Object.create({argument});"),
+            ExceptionKind::TypeError,
+            "not a prototype",
+        );
+    }
+}
+
+/// The descriptors argument is refused rather than silently ignored.
+///
+/// Honoring it means running `ToPropertyDescriptor` per key, which this entry
+/// point cannot do resumably, so it fails closed. This is a deliberate profile
+/// narrowing rather than a behavior difference: the pinned oracle accepts the
+/// argument, so the divergence is recorded as `QJS-CREATE-001` in `PORTING.md`.
+#[test]
+fn object_create_refuses_property_descriptors() {
+    assert_throws(
+        "return Object.create({}, {x:{value:1}});",
+        ExceptionKind::TypeError,
+        "property descriptors are not supported",
+    );
+}
+
+/// `Object.create` carries the pinned `name`, `length`, and descriptors.
+#[test]
+fn object_create_has_the_pinned_shape() {
+    assert_all(&[
+        // Arity 2 matches the oracle even though the second argument is
+        // refused, because `length` is part of the observable shape.
+        ("Object.create.length", "2"),
+        ("Object.create.name", "create"),
+        (
+            "Object.getOwnPropertyDescriptor(Object,'create').enumerable",
+            "false",
+        ),
+        (
+            "Object.getOwnPropertyDescriptor(Object,'create').writable",
+            "true",
+        ),
+        (
+            "Object.getOwnPropertyDescriptor(Object,'create').configurable",
+            "true",
+        ),
+    ]);
+}

@@ -90,6 +90,17 @@ Known intentional runtime differences:
   specification is the authority where the two disagree, this port follows
   ECMAScript. Widths below 64 agree with both engines.
 
+Known intentional profile narrowings. These are not behavior differences: the
+narrowed surface fails closed with a structured error rather than answering
+incorrectly, so no script can observe a wrong result.
+
+- `QJS-CREATE-001`: `Object.create` admits only its prototype argument. Honoring
+  `propertyDescriptors` means running `ToPropertyDescriptor` for each key, which
+  is resumable work this entry point cannot perform, so a present second
+  argument reports `TypeError: property descriptors are not supported` instead of
+  being silently ignored. The reported `length` stays `2` to match the pinned
+  oracle, because arity is part of the observable shape.
+
 ### Compiler, bytecode, and execution
 
 - [x] Complete opcode metadata, checked codec/disassembly, typed operands,
@@ -203,6 +214,15 @@ Known intentional runtime differences:
   `false` for a non-Number without converting it, which is what separates them
   from the global `isNaN`. `Number.isInteger(2**53)` is `true` while
   `Number.isSafeInteger(2**53)` is `false`.
+- [x] `Object.prototype.hasOwnProperty`, `isPrototypeOf`, and
+  `propertyIsEnumerable`, plus `Object.create`. The first and third share one
+  own-property resolution with `Object.getOwnPropertyDescriptor`, so all three
+  agree on every exotic case: a primitive String reports its indices and
+  `length`, and a hole is absent rather than `undefined`, which is the same
+  distinction `Array.prototype.indexOf` relies on. `isPrototypeOf` starts its
+  walk at the candidate's prototype, so nothing precedes itself, and charges the
+  shared budget per link. `Object.create` represents a null prototype rather than
+  substituting one; see `QJS-CREATE-001` for its narrowed descriptors argument.
 - [x] `String.fromCharCode` and `String.fromCodePoint`, sharing the same
   resumable machine as the prototype methods because their arguments are also
   arbitrary objects. The two differ in coercion and range: `fromCharCode` applies

@@ -796,6 +796,40 @@ impl Runtime {
         Ok(object)
     }
 
+    /// Allocates an ordinary object whose prototype may be absent.
+    ///
+    /// `Object.create(null)` is the only caller that needs a null prototype, and
+    /// a prototype-less object is genuinely useful as a bare dictionary, so the
+    /// absence is represented rather than substituted.
+    pub(crate) fn allocate_ordinary_object_with_optional_prototype(
+        &mut self,
+        prototype: Option<HeapReference>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if let Some(prototype) = prototype {
+            return self.allocate_ordinary_object_with_prototype(prototype);
+        }
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let object = self
+            .objects
+            .try_insert(HeapObject::ordinary(ObjectRecord::empty(None)))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.collection_pending = true;
+        Ok(object)
+    }
+
     pub(crate) fn allocate_boxed_boolean_with_prototype(
         &mut self,
         prototype: HeapReference,

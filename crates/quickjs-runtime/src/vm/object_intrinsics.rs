@@ -206,6 +206,51 @@ pub(super) fn get_prototype_of(
     Ok(NativeDispatch::Immediate(heap_reference_value(prototype)))
 }
 
+/// Applies `Object.create` for the one-argument form.
+///
+/// The second `propertyDescriptors` argument is not admitted: honoring it means
+/// running `ToPropertyDescriptor` per key, which is resumable work this entry
+/// point cannot perform, so it fails closed rather than silently ignoring the
+/// descriptors.
+pub(super) fn object_create(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    mut arguments: CallArguments,
+    origin: Option<&JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let requested = arguments.take_first_or_undefined();
+    // Only `null` and an object are prototypes; the oracle reports every other
+    // argument as `not a prototype`, including an absent one.
+    let prototype = match requested {
+        StoredValue::Null => None,
+        StoredValue::Function(function) => Some(HeapReference::Function(function)),
+        StoredValue::Object(object) => Some(HeapReference::Object(object)),
+        StoredValue::Undefined
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            return Err(NativeFailure::Abrupt(type_error(
+                realm,
+                origin,
+                "create",
+                "not a prototype",
+            )?));
+        }
+    };
+    if !matches!(arguments.take_first_or_undefined(), StoredValue::Undefined) {
+        return Err(NativeFailure::Abrupt(type_error(
+            realm,
+            origin,
+            "create",
+            "property descriptors are not supported",
+        )?));
+    }
+    let object = runtime.allocate_ordinary_object_with_optional_prototype(prototype)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
 /// Applies `Object.prototype.isPrototypeOf`.
 ///
 /// The walk starts at the *candidate's* prototype, not the candidate itself, so
