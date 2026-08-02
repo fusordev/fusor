@@ -28,20 +28,21 @@
 use std::collections::TryReserveError;
 
 use super::{
-    Arc, Arena, ArrayCallback, ArrayCopier, ArrayIntrinsics, ArrayMutator, ArraySearch, ArrayState,
-    Atom, AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context,
-    ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation,
-    HandleError, HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
-    IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind, NumberFormat,
-    NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey,
-    PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, ReleaseMailbox,
-    Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue,
-    StringIntrinsics, StringMethod, SymbolIntrinsics, check_limit, predefined_string, usize_to_u64,
+    Arc, Arena, ArrayCallback, ArrayCopier, ArrayIntrinsics, ArrayMutator, ArrayReduction,
+    ArraySearch, ArrayState, Atom, AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics,
+    BoxedPrimitive, Context, ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId,
+    FunctionImplementation, HandleError, HandleKind, HashMap, HeapFunction, HeapObject,
+    HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString, NativeFunction,
+    NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord,
+    PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics,
+    RealmState, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
+    RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics, check_limit,
+    predefined_string, usize_to_u64,
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 120;
-const REALM_PROPERTY_COUNT: u64 = 404;
+const REALM_FUNCTION_COUNT: usize = 122;
+const REALM_PROPERTY_COUNT: u64 = 410;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -210,6 +211,13 @@ const NUMBER_FORMAT_METHODS: [NumberFormat; 3] = [
 
 /// Index of the first `Number.prototype` rendering name in the dynamic atoms.
 const NUMBER_FORMAT_ATOM_START: usize = ARRAY_COPIER_ATOM_START + ARRAY_COPIER_METHODS.len();
+
+/// The `Array.prototype` reductions this profile installs.
+const ARRAY_REDUCTION_METHODS: [ArrayReduction; 2] =
+    [ArrayReduction::Reduce, ArrayReduction::ReduceRight];
+
+/// Index of the first `Array.prototype` reduction name in the dynamic atoms.
+const ARRAY_REDUCTION_ATOM_START: usize = ARRAY_CALLBACK_ATOM_START + ARRAY_CALLBACK_METHODS.len();
 
 /// The `Array.prototype` callback methods this profile installs.
 ///
@@ -707,6 +715,7 @@ struct RealmRecords {
     array_copiers: [ObjectRecord; ARRAY_COPIER_TOTAL],
     number_formats: [ObjectRecord; NUMBER_FORMAT_METHODS.len()],
     array_callbacks: [ObjectRecord; ARRAY_CALLBACK_METHODS.len()],
+    array_reductions: [ObjectRecord; ARRAY_REDUCTION_METHODS.len()],
     array_is_array: ObjectRecord,
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
@@ -783,7 +792,8 @@ impl RealmRecords {
                     + ARRAY_MUTATOR_METHODS.len()
                     + ARRAY_COPIER_TOTAL
                     + NUMBER_FORMAT_METHODS.len()
-                    + ARRAY_CALLBACK_METHODS.len(),
+                    + ARRAY_CALLBACK_METHODS.len()
+                    + ARRAY_REDUCTION_METHODS.len(),
             )?,
             constructor: reserved_record(3)?,
             join: reserved_record(2)?,
@@ -834,6 +844,7 @@ impl RealmRecords {
             array_copiers: array_copier_records()?,
             number_formats: number_format_records()?,
             array_callbacks: array_callback_records()?,
+            array_reductions: array_reduction_records()?,
             array_is_array: reserved_record(2)?,
             array,
             iterators,
@@ -966,6 +977,7 @@ struct RealmGraph {
     array_copiers: [FunctionId; ARRAY_COPIER_TOTAL],
     number_formats: [FunctionId; NUMBER_FORMAT_METHODS.len()],
     array_callbacks: [FunctionId; ARRAY_CALLBACK_METHODS.len()],
+    array_reductions: [FunctionId; ARRAY_REDUCTION_METHODS.len()],
     array_is_array: FunctionId,
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
@@ -981,6 +993,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         debug_assert!(runtime.functions.remove(self.array_is_array).is_some());
+        for function in self.array_reductions.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
         for function in self.array_callbacks.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
@@ -1247,6 +1262,7 @@ impl Runtime {
         let array_copiers = self.insert_array_copiers(&base, records.array_copiers);
         let number_formats = self.insert_number_formats(&base, records.number_formats);
         let array_callbacks = self.insert_array_callbacks(&base, records.array_callbacks);
+        let array_reductions = self.insert_array_reductions(&base, records.array_reductions);
         let array_is_array = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -1270,6 +1286,7 @@ impl Runtime {
             array_copiers,
             number_formats,
             array_callbacks,
+            array_reductions,
             array_is_array,
             array,
             iterators,
@@ -1392,6 +1409,9 @@ impl Runtime {
             }
             for method in ARRAY_CALLBACK_METHODS {
                 interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
+            }
+            for reduction in ARRAY_REDUCTION_METHODS {
+                interned(&mut self.atoms, &mut dynamic_atoms, reduction.name())?;
             }
             Ok(())
         })();
@@ -1667,6 +1687,28 @@ impl Runtime {
             to_string,
             value_of,
         }
+    }
+
+    /// Inserts one native function per `Array.prototype` reduction.
+    fn insert_array_reductions(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; ARRAY_REDUCTION_METHODS.len()],
+    ) -> [FunctionId; ARRAY_REDUCTION_METHODS.len()] {
+        let mut inserted = [None; ARRAY_REDUCTION_METHODS.len()];
+        for ((slot, reduction), record) in inserted
+            .iter_mut()
+            .zip(ARRAY_REDUCTION_METHODS)
+            .zip(records)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::ArrayPrototypeReduction(reduction),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every Array reduction function was inserted"))
     }
 
     /// Inserts one native function per `Array.prototype` callback method.
@@ -2732,6 +2774,12 @@ impl Runtime {
             .array_callbacks
             .into_iter()
             .zip(&graph.dynamic_atoms[ARRAY_CALLBACK_ATOM_START..])
+            .chain(
+                graph
+                    .array_reductions
+                    .into_iter()
+                    .zip(&graph.dynamic_atoms[ARRAY_REDUCTION_ATOM_START..]),
+            )
         {
             let atom = atom.clone();
             let name = atom
@@ -3165,6 +3213,17 @@ fn object_reflection_records()
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Object reflection record was reserved")))
+}
+
+/// Reserves one record per `Array.prototype` reduction.
+fn array_reduction_records() -> Result<[ObjectRecord; ARRAY_REDUCTION_METHODS.len()], RuntimeError>
+{
+    let mut records: [Option<ObjectRecord>; ARRAY_REDUCTION_METHODS.len()] =
+        [const { None }; ARRAY_REDUCTION_METHODS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Array reduction record was reserved")))
 }
 
 /// Reserves one record per `Array.prototype` callback method.

@@ -288,8 +288,16 @@ incorrectly, so no script can observe a wrong result.
   index. The length is snapshotted with `ToLength` before the first callback, so a
   callback that grows the array is not revisited, while one that shrinks it still
   stops early because each index is re-tested.
+- [x] `Array.prototype.reduce` and `reduceRight`, which share the same element
+  read but thread an accumulator through the callback's result and pass four
+  arguments rather than three. An absent initial value is distinct from an
+  explicit `undefined` one: the former seeds from the first *present* element, so
+  an empty or all-holes array reports `TypeError: empty array`, while the latter
+  simply becomes the accumulator and `[1,2].reduce((a,v)=>a+v, undefined)` is
+  `NaN`.
 - [ ] Remaining String/Number/Array method surface (`splice`, `sort`, `flat`,
-  `copyWithin`, and the locale-dependent renderings), shape sharing/transition
+  `copyWithin`, `with`, `toSorted`, and the locale-dependent renderings), shape
+  sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
 

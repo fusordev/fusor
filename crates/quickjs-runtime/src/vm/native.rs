@@ -370,6 +370,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::ArrayReduction(state) => advance_array_reduction(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
@@ -1420,6 +1427,18 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::ArrayPrototypeCallback(method) => begin_array_callback(
             runtime,
             method,
+            native.realm,
+            inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        // The two reductions share a fold whose accumulator threads through the
+        // callback's result.
+        NativeFunctionKind::ArrayPrototypeReduction(reduction) => begin_array_reduction(
+            runtime,
+            reduction,
             native.realm,
             inputs.receiver,
             inputs.arguments,

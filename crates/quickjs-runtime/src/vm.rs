@@ -53,7 +53,7 @@ use crate::{
     object::{ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty, PropertyDeletion},
     runtime::{
         ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayMutator,
-        ArraySearch, BindingCell, BoundFunction, BytecodeFunction, CollectionRoot,
+        ArrayReduction, ArraySearch, BindingCell, BoundFunction, BytecodeFunction, CollectionRoot,
         EnvironmentBinding, ForInAdvance, FrameBindingAddress, FunctionImplementation,
         HeapFunction, InstalledCode, InstalledConstant, InstalledRoot, InstalledTemplate,
         NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
@@ -295,6 +295,7 @@ enum NativeContinuation {
     ArrayMutator(Box<ArrayMutatorContinuation>),
     ArrayCopier(Box<ArrayCopierContinuation>),
     ArrayCallback(Box<ArrayCallbackContinuation>),
+    ArrayReduction(Box<ArrayReductionContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     InstanceOf(InstanceOfContinuation),
     FunctionCall,
@@ -325,6 +326,7 @@ impl NativeContinuation {
             Self::ArrayMutator(state) => state.retained_values(),
             Self::ArrayCopier(state) => state.retained_values(),
             Self::ArrayCallback(_) => ArrayCallbackContinuation::retained_values(),
+            Self::ArrayReduction(_) => ArrayReductionContinuation::retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
             Self::FunctionCall => 0,
@@ -1174,6 +1176,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ArrayMutator(state) => state.trace_roots(mark),
         NativeContinuation::ArrayCopier(state) => state.trace_roots(mark),
         NativeContinuation::ArrayCallback(state) => state.trace_roots(mark),
+        NativeContinuation::ArrayReduction(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {
             trace_function_bind_roots(state, mark);

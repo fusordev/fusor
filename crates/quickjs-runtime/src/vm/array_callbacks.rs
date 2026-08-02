@@ -527,3 +527,331 @@ fn take_completion(completion: &mut Option<StoredValue>) -> Result<StoredValue, 
         )
     })
 }
+
+/// Which stage of a reduction a continuation resumes into.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArrayReductionStage {
+    /// Awaiting the `length` property read.
+    AwaitLength,
+    /// Awaiting `ToLength` of the length value.
+    AwaitLengthConversion,
+    /// Looking for the first present element to seed the accumulator.
+    SeedAccumulator,
+    /// Awaiting the seed element's read.
+    AwaitSeedRead,
+    /// Ready to visit the next index.
+    NextElement,
+    /// Awaiting an element read that may have entered a getter.
+    AwaitElement,
+    /// Awaiting the callback's result, which becomes the accumulator.
+    AwaitCallback,
+    /// Finished.
+    Done,
+}
+
+/// One in-progress `Array.prototype` reduction.
+pub(crate) struct ArrayReductionContinuation {
+    reduction: ArrayReduction,
+    /// The coerced receiver whose elements are folded.
+    target: StoredValue,
+    /// The callback, already verified to be callable.
+    callback: FunctionId,
+    /// The accumulator, absent until it is seeded.
+    accumulator: Option<StoredValue>,
+    /// The element count from the single `ToLength` length read.
+    length: u64,
+    /// The next index to visit.
+    next: u64,
+    /// The index currently being visited.
+    current: u64,
+    realm: RealmId,
+    stage: ArrayReductionStage,
+    origin: JsStackFrame,
+}
+
+impl ArrayReductionContinuation {
+    /// The receiver and the accumulator.
+    pub(crate) const fn retained_values() -> u64 {
+        2
+    }
+
+    /// Reports the traced roots this continuation retains.
+    pub(crate) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.target, mark);
+        mark(CollectionRoot::Heap(HeapReference::Function(self.callback)));
+        if let Some(accumulator) = &self.accumulator {
+            trace_stored_value_root(accumulator, mark);
+        }
+    }
+
+    /// Moves the cursor past the index just visited.
+    fn advance(&mut self) {
+        if self.reduction.is_backward() {
+            match self.next.checked_sub(1) {
+                Some(next) => self.next = next,
+                // Index zero was the last one, so end the loop.
+                None => self.length = 0,
+            }
+        } else {
+            self.next = self.next.saturating_add(1);
+        }
+    }
+}
+
+/// Starts one `Array.prototype` reduction.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one shared entry point carries the reduction identity alongside the same receiver, arguments, and resumption context every native dispatch takes"
+)]
+pub(super) fn begin_array_reduction(
+    runtime: &mut Runtime,
+    reduction: ArrayReduction,
+    realm: RealmId,
+    receiver: StoredValue,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("cannot convert to object")?,
+            },
+            origin,
+        }));
+    }
+    let StoredValue::Function(callback) = arguments.take_first_or_undefined() else {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("not a function")?,
+            },
+            origin,
+        }));
+    };
+    // An absent initial value is distinct from an explicit `undefined` one: the
+    // former seeds from the first present element while the latter is the
+    // accumulator.
+    let accumulator = arguments.take_first();
+    let state = ArrayReductionContinuation {
+        reduction,
+        target: receiver,
+        callback,
+        accumulator,
+        length: 0,
+        next: 0,
+        current: 0,
+        realm,
+        stage: ArrayReductionStage::AwaitLength,
+        origin,
+    };
+    advance_array_reduction(runtime, state, None, return_to, execution_budget)
+}
+
+/// Resumes a reduction after an awaited read or callback.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the length, seeding, element, and callback stages form one traced continuation shared by both reductions"
+)]
+pub(super) fn advance_array_reduction(
+    runtime: &mut Runtime,
+    mut state: ArrayReductionContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            ArrayReductionStage::AwaitLength => {
+                let key = runtime.predefined_property_key(PredefinedAtom::Length);
+                charge_callback_lookup(runtime, &state.target, execution_budget)?;
+                match read_static_property(runtime, state.realm, &state.target, &key)? {
+                    PropertyReadOutcome::Value(value) => {
+                        completion = Some(value);
+                        state.stage = ArrayReductionStage::AwaitLengthConversion;
+                    }
+                    PropertyReadOutcome::Getter { function, receiver } => {
+                        state.stage = ArrayReductionStage::AwaitLengthConversion;
+                        return suspend_reduction(state, function, receiver, Vec::new(), return_to);
+                    }
+                    PropertyReadOutcome::Failed(failure) => {
+                        return Err(reduction_failure(&state, failure));
+                    }
+                }
+            }
+            ArrayReductionStage::AwaitLengthConversion => {
+                let value = take_completion(&mut completion)?;
+                let number = operator_to_number(value, state.realm, &state.origin)?;
+                state.length = number_to_length(number);
+                state.next = if state.reduction.is_backward() {
+                    state.length.saturating_sub(1)
+                } else {
+                    0
+                };
+                state.stage = if state.accumulator.is_some() {
+                    ArrayReductionStage::NextElement
+                } else {
+                    ArrayReductionStage::SeedAccumulator
+                };
+            }
+            ArrayReductionStage::SeedAccumulator => {
+                // Without an initial value the accumulator is the first *present*
+                // element, so holes before it are skipped rather than folded.
+                if state.length == 0 || state.next >= state.length {
+                    // An empty or all-holes array has nothing to seed from.
+                    return Err(NativeFailure::Abrupt(PendingException {
+                        realm: state.realm,
+                        payload: PendingExceptionPayload::EngineError {
+                            kind: ExceptionKind::TypeError,
+                            message: JsString::from_utf8("empty array")?,
+                        },
+                        origin: state.origin.clone(),
+                    }));
+                }
+                execution_budget.charge_instructions(1)?;
+                let index = state.next;
+                state.advance();
+                let key = element_key(index)?;
+                charge_callback_lookup(runtime, &state.target, execution_budget)?;
+                if !has_property(runtime, state.realm, &state.target, &key)? {
+                    continue;
+                }
+                match read_static_property(runtime, state.realm, &state.target, &key)? {
+                    PropertyReadOutcome::Value(value) => {
+                        completion = Some(value);
+                        state.stage = ArrayReductionStage::AwaitSeedRead;
+                    }
+                    PropertyReadOutcome::Getter { function, receiver } => {
+                        state.stage = ArrayReductionStage::AwaitSeedRead;
+                        return suspend_reduction(state, function, receiver, Vec::new(), return_to);
+                    }
+                    PropertyReadOutcome::Failed(failure) => {
+                        return Err(reduction_failure(&state, failure));
+                    }
+                }
+            }
+            ArrayReductionStage::AwaitSeedRead => {
+                state.accumulator = Some(take_completion(&mut completion)?);
+                state.stage = ArrayReductionStage::NextElement;
+            }
+            ArrayReductionStage::NextElement => {
+                if state.length == 0 || state.next >= state.length {
+                    state.stage = ArrayReductionStage::Done;
+                    continue;
+                }
+                execution_budget.charge_instructions(1)?;
+                let index = state.next;
+                state.current = index;
+                state.advance();
+                let key = element_key(index)?;
+                charge_callback_lookup(runtime, &state.target, execution_budget)?;
+                // A hole is skipped: the callback never sees it.
+                if !has_property(runtime, state.realm, &state.target, &key)? {
+                    continue;
+                }
+                match read_static_property(runtime, state.realm, &state.target, &key)? {
+                    PropertyReadOutcome::Value(value) => {
+                        completion = Some(value);
+                        state.stage = ArrayReductionStage::AwaitElement;
+                    }
+                    PropertyReadOutcome::Getter { function, receiver } => {
+                        state.stage = ArrayReductionStage::AwaitElement;
+                        return suspend_reduction(state, function, receiver, Vec::new(), return_to);
+                    }
+                    PropertyReadOutcome::Failed(failure) => {
+                        return Err(reduction_failure(&state, failure));
+                    }
+                }
+            }
+            ArrayReductionStage::AwaitElement => {
+                let element = take_completion(&mut completion)?;
+                let accumulator =
+                    state
+                        .accumulator
+                        .take()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "an array reduction folded an element without an accumulator",
+                        })?;
+                // The callback receives `(accumulator, element, index, array)`.
+                let mut callback_arguments = Vec::new();
+                callback_arguments.try_reserve_exact(4).map_err(|_| {
+                    ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::Frames,
+                        additional: 4,
+                    }
+                })?;
+                callback_arguments.push(accumulator);
+                callback_arguments.push(element);
+                callback_arguments.push(StoredValue::Number(JsNumber::from_f64(index_as_f64(
+                    state.current,
+                ))));
+                callback_arguments.push(state.target.duplicate());
+                state.stage = ArrayReductionStage::AwaitCallback;
+                let callback = state.callback;
+                return suspend_reduction(
+                    state,
+                    callback,
+                    StoredValue::Undefined,
+                    callback_arguments,
+                    return_to,
+                );
+            }
+            ArrayReductionStage::AwaitCallback => {
+                // The callback's result replaces the accumulator.
+                state.accumulator = Some(take_completion(&mut completion)?);
+                state.stage = ArrayReductionStage::NextElement;
+            }
+            ArrayReductionStage::Done => {
+                return Ok(NativeDispatch::Immediate(
+                    state.accumulator.take().unwrap_or(StoredValue::Undefined),
+                ));
+            }
+        }
+    }
+}
+
+/// Suspends into a call that resumes this reduction.
+fn suspend_reduction(
+    state: ArrayReductionContinuation,
+    function: FunctionId,
+    receiver: StoredValue,
+    arguments: Vec<StoredValue>,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::ArrayReduction(Box::new(state)));
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::from_values(arguments),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    }))
+}
+
+/// Builds the exception a failed property read reports.
+fn reduction_failure(
+    state: &ArrayReductionContinuation,
+    failure: PropertyFailure,
+) -> NativeFailure {
+    match property_exception_at(state.realm, state.origin.clone(), None, failure) {
+        Ok(exception) => NativeFailure::Abrupt(exception),
+        Err(error) => error.into(),
+    }
+}

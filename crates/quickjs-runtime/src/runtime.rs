@@ -368,6 +368,28 @@ impl NumberFormat {
     }
 }
 
+/// Which reduction a continuation is performing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayReduction {
+    Reduce,
+    ReduceRight,
+}
+
+impl ArrayReduction {
+    /// Returns the property name this method is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Reduce => "reduce",
+            Self::ReduceRight => "reduceRight",
+        }
+    }
+
+    /// Returns whether the reduction walks the indices in descending order.
+    pub(crate) const fn is_backward(self) -> bool {
+        matches!(self, Self::ReduceRight)
+    }
+}
+
 /// Which callback method a continuation is performing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArrayCallback {
@@ -693,6 +715,8 @@ pub(crate) enum NativeFunctionKind {
     ArrayPrototypeCopier(ArrayCopier),
     /// One `Array.prototype` callback method sharing the resumable loop.
     ArrayPrototypeCallback(ArrayCallback),
+    /// One `Array.prototype` reduction sharing the resumable fold.
+    ArrayPrototypeReduction(ArrayReduction),
     ArrayConstructor,
     SymbolConstructor,
     SymbolPrototypeToString,
