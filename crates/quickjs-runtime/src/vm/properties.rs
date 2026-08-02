@@ -689,6 +689,7 @@ pub(super) fn array_length_write_target(
     base: StoredValue,
     name: JsString,
     strict: bool,
+    reflect: bool,
     value: &StoredValue,
 ) -> OperatorPrimitiveTarget {
     let original = (!matches!(
@@ -700,6 +701,30 @@ pub(super) fn array_length_write_target(
         base,
         name,
         strict,
+        reflect,
+        definition: None,
+        original,
+        first_length: None,
+    })
+}
+
+pub(super) fn array_length_define_target(
+    base: StoredValue,
+    name: JsString,
+    value: &StoredValue,
+    definition: ArrayLengthDefinition,
+) -> OperatorPrimitiveTarget {
+    let original = (!matches!(
+        value,
+        StoredValue::Null | StoredValue::Boolean(_) | StoredValue::Number(_)
+    ))
+    .then(|| value.duplicate());
+    OperatorPrimitiveTarget::ArrayLengthWrite(ArrayLengthWriteState {
+        base,
+        name,
+        strict: false,
+        reflect: false,
+        definition: Some(definition),
         original,
         first_length: None,
     })
@@ -1507,12 +1532,14 @@ pub(super) fn define_own_property(
         }
     };
 
-    // An array's `length` is not configurable and its range check lives in the
-    // resumable length-write path, so a define of it is refused here rather than
-    // silently bypassing that path.
+    // A present Array `length` value must first pass the resumable two-conversion
+    // ArraySetLength validation. Attribute-only and accessor definitions can be
+    // decided here without observing user code; the latter is rejected by the
+    // ordinary non-configurable data-property rules below.
     if let HeapReference::Object(object) = reference
         && runtime.is_array_object(object)?
         && key.as_atom().and_then(crate::Atom::predefined_atom) == Some(PredefinedAtom::Length)
+        && definition.has_present_data_value()
     {
         return Ok(PropertyDefinitionOutcome::Failed(
             PropertyFailure::NotConfigurable,

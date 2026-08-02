@@ -157,6 +157,18 @@ impl PropertyDefinition {
             }
         }
     }
+
+    /// Returns whether this data descriptor carries a value that an exotic
+    /// object must validate before ordinary descriptor application.
+    pub(crate) const fn has_present_data_value(&self) -> bool {
+        matches!(
+            self.fields,
+            DefinitionFields::Data {
+                value: Requested::Present(_),
+                ..
+            }
+        )
+    }
 }
 
 /// The result of validating a descriptor against an object's current state.

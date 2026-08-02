@@ -1221,7 +1221,8 @@ pub(super) fn execute_one(
                         },
                     )?);
                 let origin = instruction_location(runtime, frame, source_pc)?;
-                let target = array_length_write_target(base, property.name, frame.strict, &value);
+                let target =
+                    array_length_write_target(base, property.name, frame.strict, false, &value);
                 return native_step(
                     begin_operator_primitive_conversion(
                         runtime,

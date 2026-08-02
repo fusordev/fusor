@@ -430,6 +430,40 @@ impl Runtime {
         })
     }
 
+    /// Applies the final `writable` attribute selected by `ArraySetLength` after
+    /// all indexed deletions have completed (or stopped at a blocker).
+    pub(crate) fn set_array_length_writable(
+        &mut self,
+        object: ObjectId,
+        writable: bool,
+    ) -> Result<(), crate::EngineFault> {
+        let length_key = self.predefined_property_key(PredefinedAtom::Length);
+        let array = self
+            .objects
+            .get_mut(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "array object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        if array.array_state().is_none() {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "array length layout update received a non-array object",
+            });
+        }
+        let previous = array.record.replace_existing_data_layout(
+            &length_key,
+            PropertyLayout::data(writable, false, false),
+        );
+        if previous.is_none() {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "array object lost its own data length layout",
+            });
+        }
+        self.collection_pending = true;
+        Ok(())
+    }
+
     fn update_array_length(
         &mut self,
         object: ObjectId,

@@ -89,6 +89,16 @@ pub(super) struct DefinePropertyContinuation {
     next: usize,
     realm: RealmId,
     origin: JsStackFrame,
+    result: DefinePropertyResult,
+}
+
+/// Whether a completed definition returns its target or the internal-method
+/// Boolean. `Object.defineProperty` uses the former; `Reflect.defineProperty`
+/// uses the latter and reports an ordinary rejection as `false`.
+#[derive(Clone, Copy)]
+pub(super) enum DefinePropertyResult {
+    Target,
+    Boolean,
 }
 
 /// The descriptor fields read so far.
@@ -151,6 +161,37 @@ pub(super) fn begin_define_property(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    begin_define_property_with_result(
+        runtime,
+        realm,
+        target,
+        key,
+        name,
+        descriptor,
+        return_to,
+        origin,
+        execution_budget,
+        DefinePropertyResult::Target,
+    )
+}
+
+/// Starts descriptor collection with the caller-selected completion shape.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Reflect.defineProperty shares the resumable descriptor reader but selects a Boolean completion"
+)]
+pub(super) fn begin_define_property_with_result(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    target: StoredValue,
+    key: PropertyKey,
+    name: JsString,
+    descriptor: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+    result: DefinePropertyResult,
+) -> Result<NativeDispatch, NativeFailure> {
     if !matches!(target, StoredValue::Function(_) | StoredValue::Object(_)) {
         return Err(NativeFailure::Abrupt(descriptor_type_error(
             realm,
@@ -177,6 +218,7 @@ pub(super) fn begin_define_property(
         next: 0,
         realm,
         origin,
+        result,
     };
     advance_define_property(runtime, state, None, return_to, execution_budget)
 }
@@ -243,7 +285,7 @@ pub(super) fn advance_define_property(
         }
     }
 
-    apply_collected_descriptor(runtime, state, execution_budget)
+    apply_collected_descriptor(runtime, state, return_to, execution_budget)
 }
 
 /// Returns the origin recorded in a pending define-property continuation.
@@ -289,15 +331,17 @@ fn has_descriptor_field(
 fn apply_collected_descriptor(
     runtime: &mut Runtime,
     state: DefinePropertyContinuation,
+    return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let DefinePropertyContinuation {
         target,
         key,
         name,
-        fields,
+        mut fields,
         realm,
         origin,
+        result,
         ..
     } = state;
 
@@ -309,6 +353,36 @@ fn apply_collected_descriptor(
             &origin,
             "cannot have setter/getter and value or writable",
         )?));
+    }
+
+    // ArraySetLength converts a present `value` twice before descriptor
+    // validation or mutation. Keep that work in the existing resumable Array
+    // length conversion state machine so an object value can re-enter script at
+    // both specification-mandated conversion points.
+    if is_array_length_target(runtime, &target, &key)?
+        && let Some(value) = fields.value.take()
+    {
+        let conversion = array_length_define_target(
+            target,
+            name,
+            &value,
+            ArrayLengthDefinition {
+                writable: fields.writable,
+                enumerable: fields.enumerable,
+                configurable: fields.configurable,
+                result,
+            },
+        );
+        return begin_operator_primitive_conversion(
+            runtime,
+            value,
+            OperatorPrimitiveHint::Number,
+            conversion,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
     }
 
     let definition = if has_accessor {
@@ -335,7 +409,13 @@ fn apply_collected_descriptor(
 
     let outcome = define_own_property(runtime, &target, key, &definition, execution_budget)?;
     match outcome {
-        PropertyDefinitionOutcome::Complete => Ok(NativeDispatch::Immediate(target)),
+        PropertyDefinitionOutcome::Complete => Ok(NativeDispatch::Immediate(match result {
+            DefinePropertyResult::Target => target,
+            DefinePropertyResult::Boolean => StoredValue::Boolean(true),
+        })),
+        PropertyDefinitionOutcome::Failed(_) if matches!(result, DefinePropertyResult::Boolean) => {
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+        }
         PropertyDefinitionOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
             property_exception_at(realm, origin, Some(&name), failure)?,
         )),
@@ -482,7 +562,7 @@ pub(super) fn resolve_own_property(
 }
 
 /// Reads one own property, consulting the `String` wrapper exotic first.
-fn own_property_of(
+pub(super) fn own_property_of(
     runtime: &Runtime,
     reference: HeapReference,
     key: &PropertyKey,

@@ -1498,30 +1498,107 @@ fn observe_candidate_body(body: &str) -> Result<Observation, String> {
     match call_with_dynamic_function_support(&mut context, &function, &[], limits) {
         Ok(value) => normalize_candidate_value(&value),
         Err(ExecutionError::Exception(exception)) => {
-            let Some(kind) = exception.kind() else {
-                return Err("candidate threw an arbitrary JavaScript value".to_owned());
-            };
-            let name = exception_name(kind);
-            validate_runtime_ascii(
-                name,
-                "candidate exception name",
-                MAX_EXPECTED_ERROR_NAME_BYTES,
-            )?;
-            let message = exception
-                .message()
-                .ok_or_else(|| "candidate engine exception has no message".to_owned())?;
-            let message = decode_bounded_candidate_ascii(
-                message,
-                "candidate exception message",
-                MAX_EXPECTED_ERROR_MESSAGE_BYTES,
-            )?;
-            Ok(Observation::Throw {
-                name: name.to_owned(),
-                message,
-            })
+            if let Some(kind) = exception.kind() {
+                let name = exception_name(kind);
+                validate_runtime_ascii(
+                    name,
+                    "candidate exception name",
+                    MAX_EXPECTED_ERROR_NAME_BYTES,
+                )?;
+                let message = exception
+                    .message()
+                    .ok_or_else(|| "candidate engine exception has no message".to_owned())?;
+                let message = decode_bounded_candidate_ascii(
+                    message,
+                    "candidate exception message",
+                    MAX_EXPECTED_ERROR_MESSAGE_BYTES,
+                )?;
+                return Ok(Observation::Throw {
+                    name: name.to_owned(),
+                    message,
+                });
+            }
+            let thrown = exception
+                .thrown_value()
+                .ok_or_else(|| "candidate explicit throw has no JavaScript value".to_owned())?
+                .clone();
+            normalize_candidate_thrown_value(&mut context, &thrown, limits)
         }
         Err(error) => Err(format!("candidate execution failed: {error}")),
     }
+}
+
+/// Observes an explicit JavaScript throw through ordinary property access, as
+/// the oracle harness does. Keeping this in JavaScript is important: the host
+/// must not infer an Error family from prototype identity or bypass an
+/// observable `name`/`message` getter.
+fn normalize_candidate_thrown_value(
+    context: &mut quickjs_runtime::Context<'_>,
+    thrown: &JsValue,
+    limits: DynamicFunctionLimits,
+) -> Result<Observation, String> {
+    let parameters = [SourceFragment::new("value"), SourceFragment::new("key")];
+    let observer_limits = limits.with_frontend(
+        FrontendLimits::new(CANDIDATE_SOURCE_BYTES)
+            .with_max_dynamic_function_fragments(3)
+            .with_max_dynamic_function_origin_bytes(128),
+    );
+    let completion = construct_dynamic_function(
+        context,
+        DynamicFunctionSource::new(
+            DynamicFunctionKind::Function,
+            &parameters,
+            SourceFragment::new("return value && value[key];"),
+        ),
+        observer_limits,
+    )
+    .map_err(|error| format!("cannot construct candidate throw observer: {error}"))?;
+    let observer = completion
+        .into_value()
+        .into_function()
+        .map_err(|error| format!("candidate throw observer is not a function: {error}"))?;
+    let name_key = context.string(
+        JsString::from_utf8("name")
+            .map_err(|error| format!("cannot construct candidate exception name key: {error}"))?,
+    );
+    let message_key =
+        context.string(JsString::from_utf8("message").map_err(|error| {
+            format!("cannot construct candidate exception message key: {error}")
+        })?);
+    let name = call_with_dynamic_function_support(
+        context,
+        &observer,
+        &[thrown.clone(), name_key],
+        observer_limits,
+    )
+    .map_err(|error| format!("candidate exception name observation failed: {error}"))?;
+    let message = call_with_dynamic_function_support(
+        context,
+        &observer,
+        &[thrown.clone(), message_key],
+        observer_limits,
+    )
+    .map_err(|error| format!("candidate exception message observation failed: {error}"))?;
+    let name = name
+        .as_string()
+        .map_err(|error| format!("cannot inspect candidate exception name: {error}"))?
+        .ok_or_else(|| "candidate exception name is not a String".to_owned())?;
+    let message = message
+        .as_string()
+        .map_err(|error| format!("cannot inspect candidate exception message: {error}"))?
+        .ok_or_else(|| "candidate exception message is not a String".to_owned())?;
+    Ok(Observation::Throw {
+        name: decode_bounded_candidate_ascii(
+            name,
+            "candidate exception name",
+            MAX_EXPECTED_ERROR_NAME_BYTES,
+        )?,
+        message: decode_bounded_candidate_ascii(
+            message,
+            "candidate exception message",
+            MAX_EXPECTED_ERROR_MESSAGE_BYTES,
+        )?,
+    })
 }
 
 fn normalize_candidate_value(value: &JsValue) -> Result<Observation, String> {

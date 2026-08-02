@@ -35,14 +35,14 @@ use super::{
     HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString, NativeFunction,
     NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord,
     PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics,
-    RealmState, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
-    RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics, check_limit,
-    predefined_string, usize_to_u64,
+    RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity,
+    RuntimeLimits, RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics,
+    check_limit, predefined_string, usize_to_u64,
 };
 
-const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 123;
-const REALM_PROPERTY_COUNT: u64 = 413;
+const REALM_OBJECT_COUNT: usize = 21;
+const REALM_FUNCTION_COUNT: usize = 136;
+const REALM_PROPERTY_COUNT: u64 = 454;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -214,6 +214,12 @@ const NUMBER_FORMAT_ATOM_START: usize = ARRAY_COPIER_ATOM_START + ARRAY_COPIER_M
 
 /// Index of the `Array.prototype.splice` name in the dynamic atoms.
 const ARRAY_SPLICE_ATOM_START: usize = ARRAY_REDUCTION_ATOM_START + ARRAY_REDUCTION_METHODS.len();
+
+/// Index of the realm-local `Reflect` global name.
+///
+/// Keeping it after every existing method name preserves all established
+/// dynamic-atom offsets while the reflection surface grows incrementally.
+const REFLECT_ATOM_INDEX: usize = ARRAY_SPLICE_ATOM_START + 1;
 
 /// The `Array.prototype` reductions this profile installs.
 const ARRAY_REDUCTION_METHODS: [ArrayReduction; 2] =
@@ -542,6 +548,7 @@ struct RealmNames {
     symbol_iterator_name: JsString,
     symbol_to_primitive_name: JsString,
     get_description: JsString,
+    reflect: JsString,
 }
 
 impl RealmNames {
@@ -582,8 +589,15 @@ impl RealmNames {
             symbol_to_primitive_name: JsString::from_utf8("[Symbol.toPrimitive]")
                 .map_err(AtomError::from)?,
             get_description: JsString::from_utf8("get description").map_err(AtomError::from)?,
+            reflect: JsString::from_utf8("Reflect").map_err(AtomError::from)?,
         })
     }
+}
+
+/// Reserved records for the ordinary `%Reflect%` object and its method set.
+struct ReflectRecords {
+    object: ObjectRecord,
+    methods: [ObjectRecord; ReflectMethod::ALL.len()],
 }
 
 struct RealmBaseRecords {
@@ -724,6 +738,7 @@ struct RealmRecords {
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
     symbol: SymbolIntrinsicRecords,
+    reflect: ReflectRecords,
 }
 
 impl RealmRecords {
@@ -834,6 +849,11 @@ impl RealmRecords {
             symbol_for: reserved_record(2)?,
             key_for: reserved_record(2)?,
         };
+        let reflect = ReflectRecords {
+            // Thirteen methods plus @@toStringTag.
+            object: reserved_record(ReflectMethod::ALL.len() + 1)?,
+            methods: reflect_method_records()?,
+        };
         Ok(Self {
             base,
             errors,
@@ -855,6 +875,7 @@ impl RealmRecords {
             array,
             iterators,
             symbol,
+            reflect,
         })
     }
 }
@@ -939,6 +960,12 @@ struct SymbolIntrinsicGraph {
     key_for: FunctionId,
 }
 
+/// Inserted identities for the ordinary `%Reflect%` surface.
+struct ReflectGraph {
+    object: ObjectId,
+    methods: [FunctionId; ReflectMethod::ALL.len()],
+}
+
 impl RealmBase {
     fn rollback(self, runtime: &mut Runtime) {
         for function in self.object_statics.into_iter().rev() {
@@ -989,10 +1016,14 @@ struct RealmGraph {
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
     symbol: SymbolIntrinsicGraph,
+    reflect: ReflectGraph,
 }
 
 impl RealmGraph {
     fn rollback(self, runtime: &mut Runtime) {
+        for function in self.reflect.methods.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
         for intrinsic in self.errors.entries.into_iter().rev() {
             debug_assert!(runtime.functions.remove(intrinsic.constructor).is_some());
         }
@@ -1060,6 +1091,7 @@ impl RealmGraph {
             debug_assert!(runtime.objects.remove(intrinsic.prototype).is_some());
         }
         for object in [
+            self.reflect.object,
             self.symbol.prototype,
             self.iterators.string_iterator_prototype,
             self.iterators.array_iterator_prototype,
@@ -1261,6 +1293,7 @@ impl Runtime {
         let array = self.insert_array_intrinsics(&base, records.array);
         let iterators = self.insert_iterator_intrinsics(&base, records.iterators);
         let symbol = self.insert_symbol_intrinsics(&base, records.symbol);
+        let reflect = self.insert_reflect_intrinsics(&base, records.reflect);
         let string_methods = self.insert_string_prototype_methods(&base, records.string_methods);
         let number_predicates = self.insert_number_predicates(&base, records.number_predicates);
         let string_from_statics =
@@ -1306,6 +1339,7 @@ impl Runtime {
             array,
             iterators,
             symbol,
+            reflect,
         })
     }
 
@@ -1340,7 +1374,8 @@ impl Runtime {
                     + ARRAY_SEARCH_METHODS.len()
                     + OBJECT_PROTOTYPE_REFLECTION.len()
                     + ARRAY_MUTATOR_METHODS.len()
-                    + ARRAY_COPIER_METHODS.len(),
+                    + ARRAY_COPIER_METHODS.len()
+                    + 1,
             )
             .is_err()
         {
@@ -1429,6 +1464,7 @@ impl Runtime {
                 interned(&mut self.atoms, &mut dynamic_atoms, reduction.name())?;
             }
             interned(&mut self.atoms, &mut dynamic_atoms, "splice")?;
+            intern(&mut self.atoms, &mut dynamic_atoms, &names.reflect)?;
             Ok(())
         })();
         if let Err(error) = outcome {
@@ -2119,6 +2155,35 @@ impl Runtime {
         }
     }
 
+    /// Inserts the ordinary `%Reflect%` object and its thirteen methods.
+    fn insert_reflect_intrinsics(
+        &mut self,
+        base: &RealmBase,
+        mut records: ReflectRecords,
+    ) -> ReflectGraph {
+        records
+            .object
+            .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
+        let object = self.insert_reserved_object(HeapObject::ordinary(records.object));
+        let mut methods = [None; ReflectMethod::ALL.len()];
+        for ((slot, method), record) in methods
+            .iter_mut()
+            .zip(ReflectMethod::ALL)
+            .zip(records.methods)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::Reflect(method),
+                record,
+            ));
+        }
+        ReflectGraph {
+            object,
+            methods: methods.map(|slot| slot.expect("every Reflect method was inserted")),
+        }
+    }
+
     fn insert_reserved_native(
         &mut self,
         realm: RealmId,
@@ -2214,6 +2279,7 @@ impl Runtime {
         self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
         self.publish_global_value_properties(graph)?;
         self.publish_symbol_intrinsic_properties(&graph.symbol, graph, keys, names)?;
+        self.publish_reflect_intrinsic_properties(graph, keys, names)?;
         self.append_object_methods(
             graph.base.global_object,
             [
@@ -2227,6 +2293,47 @@ impl Runtime {
                 (&keys.symbol, graph.symbol.constructor),
             ],
         )
+    }
+
+    /// Publishes the specification-defined ordinary `%Reflect%` shape.
+    fn publish_reflect_intrinsic_properties(
+        &mut self,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        let reflect_key =
+            PropertyKey::from_validated_atom(graph.dynamic_atoms[REFLECT_ATOM_INDEX].clone());
+        let method_keys =
+            ReflectMethod::ALL.map(|method| self.predefined_property_key(method.predefined_atom()));
+        {
+            let record = &mut self
+                .objects
+                .get_mut(graph.reflect.object)
+                .expect("new Reflect object remains live")
+                .record;
+            for (key, function) in method_keys.into_iter().zip(graph.reflect.methods) {
+                record.append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
+            }
+            record.append_data(
+                keys.symbol_to_string_tag.clone(),
+                IDENTITY_PROPERTY,
+                StoredValue::String(names.reflect.clone()),
+            )?;
+        }
+        for (method, function) in ReflectMethod::ALL.into_iter().zip(graph.reflect.methods) {
+            let name = predefined_string(&self.atoms, method.predefined_atom());
+            self.append_function_identity(function, &name, method.length(), keys)?;
+        }
+        self.objects
+            .get_mut(graph.base.global_object)
+            .expect("new realm global object remains live")
+            .record
+            .append_data(
+                reflect_key,
+                METHOD_PROPERTY,
+                StoredValue::Object(graph.reflect.object),
+            )
     }
 
     /// Installs the pinned global value properties `undefined`, `NaN`, and
@@ -3238,6 +3345,16 @@ fn object_reflection_records()
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Object reflection record was reserved")))
+}
+
+/// Reserves one native function record per `%Reflect%` method.
+fn reflect_method_records() -> Result<[ObjectRecord; ReflectMethod::ALL.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; ReflectMethod::ALL.len()] =
+        [const { None }; ReflectMethod::ALL.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Reflect method record was reserved")))
 }
 
 /// Reserves one record per `Array.prototype` reduction.

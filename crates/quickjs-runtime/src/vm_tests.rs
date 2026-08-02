@@ -336,6 +336,8 @@ fn array_length_and_index_mutations_precharge_shape_work_before_mutation() {
             base: StoredValue::Object(array),
             name: JsString::from_utf8("length").expect("length"),
             strict: true,
+            reflect: false,
+            definition: None,
             original: None,
             first_length: None,
         },
@@ -628,7 +630,7 @@ fn array_iterator_creation_boxes_a_primitive_receiver_once() {
 #[test]
 fn array_iterator_primitive_boxing_preflights_the_complete_transaction() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(21)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(22)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = runtime.context(&realm).expect("context").realm;
     let usage = runtime.usage();
@@ -645,8 +647,8 @@ fn array_iterator_primitive_boxing_preflights_the_complete_transaction() {
         result,
         Err(NativeFailure::Execution(ExecutionError::LimitExceeded {
             resource: RuntimeResource::HeapObjects,
-            limit: 21,
-            observed: 22,
+            limit: 22,
+            observed: 23,
         }))
     ));
     assert_eq!(runtime.usage(), usage);
@@ -3636,6 +3638,8 @@ fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
                 base: StoredValue::Object(array),
                 name: JsString::from_utf8("length").expect("length"),
                 strict: true,
+                reflect: false,
+                definition: None,
                 original: Some(StoredValue::Object(object)),
                 first_length: None,
             },
@@ -3650,6 +3654,8 @@ fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
                 base: StoredValue::Object(array),
                 name: JsString::from_utf8("length").expect("length"),
                 strict: true,
+                reflect: false,
+                definition: None,
                 original: None,
                 first_length: Some(1),
             },
@@ -4791,7 +4797,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(415))
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(456))
         .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
@@ -4813,8 +4819,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 415,
-            observed: 416,
+            limit: 456,
+            observed: 457,
         }
     ));
     let failed = runtime.usage();

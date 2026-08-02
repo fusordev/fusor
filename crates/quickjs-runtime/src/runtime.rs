@@ -681,6 +681,8 @@ pub(crate) enum NativeFunctionKind {
     ObjectPrototypeHasOwnProperty,
     ObjectPrototypeIsPrototypeOf,
     ObjectPrototypePropertyIsEnumerable,
+    /// One method on the ordinary `%Reflect%` object.
+    Reflect(ReflectMethod),
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,
@@ -736,6 +738,75 @@ pub(crate) enum NativeFunctionKind {
     ArrayIteratorNext,
     StringPrototypeIterator,
     StringIteratorNext,
+}
+
+/// The ECMAScript 2025 `%Reflect%` method set, in specification property order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReflectMethod {
+    Apply,
+    Construct,
+    DefineProperty,
+    DeleteProperty,
+    Get,
+    GetOwnPropertyDescriptor,
+    GetPrototypeOf,
+    Has,
+    IsExtensible,
+    OwnKeys,
+    PreventExtensions,
+    Set,
+    SetPrototypeOf,
+}
+
+impl ReflectMethod {
+    pub(crate) const ALL: [Self; 13] = [
+        Self::Apply,
+        Self::Construct,
+        Self::DefineProperty,
+        Self::DeleteProperty,
+        Self::Get,
+        Self::GetOwnPropertyDescriptor,
+        Self::GetPrototypeOf,
+        Self::Has,
+        Self::IsExtensible,
+        Self::OwnKeys,
+        Self::PreventExtensions,
+        Self::Set,
+        Self::SetPrototypeOf,
+    ];
+
+    pub(crate) const fn predefined_atom(self) -> PredefinedAtom {
+        match self {
+            Self::Apply => PredefinedAtom::Apply,
+            Self::Construct => PredefinedAtom::Construct,
+            Self::DefineProperty => PredefinedAtom::DefineProperty,
+            Self::DeleteProperty => PredefinedAtom::DeleteProperty,
+            Self::Get => PredefinedAtom::Get,
+            Self::GetOwnPropertyDescriptor => PredefinedAtom::GetOwnPropertyDescriptor,
+            Self::GetPrototypeOf => PredefinedAtom::GetPrototypeOf,
+            Self::Has => PredefinedAtom::Has,
+            Self::IsExtensible => PredefinedAtom::IsExtensible,
+            Self::OwnKeys => PredefinedAtom::OwnKeys,
+            Self::PreventExtensions => PredefinedAtom::PreventExtensions,
+            Self::Set => PredefinedAtom::SetProperty,
+            Self::SetPrototypeOf => PredefinedAtom::SetPrototypeOf,
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Apply | Self::DefineProperty | Self::Set => 3,
+            Self::Construct
+            | Self::DeleteProperty
+            | Self::Get
+            | Self::GetOwnPropertyDescriptor
+            | Self::Has
+            | Self::SetPrototypeOf => 2,
+            Self::GetPrototypeOf | Self::IsExtensible | Self::OwnKeys | Self::PreventExtensions => {
+                1
+            }
+        }
+    }
 }
 
 impl NativeFunctionKind {

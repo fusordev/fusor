@@ -181,6 +181,15 @@ fn type_error_message(body: &str) -> String {
     })
 }
 
+fn assert_exception_kind(body: &str, expected: ExceptionKind) {
+    evaluate(body, |result| {
+        let Err(ExecutionError::Exception(exception)) = result else {
+            panic!("expected a JavaScript throw from {body}");
+        };
+        assert_eq!(exception.kind(), Some(expected));
+    });
+}
+
 /// Joins an array's elements with commas.
 ///
 /// `Array.prototype.join` is not part of the current profile, so the fixtures
@@ -438,4 +447,249 @@ fn object_keys_returns_an_independent_array() {
          first[0]=\"changed\";\
          return first!==second&&second[0]===\"a\"&&o.a===1;"
     ));
+}
+
+/// ECMA-262 28.1 defines `%Reflect%` as a non-callable ordinary object whose
+/// prototype is `%Object.prototype%`; all thirteen methods have their exact
+/// identity and the object has the specification @@toStringTag descriptor.
+#[test]
+fn reflect_construct_has_the_specification_shape() {
+    assert_eq!(
+        text(&format!(
+            "{JOIN}return join([typeof Reflect,\
+             Object.getPrototypeOf(Reflect)===Object.prototype,\
+             Object.prototype.toString.call(Reflect),\
+             Reflect.construct.length,Reflect.construct.name,\
+             Object.getOwnPropertyNames(Reflect).join(',')]);"
+        )),
+        "object,true,[object Reflect],2,construct,apply,construct,defineProperty,deleteProperty,get,getOwnPropertyDescriptor,getPrototypeOf,has,isExtensible,ownKeys,preventExtensions,set,setPrototypeOf"
+    );
+    assert_eq!(
+        text(
+            "var d=Object.getOwnPropertyDescriptor(Reflect,Symbol.toStringTag);\
+             return d.value+'|'+d.writable+'|'+d.enumerable+'|'+d.configurable;"
+        ),
+        "Reflect|false|false|true"
+    );
+    assert_eq!(type_error_message("return Reflect();"), "not a function");
+    assert!(boolean(
+        "var specs=[['apply',3],['construct',2],['defineProperty',3],\
+          ['deleteProperty',2],['get',2],['getOwnPropertyDescriptor',2],\
+          ['getPrototypeOf',1],['has',2],['isExtensible',1],['ownKeys',1],\
+          ['preventExtensions',1],['set',3],['setPrototypeOf',2]];\
+         for(var i=0;i<specs.length;i++){\
+           var name=specs[i][0],method=Reflect[name];\
+           var descriptor=Object.getOwnPropertyDescriptor(Reflect,name);\
+           if(typeof method!=='function'||method.name!==name||\
+              method.length!==specs[i][1]||!descriptor.writable||\
+              descriptor.enumerable||!descriptor.configurable){return false;}\
+         }return true;"
+    ));
+}
+
+/// `Reflect.construct` validates `target` and the explicit `newTarget` before
+/// touching `argumentsList`, then reads `length` once and indexed values from
+/// left to right through ordinary `Get`.
+#[test]
+fn reflect_construct_preserves_specification_validation_and_collection_order() {
+    assert_eq!(
+        text(
+            "var log='';\
+             var args={get length(){log=log+'l';return 1;},\
+                       get 0(){log=log+'0';return 'message';}};\
+             var error=Reflect.construct(Error,args);\
+             return error.message+'|'+log+'|'+(Object.getPrototypeOf(error)===Error.prototype);"
+        ),
+        "message|l0|true"
+    );
+    assert_eq!(
+        text(
+            "var log='';var args={get length(){log=log+'l';return 0;}};\
+             try{Reflect.construct(Error.prototype.toString,args);}catch(error){}\
+             try{Reflect.construct(Error,args,Error.prototype.toString);}catch(error){}\
+             return log;"
+        ),
+        ""
+    );
+    assert_eq!(
+        type_error_message("return Reflect.construct(Error,null);"),
+        "not an object"
+    );
+    assert_eq!(
+        type_error_message("return Reflect.construct(Error,[],undefined);"),
+        "not a constructor"
+    );
+}
+
+/// The selected `newTarget.prototype` controls allocation while `target`
+/// controls constructor execution and the returned object completion.
+#[test]
+fn reflect_construct_keeps_target_and_new_target_distinct() {
+    assert_eq!(
+        text(
+            "function Target(value){this.value=value;}\
+             function NewTarget(){}\
+             NewTarget.prototype={marker:'custom'};\
+             var value=Reflect.construct(Target,[7],NewTarget);\
+             return value.value+'|'+value.marker+'|'+\
+                    (Object.getPrototypeOf(value)===NewTarget.prototype);"
+        ),
+        "7|custom|true"
+    );
+    assert_eq!(
+        text(
+            "function Target(){return {replacement:true};}\
+             var value=Reflect.construct(Target,[]);\
+             return value.replacement+'|'+(Object.getPrototypeOf(value)===Target.prototype);"
+        ),
+        "true|false"
+    );
+}
+
+/// The ordinary reflection surface delegates calls, preserves an explicit
+/// receiver for accessors, includes inherited properties in `has`, and emits
+/// `[[OwnPropertyKeys]]`'s numeric/string/symbol phase order.
+#[test]
+fn reflect_reads_calls_and_lists_keys_with_internal_method_semantics() {
+    assert_eq!(
+        text(
+            "var symbol=Symbol('s');var object={2:'two',a:1};\
+             Object.defineProperty(object,'hidden',{value:3});object[symbol]=4;\
+             function add(a,b){return this.base+a+b;}\
+             var getter={get x(){return this.value;}};var receiver={value:9};\
+             var keys=Reflect.ownKeys(object).map(function(key){\
+               return typeof key==='symbol'?'symbol':key;});\
+             return Reflect.apply(add,{base:5},[2,3])+'|'+\
+                    Reflect.get(getter,'x',receiver)+'|'+\
+                    Reflect.has(Object.create(object),'a')+'|'+\
+                    Reflect.getOwnPropertyDescriptor(object,'hidden').enumerable+'|'+\
+                    keys.join(',');"
+        ),
+        "10|9|true|false|2,a,hidden,symbol"
+    );
+}
+
+/// Reflect mutation methods expose internal-method rejection as `false`
+/// instead of throwing, while successful definitions and writes retain their
+/// exact descriptor and receiver behavior.
+#[test]
+fn reflect_mutations_return_booleans_and_honor_the_explicit_receiver() {
+    assert_eq!(
+        text(
+            "var object={};\
+             var defined=Reflect.defineProperty(object,'x',\
+               {value:1,writable:false,configurable:false});\
+             var redefined=Reflect.defineProperty(object,'x',{value:2});\
+             var deleted=Reflect.deleteProperty(object,'x');\
+             var fixed={};Object.defineProperty(fixed,'x',{value:1,writable:false});\
+             var receiver={};var rejected=Reflect.set(fixed,'x',2,receiver);\
+             var base={open:1};var child={};\
+             var written=Reflect.set(base,'open',7,child);\
+             var locked={};Object.preventExtensions(locked);\
+             var prototype=Reflect.setPrototypeOf(locked,{});\
+             var prevented=Reflect.preventExtensions(receiver);\
+             return [defined,redefined,deleted,rejected,written,child.open,\
+                     prototype,prevented,Reflect.isExtensible(receiver),\
+                     Reflect.getPrototypeOf(child)===Object.prototype].join('|');"
+        ),
+        "true|false|false|false|true|7|false|true|false|true"
+    );
+    assert_eq!(
+        text(
+            "var target={set x(value){this.seen=value;}};var receiver={};\
+             return Reflect.set(target,'x',11,receiver)+'|'+receiver.seen;"
+        ),
+        "true|11"
+    );
+}
+
+/// Array `length` keeps its resumable numeric conversion and exotic mutation
+/// rules when reached through `Reflect.set`, but completes with a Boolean.
+#[test]
+fn reflect_set_preserves_array_length_semantics() {
+    assert_eq!(
+        text(
+            "var array=[1,2,3];var shortened=Reflect.set(array,'length',1);\
+             Object.freeze(array);var blocked=Reflect.set(array,'length',0);\
+             return shortened+'|'+array.length+'|'+blocked;"
+        ),
+        "true|1|false"
+    );
+    assert_exception_kind(
+        "var array=[];return Reflect.set(array,'length',1.5);",
+        ExceptionKind::RangeError,
+    );
+}
+
+/// `ArraySetLength` performs `ToUint32` and `ToNumber` as distinct observable
+/// conversions, truncates before clearing writable, and returns the caller's
+/// Object/Reflect completion shape.
+#[test]
+fn array_length_descriptor_definitions_follow_array_set_length() {
+    assert_eq!(
+        text(
+            "var log='';var value={valueOf(){log=log+'v';return 1;}};\
+             var array=[1,2,3];\
+             var defined=Reflect.defineProperty(array,'length',\
+               {value:value,writable:false});\
+             var descriptor=Object.getOwnPropertyDescriptor(array,'length');\
+             return defined+'|'+array.length+'|'+descriptor.writable+'|'+log;"
+        ),
+        "true|1|false|vv"
+    );
+    assert_eq!(
+        text(
+            "var array=[1,2];\
+             var same=Object.defineProperty(array,'length',{writable:false})===array;\
+             var descriptor=Object.getOwnPropertyDescriptor(array,'length');\
+             return same+'|'+array.length+'|'+descriptor.writable+'|'+\
+                    Reflect.defineProperty(array,'length',{value:2})+'|'+\
+                    Reflect.defineProperty(array,'length',{value:1});"
+        ),
+        "true|2|false|true|false"
+    );
+    assert_exception_kind(
+        "var array=[];return Reflect.defineProperty(array,'length',{value:1.5});",
+        ExceptionKind::RangeError,
+    );
+}
+
+/// A non-configurable index stops an Array length shrink at that index plus
+/// one. `ArraySetLength` still installs a requested `writable: false` before
+/// reporting the failed internal definition.
+#[test]
+fn array_length_descriptor_blockers_preserve_the_partial_specification_result() {
+    assert_eq!(
+        text(
+            "var array=[];\
+             Object.defineProperty(array,'2',{value:3,configurable:false});\
+             var defined=Reflect.defineProperty(array,'length',\
+               {value:0,writable:false});\
+             var descriptor=Object.getOwnPropertyDescriptor(array,'length');\
+             return defined+'|'+array.length+'|'+descriptor.writable+'|'+array[2];"
+        ),
+        "false|3|false|3"
+    );
+}
+
+/// Target type checks precede every observable property-key or array-list
+/// conversion required by the corresponding ECMA-262 Reflect algorithm.
+#[test]
+fn reflect_validates_targets_before_observable_conversions() {
+    assert_eq!(
+        text(
+            "var log='';function keyString(){log=log+'k';return 'x';}\
+             var key={toString:keyString};\
+             var list={get length(){log=log+'l';return 0;}};\
+             try{Reflect.apply(1,null,list);}catch(error){}\
+             try{Reflect.defineProperty(1,key,{});}catch(error){}\
+             try{Reflect.deleteProperty(1,key);}catch(error){}\
+             try{Reflect.get(1,key);}catch(error){}\
+             try{Reflect.getOwnPropertyDescriptor(1,key);}catch(error){}\
+             try{Reflect.has(1,key);}catch(error){}\
+             try{Reflect.set(1,key,0);}catch(error){}\
+             return log;"
+        ),
+        ""
+    );
 }

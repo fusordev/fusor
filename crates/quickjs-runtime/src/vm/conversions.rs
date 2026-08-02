@@ -1699,15 +1699,40 @@ pub(super) fn finish_array_length_write(
             length
         }
     };
-    let StoredValue::Object(object) = state.base else {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "array length conversion lost its array base",
+    let object = match &state.base {
+        StoredValue::Object(object) => *object,
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "array length conversion lost its array base",
+            }
+            .into());
         }
-        .into());
     };
+    if let Some(definition) = state.definition {
+        return finish_array_length_definition(
+            runtime,
+            object,
+            length,
+            definition,
+            state.base,
+            &state.name,
+            realm,
+            origin,
+            execution_budget,
+        );
+    }
     let work = runtime.preview_array_length_write_work(object, length)?;
     execution_budget.charge_instructions(work)?;
     match runtime.set_array_length(object, length)? {
+        ArrayLengthWriteOutcome::Complete if state.reflect => {
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
+        }
+        ArrayLengthWriteOutcome::ReadOnly
+        | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. }
+            if state.reflect =>
+        {
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+        }
         ArrayLengthWriteOutcome::Complete
         | ArrayLengthWriteOutcome::ReadOnly
         | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. }
@@ -1730,6 +1755,133 @@ pub(super) fn finish_array_length_write(
                 PropertyFailure::NotConfigurable,
             )?))
         }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "ArraySetLength completion keeps the converted length, descriptor flags, target completion, diagnostic identity, and budget explicit"
+)]
+fn finish_array_length_definition(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    length: u32,
+    requested: ArrayLengthDefinition,
+    target: StoredValue,
+    name: &JsString,
+    realm: RealmId,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let key = runtime.predefined_property_key(PredefinedAtom::Length);
+    let existing =
+        runtime
+            .array_own_property(object, &key)?
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "ArraySetLength target has no own length property",
+            })?;
+    let current_writable = existing.layout().writable() == Some(true);
+    let definition = PropertyDefinition::data(
+        Requested::Present(StoredValue::Number(JsNumber::from_u32(length))),
+        requested_bool(requested.writable),
+    )
+    .with_enumerable(requested_bool(requested.enumerable))
+    .with_configurable(requested_bool(requested.configurable));
+    let final_writable = match validate_and_apply_existing(&definition, &existing) {
+        DefinitionDecision::Rejected => {
+            return array_length_definition_result(
+                requested.result,
+                false,
+                target,
+                realm,
+                origin,
+                name,
+                PropertyFailure::NotConfigurable,
+            );
+        }
+        DefinitionDecision::Unchanged => existing.layout().writable() == Some(true),
+        DefinitionDecision::Replace(OwnProperty::Data { layout, .. }) => {
+            layout.writable() == Some(true)
+        }
+        DefinitionDecision::Create(_)
+        | DefinitionDecision::Replace(OwnProperty::Accessor { .. }) => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ArraySetLength validation changed the length property's kind or presence",
+            }
+            .into());
+        }
+    };
+    let current_length = runtime
+        .array_length(object)?
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "ArraySetLength target lost its Array state",
+        })?;
+    let outcome = if current_length == length {
+        ArrayLengthWriteOutcome::Complete
+    } else {
+        let work = runtime.preview_array_length_write_work(object, length)?;
+        execution_budget.charge_instructions(work)?;
+        runtime.set_array_length(object, length)?
+    };
+    if current_writable && !final_writable {
+        // ArraySetLength applies a requested false writable flag even when a
+        // non-configurable index stops the shrink and makes the definition
+        // itself return false.
+        runtime.set_array_length_writable(object, false)?;
+    }
+    match outcome {
+        ArrayLengthWriteOutcome::Complete => array_length_definition_result(
+            requested.result,
+            true,
+            target,
+            realm,
+            origin,
+            name,
+            PropertyFailure::NotConfigurable,
+        ),
+        ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. } => array_length_definition_result(
+            requested.result,
+            false,
+            target,
+            realm,
+            origin,
+            name,
+            PropertyFailure::NotConfigurable,
+        ),
+        ArrayLengthWriteOutcome::ReadOnly => Err(EngineFault::RuntimeInvariant {
+            message: "validated ArraySetLength definition reached a read-only mutation",
+        }
+        .into()),
+    }
+}
+
+const fn requested_bool(value: Option<bool>) -> Requested<bool> {
+    match value {
+        Some(value) => Requested::Present(value),
+        None => Requested::Absent,
+    }
+}
+
+fn array_length_definition_result(
+    result: DefinePropertyResult,
+    success: bool,
+    target: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+    name: &JsString,
+    failure: PropertyFailure,
+) -> Result<NativeDispatch, NativeFailure> {
+    match (result, success) {
+        (DefinePropertyResult::Target, true) => Ok(NativeDispatch::Immediate(target)),
+        (DefinePropertyResult::Boolean, _) => {
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(success)))
+        }
+        (DefinePropertyResult::Target, false) => Err(NativeFailure::Abrupt(property_exception_at(
+            realm,
+            origin.clone(),
+            Some(name),
+            failure,
+        )?)),
     }
 }
 
@@ -2327,7 +2479,7 @@ fn finish_property_key_target(
             realm,
         } => {
             if is_array_length_target(runtime, &base, &property.key)? {
-                let target = array_length_write_target(base, property.name, strict, &value);
+                let target = array_length_write_target(base, property.name, strict, false, &value);
                 return begin_operator_primitive_conversion(
                     runtime,
                     value,
@@ -2396,7 +2548,24 @@ fn finish_property_key_target(
             origin.clone(),
             execution_budget,
         ),
-        PropertyKeyTarget::OwnPropertyDescriptor { target, realm } => {
+        PropertyKeyTarget::ReflectDefineProperty {
+            target,
+            descriptor,
+            realm,
+        } => begin_define_property_with_result(
+            runtime,
+            realm,
+            target,
+            property.key,
+            property.name,
+            descriptor,
+            return_to,
+            origin.clone(),
+            execution_budget,
+            DefinePropertyResult::Boolean,
+        ),
+        PropertyKeyTarget::OwnPropertyDescriptor { target, realm }
+        | PropertyKeyTarget::ReflectOwnPropertyDescriptor { target, realm } => {
             own_property_descriptor(runtime, realm, &target, &property.key, origin)
         }
         // `hasOwnProperty` and `propertyIsEnumerable` share one own-property
@@ -2422,6 +2591,54 @@ fn finish_property_key_target(
             });
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(enumerable)))
         }
+        PropertyKeyTarget::ReflectHas { target, realm } => Ok(NativeDispatch::Immediate(
+            StoredValue::Boolean(has_property(runtime, realm, &target, &property.key)?),
+        )),
+        PropertyKeyTarget::ReflectGet { target, receiver } => {
+            charge_heap_property_lookup(runtime, &target, execution_budget)?;
+            let reference = target
+                .heap_reference()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Reflect.get lost its validated target",
+                })?;
+            match read_heap_property_for_receiver(runtime, reference, receiver, &property.key)? {
+                PropertyReadOutcome::Value(value) => Ok(NativeDispatch::Immediate(value)),
+                PropertyReadOutcome::Getter { function, receiver } => {
+                    Ok(NativeDispatch::Call(NativeCall {
+                        function,
+                        receiver,
+                        arguments: CallArguments::empty(),
+                        return_to,
+                        origin: origin.clone(),
+                        continuations: Vec::new(),
+                        pre_call: None,
+                        new_target: None,
+                        native_caller: None,
+                    }))
+                }
+                PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
+                    message: "Reflect.get failed an object-valued property read",
+                }
+                .into()),
+            }
+        }
+        PropertyKeyTarget::ReflectSet {
+            target,
+            receiver,
+            value,
+            realm,
+        } => reflect_set_property(
+            runtime,
+            realm,
+            target,
+            property.key,
+            property.name,
+            value,
+            receiver,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         PropertyKeyTarget::Delete {
             base,
             strict,

@@ -302,6 +302,20 @@ incorrectly, so no script can observe a wrong result.
   overwritten before it is read: from the end when growing, from the front when
   shrinking. An absent `deleteCount` removes everything from `start` while an
   absent `start` removes nothing.
+- [x] The ECMAScript 2025 ordinary-object `%Reflect%` surface: all thirteen
+  methods have their specification names, lengths, descriptors, property order,
+  and non-constructable identities on a non-callable ordinary object with
+  `%Object.prototype%` and `@@toStringTag`. `apply` and `construct` share the
+  resumable `CreateListFromArrayLike` machine while preserving their distinct
+  validation and nullish-list rules. Keyed methods validate the target before
+  resumable `ToPropertyKey`; `get` and `set` preserve an explicit receiver;
+  descriptor, delete, prototype, extensibility, and own-key operations expose
+  their internal-method Boolean/result shapes rather than the throwing `Object`
+  wrappers. `Reflect.set` also reaches the existing resumable Array `length`
+  conversion and reports a rejected exotic write as `false`. Array `length`
+  definitions run their two observable numeric conversions, preserve partial
+  shrink results at non-configurable indices, and install a requested
+  non-writable final state even when that shrink returns `false`.
 - [ ] Remaining String/Number/Array method surface (`sort`, `flat`, `flatMap`,
   `copyWithin`, `with`, `toSorted`, `toReversed`, `toSpliced`, and the
   locale-dependent renderings), shape sharing/transition
@@ -313,8 +327,13 @@ incorrectly, so no script can observe a wrong result.
 - [x] Initial Error family: Error, native Error subclasses, AggregateError,
   constructor/prototype graphs, causes, `Error.isError`, `toString`, iterator
   ordering/close behavior, and snapshotted engine-error stacks.
-- [ ] Close Error compatibility gaps, then implement Object/Function/Reflect,
-  Proxy, remaining built-ins, RegExp/Date/JSON, collections, binary data,
+- [x] Close the Error compatibility corpus, including `Reflect.construct`
+  construction paths and script-thrown Error observation through ordinary
+  JavaScript property reads: 35/35 cases and all 59 required feature tags match
+  the pinned oracle.
+- [ ] Complete remaining Object/Function and exotic reflection semantics
+  (including Proxy), then remaining built-ins, RegExp/Date/JSON, collections,
+  binary data,
   Atomics, Unicode tables, promises, async functions/generators, weak
   references, and finalization registries.
 - [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide
@@ -363,12 +382,11 @@ fixture declares an unreachable one, or when an observed oracle message does not
 match the pinned format string.
 
 Current corpus status: parser 196/196, Number radix 991/991, control flow 63/63,
-iterators 40/40, function apply 15/15, function bind 21/21, call spread 15/15.
-The Error corpus stands at 31/35. Three remaining mismatches need `Reflect`,
-which belongs to the built-ins milestone; the fourth needs the harness to
-normalize a script-thrown Error object, which it currently reports as an
-arbitrary value. Each fails closed as a missing property rather than producing a
-wrong answer.
+iterators 40/40, function apply 15/15, function bind 21/21, call spread 15/15,
+and Error 35/35 (59/59 required feature tags). The Error harness observes an
+explicitly thrown value's `name` and `message` by calling a small ordinary
+dynamic JavaScript observer, so normalization follows script-visible property
+semantics instead of inferring an engine-side prototype brand.
 
 ## Engineering rules
 

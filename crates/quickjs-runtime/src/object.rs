@@ -78,6 +78,13 @@ impl KeyPhases {
         strings: true,
         symbols: false,
     };
+
+    /// All three `[[OwnPropertyKeys]]` phases, used by `Reflect.ownKeys`.
+    pub(crate) const ALL: Self = Self {
+        indices: true,
+        strings: true,
+        symbols: true,
+    };
 }
 
 /// Which atom-keyed phase `push_atom_keys` appends.

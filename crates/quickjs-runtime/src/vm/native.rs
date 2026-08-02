@@ -387,6 +387,7 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
+            NativeContinuation::ReflectSet => NativeDispatch::Immediate(StoredValue::Boolean(true)),
             NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
         };
         match dispatch {
@@ -1123,6 +1124,17 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::Reflect(method) => begin_reflect_method(
+            runtime,
+            native.realm,
+            method,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            active_frames,
+            active_frame_values,
+            execution_budget,
+        ),
         NativeFunctionKind::ObjectPrototypeToString => begin_object_prototype_to_string(
             runtime,
             native.realm,
@@ -1730,7 +1742,105 @@ pub(super) fn begin_function_apply(
     let mut supplied = inputs.arguments;
     let receiver = supplied.take_first_or_undefined();
     let array_like = supplied.take_first_or_undefined();
-    if matches!(array_like, StoredValue::Undefined | StoredValue::Null) {
+    begin_array_like_call(
+        runtime,
+        realm,
+        target,
+        receiver,
+        array_like,
+        return_to,
+        origin,
+        active_frames,
+        active_frame_values,
+        execution_budget,
+        new_target,
+        native_caller,
+        true,
+    )
+}
+
+/// Implements `Reflect.construct` in the exact ECMA-262 order: validate the
+/// target, select and validate `newTarget`, then collect the array-like list.
+/// The last step reuses the same resumable indexed `Get` machine as
+/// `Function.prototype.apply`, but nullish argument lists are rejected rather
+/// than treated as empty.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Reflect.construct keeps target/new-target validation and the shared array-like execution budget explicit"
+)]
+pub(super) fn begin_reflect_construct(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    mut supplied: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    active_frames: usize,
+    active_frame_values: u64,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let target = match supplied.take_first_or_undefined() {
+        StoredValue::Function(function) if function_is_constructor(runtime, function)? => function,
+        _ => {
+            return Err(function_apply_exception(
+                realm,
+                ExceptionKind::TypeError,
+                "not a constructor",
+                origin,
+            )?);
+        }
+    };
+    let array_like = supplied.take_first_or_undefined();
+    let new_target = match supplied.take_first() {
+        None => target,
+        Some(StoredValue::Function(function)) if function_is_constructor(runtime, function)? => {
+            function
+        }
+        Some(_) => {
+            return Err(function_apply_exception(
+                realm,
+                ExceptionKind::TypeError,
+                "not a constructor",
+                origin,
+            )?);
+        }
+    };
+    begin_array_like_call(
+        runtime,
+        realm,
+        target,
+        StoredValue::Undefined,
+        array_like,
+        return_to,
+        origin,
+        active_frames,
+        active_frame_values,
+        execution_budget,
+        Some(new_target),
+        None,
+        false,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared CreateListFromArrayLike machine keeps retained roots, construction identity, and resource accounting explicit"
+)]
+pub(super) fn begin_array_like_call(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    target: FunctionId,
+    receiver: StoredValue,
+    array_like: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    active_frames: usize,
+    active_frame_values: u64,
+    execution_budget: &mut ExecutionBudget,
+    new_target: Option<FunctionId>,
+    native_caller: Option<SyntheticNativeFrame>,
+    nullish_is_empty: bool,
+) -> Result<NativeDispatch, NativeFailure> {
+    if nullish_is_empty && matches!(array_like, StoredValue::Undefined | StoredValue::Null) {
         return function_apply_target_call(
             target,
             receiver,
@@ -1745,10 +1855,17 @@ pub(super) fn begin_function_apply(
         array_like,
         StoredValue::Function(_) | StoredValue::Object(_)
     ) {
+        // Preserve QuickJS's historical Function.prototype.apply wording while
+        // Reflect uses the specification-facing object-list diagnostic.
+        let message = if nullish_is_empty {
+            "not a object"
+        } else {
+            "not an object"
+        };
         return Err(function_apply_exception(
             realm,
             ExceptionKind::TypeError,
-            "not a object",
+            message,
             origin,
         )?);
     }

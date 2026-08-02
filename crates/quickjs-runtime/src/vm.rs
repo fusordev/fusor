@@ -57,9 +57,9 @@ use crate::{
         EnvironmentBinding, ForInAdvance, FrameBindingAddress, FunctionImplementation,
         HeapFunction, InstalledCode, InstalledConstant, InstalledRoot, InstalledTemplate,
         NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
-        PreparedIteratorResultPlan, RealmGlobalBindingState, SetPrototypeOutcome, StringArgument,
-        StringMethod, array_length_from_number, check_execution_limit, global_declaration_error,
-        usize_to_u64,
+        PreparedIteratorResultPlan, RealmGlobalBindingState, ReflectMethod, SetPrototypeOutcome,
+        StringArgument, StringMethod, array_length_from_number, check_execution_limit,
+        global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -84,6 +84,7 @@ mod iterators;
 mod native;
 mod object_intrinsics;
 mod properties;
+mod reflect;
 mod stack;
 mod string_methods;
 
@@ -95,8 +96,8 @@ use {
     aggregate_error::*, array_callbacks::*, array_copiers::*, array_join::*, array_mutators::*,
     array_search::*, bigint_intrinsics::*, bindings::*, conversions::*,
     define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*, exceptions::*,
-    execution::*, iterators::*, native::*, object_intrinsics::*, properties::*, stack::*,
-    string_methods::*,
+    execution::*, iterators::*, native::*, object_intrinsics::*, properties::*, reflect::*,
+    stack::*, string_methods::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -299,6 +300,9 @@ enum NativeContinuation {
     ArraySplice(Box<ArraySpliceContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     InstanceOf(InstanceOfContinuation),
+    /// Ignore an accessor setter's return value and complete `Reflect.set`
+    /// with the internal-method success Boolean.
+    ReflectSet,
     FunctionCall,
 }
 
@@ -331,7 +335,7 @@ impl NativeContinuation {
             Self::ArraySplice(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
-            Self::FunctionCall => 0,
+            Self::ReflectSet | Self::FunctionCall => 0,
         }
     }
 }
@@ -685,6 +689,29 @@ enum PropertyKeyTarget {
         strict: bool,
         realm: RealmId,
     },
+    ReflectGet {
+        target: StoredValue,
+        receiver: StoredValue,
+    },
+    ReflectSet {
+        target: StoredValue,
+        receiver: StoredValue,
+        value: StoredValue,
+        realm: RealmId,
+    },
+    ReflectDefineProperty {
+        target: StoredValue,
+        descriptor: StoredValue,
+        realm: RealmId,
+    },
+    ReflectOwnPropertyDescriptor {
+        target: StoredValue,
+        realm: RealmId,
+    },
+    ReflectHas {
+        target: StoredValue,
+        realm: RealmId,
+    },
 }
 
 impl PropertyKeyTarget {
@@ -695,8 +722,15 @@ impl PropertyKeyTarget {
             | Self::Delete { .. }
             | Self::OwnPropertyDescriptor { .. }
             | Self::HasOwnProperty { .. }
-            | Self::PropertyIsEnumerable { .. } => 1,
-            Self::Write { .. } | Self::DefineMethod { .. } | Self::DefineProperty { .. } => 2,
+            | Self::PropertyIsEnumerable { .. }
+            | Self::ReflectOwnPropertyDescriptor { .. }
+            | Self::ReflectHas { .. } => 1,
+            Self::Write { .. }
+            | Self::DefineMethod { .. }
+            | Self::DefineProperty { .. }
+            | Self::ReflectGet { .. }
+            | Self::ReflectDefineProperty { .. } => 2,
+            Self::ReflectSet { .. } => 3,
         }
     }
 }
@@ -794,8 +828,18 @@ struct ArrayLengthWriteState {
     base: StoredValue,
     name: JsString,
     strict: bool,
+    reflect: bool,
+    definition: Option<ArrayLengthDefinition>,
     original: Option<StoredValue>,
     first_length: Option<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct ArrayLengthDefinition {
+    writable: Option<bool>,
+    enumerable: Option<bool>,
+    configurable: Option<bool>,
+    result: DefinePropertyResult,
 }
 
 impl FunctionApplyContinuation {
@@ -1043,10 +1087,15 @@ fn trace_property_key_target_roots(
         | PropertyKeyTarget::Delete { base, .. }
         | PropertyKeyTarget::OwnPropertyDescriptor { target: base, .. }
         | PropertyKeyTarget::HasOwnProperty { target: base, .. }
-        | PropertyKeyTarget::PropertyIsEnumerable { target: base, .. } => {
+        | PropertyKeyTarget::PropertyIsEnumerable { target: base, .. }
+        | PropertyKeyTarget::ReflectOwnPropertyDescriptor { target: base, .. }
+        | PropertyKeyTarget::ReflectHas { target: base, .. } => {
             trace_stored_value_root(base, mark);
         }
         PropertyKeyTarget::DefineProperty {
+            target, descriptor, ..
+        }
+        | PropertyKeyTarget::ReflectDefineProperty {
             target, descriptor, ..
         } => {
             trace_stored_value_root(target, mark);
@@ -1054,6 +1103,22 @@ fn trace_property_key_target_roots(
         }
         PropertyKeyTarget::Write { base, value, .. } => {
             trace_stored_value_root(base, mark);
+            trace_stored_value_root(value, mark);
+        }
+        PropertyKeyTarget::ReflectGet {
+            target, receiver, ..
+        } => {
+            trace_stored_value_root(target, mark);
+            trace_stored_value_root(receiver, mark);
+        }
+        PropertyKeyTarget::ReflectSet {
+            target,
+            receiver,
+            value,
+            ..
+        } => {
+            trace_stored_value_root(target, mark);
+            trace_stored_value_root(receiver, mark);
             trace_stored_value_root(value, mark);
         }
         PropertyKeyTarget::DefineMethod { base, function, .. } => {
@@ -1272,7 +1337,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::InstanceOf(state) => {
             trace_instance_of_roots(state, mark);
         }
-        NativeContinuation::FunctionCall => {}
+        NativeContinuation::ReflectSet | NativeContinuation::FunctionCall => {}
     }
 }
 
