@@ -269,6 +269,7 @@ impl Runtime {
             );
             if let RealmIntrinsics::Ready {
                 function_prototype,
+                throw_type_error,
                 function_constructor,
                 errors,
                 boolean,
@@ -282,6 +283,12 @@ impl Runtime {
             {
                 mark_heap_reference(
                     HeapReference::Function(function_prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(throw_type_error),
                     &mut marked_functions,
                     &mut marked_objects,
                     &mut work,

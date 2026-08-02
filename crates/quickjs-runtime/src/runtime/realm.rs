@@ -41,8 +41,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 21;
-const REALM_FUNCTION_COUNT: usize = 146;
-const REALM_PROPERTY_COUNT: u64 = 484;
+const REALM_FUNCTION_COUNT: usize = 147;
+const REALM_PROPERTY_COUNT: u64 = 488;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -496,6 +496,8 @@ struct RealmKeys {
     to_string: PropertyKey,
     value_of: PropertyKey,
     apply: PropertyKey,
+    caller: PropertyKey,
+    arguments: PropertyKey,
     values: PropertyKey,
     keys: PropertyKey,
     next: PropertyKey,
@@ -529,6 +531,8 @@ impl RealmKeys {
             to_string: key(PredefinedAtom::ToString),
             value_of: key(PredefinedAtom::ValueOf),
             apply: key(PredefinedAtom::Apply),
+            caller: key(PredefinedAtom::Caller),
+            arguments: key(PredefinedAtom::ArgumentsIdentifier),
             values: key(PredefinedAtom::Values),
             keys: key(PredefinedAtom::Keys),
             next: key(PredefinedAtom::Next),
@@ -639,6 +643,7 @@ struct RealmBaseRecords {
     global: ObjectRecord,
     object_prototype: ObjectRecord,
     function_prototype: ObjectRecord,
+    throw_type_error: ObjectRecord,
     function_constructor: ObjectRecord,
     object_constructor: ObjectRecord,
     object_statics: [ObjectRecord; OBJECT_STATIC_METHODS.len()],
@@ -787,7 +792,8 @@ impl RealmRecords {
         let base = RealmBaseRecords {
             global: reserved_record(20)?,
             object_prototype: reserved_record(3 + OBJECT_PROTOTYPE_REFLECTION.len())?,
-            function_prototype: reserved_record(6)?,
+            function_prototype: reserved_record(10)?,
+            throw_type_error: reserved_record(2)?,
             function_constructor: reserved_record(3)?,
             object_constructor: reserved_record(3 + OBJECT_STATIC_METHODS.len())?,
             object_statics: object_static_records()?,
@@ -920,6 +926,7 @@ struct RealmBase {
     object_prototype: ObjectId,
     global_object: ObjectId,
     function_prototype: FunctionId,
+    throw_type_error: FunctionId,
     function_constructor: FunctionId,
     object_constructor: FunctionId,
     object_statics: [FunctionId; OBJECT_STATIC_METHODS.len()],
@@ -1214,6 +1221,7 @@ impl Runtime {
             .expect("new realm remains live")
             .intrinsics = RealmIntrinsics::Ready {
             function_prototype: graph.base.function_prototype,
+            throw_type_error: graph.base.throw_type_error,
             function_constructor: graph.base.function_constructor,
             errors: graph.errors,
             boolean: BooleanIntrinsics {
@@ -1561,6 +1569,12 @@ impl Runtime {
             NativeFunctionKind::FunctionPrototype,
             records.function_prototype,
         );
+        let throw_type_error = self.insert_reserved_native(
+            realm,
+            HeapReference::Function(function_prototype),
+            NativeFunctionKind::ThrowTypeError,
+            records.throw_type_error,
+        );
         let function_constructor = self.insert_reserved_native(
             realm,
             HeapReference::Function(function_prototype),
@@ -1637,6 +1651,7 @@ impl Runtime {
             object_prototype,
             global_object,
             function_prototype,
+            throw_type_error,
             function_constructor,
             object_constructor,
             object_statics,
@@ -2493,14 +2508,28 @@ impl Runtime {
         {
             let record = &mut self
                 .functions
+                .get_mut(graph.base.throw_type_error)
+                .expect("new %ThrowTypeError% remains live")
+                .object;
+            record.append_data(
+                keys.length.clone(),
+                FROZEN_PROPERTY,
+                StoredValue::Number(JsNumber::from_i32(0)),
+            )?;
+            record.append_data(
+                keys.name.clone(),
+                FROZEN_PROPERTY,
+                StoredValue::String(names.empty.clone()),
+            )?;
+            record.prevent_extensions();
+        }
+
+        {
+            let record = &mut self
+                .functions
                 .get_mut(graph.base.function_prototype)
                 .expect("new Function.prototype remains live")
                 .object;
-            record.append_data(
-                keys.constructor.clone(),
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.base.function_constructor),
-            )?;
             record.append_data(
                 keys.length.clone(),
                 IDENTITY_PROPERTY,
@@ -2511,10 +2540,17 @@ impl Runtime {
                 IDENTITY_PROPERTY,
                 StoredValue::String(names.empty.clone()),
             )?;
-            record.append_data(
-                keys.to_string.clone(),
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.base.function_to_string),
+            record.append_accessor(
+                keys.caller.clone(),
+                PropertyLayout::accessor(false, true),
+                Some(graph.base.throw_type_error),
+                Some(graph.base.throw_type_error),
+            )?;
+            record.append_accessor(
+                keys.arguments.clone(),
+                PropertyLayout::accessor(false, true),
+                Some(graph.base.throw_type_error),
+                Some(graph.base.throw_type_error),
             )?;
             record.append_data(
                 PropertyKey::from_validated_atom(graph.dynamic_atoms[CALL_ATOM_INDEX].clone()),
@@ -2530,6 +2566,16 @@ impl Runtime {
                 PropertyKey::from_validated_atom(graph.dynamic_atoms[BIND_ATOM_INDEX].clone()),
                 METHOD_PROPERTY,
                 StoredValue::Function(graph.base.function_bind),
+            )?;
+            record.append_data(
+                keys.to_string.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.base.function_to_string),
+            )?;
+            record.append_data(
+                keys.constructor.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.base.function_constructor),
             )?;
             record.append_data(
                 keys.symbol_has_instance.clone(),

@@ -72,6 +72,7 @@ enum RealmIntrinsics {
     Initializing,
     Ready {
         function_prototype: FunctionId,
+        throw_type_error: FunctionId,
         function_constructor: FunctionId,
         errors: ErrorIntrinsics,
         boolean: BooleanIntrinsics,
@@ -661,6 +662,7 @@ pub(crate) enum NativeFunctionKind {
     FunctionPrototypeCall,
     FunctionPrototypeBind,
     FunctionPrototypeHasInstance,
+    ThrowTypeError,
     OrdinaryFunctionConstructor,
     ObjectConstructor,
     ObjectGetPrototypeOf,

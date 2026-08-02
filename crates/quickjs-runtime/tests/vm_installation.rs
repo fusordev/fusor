@@ -238,7 +238,7 @@ fn long_lived_context_drains_dropped_roots_before_installation_limits() {
     let mut runtime = Runtime::try_new(
         RuntimeLimits::default()
             .with_max_public_roots(1)
-            .with_max_heap_functions(147),
+            .with_max_heap_functions(148),
     )
     .expect("runtime");
     let realm = runtime.create_realm().expect("realm");

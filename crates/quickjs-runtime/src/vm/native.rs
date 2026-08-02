@@ -870,6 +870,14 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::FunctionPrototype => {
             Ok(NativeDispatch::Immediate(StoredValue::Undefined))
         }
+        NativeFunctionKind::ThrowTypeError => Err(NativeFailure::Abrupt(PendingException {
+            realm: native.realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("invalid property access")?,
+            },
+            origin: origin.unwrap_or_else(native_function_host_origin),
+        })),
         NativeFunctionKind::FunctionPrototypeApply => begin_function_apply(
             runtime,
             native.realm,

@@ -571,6 +571,41 @@ fn function_prototype_is_callable_but_not_constructable() {
     );
 }
 
+/// `AddRestrictedFunctionProperties` installs one realm-owned
+/// `%ThrowTypeError%` as both accessors for `caller` and `arguments`.
+#[test]
+fn function_prototype_has_restricted_caller_and_arguments_properties() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let inspect = dynamic_function(
+        &mut runtime.context(&realm).expect("context"),
+        &[],
+        "var caller=Object.getOwnPropertyDescriptor(Function.prototype,'caller');\
+         var args=Object.getOwnPropertyDescriptor(Function.prototype,'arguments');\
+         var thrower=caller.get,name=Object.getOwnPropertyDescriptor(thrower,'name'),\
+             length=Object.getOwnPropertyDescriptor(thrower,'length');\
+         var getError=false,setError=false;\
+         try{Function.prototype.caller;}catch(error){\
+           getError=error instanceof TypeError&&error.message==='invalid property access';}\
+         try{Function.prototype.arguments=1;}catch(error){\
+           setError=error instanceof TypeError&&error.message==='invalid property access';}\
+         return Object.getOwnPropertyNames(Function.prototype).join(',')===\
+           'length,name,caller,arguments,call,apply,bind,toString,constructor'&&\
+           caller.get===caller.set&&caller.get===args.get&&args.get===args.set&&\
+           !caller.enumerable&&caller.configurable&&!args.enumerable&&args.configurable&&\
+           thrower.name===''&&thrower.length===0&&!Object.isExtensible(thrower)&&\
+           !name.writable&&!name.enumerable&&!name.configurable&&\
+           !length.writable&&!length.enumerable&&!length.configurable&&getError&&setError;",
+    );
+    let value = runtime
+        .context(&realm)
+        .expect("context")
+        .call(&inspect, &[], ExecutionLimits::default())
+        .expect("restricted Function properties");
+
+    assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+}
+
 #[test]
 fn function_prototype_call_has_native_source_and_is_not_constructable() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");

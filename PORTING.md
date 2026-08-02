@@ -355,7 +355,11 @@ Known intentional runtime differences:
   callback calls and `ToPropertyKey`, close only post-yield abrupt completions,
   retain first-seen keyed lists, then materialize realm Arrays on a fresh
   null-prototype ordinary object after normal iterator completion.
-- [ ] Complete remaining Function/legacy properties and exotic
+- [x] Add `AddRestrictedFunctionProperties` with one anonymous, non-extensible
+  realm-owned `%ThrowTypeError%`: `Function.prototype.caller` and `arguments`
+  share it as getter and setter, remain configurable and non-enumerable, and
+  expose frozen empty-name/zero-length thrower identity properties.
+- [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date/JSON, collections, binary data,
   Atomics, Unicode tables, promises, async functions/generators, weak
