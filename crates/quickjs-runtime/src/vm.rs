@@ -918,6 +918,8 @@ enum OperatorPrimitiveTarget {
     StringIteratorIntrinsic,
     /// `JSON.parse`'s source text, awaiting `ToString`.
     JsonParseText(JsonParseTextContinuation),
+    /// `JSON.rawJSON`'s source text, awaiting `ToString`.
+    JsonRawJsonText,
     ErrorConstructorMessage(ErrorConstructorContinuation),
     ErrorToStringName(ErrorToStringContinuation),
     ErrorToStringMessage(ErrorToStringContinuation),
@@ -964,6 +966,7 @@ impl OperatorPrimitiveTarget {
             | Self::StringIntrinsic { new_target: None }
             | Self::SymbolIntrinsic { .. }
             | Self::StringIteratorIntrinsic
+            | Self::JsonRawJsonText
             | Self::BigIntToString { .. }
             | Self::BigIntTruncationBits { .. }
             | Self::BigIntTruncationValue { .. } => 0,
@@ -1158,6 +1161,7 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::NumberFormatDigits { .. }
         | OperatorPrimitiveTarget::SymbolIntrinsic { .. }
         | OperatorPrimitiveTarget::StringIteratorIntrinsic
+        | OperatorPrimitiveTarget::JsonRawJsonText
         | OperatorPrimitiveTarget::BigIntToString { .. }
         | OperatorPrimitiveTarget::BigIntTruncationValue { .. } => {}
         OperatorPrimitiveTarget::JsonParseText(state) => state.trace_roots(mark),

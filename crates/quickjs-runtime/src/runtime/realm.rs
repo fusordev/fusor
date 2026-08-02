@@ -41,8 +41,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 22;
-const REALM_FUNCTION_COUNT: usize = 148;
-const REALM_PROPERTY_COUNT: u64 = 492;
+const REALM_FUNCTION_COUNT: usize = 150;
+const REALM_PROPERTY_COUNT: u64 = 498;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -221,8 +221,11 @@ const ARRAY_SPLICE_ATOM_START: usize = ARRAY_REDUCTION_ATOM_START + ARRAY_REDUCT
 /// dynamic-atom offsets while the reflection surface grows incrementally.
 const REFLECT_ATOM_INDEX: usize = ARRAY_SPLICE_ATOM_START + 1;
 
+/// Index of the realm-local `JSON.isRawJSON` method name.
+const JSON_IS_RAW_JSON_ATOM_INDEX: usize = REFLECT_ATOM_INDEX + 1;
+
 /// Index of the realm-local `JSON.parse` method name.
-const JSON_PARSE_ATOM_INDEX: usize = REFLECT_ATOM_INDEX + 1;
+const JSON_PARSE_ATOM_INDEX: usize = JSON_IS_RAW_JSON_ATOM_INDEX + 1;
 
 /// Exact number of non-predefined atoms interned by one realm transaction.
 const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
@@ -241,7 +244,7 @@ const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
     + NUMBER_FORMAT_METHODS.len()
     + ARRAY_CALLBACK_METHODS.len()
     + ARRAY_REDUCTION_METHODS.len()
-    + 3;
+    + 4;
 
 /// The `Array.prototype` reductions this profile installs.
 const ARRAY_REDUCTION_METHODS: [ArrayReduction; 2] =
@@ -611,7 +614,9 @@ struct RealmNames {
     get_description: JsString,
     reflect: JsString,
     json: JsString,
+    is_raw_json: JsString,
     parse: JsString,
+    raw_json: JsString,
 }
 
 impl RealmNames {
@@ -654,7 +659,9 @@ impl RealmNames {
             get_description: JsString::from_utf8("get description").map_err(AtomError::from)?,
             reflect: JsString::from_utf8("Reflect").map_err(AtomError::from)?,
             json: predefined_string(atoms, PredefinedAtom::Json),
+            is_raw_json: JsString::from_utf8("isRawJSON").map_err(AtomError::from)?,
             parse: JsString::from_utf8("parse").map_err(AtomError::from)?,
+            raw_json: predefined_string(atoms, PredefinedAtom::RawJson),
         })
     }
 }
@@ -668,7 +675,9 @@ struct ReflectRecords {
 /// Reserved records for the currently installed `%JSON%` surface.
 struct JsonRecords {
     object: ObjectRecord,
+    is_raw_json: ObjectRecord,
     parse: ObjectRecord,
+    raw_json: ObjectRecord,
 }
 
 struct RealmBaseRecords {
@@ -929,9 +938,11 @@ impl RealmRecords {
             methods: reflect_method_records()?,
         };
         let json = JsonRecords {
-            // `parse` plus @@toStringTag.
-            object: reserved_record(2)?,
+            // Three methods plus @@toStringTag.
+            object: reserved_record(4)?,
+            is_raw_json: reserved_record(2)?,
             parse: reserved_record(2)?,
+            raw_json: reserved_record(2)?,
         };
         Ok(Self {
             base,
@@ -1050,7 +1061,9 @@ struct ReflectGraph {
 /// Inserted identities for the ordinary `%JSON%` object and `parse` method.
 struct JsonGraph {
     object: ObjectId,
+    is_raw_json: FunctionId,
     parse: FunctionId,
+    raw_json: FunctionId,
 }
 
 impl RealmBase {
@@ -1109,6 +1122,8 @@ struct RealmGraph {
 
 impl RealmGraph {
     fn rollback(self, runtime: &mut Runtime) {
+        debug_assert!(runtime.functions.remove(self.json.raw_json).is_some());
+        debug_assert!(runtime.functions.remove(self.json.is_raw_json).is_some());
         debug_assert!(runtime.functions.remove(self.json.parse).is_some());
         for function in self.reflect.methods.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
@@ -1546,6 +1561,7 @@ impl Runtime {
             }
             interned(&mut self.atoms, &mut dynamic_atoms, "splice")?;
             intern(&mut self.atoms, &mut dynamic_atoms, &names.reflect)?;
+            intern(&mut self.atoms, &mut dynamic_atoms, &names.is_raw_json)?;
             intern(&mut self.atoms, &mut dynamic_atoms, &names.parse)?;
             Ok(())
         })();
@@ -2274,7 +2290,7 @@ impl Runtime {
         }
     }
 
-    /// Inserts the ordinary `%JSON%` object and the first complete method.
+    /// Inserts the ordinary `%JSON%` object and its currently complete methods.
     fn insert_json_intrinsics(&mut self, base: &RealmBase, mut records: JsonRecords) -> JsonGraph {
         records
             .object
@@ -2286,7 +2302,24 @@ impl Runtime {
             NativeFunctionKind::JsonParse,
             records.parse,
         );
-        JsonGraph { object, parse }
+        let is_raw_json = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::JsonIsRawJson,
+            records.is_raw_json,
+        );
+        let raw_json = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::JsonRawJson,
+            records.raw_json,
+        );
+        JsonGraph {
+            object,
+            is_raw_json,
+            parse,
+            raw_json,
+        }
     }
 
     fn insert_reserved_native(
@@ -2442,34 +2475,46 @@ impl Runtime {
             )
     }
 
-    /// Publishes `%JSON%`, its `parse` method, and its specification tag.
+    /// Publishes `%JSON%`, its currently complete methods, and its specification tag.
     fn publish_json_intrinsic_properties(
         &mut self,
         graph: &RealmGraph,
         keys: &RealmKeys,
         names: &RealmNames,
     ) -> Result<(), TryReserveError> {
+        let is_raw_json_key = PropertyKey::from_validated_atom(
+            graph.dynamic_atoms[JSON_IS_RAW_JSON_ATOM_INDEX].clone(),
+        );
         let parse_key =
             PropertyKey::from_validated_atom(graph.dynamic_atoms[JSON_PARSE_ATOM_INDEX].clone());
-        self.objects
+        let raw_json_key = self.predefined_property_key(PredefinedAtom::RawJson);
+        let json = self
+            .objects
             .get_mut(graph.json.object)
-            .expect("new JSON object remains live")
-            .record
-            .append_data(
-                parse_key,
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.json.parse),
-            )?;
-        self.objects
-            .get_mut(graph.json.object)
-            .expect("new JSON object remains live")
-            .record
-            .append_data(
-                keys.symbol_to_string_tag.clone(),
-                IDENTITY_PROPERTY,
-                StoredValue::String(names.json.clone()),
-            )?;
+            .expect("new JSON object remains live");
+        json.record.append_data(
+            is_raw_json_key,
+            METHOD_PROPERTY,
+            StoredValue::Function(graph.json.is_raw_json),
+        )?;
+        json.record.append_data(
+            parse_key,
+            METHOD_PROPERTY,
+            StoredValue::Function(graph.json.parse),
+        )?;
+        json.record.append_data(
+            raw_json_key,
+            METHOD_PROPERTY,
+            StoredValue::Function(graph.json.raw_json),
+        )?;
+        json.record.append_data(
+            keys.symbol_to_string_tag.clone(),
+            IDENTITY_PROPERTY,
+            StoredValue::String(names.json.clone()),
+        )?;
+        self.append_function_identity(graph.json.is_raw_json, &names.is_raw_json, 1, keys)?;
         self.append_function_identity(graph.json.parse, &names.parse, 2, keys)?;
+        self.append_function_identity(graph.json.raw_json, &names.raw_json, 1, keys)?;
         let json_key = self.predefined_property_key(PredefinedAtom::Json);
         self.objects
             .get_mut(graph.base.global_object)

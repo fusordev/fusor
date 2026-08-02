@@ -129,13 +129,82 @@ fn json_parse_has_the_standard_identity_and_json_tag() {
     );
     assert_eq!(
         text("return Object.getOwnPropertyNames(JSON).join(',');"),
-        "parse"
+        "isRawJSON,parse,rawJSON"
     );
     assert!(boolean(
         "const d=Object.getOwnPropertyDescriptor(this,'JSON');\
          const p=Object.getOwnPropertyDescriptor(JSON,'parse');\
          return d.writable&&!d.enumerable&&d.configurable&&p.writable&&!p.enumerable&&p.configurable;"
     ));
+}
+
+#[test]
+fn raw_json_has_standard_identities_and_an_unforgeable_frozen_brand() {
+    assert_eq!(
+        text(
+            "return JSON.isRawJSON.name+','+JSON.isRawJSON.length+','+\
+             JSON.rawJSON.name+','+JSON.rawJSON.length;"
+        ),
+        "isRawJSON,1,rawJSON,1"
+    );
+    assert!(boolean(
+        "const raw=JSON.rawJSON('1e2');\
+         const d=Object.getOwnPropertyDescriptor(raw,'rawJSON');\
+         return JSON.isRawJSON(raw)&&!JSON.isRawJSON({rawJSON:'1e2'})&&\
+           !JSON.isRawJSON(1)&&Object.getPrototypeOf(raw)===null&&Object.isFrozen(raw)&&\
+           raw.rawJSON==='1e2'&&!d.writable&&d.enumerable&&!d.configurable&&\
+           Object.prototype.toString.call(raw)==='[object Object]';"
+    ));
+}
+
+#[test]
+fn raw_json_accepts_only_exact_primitive_json_text() {
+    assert!(boolean(
+        "const values=['null','true','false','-0','1e2','\"x\"','\"\\ud800\"'];\
+         for(let i=0;i<values.length;i++){\
+           if(JSON.rawJSON(values[i]).rawJSON!==values[i])return false;\
+         }return true;"
+    ));
+    for source in [
+        "",
+        " 1",
+        "1 ",
+        "[]",
+        "{}",
+        "+1",
+        "01",
+        "NaN",
+        "Infinity",
+        "undefined",
+        "\u{a0}null",
+    ] {
+        let escaped = source
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
+        assert_eq!(
+            exception_kind(&format!("return JSON.rawJSON('{escaped}');")),
+            ExceptionKind::SyntaxError,
+            "accepted {source:?}"
+        );
+    }
+}
+
+#[test]
+fn raw_json_performs_tostring_before_grammar_validation() {
+    assert_eq!(
+        text(
+            "let log='';\
+             const raw=JSON.rawJSON({toString(){log='called';return 'null';}});\
+             return log+':'+raw.rawJSON;"
+        ),
+        "called:null"
+    );
+    assert_eq!(
+        exception_kind("return JSON.rawJSON(Symbol('x'));"),
+        ExceptionKind::TypeError
+    );
 }
 
 #[test]

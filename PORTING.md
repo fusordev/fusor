@@ -366,9 +366,16 @@ Known intentional runtime differences:
   post-order `InternalizeJSONProperty` machine re-reads mutated properties,
   preserves getter and callback abrupt completions, applies delete-or-define
   results, and supplies the ECMAScript 2026 primitive `context.source` record.
+- [x] Add the ECMAScript 2026 raw-JSON surface. `JSON.rawJSON` performs the
+  observable `ToString`, applies the specification's boundary checks, accepts
+  only an exact primitive ECMA-404 text, and atomically creates a frozen,
+  null-prototype object with the unforgeable `[[IsRawJSON]]` brand and exact
+  enumerable `rawJSON` data property. `JSON.isRawJSON` tests that internal slot
+  rather than forgeable shape, and the realm publishes both method identities
+  in standard property order.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
-  RegExp/Date, JSON serialization and raw JSON, collections, binary data,
+  RegExp/Date, JSON serialization, collections, binary data,
   Atomics, Unicode tables, promises, async functions/generators, weak
   references, and finalization registries.
 - [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide

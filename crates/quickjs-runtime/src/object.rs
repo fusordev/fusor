@@ -1006,6 +1006,8 @@ impl ArrayState {
 
 pub(crate) enum HeapObjectKind {
     Ordinary,
+    /// An ordinary null-prototype object with the `[[IsRawJSON]]` slot.
+    RawJson,
     Array(ArrayState),
     Error,
     BoxedPrimitive(BoxedPrimitive),
@@ -1019,6 +1021,7 @@ impl HeapObjectKind {
     pub(crate) const fn boxed_primitive(&self) -> Option<&BoxedPrimitive> {
         match self {
             Self::Ordinary
+            | Self::RawJson
             | Self::Array(_)
             | Self::Error
             | Self::ForInIterator(_)
@@ -1032,6 +1035,7 @@ impl HeapObjectKind {
         match self {
             Self::Array(state) => Some(state),
             Self::Ordinary
+            | Self::RawJson
             | Self::Error
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
@@ -1044,6 +1048,7 @@ impl HeapObjectKind {
         match self {
             Self::Array(state) => Some(state),
             Self::Ordinary
+            | Self::RawJson
             | Self::Error
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
@@ -1056,6 +1061,7 @@ impl HeapObjectKind {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::RawJson
             | Self::Array(_)
             | Self::Error
             | Self::BoxedPrimitive(_)
@@ -1068,6 +1074,7 @@ impl HeapObjectKind {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::RawJson
             | Self::Array(_)
             | Self::Error
             | Self::BoxedPrimitive(_)
@@ -1080,6 +1087,7 @@ impl HeapObjectKind {
         match self {
             Self::ArrayIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::RawJson
             | Self::Array(_)
             | Self::Error
             | Self::BoxedPrimitive(_)
@@ -1092,6 +1100,7 @@ impl HeapObjectKind {
         match self {
             Self::ArrayIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::RawJson
             | Self::Array(_)
             | Self::Error
             | Self::BoxedPrimitive(_)
@@ -1104,6 +1113,7 @@ impl HeapObjectKind {
         match self {
             Self::StringIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::RawJson
             | Self::Array(_)
             | Self::Error
             | Self::BoxedPrimitive(_)
@@ -1116,6 +1126,7 @@ impl HeapObjectKind {
         match self {
             Self::StringIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::RawJson
             | Self::Array(_)
             | Self::Error
             | Self::BoxedPrimitive(_)
@@ -1136,6 +1147,15 @@ impl HeapObject {
     pub(crate) const fn ordinary(record: ObjectRecord) -> Self {
         Self {
             kind: HeapObjectKind::Ordinary,
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn raw_json(record: ObjectRecord) -> Self {
+        Self {
+            kind: HeapObjectKind::RawJson,
             record,
             public_roots: 0,
         }
@@ -1207,6 +1227,11 @@ impl HeapObject {
     #[must_use]
     pub(crate) const fn is_error(&self) -> bool {
         matches!(self.kind, HeapObjectKind::Error)
+    }
+
+    #[must_use]
+    pub(crate) const fn is_raw_json(&self) -> bool {
+        matches!(self.kind, HeapObjectKind::RawJson)
     }
 
     #[must_use]
@@ -1529,6 +1554,17 @@ mod tests {
         let object = HeapObject::ordinary(ObjectRecord::empty(None));
 
         assert!(matches!(object.kind(), HeapObjectKind::Ordinary));
+        assert!(!object.is_error());
+        assert!(object.boxed_primitive().is_none());
+        assert_eq!(object.public_roots, 0);
+    }
+
+    #[test]
+    fn raw_json_heap_object_preserves_its_internal_brand() {
+        let object = HeapObject::raw_json(ObjectRecord::empty(None));
+
+        assert!(matches!(object.kind(), HeapObjectKind::RawJson));
+        assert!(object.is_raw_json());
         assert!(!object.is_error());
         assert!(object.boxed_primitive().is_none());
         assert_eq!(object.public_roots, 0);

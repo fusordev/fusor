@@ -830,6 +830,67 @@ impl Runtime {
         Ok(object)
     }
 
+    /// Allocates the frozen null-prototype object created by `JSON.rawJSON`.
+    ///
+    /// The object and its single data property are prepared before publication,
+    /// so either resource limit can reject the complete allocation without
+    /// leaving a partially initialized heap object behind.
+    pub(crate) fn allocate_raw_json_object(
+        &mut self,
+        text: JsString,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties.saturating_add(1),
+        )?;
+
+        let mut record = ObjectRecord::empty(None);
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::RawJson),
+                PropertyLayout::data(false, true, false),
+                StoredValue::String(text),
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        record.prevent_extensions();
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let object = self
+            .objects
+            .try_insert(HeapObject::raw_json(record))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.object_properties = self.object_properties.saturating_add(1);
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    /// Tests the unforgeable `[[IsRawJSON]]` object brand.
+    pub(crate) fn is_raw_json_object(&self, object: ObjectId) -> Result<bool, crate::EngineFault> {
+        self.objects.get(object).map(HeapObject::is_raw_json).ok_or(
+            crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            },
+        )
+    }
+
     pub(crate) fn allocate_boxed_boolean_with_prototype(
         &mut self,
         prototype: HeapReference,

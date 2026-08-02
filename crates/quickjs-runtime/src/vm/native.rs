@@ -1319,6 +1319,18 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::JsonIsRawJson => {
+            let value = inputs.arguments.take_first_or_undefined();
+            json_is_raw_json(runtime, &value)
+        }
+        NativeFunctionKind::JsonRawJson => begin_json_raw_json(
+            runtime,
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::ObjectPrototypeToString => begin_object_prototype_to_string(
             runtime,
             native.realm,

@@ -697,6 +697,10 @@ pub(crate) enum NativeFunctionKind {
     Reflect(ReflectMethod),
     /// `JSON.parse`.
     JsonParse,
+    /// `JSON.isRawJSON`.
+    JsonIsRawJson,
+    /// `JSON.rawJSON`.
+    JsonRawJson,
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,

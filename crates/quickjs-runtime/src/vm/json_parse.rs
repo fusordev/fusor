@@ -916,6 +916,128 @@ impl JsonParseContinuation {
     }
 }
 
+/// Implements the unforgeable `[[IsRawJSON]]` brand test.
+pub(super) fn json_is_raw_json(
+    runtime: &Runtime,
+    value: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let branded = match value {
+        StoredValue::Object(object) => runtime.is_raw_json_object(*object)?,
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::Function(_) => false,
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::Boolean(branded)))
+}
+
+/// Begins `JSON.rawJSON` with the specification's observable `ToString`.
+pub(super) fn begin_json_raw_json(
+    runtime: &mut Runtime,
+    text: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    begin_operator_primitive_conversion(
+        runtime,
+        text,
+        OperatorPrimitiveHint::String,
+        OperatorPrimitiveTarget::JsonRawJsonText,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+/// Validates one primitive JSON text and creates its frozen branded wrapper.
+pub(super) fn finish_json_raw_json_text(
+    runtime: &mut Runtime,
+    text: JsString,
+    realm: RealmId,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    execution_budget.charge_instructions(u64::from(text.len()).saturating_add(1))?;
+    let Some(last_index) = text.len().checked_sub(1) else {
+        return Err(NativeFailure::Abrupt(json_syntax_exception(realm, origin)?));
+    };
+    let first = text.code_unit_at(0).ok_or(EngineFault::RuntimeInvariant {
+        message: "non-empty raw JSON text has no first code unit",
+    })?;
+    let last = text
+        .code_unit_at(last_index)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "non-empty raw JSON text has no last code unit",
+        })?;
+    if !is_raw_json_first_code_unit(first) || !is_raw_json_last_code_unit(last) {
+        return Err(NativeFailure::Abrupt(json_syntax_exception(realm, origin)?));
+    }
+
+    let document = match JsonTextParser::new(text.clone()).and_then(JsonTextParser::parse) {
+        Ok(document) => document,
+        Err(JsonTextFailure::Syntax) => {
+            return Err(NativeFailure::Abrupt(json_syntax_exception(realm, origin)?));
+        }
+        Err(JsonTextFailure::Native(failure)) => return Err(failure),
+    };
+    let root = document
+        .nodes
+        .get(document.root)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "raw JSON parser completed without a root node",
+        })?;
+    if !matches!(
+        root.kind,
+        JsonNodeKind::Null
+            | JsonNodeKind::Boolean(_)
+            | JsonNodeKind::Number(_)
+            | JsonNodeKind::String(_)
+    ) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "raw JSON boundary checks admitted an object or array",
+        }
+        .into());
+    }
+    let object = runtime.allocate_raw_json_object(text)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn is_raw_json_first_code_unit(unit: u16) -> bool {
+    is_ascii_lowercase(unit)
+        || is_ascii_digit(unit)
+        || unit == u16::from(b'"')
+        || unit == u16::from(b'-')
+}
+
+fn is_raw_json_last_code_unit(unit: u16) -> bool {
+    is_ascii_lowercase(unit) || is_ascii_digit(unit) || unit == u16::from(b'"')
+}
+
+fn is_ascii_lowercase(unit: u16) -> bool {
+    unit >= u16::from(b'a') && unit <= u16::from(b'z')
+}
+
+fn json_syntax_exception(
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<PendingException, NativeFailure> {
+    Ok(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::SyntaxError,
+            message: JsString::from_utf8("invalid JSON")?,
+        },
+        origin,
+    })
+}
+
 /// Begins `ToString(text)` before validating any JSON grammar.
 pub(super) fn begin_json_parse(
     runtime: &mut Runtime,
@@ -953,14 +1075,7 @@ pub(super) fn finish_json_parse_text(
     let document = match JsonTextParser::new(text).and_then(JsonTextParser::parse) {
         Ok(document) => document,
         Err(JsonTextFailure::Syntax) => {
-            return Err(NativeFailure::Abrupt(PendingException {
-                realm,
-                payload: PendingExceptionPayload::EngineError {
-                    kind: ExceptionKind::SyntaxError,
-                    message: JsString::from_utf8("invalid JSON")?,
-                },
-                origin,
-            }));
+            return Err(NativeFailure::Abrupt(json_syntax_exception(realm, origin)?));
         }
         Err(JsonTextFailure::Native(failure)) => return Err(failure),
     };
