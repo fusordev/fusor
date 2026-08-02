@@ -146,8 +146,10 @@ pub(super) fn begin_string_method(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     // `RequireObjectCoercible` runs before `ToString`, so a nullish receiver
-    // throws before any argument is touched.
-    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
+    // throws before any argument is touched. The two `String` statics skip this
+    // entirely because they ignore their receiver.
+    if method.converts_receiver() && matches!(receiver, StoredValue::Undefined | StoredValue::Null)
+    {
         return Err(NativeFailure::Abrupt(PendingException {
             realm,
             payload: PendingExceptionPayload::EngineError {
@@ -196,7 +198,12 @@ pub(super) fn begin_string_method(
     };
 
     // A primitive String receiver needs no conversion, which keeps the common
-    // case free of a continuation.
+    // case free of a continuation; a static has no subject at all.
+    if !method.converts_receiver() {
+        let mut state = state;
+        state.subject = Some(JsString::empty());
+        return advance_string_method(runtime, state, None, return_to, execution_budget);
+    }
     if let StoredValue::String(subject) = receiver {
         let mut state = state;
         state.subject = Some(subject);
@@ -308,12 +315,11 @@ pub(super) fn advance_string_method(
 
 /// Returns the coercion shape of one argument position.
 fn argument_shape_at(method: StringMethod, index: usize) -> StringArgument {
-    // A variadic method converts every argument with `ToString`.
     method
         .argument_shape()
         .get(index)
         .copied()
-        .unwrap_or(StringArgument::String)
+        .unwrap_or_else(|| method.variadic_argument())
 }
 
 /// Applies one argument's coercion to an already-primitive value.
@@ -567,6 +573,55 @@ fn finish_string_method(state: &StringMethodContinuation) -> Result<NativeDispat
                 }
             }
             StoredValue::String(subject.slice(start..end)?)
+        }
+        // The two `String` statics ignore `subject` and build their result from
+        // the converted arguments alone. They differ in coercion and range:
+        // `fromCharCode` reduces each argument modulo 2^16, so
+        // `String.fromCharCode(65601)` is `"A"`, while `fromCodePoint` rejects
+        // anything that is not an exact code point.
+        StringMethod::FromCharCode | StringMethod::FromCodePoint => {
+            let code_points = matches!(state.method, StringMethod::FromCodePoint);
+            let mut units = Vec::new();
+            for argument in arguments {
+                let ConvertedArgument::Number(number) = argument else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "a String factory read a non-Number argument",
+                    }
+                    .into());
+                };
+                if code_points {
+                    let code_point = validated_code_point(*number, state)?;
+                    units
+                        .try_reserve(2)
+                        .map_err(|_| ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::Frames,
+                            additional: 2,
+                        })?;
+                    // A supplementary code point becomes a surrogate pair, so
+                    // `String.fromCodePoint(0x1F600).length` is `2`.
+                    if let Some(offset) = code_point.checked_sub(0x1_0000) {
+                        let high = u16::try_from(0xd800 + (offset >> 10))
+                            .expect("the code-point bound proves the high surrogate fits");
+                        let low = u16::try_from(0xdc00 + (offset & 0x3ff))
+                            .expect("the mask proves the low surrogate fits");
+                        units.push(high);
+                        units.push(low);
+                    } else {
+                        units.push(
+                            u16::try_from(code_point).expect("a BMP code point fits one code unit"),
+                        );
+                    }
+                } else {
+                    units
+                        .try_reserve(1)
+                        .map_err(|_| ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::Frames,
+                            additional: 1,
+                        })?;
+                    units.push(number_to_uint16(*number));
+                }
+            }
+            StoredValue::String(JsString::from_code_units(units)?)
         }
         StringMethod::IsWellFormed => StoredValue::Boolean(is_well_formed(subject)),
         StringMethod::ToWellFormed => StoredValue::String(to_well_formed(subject)?),
@@ -823,6 +878,42 @@ fn string_too_long(state: &StringMethodContinuation) -> Result<NativeFailure, Na
         payload: PendingExceptionPayload::EngineError {
             kind: ExceptionKind::InternalError,
             message: JsString::from_utf8("string too long")?,
+        },
+        origin: state.origin.clone(),
+    }))
+}
+
+/// Validates one `String.fromCodePoint` argument.
+///
+/// A code point must be an exact integer in `0..=0x10FFFF`; anything else
+/// reports `RangeError: invalid code point`, which the pinned oracle confirms
+/// for `1.5`, `-1`, `NaN`, `Infinity`, and `0x110000`.
+fn validated_code_point(
+    value: JsNumber,
+    state: &StringMethodContinuation,
+) -> Result<u32, NativeFailure> {
+    let value = value.as_f64();
+    // Integrality is an exact property, so the comparison is deliberately exact.
+    #[expect(
+        clippy::float_cmp,
+        reason = "a code point is an exact integer, so an epsilon comparison would admit the wrong values"
+    )]
+    let integral = value.is_finite() && value.trunc() == value;
+    if integral && (0.0..=1_114_111.0).contains(&value) {
+        // The range check proves the truncation is exact.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the preceding range check bounds the code point by 0x10FFFF"
+        )]
+        let code_point = value as u32;
+        return Ok(code_point);
+    }
+    Err(NativeFailure::Abrupt(PendingException {
+        realm: state.realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::RangeError,
+            message: JsString::from_utf8("invalid code point")?,
         },
         origin: state.origin.clone(),
     }))

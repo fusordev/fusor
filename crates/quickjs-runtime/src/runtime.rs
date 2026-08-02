@@ -403,6 +403,10 @@ pub(crate) enum StringMethod {
     TrimStart,
     IsWellFormed,
     ToWellFormed,
+    /// `String.fromCharCode`, which is a static rather than a prototype method.
+    FromCharCode,
+    /// `String.fromCodePoint`, likewise a static.
+    FromCodePoint,
 }
 
 impl StringMethod {
@@ -419,7 +423,9 @@ impl StringMethod {
             | Self::TrimStart
             | Self::IsWellFormed
             | Self::ToWellFormed
-            | Self::Concat => &[],
+            | Self::Concat
+            | Self::FromCharCode
+            | Self::FromCodePoint => &[],
             Self::At | Self::CharAt | Self::CharCodeAt | Self::CodePointAt => {
                 &[StringArgument::Integer]
             }
@@ -444,7 +450,28 @@ impl StringMethod {
 
     /// Returns whether the method consumes every remaining argument.
     pub(crate) const fn is_variadic(self) -> bool {
-        matches!(self, Self::Concat)
+        matches!(
+            self,
+            Self::Concat | Self::FromCharCode | Self::FromCodePoint
+        )
+    }
+
+    /// Returns whether the method converts its receiver with `ToString`.
+    ///
+    /// The two `String` statics do not: they are installed on the constructor,
+    /// so they ignore their receiver entirely.
+    pub(crate) const fn converts_receiver(self) -> bool {
+        !matches!(self, Self::FromCharCode | Self::FromCodePoint)
+    }
+
+    /// Returns how a variadic method coerces each of its arguments.
+    pub(crate) const fn variadic_argument(self) -> StringArgument {
+        match self {
+            // `fromCharCode` and `fromCodePoint` both need a Number; the width
+            // and the validation differ in the body.
+            Self::FromCharCode | Self::FromCodePoint => StringArgument::Number,
+            _ => StringArgument::String,
+        }
     }
 }
 

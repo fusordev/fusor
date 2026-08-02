@@ -40,8 +40,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 90;
-const REALM_PROPERTY_COUNT: u64 = 314;
+const REALM_FUNCTION_COUNT: usize = 92;
+const REALM_PROPERTY_COUNT: u64 = 320;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -149,6 +149,12 @@ impl StringPrototypeMethod {
 /// Index of the first `Number` static name in the realm's dynamic atom list.
 const NUMBER_STATIC_ATOM_START: usize = STRING_METHOD_ATOM_START + STRING_INTERNED_METHOD_COUNT;
 
+/// Index of the first `String` factory name in the realm's dynamic atom list.
+///
+/// The factories are interned after the `Number` statics and `Array.isArray`.
+const STRING_FROM_ATOM_START: usize =
+    NUMBER_STATIC_ATOM_START + NUMBER_VALUE_STATICS.len() + NUMBER_PREDICATE_STATICS.len() + 1;
+
 /// The `Number` constructor's numeric value properties.
 ///
 /// Each is non-writable, non-enumerable, and non-configurable, which the pinned
@@ -182,6 +188,15 @@ const NUMBER_PREDICATE_STATICS: [(&str, NumberPredicate); 4] = [
     ("isSafeInteger", NumberPredicate::IsSafeInteger),
     ("isFinite", NumberPredicate::IsFinite),
     ("isNaN", NumberPredicate::IsNaN),
+];
+
+/// The `String` constructor's code-unit factories.
+///
+/// Both report arity 1 even though both are variadic, which the pinned oracle
+/// confirms.
+const STRING_FROM_STATICS: [(&str, StringMethod); 2] = [
+    ("fromCharCode", StringMethod::FromCharCode),
+    ("fromCodePoint", StringMethod::FromCodePoint),
 ];
 
 /// The `Object` constructor's static methods.
@@ -580,6 +595,7 @@ struct RealmRecords {
     string: PrimitiveIntrinsicRecords,
     string_methods: [ObjectRecord; STRING_PROTOTYPE_METHODS.len()],
     number_predicates: [ObjectRecord; NUMBER_PREDICATE_STATICS.len()],
+    string_from_statics: [ObjectRecord; STRING_FROM_STATICS.len()],
     array_is_array: ObjectRecord,
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
@@ -587,6 +603,10 @@ struct RealmRecords {
 }
 
 impl RealmRecords {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat reservation site keeps every realm intrinsic's exact property budget auditable in a single place"
+    )]
     fn try_new(length_key: &PropertyKey) -> Result<Self, RuntimeError> {
         // Keep these reservations in the original transaction order so a
         // recoverable allocation failure reports the same `additional` value.
@@ -639,8 +659,12 @@ impl RealmRecords {
         let bigint = BigIntIntrinsicRecords::try_new()?;
         // `String.prototype` additionally carries `length`, its iterator, and
         // every installed method.
-        let string = PrimitiveIntrinsicRecords::try_new(5 + STRING_PROTOTYPE_METHODS.len())?;
+        let string = PrimitiveIntrinsicRecords::try_new_with_constructor(
+            5 + STRING_PROTOTYPE_METHODS.len(),
+            3 + STRING_FROM_STATICS.len(),
+        )?;
         let string_methods = string_method_records()?;
+        let string_from_statics = string_from_records()?;
         let mut array = ArrayIntrinsicRecords {
             prototype: reserved_record(8)?,
             constructor: reserved_record(3)?,
@@ -686,6 +710,7 @@ impl RealmRecords {
             string,
             string_methods,
             number_predicates,
+            string_from_statics,
             array_is_array: reserved_record(2)?,
             array,
             iterators,
@@ -808,6 +833,7 @@ struct RealmGraph {
     string: PrimitiveIntrinsicGraph,
     string_methods: [FunctionId; STRING_PROTOTYPE_METHODS.len()],
     number_predicates: [FunctionId; NUMBER_PREDICATE_STATICS.len()],
+    string_from_statics: [FunctionId; STRING_FROM_STATICS.len()],
     array_is_array: FunctionId,
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
@@ -823,6 +849,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         debug_assert!(runtime.functions.remove(self.array_is_array).is_some());
+        for function in self.string_from_statics.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
         for function in self.number_predicates.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
@@ -1064,6 +1093,8 @@ impl Runtime {
         let symbol = self.insert_symbol_intrinsics(&base, records.symbol);
         let string_methods = self.insert_string_prototype_methods(&base, records.string_methods);
         let number_predicates = self.insert_number_predicates(&base, records.number_predicates);
+        let string_from_statics =
+            self.insert_string_from_statics(&base, records.string_from_statics);
         let array_is_array = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -1081,6 +1112,7 @@ impl Runtime {
             string,
             string_methods,
             number_predicates,
+            string_from_statics,
             array_is_array,
             array,
             iterators,
@@ -1110,7 +1142,8 @@ impl Runtime {
                     + STRING_INTERNED_METHOD_COUNT
                     + NUMBER_VALUE_STATICS.len()
                     + NUMBER_PREDICATE_STATICS.len()
-                    + 1,
+                    + 1
+                    + STRING_FROM_STATICS.len(),
             )
             .is_err()
         {
@@ -1174,6 +1207,9 @@ impl Runtime {
                 interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
             }
             interned(&mut self.atoms, &mut dynamic_atoms, "isArray")?;
+            for (literal, _) in STRING_FROM_STATICS {
+                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
+            }
             Ok(())
         })();
         if let Err(error) = outcome {
@@ -1428,6 +1464,25 @@ impl Runtime {
             to_string,
             value_of,
         }
+    }
+
+    /// Inserts one native function per `String` code-unit factory.
+    fn insert_string_from_statics(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; STRING_FROM_STATICS.len()],
+    ) -> [FunctionId; STRING_FROM_STATICS.len()] {
+        let mut inserted = [None; STRING_FROM_STATICS.len()];
+        for ((slot, (_, kind)), record) in inserted.iter_mut().zip(STRING_FROM_STATICS).zip(records)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::StringPrototypeMethod(kind),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every String factory function was inserted"))
     }
 
     /// Inserts one native function per `Number` predicate static.
@@ -2207,6 +2262,28 @@ impl Runtime {
                 StoredValue::Function(graph.array_is_array),
             )?;
         self.append_function_identity(graph.array_is_array, &name, 1, keys)?;
+
+        for ((_, function), atom) in STRING_FROM_STATICS
+            .into_iter()
+            .zip(graph.string_from_statics)
+            .zip(&graph.dynamic_atoms[STRING_FROM_ATOM_START..])
+        {
+            let atom = atom.clone();
+            let name = atom
+                .description()
+                .expect("interned String factory name has a description")
+                .clone();
+            self.functions
+                .get_mut(graph.string.constructor)
+                .expect("new String constructor remains live")
+                .object
+                .append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            self.append_function_identity(function, &name, 1, keys)?;
+        }
         Ok(())
     }
 
@@ -2612,6 +2689,16 @@ fn object_static_records() -> Result<[ObjectRecord; OBJECT_STATIC_METHODS.len()]
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Object static record was reserved")))
+}
+
+/// Reserves one record per `String` code-unit factory.
+fn string_from_records() -> Result<[ObjectRecord; STRING_FROM_STATICS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; STRING_FROM_STATICS.len()] =
+        [const { None }; STRING_FROM_STATICS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every String factory record was reserved")))
 }
 
 /// Reserves one record per `Number` predicate static.

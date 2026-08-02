@@ -41,7 +41,7 @@ use crate::{
     RuntimeError, RuntimeResource,
     conversion::{
         number_to_index, number_to_int32, number_to_integer_or_infinity, number_to_length,
-        number_to_uint32, string_to_number,
+        number_to_uint16, number_to_uint32, string_to_number,
     },
     define_property::{
         DefinitionDecision, PropertyDefinition, Requested, validate_and_apply_existing,

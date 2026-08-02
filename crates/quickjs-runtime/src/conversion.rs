@@ -206,10 +206,6 @@ pub(crate) fn number_to_int32(value: JsNumber) -> i32 {
 /// multiple-of-2^32 cases consistent across every width rather than restating
 /// them per type.
 #[must_use]
-#[allow(
-    dead_code,
-    reason = "the narrow conversions are verified against the oracle before the typed-array and String.fromCharCode surfaces that consume them exist"
-)]
 pub(crate) fn number_to_uint16(value: JsNumber) -> u16 {
     // Masking before the conversion makes it infallible, so the modular result
     // needs no lossy cast.

@@ -203,6 +203,13 @@ Known intentional runtime differences:
   `false` for a non-Number without converting it, which is what separates them
   from the global `isNaN`. `Number.isInteger(2**53)` is `true` while
   `Number.isSafeInteger(2**53)` is `false`.
+- [x] `String.fromCharCode` and `String.fromCodePoint`, sharing the same
+  resumable machine as the prototype methods because their arguments are also
+  arbitrary objects. The two differ in coercion and range: `fromCharCode` applies
+  `ToUint16` and wraps silently, so `String.fromCharCode(65601)` is `"A"`, while
+  `fromCodePoint` requires an exact code point in `0..=0x10FFFF` and otherwise
+  reports `RangeError: invalid code point`. A supplementary code point is encoded
+  as a surrogate pair, so `String.fromCodePoint(0x1F600).length` is `2`.
 - [ ] Remaining String/Number/Array method surface (notably `toFixed`,
   `toPrecision`, and `toExponential`, which need exact decimal formatting, and
   the `Array.prototype` mutators), shape sharing/transition interning, remaining
