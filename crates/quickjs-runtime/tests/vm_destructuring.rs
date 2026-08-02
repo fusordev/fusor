@@ -1152,6 +1152,50 @@ fn object_rest_copies_getter_values() {
 }
 
 #[test]
+fn object_rest_copies_enumerable_symbol_properties() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let symbol=Symbol('rest');let object={a:1};object[symbol]=2;\
+            let {...rest}=object;\
+            return rest.a+rest[symbol]*10+Object.getOwnPropertySymbols(rest).length*100;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object rest Symbol result");
+    assert_number(&result, 121);
+}
+
+#[test]
+fn object_rest_rechecks_snapshotted_descriptors_after_getters() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let object={};\
+            function first(){\
+                Object.defineProperty(object,'hidden',{enumerable:true});\
+                delete object.deleted;object.added=4;return 1;\
+            }\
+            Object.defineProperty(object,'a',{get:first,enumerable:true});\
+            Object.defineProperty(object,'hidden',{value:2,configurable:true});\
+            object.deleted=3;let {...rest}=object;\
+            return rest.a*100+rest.hidden*10+\
+                (Object.hasOwn(rest,'deleted')?0:1)+\
+                (Object.hasOwn(rest,'added')?0:2);",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object rest descriptor mutation result");
+    assert_number(&result, 123);
+}
+
+#[test]
 fn object_rest_with_defaults_and_nested_patterns() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

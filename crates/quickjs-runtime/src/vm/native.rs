@@ -328,6 +328,15 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::CopyDataProperties(state) => {
                 advance_copy_data_properties(runtime, state, &value, return_to, execution_budget)?
             }
+            NativeContinuation::EnumerableOwnProperties(state) => {
+                advance_enumerable_own_properties(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::DefineProperty(state) => advance_define_property(
                 runtime,
                 *state,
@@ -1041,6 +1050,23 @@ pub(super) fn dispatch_native_call_with_frames(
                 arguments.take_first(),
                 listing,
                 origin.as_ref(),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectValues | NativeFunctionKind::ObjectEntries => {
+            let kind = if native.kind == NativeFunctionKind::ObjectValues {
+                EnumerableOwnPropertiesKind::Value
+            } else {
+                EnumerableOwnPropertiesKind::KeyAndValue
+            };
+            let mut arguments = inputs.arguments;
+            begin_enumerable_own_properties(
+                runtime,
+                native.realm,
+                arguments.take_first(),
+                kind,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
                 execution_budget,
             )
         }

@@ -505,6 +505,44 @@ pub(super) enum KeyListing {
     AllSymbolKeys,
 }
 
+/// Which ECMA-262 `EnumerableOwnProperties` result projection is requested.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EnumerableOwnPropertiesKind {
+    /// Append each selected property's value, as `Object.values` does.
+    Value,
+    /// Append a fresh `[key, value]` Array, as `Object.entries` does.
+    KeyAndValue,
+}
+
+/// One suspended `EnumerableOwnProperties` scan.
+pub(super) struct EnumerableOwnPropertiesContinuation {
+    target: StoredValue,
+    snapshot: ForInSnapshot,
+    next: usize,
+    elements: Vec<StoredValue>,
+    current_key: Option<PropertyKey>,
+    kind: EnumerableOwnPropertiesKind,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl EnumerableOwnPropertiesContinuation {
+    /// Values held across a getter call and charged to the suspended frame.
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64
+            .saturating_add(usize_to_u64(self.elements.len()))
+            .saturating_add(u64::from(self.current_key.is_some()))
+    }
+
+    /// Keeps the source and all collected values alive across getter re-entry.
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.target, mark);
+        for element in &self.elements {
+            trace_stored_value_root(element, mark);
+        }
+    }
+}
+
 /// `Object.keys(target)`, `Object.getOwnPropertyNames(target)`, and
 /// `Object.getOwnPropertySymbols(target)`.
 pub(super) fn own_property_keys(
@@ -617,6 +655,232 @@ fn string_key_values(
         elements.push(StoredValue::String(JsString::from_utf8("length")?));
     }
     Ok(elements)
+}
+
+/// Starts `Object.values` or `Object.entries`.
+pub(super) fn begin_enumerable_own_properties(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    argument: Option<StoredValue>,
+    kind: EnumerableOwnPropertiesKind,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let target = argument.unwrap_or(StoredValue::Undefined);
+    if matches!(target, StoredValue::Undefined | StoredValue::Null) {
+        return Err(NativeFailure::Abrupt(type_error(
+            realm,
+            Some(&origin),
+            "EnumerableOwnProperties",
+            "cannot convert to object",
+        )?));
+    }
+    let Some(reference) = target.heap_reference() else {
+        return primitive_enumerable_own_properties(runtime, realm, target, kind, execution_budget);
+    };
+
+    // The key list is fixed before any getter runs. It includes hidden String
+    // keys because each descriptor's *current* enumerability is rechecked when
+    // that key is reached; Symbols are excluded by the abstract operation.
+    let (snapshot, work) = runtime.try_own_key_snapshot(reference, 0, KeyPhases::STRING_KEYS)?;
+    execution_budget.charge_instructions(work)?;
+    let mut elements = Vec::new();
+    elements
+        .try_reserve_exact(snapshot.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: snapshot.len(),
+        })?;
+    advance_enumerable_own_properties(
+        runtime,
+        EnumerableOwnPropertiesContinuation {
+            target,
+            snapshot,
+            next: 0,
+            elements,
+            current_key: None,
+            kind,
+            realm,
+            origin,
+        },
+        None,
+        return_to,
+        execution_budget,
+    )
+}
+
+/// Resumes the left-to-right descriptor/read loop after an accessor getter.
+pub(super) fn advance_enumerable_own_properties(
+    runtime: &mut Runtime,
+    mut state: EnumerableOwnPropertiesContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        if let Some(key) = state.current_key.take() {
+            let value = take_enumerable_completion(&mut completion)?;
+            let element = enumerable_result_element(runtime, state.realm, state.kind, &key, value)?;
+            state.elements.push(element);
+        }
+
+        let Some(candidate) = state.snapshot.get(state.next).cloned() else {
+            let array = runtime.allocate_array(state.realm, state.elements)?;
+            return Ok(NativeDispatch::Immediate(StoredValue::Object(array)));
+        };
+        state.next = state.next.saturating_add(1);
+        execution_budget.charge_instructions(1)?;
+
+        let reference = state
+            .target
+            .heap_reference()
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "EnumerableOwnProperties lost its object target",
+            })?;
+        // A prior getter may have deleted the property or changed its
+        // enumerability, so this is deliberately not the descriptor captured
+        // in the key snapshot.
+        charge_heap_property_lookup(runtime, &state.target, execution_budget)?;
+        let Some(own) = own_property_of(runtime, reference, candidate.key())? else {
+            continue;
+        };
+        if !own.layout().is_enumerable() {
+            continue;
+        }
+
+        charge_heap_property_lookup(runtime, &state.target, execution_budget)?;
+        match read_heap_property_for_receiver(
+            runtime,
+            reference,
+            state.target.duplicate(),
+            candidate.key(),
+        )? {
+            PropertyReadOutcome::Value(value) => {
+                let element = enumerable_result_element(
+                    runtime,
+                    state.realm,
+                    state.kind,
+                    candidate.key(),
+                    value,
+                )?;
+                state.elements.push(element);
+            }
+            PropertyReadOutcome::Getter { function, receiver } => {
+                state.current_key = Some(candidate.key().clone());
+                let origin = state.origin.clone();
+                return Ok(NativeDispatch::Call(NativeCall {
+                    function,
+                    receiver,
+                    arguments: CallArguments::empty(),
+                    return_to,
+                    origin,
+                    continuations: enumerable_own_properties_continuation(state)?,
+                    pre_call: None,
+                    new_target: None,
+                    native_caller: None,
+                }));
+            }
+            PropertyReadOutcome::Failed(failure) => {
+                return Err(NativeFailure::Abrupt(property_exception_at(
+                    state.realm,
+                    state.origin,
+                    None,
+                    failure,
+                )?));
+            }
+        }
+    }
+}
+
+/// Produces the immediate primitive result after `ToObject`.
+fn primitive_enumerable_own_properties(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    target: StoredValue,
+    kind: EnumerableOwnPropertiesKind,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::String(value) = target else {
+        execution_budget.charge_instructions(1)?;
+        let array = runtime.allocate_array(realm, Vec::new())?;
+        return Ok(NativeDispatch::Immediate(StoredValue::Object(array)));
+    };
+    let length = value.len();
+    execution_budget.charge_instructions(u64::from(length).saturating_add(1))?;
+    let capacity = usize::try_from(length).unwrap_or(usize::MAX);
+    let mut elements = Vec::new();
+    elements
+        .try_reserve_exact(capacity)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: capacity,
+        })?;
+    for raw_index in 0..length {
+        let index = ArrayIndex::new(raw_index).ok_or(EngineFault::RuntimeInvariant {
+            message: "primitive String enumeration reached the non-index u32 maximum",
+        })?;
+        let key = PropertyKey::from_index(index);
+        let element = enumerable_result_element(
+            runtime,
+            realm,
+            kind,
+            &key,
+            StoredValue::String(value.slice(raw_index..raw_index.saturating_add(1))?),
+        )?;
+        elements.push(element);
+    }
+    let array = runtime.allocate_array(realm, elements)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(array)))
+}
+
+/// Applies the `value` or `key+value` projection for one selected property.
+fn enumerable_result_element(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    kind: EnumerableOwnPropertiesKind,
+    key: &PropertyKey,
+    value: StoredValue,
+) -> Result<StoredValue, NativeFailure> {
+    if matches!(kind, EnumerableOwnPropertiesKind::Value) {
+        return Ok(value);
+    }
+    let mut pair = Vec::new();
+    pair.try_reserve_exact(2)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: 2,
+        })?;
+    pair.push(StoredValue::String(property_key_string(key)?));
+    pair.push(value);
+    Ok(StoredValue::Object(runtime.allocate_array(realm, pair)?))
+}
+
+/// Builds the one-element continuation list used by a selected getter.
+fn enumerable_own_properties_continuation(
+    state: EnumerableOwnPropertiesContinuation,
+) -> Result<Vec<NativeContinuation>, NativeFailure> {
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::EnumerableOwnProperties(Box::new(state)));
+    Ok(continuations)
+}
+
+fn take_enumerable_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, NativeFailure> {
+    completion.take().ok_or_else(|| {
+        EngineFault::RuntimeInvariant {
+            message: "EnumerableOwnProperties resumed without a getter completion",
+        }
+        .into()
+    })
 }
 
 /// `Object.getOwnPropertyDescriptors(O)`.

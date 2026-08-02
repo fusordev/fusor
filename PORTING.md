@@ -337,9 +337,16 @@ incorrectly, so no script can observe a wrong result.
   ordering, symbol-only own-key projection, primitive String exotic keys, fresh
   descriptor materialization, exact built-in identities, and pinned constructor
   property order.
+- [x] Add `Object.values` and `Object.entries` through one resumable
+  `EnumerableOwnProperties` machine: it fixes the string-key snapshot before
+  getter re-entry, re-reads each current descriptor, skips deleted or hidden
+  keys, observes newly enumerable snapshotted keys, propagates getter throws,
+  and boxes primitive Strings. The shared `CopyDataProperties` path now also
+  snapshots Symbols and rechecks descriptors, fixing object rest/spread under
+  getter-driven mutation.
 - [ ] Complete the remaining `Object` statics (`assign`, `defineProperties`,
-  `values`, `entries`, `fromEntries`, `groupBy`, and the descriptor-bearing
-  `Object.create` form), remaining Function/legacy properties, and exotic
+  `fromEntries`, `groupBy`, and the descriptor-bearing `Object.create` form),
+  remaining Function/legacy properties, and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date/JSON, collections, binary data,
   Atomics, Unicode tables, promises, async functions/generators, weak

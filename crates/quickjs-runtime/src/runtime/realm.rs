@@ -41,8 +41,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 21;
-const REALM_FUNCTION_COUNT: usize = 140;
-const REALM_PROPERTY_COUNT: u64 = 466;
+const REALM_FUNCTION_COUNT: usize = 142;
+const REALM_PROPERTY_COUNT: u64 = 472;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -328,7 +328,7 @@ const ARRAY_SEARCH_ATOM_START: usize = STRING_FROM_ATOM_START + STRING_FROM_STAT
 /// operations the current profile can honor completely are installed, so an
 /// absent method fails closed as a missing property rather than behaving
 /// incorrectly.
-const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 17] = [
+const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 19] = [
     ObjectStaticMethod::interned("create", NativeFunctionKind::ObjectCreate, 2),
     ObjectStaticMethod::predefined(
         PredefinedAtom::GetPrototypeOf,
@@ -356,6 +356,8 @@ const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 17] = [
         1,
     ),
     ObjectStaticMethod::predefined(PredefinedAtom::Keys, NativeFunctionKind::ObjectKeys, 1),
+    ObjectStaticMethod::predefined(PredefinedAtom::Values, NativeFunctionKind::ObjectValues, 1),
+    ObjectStaticMethod::dynamic(ENTRIES_ATOM_INDEX, NativeFunctionKind::ObjectEntries, 1),
     ObjectStaticMethod::predefined(
         PredefinedAtom::IsExtensible,
         NativeFunctionKind::ObjectIsExtensible,
@@ -403,6 +405,8 @@ const OBJECT_INTERNED_STATIC_COUNT: usize = {
 struct ObjectStaticMethod {
     /// The predefined atom for this name, when one exists.
     predefined_name: Option<PredefinedAtom>,
+    /// A realm dynamic atom already interned for another intrinsic name.
+    dynamic_atom_index: Option<usize>,
     /// The literal name to intern when no predefined atom exists.
     interned_name: Option<&'static str>,
     kind: NativeFunctionKind,
@@ -413,6 +417,7 @@ impl ObjectStaticMethod {
     const fn predefined(name: PredefinedAtom, kind: NativeFunctionKind, length: i32) -> Self {
         Self {
             predefined_name: Some(name),
+            dynamic_atom_index: None,
             interned_name: None,
             kind,
             length,
@@ -422,7 +427,18 @@ impl ObjectStaticMethod {
     const fn interned(name: &'static str, kind: NativeFunctionKind, length: i32) -> Self {
         Self {
             predefined_name: None,
+            dynamic_atom_index: None,
             interned_name: Some(name),
+            kind,
+            length,
+        }
+    }
+
+    const fn dynamic(index: usize, kind: NativeFunctionKind, length: i32) -> Self {
+        Self {
+            predefined_name: None,
+            dynamic_atom_index: Some(index),
+            interned_name: None,
             kind,
             length,
         }
@@ -2573,6 +2589,13 @@ impl Runtime {
                     self.predefined_property_key(atom),
                     predefined_string(&self.atoms, atom),
                 )
+            } else if let Some(index) = method.dynamic_atom_index {
+                let atom = graph.dynamic_atoms[index].clone();
+                let name = atom
+                    .description()
+                    .expect("shared dynamic Object static name has a description")
+                    .clone();
+                (PropertyKey::from_validated_atom(atom), name)
             } else {
                 let atom = graph.dynamic_atoms[interned].clone();
                 interned += 1;

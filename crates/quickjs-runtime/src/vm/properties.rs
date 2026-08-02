@@ -1343,7 +1343,10 @@ pub(super) fn begin_copy_data_properties(
             .into());
         }
     };
-    let (snapshot, snapshot_work) = runtime.try_for_in_snapshot(reference, 0)?;
+    // CopyDataProperties snapshots all own keys, including Symbols. Whether a
+    // snapshotted key is still present and enumerable is rechecked when that
+    // key is reached after any earlier getter re-entry.
+    let (snapshot, snapshot_work) = runtime.try_own_key_snapshot(reference, 0, KeyPhases::ALL)?;
     execution_budget.charge_instructions(snapshot_work)?;
     let excluded = if matches!(excluded, StoredValue::Undefined) {
         None
@@ -1389,9 +1392,6 @@ pub(super) fn advance_copy_data_properties(
                 };
                 state.next = state.next.saturating_add(1);
                 execution_budget.charge_instructions(1)?;
-                if !candidate.enumerable() {
-                    continue;
-                }
                 if let Some(excluded) = &state.excluded {
                     let reference = match excluded {
                         StoredValue::Function(function) => HeapReference::Function(*function),
@@ -1417,6 +1417,21 @@ pub(super) fn advance_copy_data_properties(
                         continue;
                     }
                 }
+                let source_reference =
+                    state
+                        .source
+                        .heap_reference()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "copy-data-properties lost its object source",
+                        })?;
+                charge_heap_property_lookup(runtime, &state.source, execution_budget)?;
+                let Some(own) = own_property_of(runtime, source_reference, candidate.key())? else {
+                    continue;
+                };
+                if !own.layout().is_enumerable() {
+                    continue;
+                }
+                charge_heap_property_lookup(runtime, &state.source, execution_budget)?;
                 match read_static_property(runtime, state.realm, &state.source, candidate.key())? {
                     PropertyReadOutcome::Value(value) => {
                         match define_static_property(

@@ -461,7 +461,7 @@ fn object_keys_returns_an_independent_array() {
 fn the_extended_object_reflection_statics_have_the_specification_shape() {
     assert!(boolean(
         "var specs=[['is',2],['hasOwn',2],['getOwnPropertySymbols',1],\
-          ['getOwnPropertyDescriptors',1]];\
+          ['getOwnPropertyDescriptors',1],['values',1],['entries',1]];\
          for(var i=0;i<specs.length;i++){\
            var name=specs[i][0],method=Object[name];\
            var descriptor=Object.getOwnPropertyDescriptor(Object,name);\
@@ -473,7 +473,7 @@ fn the_extended_object_reflection_statics_have_the_specification_shape() {
     assert_eq!(
         text("return Object.getOwnPropertyNames(Object).join(',');"),
         "length,name,create,getPrototypeOf,setPrototypeOf,defineProperty,\
-getOwnPropertyNames,getOwnPropertySymbols,keys,isExtensible,preventExtensions,\
+getOwnPropertyNames,getOwnPropertySymbols,keys,values,entries,isExtensible,preventExtensions,\
 getOwnPropertyDescriptor,getOwnPropertyDescriptors,is,seal,freeze,isSealed,\
 isFrozen,hasOwn,prototype"
     );
@@ -578,6 +578,79 @@ fn get_own_property_descriptors_observes_primitive_string_exotics() {
     ));
     assert_eq!(
         type_error_message("return Object.getOwnPropertyDescriptors(null);"),
+        "cannot convert to object"
+    );
+}
+
+/// `Object.values` and `Object.entries` use the string-key phase of
+/// `[[OwnPropertyKeys]]`, filter on the current descriptor's enumerability, and
+/// read values from left to right while omitting symbols and hidden properties.
+#[test]
+fn object_values_and_entries_follow_enumerable_own_property_order() {
+    assert!(boolean(
+        "var symbol=Symbol('s'),object={b:2};object[2]='two';object.a=1;\
+         object[0]='zero';Object.defineProperty(object,'hidden',{value:9});\
+         object[symbol]=3;var values=Object.values(object);\
+         var entries=Object.entries(object);\
+         return values.join(',')==='zero,two,2,1'&&entries.length===4&&\
+           entries[0][0]==='0'&&entries[0][1]==='zero'&&\
+           entries[1][0]==='2'&&entries[1][1]==='two'&&\
+           entries[2][0]==='b'&&entries[2][1]===2&&\
+           entries[3][0]==='a'&&entries[3][1]===1;"
+    ));
+}
+
+/// The own-key list is fixed before the first getter, but each later key's
+/// descriptor is re-read. A getter can therefore expose or delete a snapshotted
+/// key, while a newly added key is not visited.
+#[test]
+fn enumerable_own_properties_rechecks_descriptors_after_each_getter() {
+    assert!(boolean(
+        "var log='';var object={};\
+         function first(){log=log+'a';\
+           Object.defineProperty(object,'hidden',{enumerable:true});\
+           delete object.deleted;object.added=4;return 1;}\
+         Object.defineProperty(object,'a',{get:first,enumerable:true});\
+         Object.defineProperty(object,'hidden',{value:2,configurable:true});\
+         object.deleted=3;var values=Object.values(object);\
+         return values.length===2&&values[0]===1&&values[1]===2&&log==='a';"
+    ));
+}
+
+/// A non-enumerable accessor is never invoked. Enumerable getters receive the
+/// original object as `this`, and abrupt completion is propagated unchanged.
+#[test]
+fn enumerable_own_properties_runs_only_selected_getters_and_propagates_throws() {
+    assert!(boolean(
+        "var log='';var object={};var marker={};\
+         function hidden(){log=log+'h';return 1;}\
+         function visible(){log=log+'v';return this===object?7:0;}\
+         Object.defineProperty(object,'hidden',{get:hidden});\
+         Object.defineProperty(object,'visible',{get:visible,enumerable:true});\
+         var values=Object.values(object);if(values[0]!==7||log!=='v'){return false;}\
+         function boom(){throw marker;}\
+         Object.defineProperty(object,'boom',{get:boom,enumerable:true});\
+         try{Object.entries(object);}catch(error){return error===marker;}return false;"
+    ));
+}
+
+/// `ToObject` exposes primitive String index properties; other non-nullish
+/// primitives have no enumerable own properties and nullish inputs throw.
+#[test]
+fn object_values_and_entries_box_primitive_strings() {
+    assert!(boolean(
+        "var values=Object.values('ab'),entries=Object.entries('ab');\
+         return values.length===2&&values[0]==='a'&&values[1]==='b'&&\
+           entries.length===2&&entries[0][0]==='0'&&entries[0][1]==='a'&&\
+           entries[1][0]==='1'&&entries[1][1]==='b'&&\
+           Object.values(5).length===0&&Object.entries(true).length===0;"
+    ));
+    assert_eq!(
+        type_error_message("return Object.values(null);"),
+        "cannot convert to object"
+    );
+    assert_eq!(
+        type_error_message("return Object.entries(undefined);"),
         "cannot convert to object"
     );
 }
