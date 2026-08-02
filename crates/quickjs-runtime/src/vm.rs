@@ -292,6 +292,7 @@ enum NativeContinuation {
     IteratorClose(IteratorCloseContinuation),
     CopyDataProperties(CopyDataPropertiesContinuation),
     EnumerableOwnProperties(Box<EnumerableOwnPropertiesContinuation>),
+    ObjectAssign(Box<ObjectAssignContinuation>),
     ArrayJoin(Box<ArrayJoinContinuation>),
     ArraySearch(Box<ArraySearchContinuation>),
     ArrayMutator(Box<ArrayMutatorContinuation>),
@@ -328,6 +329,7 @@ impl NativeContinuation {
             Self::IteratorClose(state) => state.retained_values(),
             Self::CopyDataProperties(state) => state.retained_values(),
             Self::EnumerableOwnProperties(state) => state.retained_values(),
+            Self::ObjectAssign(state) => state.retained_values(),
             Self::ArrayJoin(_) => ArrayJoinContinuation::retained_values(),
             Self::ArraySearch(_) => ArraySearchContinuation::retained_values(),
             Self::ArrayMutator(state) => state.retained_values(),
@@ -1338,6 +1340,7 @@ fn trace_native_continuation_roots(
             }
         }
         NativeContinuation::EnumerableOwnProperties(state) => state.trace_roots(mark),
+        NativeContinuation::ObjectAssign(state) => state.trace_roots(mark),
         NativeContinuation::InstanceOf(state) => {
             trace_instance_of_roots(state, mark);
         }

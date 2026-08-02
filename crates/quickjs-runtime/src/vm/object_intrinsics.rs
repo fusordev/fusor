@@ -543,6 +543,61 @@ impl EnumerableOwnPropertiesContinuation {
     }
 }
 
+/// Which observable operation an `Object.assign` continuation is awaiting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ObjectAssignStage {
+    /// Select and snapshot the next non-nullish source.
+    NextSource,
+    /// Recheck and read the next key of the current source.
+    NextKey,
+    /// Await a source accessor getter.
+    AwaitGet,
+    /// Await a target setter or an Array `length` conversion/write.
+    AwaitSet,
+}
+
+/// One suspended `Object.assign` traversal.
+pub(super) struct ObjectAssignContinuation {
+    target: StoredValue,
+    sources: Vec<StoredValue>,
+    next_source: usize,
+    source: Option<StoredValue>,
+    keys: Vec<PropertyKey>,
+    next_key: usize,
+    current_key: Option<PropertyKey>,
+    realm: RealmId,
+    stage: ObjectAssignStage,
+    origin: JsStackFrame,
+}
+
+impl ObjectAssignContinuation {
+    /// Values and key slots retained across getter, setter, and conversion
+    /// re-entry.
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64
+            .saturating_add(usize_to_u64(self.sources.len()))
+            .saturating_add(u64::from(self.source.is_some()))
+            .saturating_add(usize_to_u64(self.keys.len()))
+            .saturating_add(u64::from(self.current_key.is_some()))
+    }
+
+    /// Traces the target, all pending sources, and the active source.
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.target, mark);
+        for source in &self.sources {
+            trace_stored_value_root(source, mark);
+        }
+        if let Some(source) = &self.source {
+            trace_stored_value_root(source, mark);
+        }
+    }
+}
+
+enum ObjectAssignSet {
+    Continue(Box<ObjectAssignContinuation>),
+    Suspend(Box<NativeDispatch>),
+}
+
 /// `Object.keys(target)`, `Object.getOwnPropertyNames(target)`, and
 /// `Object.getOwnPropertySymbols(target)`.
 pub(super) fn own_property_keys(
@@ -880,6 +935,398 @@ fn take_enumerable_completion(
             message: "EnumerableOwnProperties resumed without a getter completion",
         }
         .into()
+    })
+}
+
+/// Starts `Object.assign(target, ...sources)`.
+pub(super) fn begin_object_assign(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    target: StoredValue,
+    sources: Vec<StoredValue>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    // `ToObject(target)` precedes every source operation. Reuse the Object
+    // constructor's primitive boxing after rejecting the nullish cases for
+    // which `Object(target)` would instead allocate a fresh object.
+    if matches!(target, StoredValue::Undefined | StoredValue::Null) {
+        return Err(NativeFailure::Abrupt(type_error(
+            realm,
+            Some(&origin),
+            "assign",
+            "cannot convert to object",
+        )?));
+    }
+    let target = match object_constructor(runtime, realm, Some(target))? {
+        NativeDispatch::Immediate(target) => target,
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::Frame(_)
+        | NativeDispatch::Call(_) => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "Object target coercion produced a non-immediate result",
+            }
+            .into());
+        }
+    };
+    if sources.is_empty() {
+        return Ok(NativeDispatch::Immediate(target));
+    }
+    advance_object_assign(
+        runtime,
+        ObjectAssignContinuation {
+            target,
+            sources,
+            next_source: 0,
+            source: None,
+            keys: Vec::new(),
+            next_key: 0,
+            current_key: None,
+            realm,
+            stage: ObjectAssignStage::NextSource,
+            origin,
+        },
+        None,
+        return_to,
+        execution_budget,
+    )
+}
+
+/// Resumes the iterative source/key/Get/Set traversal.
+pub(super) fn advance_object_assign(
+    runtime: &mut Runtime,
+    mut state: ObjectAssignContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            ObjectAssignStage::AwaitGet => {
+                let key = state
+                    .current_key
+                    .take()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "Object.assign getter resumed without a pending key",
+                    })?;
+                let value = take_object_assign_completion(&mut completion, "getter")?;
+                match object_assign_set(runtime, state, key, value, return_to, execution_budget)? {
+                    ObjectAssignSet::Continue(next) => state = *next,
+                    ObjectAssignSet::Suspend(dispatch) => return Ok(*dispatch),
+                }
+            }
+            ObjectAssignStage::AwaitSet => {
+                let _ = take_object_assign_completion(&mut completion, "setter")?;
+                state.stage = ObjectAssignStage::NextKey;
+            }
+            ObjectAssignStage::NextSource => {
+                if state.next_source >= state.sources.len() {
+                    return Ok(NativeDispatch::Immediate(state.target));
+                }
+                let next = std::mem::replace(
+                    state.sources.get_mut(state.next_source).ok_or(
+                        EngineFault::RuntimeInvariant {
+                            message: "Object.assign source cursor escaped its source list",
+                        },
+                    )?,
+                    StoredValue::Undefined,
+                );
+                state.next_source = state.next_source.saturating_add(1);
+                if matches!(next, StoredValue::Undefined | StoredValue::Null) {
+                    continue;
+                }
+                state.keys = object_assign_source_keys(runtime, &next, execution_budget)?;
+                state.source = Some(next);
+                state.next_key = 0;
+                state.stage = ObjectAssignStage::NextKey;
+            }
+            ObjectAssignStage::NextKey => {
+                let Some(key) = state.keys.get(state.next_key).cloned() else {
+                    state.source = None;
+                    state.keys.clear();
+                    state.stage = ObjectAssignStage::NextSource;
+                    continue;
+                };
+                state.next_key = state.next_key.saturating_add(1);
+                execution_budget.charge_instructions(1)?;
+                let source = state.source.as_ref().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Object.assign reached a key without an active source",
+                })?;
+                charge_object_assign_lookup(runtime, source, execution_budget)?;
+                let Some(own) =
+                    resolve_own_property(runtime, state.realm, source, &key, &state.origin)?
+                else {
+                    continue;
+                };
+                if !own.layout().is_enumerable() {
+                    continue;
+                }
+                charge_object_assign_lookup(runtime, source, execution_budget)?;
+                match read_static_property(runtime, state.realm, source, &key)? {
+                    PropertyReadOutcome::Value(value) => {
+                        match object_assign_set(
+                            runtime,
+                            state,
+                            key,
+                            value,
+                            return_to,
+                            execution_budget,
+                        )? {
+                            ObjectAssignSet::Continue(next) => state = *next,
+                            ObjectAssignSet::Suspend(dispatch) => return Ok(*dispatch),
+                        }
+                    }
+                    PropertyReadOutcome::Getter { function, receiver } => {
+                        state.current_key = Some(key);
+                        state.stage = ObjectAssignStage::AwaitGet;
+                        return object_assign_call(
+                            function,
+                            receiver,
+                            Vec::new(),
+                            state,
+                            return_to,
+                        );
+                    }
+                    PropertyReadOutcome::Failed(failure) => {
+                        return Err(NativeFailure::Abrupt(property_exception_at(
+                            state.realm,
+                            state.origin,
+                            object_assign_property_name(&key).as_ref(),
+                            failure,
+                        )?));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Snapshots one source's `[[OwnPropertyKeys]]` result before any value Get.
+fn object_assign_source_keys(
+    runtime: &Runtime,
+    source: &StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<Vec<PropertyKey>, NativeFailure> {
+    if let Some(reference) = source.heap_reference() {
+        let (snapshot, work) = runtime.try_own_key_snapshot(reference, 0, KeyPhases::ALL)?;
+        execution_budget.charge_instructions(work)?;
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(snapshot.len())
+            .map_err(|_| ExecutionError::AllocationFailed {
+                resource: RuntimeResource::FrameValues,
+                additional: snapshot.len(),
+            })?;
+        for index in 0..snapshot.len() {
+            keys.push(
+                snapshot
+                    .get(index)
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "Object.assign own-key snapshot shrank",
+                    })?
+                    .key()
+                    .clone(),
+            );
+        }
+        return Ok(keys);
+    }
+    if let StoredValue::String(value) = source {
+        let keys = primitive_string_own_keys(runtime, value)?;
+        execution_budget.charge_instructions(usize_to_u64(keys.len()).saturating_add(1))?;
+        return Ok(keys);
+    }
+    execution_budget.charge_instructions(1)?;
+    Ok(Vec::new())
+}
+
+/// Applies the strict `Set(to, key, value, true)` step.
+fn object_assign_set(
+    runtime: &mut Runtime,
+    mut state: ObjectAssignContinuation,
+    key: PropertyKey,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<ObjectAssignSet, NativeFailure> {
+    let name = object_assign_property_name(&key);
+    if is_array_length_target(runtime, &state.target, &key)? {
+        let conversion = array_length_write_target(
+            state.target.duplicate(),
+            name.clone().ok_or(EngineFault::RuntimeInvariant {
+                message: "Array length assignment has no String property name",
+            })?,
+            true,
+            false,
+            &value,
+        );
+        state.stage = ObjectAssignStage::AwaitSet;
+        let realm = state.realm;
+        let origin = state.origin.clone();
+        let dispatch = begin_operator_primitive_conversion(
+            runtime,
+            value,
+            OperatorPrimitiveHint::Number,
+            conversion,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        )?;
+        return object_assign_after_nested(dispatch, state);
+    }
+
+    match write_static_property(
+        runtime,
+        state.realm,
+        &state.target,
+        key,
+        value,
+        true,
+        execution_budget,
+    )? {
+        PropertyWriteOutcome::Complete => {
+            state.stage = ObjectAssignStage::NextKey;
+            Ok(ObjectAssignSet::Continue(Box::new(state)))
+        }
+        PropertyWriteOutcome::Setter {
+            function,
+            receiver,
+            value,
+        } => {
+            let mut arguments = Vec::new();
+            arguments
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::FrameValues,
+                    additional: 1,
+                })?;
+            arguments.push(value);
+            state.stage = ObjectAssignStage::AwaitSet;
+            Ok(ObjectAssignSet::Suspend(Box::new(object_assign_call(
+                function, receiver, arguments, state, return_to,
+            )?)))
+        }
+        PropertyWriteOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
+            state.realm,
+            state.origin,
+            name.as_ref(),
+            failure,
+        )?)),
+    }
+}
+
+/// Chains the assign state outside an Array length conversion continuation.
+fn object_assign_after_nested(
+    dispatch: NativeDispatch,
+    state: ObjectAssignContinuation,
+) -> Result<ObjectAssignSet, NativeFailure> {
+    let mut outer = Vec::new();
+    outer
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    outer.push(NativeContinuation::ObjectAssign(Box::new(state)));
+    match dispatch {
+        NativeDispatch::Immediate(_) => {
+            let Some(NativeContinuation::ObjectAssign(mut state)) = outer.pop() else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "Object.assign immediate continuation disappeared",
+                }
+                .into());
+            };
+            state.stage = ObjectAssignStage::NextKey;
+            Ok(ObjectAssignSet::Continue(state))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(&mut frame, outer)?;
+            Ok(ObjectAssignSet::Suspend(Box::new(NativeDispatch::Frame(
+                frame,
+            ))))
+        }
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(&mut call, outer)?;
+            Ok(ObjectAssignSet::Suspend(Box::new(NativeDispatch::Call(
+                call,
+            ))))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone => Err(EngineFault::RuntimeInvariant {
+            message: "Array length conversion produced a structured result",
+        }
+        .into()),
+    }
+}
+
+/// Builds a getter or setter call with the assign continuation attached.
+fn object_assign_call(
+    function: FunctionId,
+    receiver: StoredValue,
+    arguments: Vec<StoredValue>,
+    state: ObjectAssignContinuation,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::ObjectAssign(Box::new(state)));
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::from_values(arguments),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    }))
+}
+
+fn charge_object_assign_lookup(
+    runtime: &Runtime,
+    source: &StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    if source.heap_reference().is_some() {
+        charge_heap_property_lookup(runtime, source, execution_budget)
+    } else {
+        execution_budget.charge_instructions(1).map_err(Into::into)
+    }
+}
+
+fn object_assign_property_name(key: &PropertyKey) -> Option<JsString> {
+    if let Some(index) = key.as_index() {
+        return index_string(index.get()).ok();
+    }
+    key.as_atom().and_then(crate::Atom::description).cloned()
+}
+
+fn take_object_assign_completion(
+    completion: &mut Option<StoredValue>,
+    operation: &'static str,
+) -> Result<StoredValue, NativeFailure> {
+    completion.take().ok_or_else(|| {
+        let message = if operation == "getter" {
+            "Object.assign resumed without a getter completion"
+        } else {
+            "Object.assign resumed without a setter completion"
+        };
+        EngineFault::RuntimeInvariant { message }.into()
     })
 }
 

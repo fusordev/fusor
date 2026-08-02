@@ -344,8 +344,13 @@ incorrectly, so no script can observe a wrong result.
   and boxes primitive Strings. The shared `CopyDataProperties` path now also
   snapshots Symbols and rechecks descriptors, fixing object rest/spread under
   getter-driven mutation.
-- [ ] Complete the remaining `Object` statics (`assign`, `defineProperties`,
-  `fromEntries`, `groupBy`, and the descriptor-bearing `Object.create` form),
+- [x] Implement `Object.assign` with target `ToObject` validation before source
+  access, per-source all-own-key snapshots, current descriptor rechecks,
+  primitive String and Symbol copying, and resumable getter/strict-setter
+  re-entry. Failures preserve already committed writes, and Array `length`
+  targets reuse the ordinary nested conversion and shrink machinery.
+- [ ] Complete the remaining `Object` statics (`defineProperties`, `fromEntries`,
+  `groupBy`, and the descriptor-bearing `Object.create` form),
   remaining Function/legacy properties, and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date/JSON, collections, binary data,

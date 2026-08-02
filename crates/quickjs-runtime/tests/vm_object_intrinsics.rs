@@ -461,7 +461,7 @@ fn object_keys_returns_an_independent_array() {
 fn the_extended_object_reflection_statics_have_the_specification_shape() {
     assert!(boolean(
         "var specs=[['is',2],['hasOwn',2],['getOwnPropertySymbols',1],\
-          ['getOwnPropertyDescriptors',1],['values',1],['entries',1]];\
+          ['getOwnPropertyDescriptors',1],['values',1],['entries',1],['assign',2]];\
          for(var i=0;i<specs.length;i++){\
            var name=specs[i][0],method=Object[name];\
            var descriptor=Object.getOwnPropertyDescriptor(Object,name);\
@@ -474,7 +474,7 @@ fn the_extended_object_reflection_statics_have_the_specification_shape() {
         text("return Object.getOwnPropertyNames(Object).join(',');"),
         "length,name,create,getPrototypeOf,setPrototypeOf,defineProperty,\
 getOwnPropertyNames,getOwnPropertySymbols,keys,values,entries,isExtensible,preventExtensions,\
-getOwnPropertyDescriptor,getOwnPropertyDescriptors,is,seal,freeze,isSealed,\
+getOwnPropertyDescriptor,getOwnPropertyDescriptors,is,assign,seal,freeze,isSealed,\
 isFrozen,hasOwn,prototype"
     );
 }
@@ -652,6 +652,120 @@ fn object_values_and_entries_box_primitive_strings() {
     assert_eq!(
         type_error_message("return Object.entries(undefined);"),
         "cannot convert to object"
+    );
+}
+
+/// `Object.assign` has the standard built-in identity and descriptor.
+#[test]
+fn object_assign_has_the_specification_shape() {
+    assert!(boolean(
+        "var descriptor=Object.getOwnPropertyDescriptor(Object,'assign');\
+         return typeof Object.assign==='function'&&Object.assign.name==='assign'&&\
+           Object.assign.length===2&&descriptor.writable&&!descriptor.enumerable&&\
+           descriptor.configurable;"
+    ));
+}
+
+/// Sources are visited left to right. Each source snapshots all own keys,
+/// filters current enumerable descriptors, reads getters, and copies both
+/// String and Symbol keys with strict `Set` semantics.
+#[test]
+fn object_assign_copies_sources_strings_and_symbols_in_order() {
+    assert!(boolean(
+        "var symbol=Symbol('s'),log='';var first={};\
+         function readA(){log=log+'a';return 1;}\
+         Object.defineProperty(first,'a',{get:readA,enumerable:true});first[symbol]=2;\
+         var target=Object.assign({},first,null,undefined,'bc',{a:4});\
+         return log==='a'&&target.a===4&&target[symbol]===2&&\
+           target[0]==='b'&&target[1]==='c'&&\
+           Object.getOwnPropertySymbols(target)[0]===symbol;"
+    ));
+}
+
+/// The target is coerced once with `ToObject`, so non-nullish primitives return
+/// their mutable wrapper while a nullish target fails before any source Get.
+#[test]
+fn object_assign_boxes_its_target_and_validates_it_before_sources() {
+    assert!(boolean(
+        "var boxed=Object.assign(1,{a:2});\
+         return typeof boxed==='object'&&boxed.valueOf()===1&&boxed.a===2;"
+    ));
+    assert_eq!(
+        text(
+            "var log='';function read(){log=log+'g';return 1;}\
+             var source={};Object.defineProperty(source,'x',{get:read,enumerable:true});\
+             try{Object.assign(null,source);}catch(error){}return log;"
+        ),
+        ""
+    );
+    assert_eq!(
+        type_error_message("return Object.assign(undefined,{x:1});"),
+        "cannot convert to object"
+    );
+}
+
+/// The source key list is fixed, but current descriptors are re-read after
+/// earlier getters and target setters. Snapshotted properties can become
+/// enumerable or disappear; newly added keys remain outside the traversal.
+#[test]
+fn object_assign_rechecks_source_descriptors_after_reentry() {
+    assert!(boolean(
+        "var source={},target={};\
+         function first(){Object.defineProperty(source,'hidden',{enumerable:true});\
+           delete source.deleted;source.added=4;return 1;}\
+         Object.defineProperty(source,'a',{get:first,enumerable:true});\
+         Object.defineProperty(source,'hidden',{value:2,configurable:true});\
+         source.deleted=3;Object.assign(target,source);\
+         return target.a===1&&target.hidden===2&&!Object.hasOwn(target,'deleted')&&\
+           !Object.hasOwn(target,'added');"
+    ));
+    assert!(boolean(
+        "var source={a:1};var target={};\
+         Object.defineProperty(source,'hidden',{value:2,enumerable:false,configurable:true});\
+         function setA(value){Object.defineProperty(source,'hidden',{enumerable:true});}\
+         Object.defineProperty(target,'a',{set:setA});Object.assign(target,source);\
+         return target.hidden===2;"
+    ));
+}
+
+/// Setters run with the coerced target as receiver. A rejected strict write or
+/// a throwing setter aborts the operation after preserving earlier writes.
+#[test]
+fn object_assign_uses_strict_resumable_set_semantics() {
+    assert!(boolean(
+        "var log='',target={};function setX(value){log=log+(this===target?'t':'f')+value;}\
+         Object.defineProperty(target,'x',{set:setX});Object.assign(target,{x:3});\
+         if(log!=='t3'){return false;}\
+         Object.defineProperty(target,'fixed',{value:1});\
+         try{Object.assign(target,{before:2,fixed:3,after:4});}catch(error){\
+           return error instanceof TypeError&&target.before===2&&target.fixed===1&&\
+             !Object.hasOwn(target,'after');}return false;"
+    ));
+    assert!(boolean(
+        "var marker={},target={};function thrower(value){throw marker;}\
+         Object.defineProperty(target,'x',{set:thrower});\
+         try{Object.assign(target,{x:1});}catch(error){return error===marker;}return false;"
+    ));
+    assert!(boolean(
+        "var marker={},source={};function thrower(){throw marker;}\
+         Object.defineProperty(source,'x',{get:thrower,enumerable:true});\
+         try{Object.assign({},source);}catch(error){return error===marker;}return false;"
+    ));
+}
+
+/// Assigning an enumerable `length` key to an Array uses the existing
+/// resumable Array length write path, including the two observable numeric
+/// conversions required for an object-valued length.
+#[test]
+fn object_assign_routes_array_length_through_array_set_length() {
+    assert_eq!(
+        text(
+            "var log='';function lengthValue(){log=log+'v';return 2;}\
+             var length={valueOf:lengthValue};\
+             var array=[];Object.assign(array,{length:length});\
+             return array.length+'|'+log;"
+        ),
+        "2|vv"
     );
 }
 

@@ -41,8 +41,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 21;
-const REALM_FUNCTION_COUNT: usize = 142;
-const REALM_PROPERTY_COUNT: u64 = 472;
+const REALM_FUNCTION_COUNT: usize = 143;
+const REALM_PROPERTY_COUNT: u64 = 475;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -328,7 +328,7 @@ const ARRAY_SEARCH_ATOM_START: usize = STRING_FROM_ATOM_START + STRING_FROM_STAT
 /// operations the current profile can honor completely are installed, so an
 /// absent method fails closed as a missing property rather than behaving
 /// incorrectly.
-const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 19] = [
+const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 20] = [
     ObjectStaticMethod::interned("create", NativeFunctionKind::ObjectCreate, 2),
     ObjectStaticMethod::predefined(
         PredefinedAtom::GetPrototypeOf,
@@ -379,6 +379,7 @@ const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 19] = [
         1,
     ),
     ObjectStaticMethod::interned("is", NativeFunctionKind::ObjectIs, 2),
+    ObjectStaticMethod::interned("assign", NativeFunctionKind::ObjectAssign, 2),
     ObjectStaticMethod::interned("seal", NativeFunctionKind::ObjectSeal, 1),
     ObjectStaticMethod::interned("freeze", NativeFunctionKind::ObjectFreeze, 1),
     ObjectStaticMethod::interned("isSealed", NativeFunctionKind::ObjectIsSealed, 1),

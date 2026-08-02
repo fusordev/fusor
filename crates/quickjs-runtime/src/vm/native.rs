@@ -97,7 +97,7 @@ pub(super) fn active_execution_frames(frames: &[Frame]) -> usize {
     })
 }
 
-fn attach_native_continuations(
+pub(super) fn attach_native_continuations(
     frame: &mut Frame,
     mut outer: Vec<NativeContinuation>,
 ) -> Result<(), NativeFailure> {
@@ -122,7 +122,7 @@ fn attach_native_continuations(
     Ok(())
 }
 
-fn prepend_native_continuations(
+pub(super) fn prepend_native_continuations(
     call: &mut NativeCall,
     mut outer: Vec<NativeContinuation>,
 ) -> Result<(), NativeFailure> {
@@ -337,6 +337,13 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::ObjectAssign(state) => advance_object_assign(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::DefineProperty(state) => advance_define_property(
                 runtime,
                 *state,
@@ -1087,6 +1094,19 @@ pub(super) fn dispatch_native_call_with_frames(
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(
                 first.same_value(&second),
             )))
+        }
+        NativeFunctionKind::ObjectAssign => {
+            let mut arguments = inputs.arguments;
+            let target = arguments.take_first_or_undefined();
+            begin_object_assign(
+                runtime,
+                native.realm,
+                target,
+                arguments.into_remaining_values(),
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
         }
         NativeFunctionKind::ObjectHasOwn => {
             let mut arguments = inputs.arguments;
