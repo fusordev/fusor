@@ -349,6 +349,34 @@ pub(crate) struct BytecodeFunction {
     pub(crate) environment: Vec<EnvironmentBinding>,
 }
 
+/// Which copying method a continuation is performing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayCopier {
+    Slice,
+    Concat,
+    At,
+}
+
+impl ArrayCopier {
+    /// Returns the reported `length` of the installed function.
+    pub(crate) const fn arity(self) -> i32 {
+        match self {
+            Self::Slice => 2,
+            // `concat` is variadic and `at` takes one index; both report 1.
+            Self::Concat | Self::At => 1,
+        }
+    }
+
+    /// Returns the property name this method is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Slice => "slice",
+            Self::Concat => "concat",
+            Self::At => "at",
+        }
+    }
+}
+
 /// Which mutator a continuation is performing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArrayMutator {
@@ -591,6 +619,8 @@ pub(crate) enum NativeFunctionKind {
     ArrayPrototypeSearch(ArraySearch),
     /// One `Array.prototype` mutator sharing the resumable element driver.
     ArrayPrototypeMutator(ArrayMutator),
+    /// One `Array.prototype` copying method sharing the resumable element read.
+    ArrayPrototypeCopier(ArrayCopier),
     ArrayConstructor,
     SymbolConstructor,
     SymbolPrototypeToString,

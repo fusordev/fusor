@@ -356,6 +356,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::ArrayCopier(state) => advance_array_copier(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
@@ -1354,6 +1361,18 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::ArrayPrototypeMutator(mutator) => begin_array_mutator(
             runtime,
             mutator,
+            native.realm,
+            inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        // `slice`, `concat`, and `at` read without mutating; the first two build
+        // a fresh Array while `at` answers one element.
+        NativeFunctionKind::ArrayPrototypeCopier(copier) => begin_array_copier(
+            runtime,
+            copier,
             native.realm,
             inputs.receiver,
             inputs.arguments,

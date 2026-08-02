@@ -237,6 +237,14 @@ incorrectly, so no script can observe a wrong result.
   reproduced. A real Array's exotic `length` reaches the array write path
   directly, because the ordinary path deliberately refuses a `length` write that
   has not run a resumable numeric conversion.
+- [x] `Array.prototype.slice`, `concat`, and `at`, which read without mutating.
+  `slice` and `concat` build a fresh Array while `at` answers one element, and all
+  three share the same resumable element read. `concat` spreads only a real
+  Array, and it applies that same test to its receiver, so
+  `Array.prototype.concat.call({length:2,0:"a"},9)` has length `2` with the
+  array-like itself at index `0`; nesting is never flattened. Holes survive into
+  the result because an absent source index is skipped rather than written, and
+  the destination length is set once at the end so a trailing hole still counts.
 - [x] `String.fromCharCode` and `String.fromCodePoint`, sharing the same
   resumable machine as the prototype methods because their arguments are also
   arbitrary objects. The two differ in coercion and range: `fromCharCode` applies
