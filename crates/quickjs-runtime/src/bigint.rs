@@ -264,6 +264,93 @@ impl JsBigInt {
         Some(low | (high << LIMB_BITS))
     }
 
+    /// Converts the value to the nearest binary64, rounding half to even.
+    ///
+    /// This is the `BigInt` branch of ECMAScript `ToNumber`, which is reachable
+    /// through the explicit `Number()` coercion rather than through an operator
+    /// (`js_bigint_to_float64`, `quickjs.c:12258`). A magnitude beyond the
+    /// binary64 range becomes an infinity of the right sign, so no error is
+    /// possible.
+    ///
+    /// The rounding is exact rather than a per-limb accumulation of
+    /// floating-point additions: the top 54 significant bits are taken directly,
+    /// and every discarded bit below them only contributes a sticky flag. That
+    /// keeps `Number(9007199254740993n)` at `9007199254740992`, which the pinned
+    /// oracle reports.
+    #[must_use]
+    pub fn to_f64(&self) -> f64 {
+        if self.is_zero() {
+            return 0.0;
+        }
+        let negative = self.is_negative();
+        // `abs` only fails when its widened storage cannot be reserved; falling
+        // back to the unsigned magnitude of the limbs keeps this total, and the
+        // sign is reapplied below either way.
+        let Ok(magnitude) = self.magnitude() else {
+            return if negative {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+        };
+        let Some(bit_length) = magnitude_bit_length(&magnitude) else {
+            return 0.0;
+        };
+        // The unbiased exponent of the leading one bit.
+        let exponent = bit_length - 1;
+        if exponent > 1023 {
+            return if negative {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+        }
+
+        // Take 54 bits: 53 of significand plus one rounding bit, then fold every
+        // lower bit into a sticky flag.
+        let significand_bits = 54_u64;
+        let mut significand = 0_u64;
+        let mut sticky = false;
+        for offset in 0..bit_length {
+            let bit_index = exponent - offset;
+            let bit = magnitude_bit(&magnitude, bit_index);
+            if offset < significand_bits {
+                significand = (significand << 1) | u64::from(bit);
+            } else if bit == 1 {
+                sticky = true;
+            }
+        }
+        // A value shorter than the window is left-aligned by the loop above, so
+        // shift it into place.
+        if bit_length < significand_bits {
+            significand <<= significand_bits - bit_length;
+        }
+
+        // Round the 54-bit value to 53 bits, half to even.
+        let round_bit = significand & 1;
+        let mut rounded = significand >> 1;
+        if round_bit == 1 && (sticky || rounded & 1 == 1) {
+            rounded += 1;
+        }
+        let mut exponent = exponent;
+        if rounded >= 1_u64 << 53 {
+            rounded >>= 1;
+            exponent += 1;
+            if exponent > 1023 {
+                return if negative {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                };
+            }
+        }
+
+        let sign_bit = u64::from(negative) << 63;
+        let biased_exponent = (exponent + 1023) << 52;
+        let fraction = rounded & ((1_u64 << 52) - 1);
+        f64::from_bits(sign_bit | biased_exponent | fraction)
+    }
+
     /// Returns the two's-complement negation.
     ///
     /// # Errors
@@ -824,6 +911,31 @@ fn normalize_magnitude(limbs: &mut Vec<u32>) {
     }
 }
 
+/// Returns the number of significant bits in a non-negative magnitude.
+///
+/// Answers `None` for a zero magnitude, which has no leading one bit.
+fn magnitude_bit_length(limbs: &[u32]) -> Option<u64> {
+    let (index, top) = limbs
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, limb)| **limb != 0)?;
+    let index = u64::try_from(index).ok()?;
+    // `u32::BITS - leading_zeros` is the bit width of the top limb.
+    Some(index * u64::from(LIMB_BITS) + u64::from(u32::BITS - top.leading_zeros()))
+}
+
+/// Returns bit `index` of a non-negative magnitude, or `0` past its end.
+fn magnitude_bit(limbs: &[u32], index: u64) -> u32 {
+    let limb_index = index / u64::from(LIMB_BITS);
+    let bit_index = index % u64::from(LIMB_BITS);
+    let Ok(limb_index) = usize::try_from(limb_index) else {
+        return 0;
+    };
+    let limb = limbs.get(limb_index).copied().unwrap_or(0);
+    (limb >> bit_index) & 1
+}
+
 /// Divides a magnitude in place by a small divisor, returning the remainder.
 fn divide_magnitude_by_small(limbs: &mut [u32], divisor: u32) -> u64 {
     let mut remainder = 0_u64;
@@ -1350,5 +1462,79 @@ mod tests {
             shrinking = quotient;
         }
         assert_eq!(decimal(&shrinking), "1");
+    }
+
+    /// `Number(bigint)` rounds half to even, matching the pinned oracle.
+    ///
+    /// ```console
+    /// $ /private/tmp/quickjs-2026-06-04/qjs -e 'const b=new ArrayBuffer(8);\
+    ///   const f=new Float64Array(b), u=new BigUint64Array(b);\
+    ///   for (const c of [2n**53n+1n, 2n**53n+3n, 12345678901234567890n]) {\
+    ///     f[0]=Number(c); console.log(c.toString(), Number(c), u[0].toString(16)); }'
+    /// 9007199254740993 9007199254740992 4340000000000000
+    /// 9007199254740995 9007199254740996 4340000000000002
+    /// 12345678901234567890 12345678901234567000 43e56a95319d63e1
+    /// ```
+    #[test]
+    fn conversion_to_binary64_rounds_half_to_even() {
+        // (decimal source, exact binary64 bit pattern)
+        let cases: [(&str, u64); 14] = [
+            ("0", 0x0),
+            ("1", 0x3ff0_0000_0000_0000),
+            ("-1", 0xbff0_0000_0000_0000),
+            ("255", 0x406f_e000_0000_0000),
+            ("-255", 0xc06f_e000_0000_0000),
+            // 2^53 is the last exactly representable integer.
+            ("9007199254740991", 0x433f_ffff_ffff_ffff),
+            ("9007199254740992", 0x4340_0000_0000_0000),
+            // A tie rounds toward the even significand rather than away.
+            ("9007199254740993", 0x4340_0000_0000_0000),
+            ("9007199254740994", 0x4340_0000_0000_0001),
+            ("9007199254740995", 0x4340_0000_0000_0002),
+            ("12345678901234567890", 0x43e5_6a95_319d_63e1),
+            ("-12345678901234567890", 0xc3e5_6a95_319d_63e1),
+            ("18446744073709551616", 0x43f0_0000_0000_0000),
+            ("-18446744073709551616", 0xc3f0_0000_0000_0000),
+        ];
+        for (source, expected) in cases {
+            let value = JsBigInt::from_str_radix(source, 10).expect("a decimal literal");
+            assert_eq!(
+                value.to_f64().to_bits(),
+                expected,
+                "Number({source}) produced {}",
+                value.to_f64()
+            );
+        }
+    }
+
+    /// A magnitude past the binary64 range becomes a signed infinity.
+    ///
+    /// Oracle: `Number(2n**1024n)` is `Infinity`, `Number(-(2n**1024n))` is
+    /// `-Infinity`, and `Number(2n**1023n)` is still finite at
+    /// `8.98846567431158e+307`.
+    #[test]
+    fn conversion_to_binary64_overflows_to_a_signed_infinity() {
+        let two = JsBigInt::from_i32(2);
+        let finite = two
+            .pow(&JsBigInt::from_i32(1023))
+            .expect("2^1023 is within the limb cap");
+        assert_eq!(finite.to_f64().to_bits(), 0x7fe0_0000_0000_0000);
+
+        let overflow = two
+            .pow(&JsBigInt::from_i32(1024))
+            .expect("2^1024 is within the limb cap");
+        // Comparing bit patterns keeps the assertion exact and avoids a
+        // floating-point equality test.
+        assert_eq!(overflow.to_f64().to_bits(), f64::INFINITY.to_bits());
+        assert_eq!(
+            overflow.neg().expect("negation").to_f64().to_bits(),
+            f64::NEG_INFINITY.to_bits()
+        );
+
+        // Rounding the largest finite magnitude upward also overflows.
+        let just_below = overflow
+            .sub(&JsBigInt::from_i32(1))
+            .expect("2^1024 - 1 is within the limb cap");
+        assert_eq!(just_below.to_f64().to_bits(), f64::INFINITY.to_bits());
     }
 }

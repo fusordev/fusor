@@ -197,6 +197,106 @@ pub(crate) fn number_to_int32(value: JsNumber) -> i32 {
     i32::from_ne_bytes(number_to_uint32(value).to_ne_bytes())
 }
 
+/// Applies `ToUint16` to an already-converted ECMAScript Number.
+///
+/// The modular narrow conversions are all defined as `ToUint32` followed by a
+/// truncation, which upstream performs by assigning the `int32_t` result into a
+/// narrower integer (`quickjs.c:9985` and the typed-array element writes).
+/// Sharing `number_to_uint32` therefore keeps the `NaN`, infinity, and
+/// multiple-of-2^32 cases consistent across every width rather than restating
+/// them per type.
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "the narrow conversions are verified against the oracle before the typed-array and String.fromCharCode surfaces that consume them exist"
+)]
+pub(crate) fn number_to_uint16(value: JsNumber) -> u16 {
+    // Masking before the conversion makes it infallible, so the modular result
+    // needs no lossy cast.
+    let truncated = number_to_uint32(value) & u32::from(u16::MAX);
+    u16::try_from(truncated).expect("the mask leaves at most 16 bits")
+}
+
+/// Applies `ToInt16` to an already-converted ECMAScript Number.
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "the narrow conversions are verified against the oracle before the typed-array surface that consumes them exists"
+)]
+pub(crate) fn number_to_int16(value: JsNumber) -> i16 {
+    i16::from_ne_bytes(number_to_uint16(value).to_ne_bytes())
+}
+
+/// Applies `ToUint8` to an already-converted ECMAScript Number.
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "the narrow conversions are verified against the oracle before the typed-array surface that consumes them exists"
+)]
+pub(crate) fn number_to_uint8(value: JsNumber) -> u8 {
+    let truncated = number_to_uint32(value) & u32::from(u8::MAX);
+    u8::try_from(truncated).expect("the mask leaves at most 8 bits")
+}
+
+/// Applies `ToInt8` to an already-converted ECMAScript Number.
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "the narrow conversions are verified against the oracle before the typed-array surface that consumes them exists"
+)]
+pub(crate) fn number_to_int8(value: JsNumber) -> i8 {
+    i8::from_ne_bytes(number_to_uint8(value).to_ne_bytes())
+}
+
+/// Applies `ToUint8Clamp` to an already-converted ECMAScript Number.
+///
+/// This is the one narrow conversion that is not modular: `NaN` becomes `0`,
+/// out-of-range values saturate, and an in-range value is rounded half-to-even
+/// because upstream uses `lrint` under the default rounding mode
+/// (`JS_ToUint8ClampFree`, `quickjs.c:13381`). The oracle confirms the tie
+/// direction: writing `0.5`, `1.5`, `2.5`, and `3.5` into a `Uint8ClampedArray`
+/// yields `0`, `2`, `2`, and `4`.
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "the clamped conversion is verified against the oracle before the Uint8ClampedArray surface that consumes it exists"
+)]
+pub(crate) fn number_to_uint8_clamp(value: JsNumber) -> u8 {
+    let value = value.as_f64();
+    if value.is_nan() || value <= 0.0 {
+        return 0;
+    }
+    if value >= 255.0 {
+        return 255;
+    }
+    round_half_to_even(value)
+}
+
+/// Rounds a value in `0.0..255.0` half-to-even without a floating-point cast.
+fn round_half_to_even(value: f64) -> u8 {
+    let floor = value.floor();
+    // `floor` lies in `0.0..255.0`, so the truncation is exact.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the caller's range check proves the floor is an exact u8"
+    )]
+    let lower = floor as u8;
+    let fraction = value - floor;
+    // A tie is an exact property of the halfway value, so the comparison is
+    // deliberately exact rather than approximate.
+    #[expect(
+        clippy::float_cmp,
+        reason = "the tie case is exactly 0.5, so an epsilon comparison would round the wrong values"
+    )]
+    let tie = fraction == 0.5;
+    if fraction > 0.5 || (tie && lower % 2 == 1) {
+        lower.saturating_add(1)
+    } else {
+        lower
+    }
+}
+
 /// The largest integer binary64 represents exactly, which bounds `ToIndex` and
 /// `ToLength` (`MAX_SAFE_INTEGER`, `quickjs.c:13485`).
 pub(crate) const MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
@@ -273,6 +373,70 @@ pub(crate) fn number_to_index(value: JsNumber) -> Option<u64> {
 )]
 fn max_safe_integer_as_f64() -> f64 {
     MAX_SAFE_INTEGER as f64
+}
+
+/// Applies ECMAScript `CanonicalNumericIndexString`.
+///
+/// Answers `Some(number)` when `key` is the canonical `ToString` spelling of a
+/// Number, and `None` otherwise. `"-0"` is the one key whose round trip fails
+/// yet is still canonical, so it is answered directly, matching the
+/// `JS_ATOM_minus_zero` case of `JS_AtomIsNumericIndex1` (`quickjs.c:3675`).
+///
+/// This is what separates a typed array's integer-indexed slots from its
+/// ordinary properties: `"1.0"`, `"00"`, `"+1"`, and `"1e0"` all name Numbers but
+/// are not canonical, so they stay ordinary properties, while `"NaN"`,
+/// `"Infinity"`, and `"0.5"` are canonical and therefore reach the exotic
+/// integer-index path. The pinned oracle confirms the split through
+/// `Object.defineProperty` on an `Int8Array`: `"1.0"` becomes an own property
+/// while `"0.5"` reports `non integer index in typed array`.
+///
+/// # Errors
+///
+/// Returns an error only if a temporary string buffer cannot be allocated.
+#[allow(
+    dead_code,
+    reason = "the canonical-index predicate is verified against the oracle before the integer-indexed exotic objects that consume it exist"
+)]
+pub(crate) fn canonical_numeric_index_string(
+    key: &JsString,
+) -> Result<Option<JsNumber>, JsStringError> {
+    // Upstream's fast rejection: a canonical spelling starts with a digit or a
+    // minus sign, except for the three named values handled below. Keeping it
+    // means an ordinary method name never runs a numeric conversion.
+    let first = key.code_unit_at(0);
+    let numeric_start = first.is_some_and(|unit| is_ascii_digit(unit) || unit == u16::from(b'-'));
+    if !numeric_start {
+        // `NaN` and `Infinity` are canonical yet start with a letter.
+        let named = if string_equals_ascii(key, "NaN") {
+            Some(f64::NAN)
+        } else if string_equals_ascii(key, "Infinity") {
+            Some(f64::INFINITY)
+        } else {
+            None
+        };
+        return Ok(named.map(JsNumber::from_f64));
+    }
+
+    // `ToString(-0)` is `"0"`, so the round trip below would reject `"-0"`
+    // even though it is the canonical spelling of negative zero.
+    if string_equals_ascii(key, "-0") {
+        return Ok(Some(JsNumber::from_f64(-0.0)));
+    }
+
+    let number = string_to_number(key)?;
+    let rendered = number.to_javascript_string()?;
+    Ok((rendered == *key).then_some(number))
+}
+
+/// Compares a string against an ASCII literal by code unit.
+fn string_equals_ascii(value: &JsString, expected: &str) -> bool {
+    if usize::try_from(value.len()).ok() != Some(expected.len()) {
+        return false;
+    }
+    expected
+        .bytes()
+        .zip(0_u32..)
+        .all(|(byte, index)| value.code_unit_at(index) == Some(u16::from(byte)))
 }
 
 fn parse_infinity(units: &mut Peekable<CodeUnits<'_>>, sign: Option<u8>) -> JsNumber {
@@ -522,8 +686,10 @@ fn significant_width(digit: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SAFE_INTEGER, max_safe_integer_as_f64, number_to_index, number_to_int32,
-        number_to_integer_or_infinity, number_to_length, number_to_uint32, string_to_number,
+        MAX_SAFE_INTEGER, canonical_numeric_index_string, max_safe_integer_as_f64, number_to_index,
+        number_to_int8, number_to_int16, number_to_int32, number_to_integer_or_infinity,
+        number_to_length, number_to_uint8, number_to_uint8_clamp, number_to_uint16,
+        number_to_uint32, string_to_number,
     };
     use crate::{JsNumber, JsString};
 
@@ -763,5 +929,206 @@ mod tests {
         );
         assert_eq!(number_to_index(JsNumber::from_f64(f64::INFINITY)), None);
         assert_eq!(number_to_index(JsNumber::from_f64(f64::NEG_INFINITY)), None);
+    }
+
+    /// The modular narrow conversions truncate a `ToUint32` result.
+    ///
+    /// Typed-array element writes are the only script-reachable path to these,
+    /// so the expectations come from the pinned oracle:
+    ///
+    /// ```console
+    /// $ /private/tmp/quickjs-2026-06-04/qjs -e 'const v=new Int8Array(1);\
+    ///   for(const x of [128,-129,254.5,4294967297]){v[0]=x;console.log(x,v[0]);}'
+    /// 128 -128
+    /// -129 127
+    /// 254.5 -2
+    /// 4294967297 1
+    /// ```
+    #[test]
+    fn the_modular_narrow_conversions_match_the_oracle() {
+        // (input, Int8, Uint8, Int16, Uint16)
+        let cases: [(f64, i8, u8, i16, u16); 21] = [
+            (0.0, 0, 0, 0, 0),
+            (-0.0, 0, 0, 0, 0),
+            (1.9, 1, 1, 1, 1),
+            (-1.9, -1, 255, -1, 65535),
+            (127.5, 127, 127, 127, 127),
+            (128.0, -128, 128, 128, 128),
+            (255.0, -1, 255, 255, 255),
+            (256.0, 0, 0, 256, 256),
+            (257.0, 1, 1, 257, 257),
+            (-1.0, -1, 255, -1, 65535),
+            (-128.0, -128, 128, -128, 65408),
+            (-129.0, 127, 127, -129, 65407),
+            (32767.0, -1, 255, 32767, 32767),
+            (32768.0, 0, 0, -32768, 32768),
+            (-32769.0, -1, 255, 32767, 32767),
+            (65535.0, -1, 255, -1, 65535),
+            (65536.0, 0, 0, 0, 0),
+            (254.5, -2, 254, 254, 254),
+            (f64::NAN, 0, 0, 0, 0),
+            (f64::INFINITY, 0, 0, 0, 0),
+            (4_294_967_297.0, 1, 1, 1, 1),
+        ];
+        for (input, expected_int8, expected_uint8, expected_int16, expected_uint16) in cases {
+            let number = JsNumber::from_f64(input);
+            assert_eq!(number_to_int8(number), expected_int8, "ToInt8({input})");
+            assert_eq!(number_to_uint8(number), expected_uint8, "ToUint8({input})");
+            assert_eq!(number_to_int16(number), expected_int16, "ToInt16({input})");
+            assert_eq!(
+                number_to_uint16(number),
+                expected_uint16,
+                "ToUint16({input})"
+            );
+        }
+    }
+
+    /// `ToUint8Clamp` saturates instead of wrapping and rounds half-to-even.
+    ///
+    /// The tie direction is upstream's `lrint` (`quickjs.c:13381`), which the
+    /// pinned oracle confirms:
+    ///
+    /// ```console
+    /// $ /private/tmp/quickjs-2026-06-04/qjs -e 'const v=new Uint8ClampedArray(1);\
+    ///   for(const x of [0.5,1.5,2.5,3.5,-1,256]){v[0]=x;console.log(x,v[0]);}'
+    /// 0.5 0
+    /// 1.5 2
+    /// 2.5 2
+    /// 3.5 4
+    /// -1 0
+    /// 256 255
+    /// ```
+    #[test]
+    fn to_uint8_clamp_saturates_and_rounds_half_to_even() {
+        for (input, expected) in [
+            (0.0, 0),
+            (-0.0, 0),
+            (0.5, 0),
+            (1.5, 2),
+            (2.5, 2),
+            (3.5, 4),
+            (1.9, 2),
+            (-1.9, 0),
+            (-0.5, 0),
+            (127.0, 127),
+            (127.5, 128),
+            (128.0, 128),
+            (128.5, 128),
+            (253.5, 254),
+            (254.5, 254),
+            (255.0, 255),
+            (255.5, 255),
+            (256.0, 255),
+            (-1.0, 0),
+            (-255.0, 0),
+            (f64::NAN, 0),
+            (f64::INFINITY, 255),
+            (f64::NEG_INFINITY, 0),
+            (4_294_967_296.0, 255),
+            (9_007_199_254_740_992.0, 255),
+        ] {
+            assert_eq!(
+                number_to_uint8_clamp(JsNumber::from_f64(input)),
+                expected,
+                "ToUint8Clamp({input})"
+            );
+        }
+    }
+
+    /// `CanonicalNumericIndexString` accepts only the exact `ToString` spelling.
+    ///
+    /// A key is canonical when `String(Number(key))` is the key itself, plus the
+    /// `"-0"` special case whose round trip renders `"0"`. The pinned oracle
+    /// enumerates the boundary:
+    ///
+    /// ```console
+    /// $ /private/tmp/quickjs-2026-06-04/qjs -e 'for (const k of ["1.0","1e21","1e+21",\
+    ///     "-0","NaN","1e-7","1e-6"]) console.log(k, k==="-0"||String(Number(k))===k);'
+    /// 1.0 false
+    /// 1e21 false
+    /// 1e+21 true
+    /// -0 true
+    /// NaN true
+    /// 1e-7 true
+    /// 1e-6 false
+    /// ```
+    #[test]
+    fn canonical_numeric_index_strings_match_the_oracle() {
+        let canonical: [(&str, f64); 13] = [
+            ("0", 0.0),
+            ("1", 1.0),
+            ("-1", -1.0),
+            ("Infinity", f64::INFINITY),
+            ("-Infinity", f64::NEG_INFINITY),
+            ("4294967295", 4_294_967_295.0),
+            ("4294967296", 4_294_967_296.0),
+            ("0.5", 0.5),
+            ("-0.5", -0.5),
+            ("0.1", 0.1),
+            ("1e-7", 1e-7),
+            ("-1e-7", -1e-7),
+            ("1e+21", 1e21),
+        ];
+        for (key, expected) in canonical {
+            let key = JsString::from_utf8(key).expect("test key");
+            let actual = canonical_numeric_index_string(&key)
+                .expect("temporary storage")
+                .expect("a canonical key");
+            assert_eq!(
+                actual.as_f64().to_bits(),
+                expected.to_bits(),
+                "CanonicalNumericIndexString({key:?})"
+            );
+        }
+
+        // `NaN` is canonical but never equal to itself, so it is checked apart.
+        let nan_key = JsString::from_utf8("NaN").expect("test key");
+        assert!(
+            canonical_numeric_index_string(&nan_key)
+                .expect("temporary storage")
+                .expect("NaN is canonical")
+                .as_f64()
+                .is_nan()
+        );
+
+        // `-0` is canonical even though `ToString(-0)` renders `"0"`.
+        let negative_zero = JsString::from_utf8("-0").expect("test key");
+        assert_eq!(
+            canonical_numeric_index_string(&negative_zero)
+                .expect("temporary storage")
+                .expect("-0 is canonical")
+                .as_f64()
+                .to_bits(),
+            (-0.0_f64).to_bits()
+        );
+
+        for key in [
+            "",
+            "00",
+            "0.0",
+            "1.0",
+            " 1",
+            "1 ",
+            "+1",
+            "1e0",
+            "1e21",
+            "0x1",
+            "abc",
+            "1.5e300",
+            "9007199254740993",
+            "1e100",
+            "1e-6",
+            "Infinityx",
+            "nan",
+            "-",
+        ] {
+            let key = JsString::from_utf8(key).expect("test key");
+            assert!(
+                canonical_numeric_index_string(&key)
+                    .expect("temporary storage")
+                    .is_none(),
+                "CanonicalNumericIndexString({key:?}) must be undefined"
+            );
+        }
     }
 }

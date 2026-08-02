@@ -313,15 +313,63 @@ fn mixing_a_bigint_with_a_number_throws() {
     }
 }
 
-/// Oracle: `Math.max(1n)` and `Number(1n)` show that an explicit numeric
-/// coercion is where a `BigInt` is rejected. `Number(1n)` is `1` upstream, but
-/// `Number` is a deliberate conversion rather than an operator.
+/// Oracle: `Math.max(1n)` shows that an *operator*'s implicit numeric coercion
+/// is where a `BigInt` is rejected.
+///
+/// `Number()` is deliberately not in that set; see
+/// [`the_number_coercion_accepts_a_bigint_through_to_numeric`].
 #[test]
 fn an_implicit_numeric_coercion_rejects_a_bigint() {
     assert_throws(
         "return BigInt(1)|0;",
         ExceptionKind::TypeError,
         "cannot convert bigint to number",
+    );
+}
+
+/// `Number(bigint)` applies `ToNumeric` rather than `ToNumber`.
+///
+/// The `Number` constructor is the one coercion that crosses the two numeric
+/// domains: it admits a `BigInt` and rounds it to the nearest binary64
+/// (`js_number_constructor`, `quickjs.c:44595`). Every operator keeps rejecting
+/// one, which is what the test above pins.
+///
+/// ```console
+/// $ /private/tmp/quickjs-2026-06-04/qjs -e 'console.log(Number(1n), Number(-1n),\
+///     Number(255n), Number(9007199254740993n), Number(2n**1024n),\
+///     Number(Object(1n)), typeof Number(1n));'
+/// 1 -1 255 9007199254740992 Infinity 1 number
+/// ```
+#[test]
+fn the_number_coercion_accepts_a_bigint_through_to_numeric() {
+    assert_eq!(text("return String(Number(BigInt(1)));"), "1");
+    assert_eq!(text("return String(Number(BigInt(-1)));"), "-1");
+    assert_eq!(text("return String(Number(BigInt(255)));"), "255");
+    assert_eq!(text("return typeof Number(BigInt(1));"), "number");
+    assert!(boolean("return Number(BigInt(1))===1;"));
+
+    // Precision is lost exactly the way binary64 rounding requires.
+    assert_eq!(
+        text("return String(Number(BigInt('9007199254740993')));"),
+        "9007199254740992"
+    );
+    // A magnitude past the binary64 range becomes a signed infinity.
+    assert_eq!(
+        text("return String(Number(BigInt(2)**BigInt(1024)));"),
+        "Infinity"
+    );
+    assert_eq!(
+        text("return String(Number(-(BigInt(2)**BigInt(1024))));"),
+        "-Infinity"
+    );
+
+    // A wrapper unwraps through `valueOf` and then takes the same path.
+    assert_eq!(text("return String(Number(Object(BigInt(1))));"), "1");
+
+    // `new Number(1n)` stores the converted Number, so its `valueOf` agrees.
+    assert_eq!(
+        text("return String(new Number(BigInt(255)).valueOf());"),
+        "255"
     );
 }
 

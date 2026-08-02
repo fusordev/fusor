@@ -1514,7 +1514,11 @@ fn finish_operator_primitive_target(
             execution_budget,
         ),
         OperatorPrimitiveTarget::NumberIntrinsic { new_target } => {
-            let value = operator_to_number(value, realm, origin)?;
+            // `Number()` is the one coercion that crosses the numeric domains.
+            // It applies `ToNumeric` and then converts a `BigInt` result to the
+            // nearest binary64 (`js_number_constructor`, `quickjs.c:44595`),
+            // which is why `Number(1n)` is `1` while `1n | 0` still throws.
+            let value = operator_to_numeric(value, realm, origin)?;
             new_target.map_or_else(
                 || Ok(NativeDispatch::Immediate(StoredValue::Number(value))),
                 |new_target| {
@@ -2206,6 +2210,25 @@ pub(super) fn operator_to_number(
             message: "object reached primitive operator Number conversion",
         }
         .into()),
+    }
+}
+
+/// Applies ECMAScript `ToNumeric` to an already-primitive value, then narrows
+/// the result to a Number.
+///
+/// `ToNumeric` differs from `ToNumber` only for a `BigInt`, which it admits
+/// instead of rejecting (`JS_ToNumericFree`, `quickjs.c:13025`). The `Number`
+/// constructor is the caller that wants this: it accepts a `BigInt` and rounds
+/// it to the nearest binary64, while every operator keeps using
+/// [`operator_to_number`] so the two numeric domains stay separate.
+pub(super) fn operator_to_numeric(
+    value: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<JsNumber, NativeFailure> {
+    match value {
+        StoredValue::BigInt(value) => Ok(JsNumber::from_f64(value.to_f64())),
+        value => operator_to_number(value, realm, origin),
     }
 }
 
