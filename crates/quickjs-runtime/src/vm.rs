@@ -84,6 +84,7 @@ mod group_by;
 mod instanceof;
 mod iterators;
 mod json_parse;
+mod json_stringify;
 mod native;
 mod object_intrinsics;
 mod properties;
@@ -99,8 +100,8 @@ use {
     aggregate_error::*, array_callbacks::*, array_copiers::*, array_join::*, array_mutators::*,
     array_search::*, bigint_intrinsics::*, bindings::*, conversions::*,
     define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*, exceptions::*,
-    execution::*, from_entries::*, group_by::*, iterators::*, json_parse::*, native::*,
-    object_intrinsics::*, properties::*, reflect::*, stack::*, string_methods::*,
+    execution::*, from_entries::*, group_by::*, iterators::*, json_parse::*, json_stringify::*,
+    native::*, object_intrinsics::*, properties::*, reflect::*, stack::*, string_methods::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -288,6 +289,7 @@ enum NativeContinuation {
     FromEntries(Box<FromEntriesContinuation>),
     GroupBy(Box<GroupByContinuation>),
     JsonParse(Box<JsonParseContinuation>),
+    JsonStringify(Box<JsonStringifyContinuation>),
     ErrorConstructor(ErrorConstructorContinuation),
     ErrorToString(ErrorToStringContinuation),
     ArrayIteratorNext(ArrayIteratorNextContinuation),
@@ -329,6 +331,7 @@ impl NativeContinuation {
             Self::FromEntries(state) => state.retained_values(),
             Self::GroupBy(state) => state.retained_values(),
             Self::JsonParse(state) => state.retained_values(),
+            Self::JsonStringify(state) => state.retained_values(),
             Self::ErrorConstructor(state) => state.retained_values(),
             Self::ErrorToString(state) => state.retained_values(),
             Self::ArrayIteratorNext(state) => state.retained_values(),
@@ -920,6 +923,11 @@ enum OperatorPrimitiveTarget {
     JsonParseText(JsonParseTextContinuation),
     /// `JSON.rawJSON`'s source text, awaiting `ToString`.
     JsonRawJsonText,
+    JsonStringifyReplacerItem(Box<JsonStringifyContinuation>),
+    JsonStringifySpaceNumber(Box<JsonStringifyContinuation>),
+    JsonStringifySpaceString(Box<JsonStringifyContinuation>),
+    JsonStringifyBoxedNumber(Box<JsonStringifyContinuation>),
+    JsonStringifyBoxedString(Box<JsonStringifyContinuation>),
     ErrorConstructorMessage(ErrorConstructorContinuation),
     ErrorToStringName(ErrorToStringContinuation),
     ErrorToStringMessage(ErrorToStringContinuation),
@@ -983,6 +991,11 @@ impl OperatorPrimitiveTarget {
             } => 1,
             Self::ErrorConstructorMessage(state) => state.retained_values(),
             Self::JsonParseText(state) => state.retained_values(),
+            Self::JsonStringifyReplacerItem(state)
+            | Self::JsonStringifySpaceNumber(state)
+            | Self::JsonStringifySpaceString(state)
+            | Self::JsonStringifyBoxedNumber(state)
+            | Self::JsonStringifyBoxedString(state) => state.retained_values(),
             Self::ErrorToStringName(state) | Self::ErrorToStringMessage(state) => {
                 state.retained_values()
             }
@@ -1165,6 +1178,11 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::BigIntToString { .. }
         | OperatorPrimitiveTarget::BigIntTruncationValue { .. } => {}
         OperatorPrimitiveTarget::JsonParseText(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::JsonStringifyReplacerItem(state)
+        | OperatorPrimitiveTarget::JsonStringifySpaceNumber(state)
+        | OperatorPrimitiveTarget::JsonStringifySpaceString(state)
+        | OperatorPrimitiveTarget::JsonStringifyBoxedNumber(state)
+        | OperatorPrimitiveTarget::JsonStringifyBoxedString(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::BinaryRight { right, .. } => {
             trace_stored_value_root(right, mark);
         }
@@ -1313,6 +1331,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::FromEntries(state) => state.trace_roots(mark),
         NativeContinuation::GroupBy(state) => state.trace_roots(mark),
         NativeContinuation::JsonParse(state) => state.trace_roots(mark),
+        NativeContinuation::JsonStringify(state) => state.trace_roots(mark),
         NativeContinuation::ErrorConstructor(state) => state.trace_roots(mark),
         NativeContinuation::ErrorToString(state) => state.trace_roots(mark),
         NativeContinuation::ArrayIteratorNext(state) => {

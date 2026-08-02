@@ -891,6 +891,36 @@ impl Runtime {
         )
     }
 
+    /// Returns the immutable source text carried by a branded raw-JSON object.
+    pub(crate) fn raw_json_text(
+        &self,
+        object: ObjectId,
+    ) -> Result<Option<JsString>, crate::EngineFault> {
+        let object = self
+            .objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        if !object.is_raw_json() {
+            return Ok(None);
+        }
+        let key = self.predefined_property_key(PredefinedAtom::RawJson);
+        match object.record.own_property(&key) {
+            Some(OwnProperty::Data {
+                value: StoredValue::String(text),
+                ..
+            }) => Ok(Some(text)),
+            Some(OwnProperty::Data { .. } | OwnProperty::Accessor { .. }) | None => {
+                Err(crate::EngineFault::RuntimeInvariant {
+                    message: "branded raw JSON object lost its immutable source text",
+                })
+            }
+        }
+    }
+
     pub(crate) fn allocate_boxed_boolean_with_prototype(
         &mut self,
         prototype: HeapReference,

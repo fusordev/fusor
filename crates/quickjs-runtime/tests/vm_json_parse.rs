@@ -129,12 +129,229 @@ fn json_parse_has_the_standard_identity_and_json_tag() {
     );
     assert_eq!(
         text("return Object.getOwnPropertyNames(JSON).join(',');"),
-        "isRawJSON,parse,rawJSON"
+        "isRawJSON,parse,rawJSON,stringify"
     );
     assert!(boolean(
         "const d=Object.getOwnPropertyDescriptor(this,'JSON');\
          const p=Object.getOwnPropertyDescriptor(JSON,'parse');\
          return d.writable&&!d.enumerable&&d.configurable&&p.writable&&!p.enumerable&&p.configurable;"
+    ));
+}
+
+#[test]
+fn json_stringify_has_the_standard_identity_and_descriptor() {
+    assert_eq!(
+        text("return JSON.stringify.name+','+JSON.stringify.length;"),
+        "stringify,3"
+    );
+    assert!(boolean(
+        "const d=Object.getOwnPropertyDescriptor(JSON,'stringify');\
+         return d.value===JSON.stringify&&d.writable&&!d.enumerable&&d.configurable;"
+    ));
+}
+
+#[test]
+fn json_stringify_serializes_primitives_and_quotes_well_formed_strings() {
+    assert!(boolean(
+        r#"return JSON.stringify(null)==='null'&&
+                  JSON.stringify(true)==='true'&&
+                  JSON.stringify('x')==='\"x\"'&&
+                  JSON.stringify(-0)==='0'&&
+                  JSON.stringify(NaN)==='null'&&
+                  JSON.stringify(Infinity)==='null'&&
+                  JSON.stringify(undefined)===undefined&&
+                  JSON.stringify(function(){})===undefined&&
+                  JSON.stringify(Symbol('x'))===undefined&&
+                  JSON.stringify('\b\t\n\f\r\"\\')==='\"\\b\\t\\n\\f\\r\\\"\\\\\"'&&
+                  JSON.stringify('\ud800')==='\"\\ud800\"'&&
+                  JSON.stringify('\udc00')==='\"\\udc00\"';"#
+    ));
+    assert_eq!(
+        exception_kind("return JSON.stringify(BigInt(1));"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn json_stringify_snapshots_array_length_and_object_keys() {
+    assert!(boolean(
+        r#"const array=[1];
+           array.length=4;array[2]=undefined;array.extra=9;
+           if(JSON.stringify(array)!=='[1,null,null,null]')return false;
+           const shrinking=[1,2];
+           Object.defineProperty(shrinking,0,{enumerable:true,configurable:true,get(){shrinking.length=0;return 7;}});
+           if(JSON.stringify(shrinking)!=='[7,null]')return false;
+           const object={};
+           object.b=1;object[2]=2;object[1]=3;object.a=4;
+           Object.defineProperty(object,'hidden',{enumerable:false,value:5});
+           object[Symbol('s')]=6;
+           if(JSON.stringify(object)!=='{\"1\":3,\"2\":2,\"b\":1,\"a\":4}')return false;
+           const changing={};
+           Object.defineProperty(changing,'a',{enumerable:true,get(){delete changing.b;changing.c=3;return 1;}});
+           changing.b=2;
+           return JSON.stringify(changing)==='{\"a\":1}';"#
+    ));
+}
+
+#[test]
+fn json_stringify_orders_to_json_and_replacer_observably() {
+    assert_eq!(
+        text(
+            r"let log='';let receiver=false;let holder=false;
+               const value={get toJSON(){log+='get;';return function serializer(key){receiver=this===value;log+='call:'+key+';';return {x:1};};}};
+               const root={a:value};
+               const result=JSON.stringify(root,function(key,current){
+                 log+='replace:'+key+';';
+                 if(key==='a')holder=this===root;
+                 return current;
+               });
+               return result+'|'+log+'|'+receiver+'|'+holder;"
+        ),
+        "{\"a\":{\"x\":1}}|replace:;get;call:a;replace:a;replace:x;|true|true"
+    );
+    assert!(boolean(
+        r#"BigInt.prototype.toJSON=function bigintToJSON(key){return key==='a'?'big':'bad';};
+           return JSON.stringify({a:BigInt(1)})==='{\"a\":\"big\"}';"#
+    ));
+}
+
+#[test]
+fn json_stringify_applies_replacer_function_omission_rules() {
+    assert_eq!(
+        text(
+            r"let rootThis=false;
+               const object={a:1,b:2,c:[undefined,function(){},Symbol('x')]};
+               const result=JSON.stringify(object,function(key,value){
+                 if(key==='')rootThis=this!==object&&this['']===object;
+                 if(key==='b')return undefined;
+                 return value;
+               });
+               return result+'|'+rootThis;"
+        ),
+        "{\"a\":1,\"c\":[null,null,null]}|true"
+    );
+}
+
+#[test]
+fn json_stringify_builds_the_replacer_property_list_in_order() {
+    assert_eq!(
+        text(
+            r"let log='';
+               const boxed=new String('ignored');
+               boxed.toString=function boxedToString(){log+='coerce;';return 'b';};
+               const replacer=['a',boxed,'a',2,true,Symbol('x')];
+               Object.defineProperty(replacer,0,{get(){log+='get0;';return 'a';}});
+               Object.defineProperty(replacer,1,{get(){log+='get1;';return boxed;}});
+               const result=JSON.stringify({a:1,b:2,2:3,c:4},replacer);
+               return result+'|'+log;"
+        ),
+        "{\"a\":1,\"b\":2,\"2\":3}|get0;get1;coerce;"
+    );
+}
+
+#[test]
+fn json_stringify_clamps_gap_and_observes_boxed_space_conversion() {
+    assert_eq!(
+        text("return JSON.stringify({a:{b:1}},null,20);"),
+        "{\n          \"a\": {\n                    \"b\": 1\n          }\n}"
+    );
+    assert_eq!(
+        text(
+            r"let log='';const space=new String('ignored');
+               space.toString=function spaceToString(){log='space';return 'abcdefghijk';};
+               return JSON.stringify({a:1},null,space)+'|'+log;"
+        ),
+        "{\nabcdefghij\"a\": 1\n}|space"
+    );
+}
+
+#[test]
+fn json_stringify_unboxes_branded_primitives_and_honors_callable_to_json() {
+    assert_eq!(
+        text(
+            r"let log='';
+               const number=new Number(1);
+               number.valueOf=function numberValueOf(){log+='number;';return 2;};
+               const string=new String('original');
+               string.toString=function stringToString(){log+='string;';return 'changed';};
+               const boolean=new Boolean(false);
+               boolean.valueOf=function booleanValueOf(){return true;};
+               function callable(){}
+               callable.toJSON=function functionToJSON(key){return key;};
+               return JSON.stringify(number)+'|'+JSON.stringify(string)+'|'+
+                 JSON.stringify(boolean)+'|'+JSON.stringify({f:callable})+'|'+log;"
+        ),
+        "2|\"changed\"|false|{\"f\":\"f\"}|number;string;"
+    );
+    assert_eq!(
+        exception_kind("return JSON.stringify(Object(BigInt(1)));"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn json_stringify_does_not_reapply_to_json_to_callback_results() {
+    assert!(boolean(
+        r#"let calls=0;
+           const replacement={toJSON(){calls++;return "wrong";}};
+           const original={toJSON(){calls++;return replacement;}};
+           if(JSON.stringify(original)!=='{}'||calls!==1)return false;
+           calls=0;
+           const result=JSON.stringify({x:1},function(key,value){return key==='x'?replacement:value;});
+           return result==='{"x":{}}'&&calls===0;"#
+    ));
+}
+
+#[test]
+fn json_stringify_uses_property_lists_for_inherited_values_without_recursion() {
+    assert!(boolean(
+        r#"const list=[];for(let i=0;i<512;i++){list[i]='x';}
+           const object=Object.create({x:1});
+           if(JSON.stringify(object,list)!=='{"x":1}')return false;
+           const raw=JSON.stringify({x:1},function(key,value){
+             return key==='x'?JSON.rawJSON('1e2'):value;
+           });
+           return raw==='{"x":1e2}';"#
+    ));
+}
+
+#[test]
+fn json_stringify_embeds_raw_json_and_rejects_cycles() {
+    assert_eq!(
+        text(r#"return JSON.stringify({a:JSON.rawJSON('1e2'),b:[JSON.rawJSON('\"x\"')]});"#),
+        "{\"a\":1e2,\"b\":[\"x\"]}"
+    );
+    assert!(boolean(
+        "const shared={x:1};return JSON.stringify([shared,shared])==='[{\"x\":1},{\"x\":1}]';"
+    ));
+    assert_eq!(
+        exception_kind("const value={};value.self=value;return JSON.stringify(value);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn json_stringify_propagates_abrupt_completions() {
+    assert!(boolean(
+        r"let count=0;
+           try{JSON.stringify({get a(){throw 41;}});}catch(error){if(error===41)count++;}
+           try{JSON.stringify({a:{toJSON(){throw 42;}}});}catch(error){if(error===42)count++;}
+           try{JSON.stringify({a:1},function(){throw 43;});}catch(error){if(error===43)count++;}
+           const item=new String('a');item.toString=function itemToString(){throw 44;};
+           try{JSON.stringify({a:1},[item]);}catch(error){if(error===44)count++;}
+           const space=new Number(1);space.valueOf=function spaceValueOf(){throw 45;};
+           try{JSON.stringify({a:1},null,space);}catch(error){if(error===45)count++;}
+           return count===5;"
+    ));
+}
+
+#[test]
+fn deeply_nested_json_stringify_uses_a_worklist() {
+    assert!(boolean(
+        "let value=0;for(let i=0;i<2000;i++){value=[value];}\
+         if(JSON.stringify(value).length!==4001)return false;\
+         value=0;for(let i=0;i<2000;i++){value={x:value};}\
+         return JSON.stringify(value).length===12001;"
     ));
 }
 

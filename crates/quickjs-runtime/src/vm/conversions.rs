@@ -1585,6 +1585,26 @@ fn finish_operator_primitive_target(
             let text = operator_primitive_to_string(value, realm, origin)?;
             finish_json_raw_json_text(runtime, text, realm, origin.clone(), execution_budget)
         }
+        OperatorPrimitiveTarget::JsonStringifyReplacerItem(state) => {
+            let item = operator_primitive_to_string(value, realm, origin)?;
+            finish_json_stringify_replacer_item(runtime, *state, item, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::JsonStringifySpaceNumber(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            finish_json_stringify_space_number(runtime, *state, number, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::JsonStringifySpaceString(state) => {
+            let string = operator_primitive_to_string(value, realm, origin)?;
+            finish_json_stringify_space_string(runtime, *state, string, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::JsonStringifyBoxedNumber(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            finish_json_stringify_boxed_number(runtime, *state, number, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::JsonStringifyBoxedString(state) => {
+            let string = operator_primitive_to_string(value, realm, origin)?;
+            finish_json_stringify_boxed_string(runtime, *state, string, return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::ErrorConstructorMessage(state) => {
             let message = operator_primitive_to_string(value, realm, origin)?;
             finish_error_constructor_message(runtime, state, message, return_to, execution_budget)

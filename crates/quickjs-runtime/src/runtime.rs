@@ -701,6 +701,8 @@ pub(crate) enum NativeFunctionKind {
     JsonIsRawJson,
     /// `JSON.rawJSON`.
     JsonRawJson,
+    /// `JSON.stringify`.
+    JsonStringify,
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,

@@ -373,9 +373,16 @@ Known intentional runtime differences:
   enumerable `rawJSON` data property. `JSON.isRawJSON` tests that internal slot
   rather than forgeable shape, and the realm publishes both method identities
   in standard property order.
+- [x] Implement `JSON.stringify` with an iterative serialization worklist:
+  replacer-list getters and boxed coercions, `space` conversion, property
+  getters, `toJSON`, replacer calls, wrapper unboxing, raw-JSON embedding,
+  key/length snapshots, cycle detection, well-formed UTF-16 quoting, and
+  compact or indented container assembly all preserve specification order and
+  abrupt completion. Linear scans and output passes consume explicit fuel, and
+  continuation accounting retains every suspended collection and heap edge.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
-  RegExp/Date, JSON serialization, collections, binary data,
+  RegExp/Date, collections, binary data,
   Atomics, Unicode tables, promises, async functions/generators, weak
   references, and finalization registries.
 - [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide

@@ -318,6 +318,9 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::JsonParse(state) => {
                 advance_json_parse(runtime, *state, value, return_to, execution_budget)?
             }
+            NativeContinuation::JsonStringify(state) => {
+                advance_json_stringify(runtime, *state, value, return_to, execution_budget)?
+            }
             NativeContinuation::ErrorConstructor(state) => {
                 advance_error_constructor(runtime, state, value, return_to, execution_budget)?
             }
@@ -1325,6 +1328,16 @@ pub(super) fn dispatch_native_call_with_frames(
         }
         NativeFunctionKind::JsonRawJson => begin_json_raw_json(
             runtime,
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::JsonStringify => begin_json_stringify(
+            runtime,
+            inputs.arguments.take_first_or_undefined(),
+            inputs.arguments.take_first_or_undefined(),
             inputs.arguments.take_first_or_undefined(),
             native.realm,
             return_to,
