@@ -541,6 +541,19 @@ pub(crate) enum NumberPredicate {
     IsNaN,
 }
 
+/// One of the coercing numeric functions installed on the global object.
+///
+/// These are deliberately distinct from [`NumberPredicate`]: the global
+/// predicates apply `ToNumber`, and the parsers apply the string-prefix
+/// algorithms after their observable argument conversions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GlobalNumericFunction {
+    IsFinite,
+    IsNaN,
+    ParseFloat,
+    ParseInt,
+}
+
 /// How one argument is coerced before the method body runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StringArgument {
@@ -727,6 +740,8 @@ pub(crate) enum NativeFunctionKind {
     StringPrototypeMethod(StringMethod),
     /// One `Number` predicate static.
     NumberPredicateStatic(NumberPredicate),
+    /// One coercing numeric function on the realm's global object.
+    GlobalNumeric(GlobalNumericFunction),
     /// `Array.isArray`.
     ArrayIsArray,
     /// One `Array.prototype` search sharing the resumable element loop.

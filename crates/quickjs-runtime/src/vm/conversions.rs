@@ -1540,6 +1540,48 @@ fn finish_operator_primitive_target(
             let digits = operator_to_number(value, realm, origin)?;
             finish_number_format(number, format, digits, realm, origin)
         }
+        OperatorPrimitiveTarget::GlobalNumeric(function) => match function {
+            GlobalNumericFunction::IsFinite | GlobalNumericFunction::IsNaN => {
+                let number = operator_to_number(value, realm, origin)?.as_f64();
+                let answer = if function == GlobalNumericFunction::IsFinite {
+                    number.is_finite()
+                } else {
+                    number.is_nan()
+                };
+                Ok(NativeDispatch::Immediate(StoredValue::Boolean(answer)))
+            }
+            GlobalNumericFunction::ParseFloat => {
+                let text = operator_primitive_to_string(value, realm, origin)?;
+                execution_budget.charge_instructions(u64::from(text.len()).saturating_add(1))?;
+                Ok(NativeDispatch::Immediate(StoredValue::Number(
+                    string_to_parse_float(&text)?,
+                )))
+            }
+            GlobalNumericFunction::ParseInt => Err(EngineFault::RuntimeInvariant {
+                message: "parseInt reached the single-argument numeric continuation",
+            }
+            .into()),
+        },
+        OperatorPrimitiveTarget::GlobalParseIntString { radix } => {
+            let text = operator_primitive_to_string(value, realm, origin)?;
+            begin_operator_primitive_conversion(
+                runtime,
+                radix,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::GlobalParseIntRadix { text },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::GlobalParseIntRadix { text } => {
+            let radix = number_to_int32(operator_to_number(value, realm, origin)?);
+            execution_budget.charge_instructions(u64::from(text.len()).saturating_add(1))?;
+            Ok(NativeDispatch::Immediate(StoredValue::Number(
+                string_to_parse_int(&text, radix)?,
+            )))
+        }
         OperatorPrimitiveTarget::StringIntrinsic { new_target } => {
             let value = operator_primitive_to_string(value, realm, origin)?;
             if let Some(new_target) = new_target {

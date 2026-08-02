@@ -31,18 +31,18 @@ use super::{
     Arc, Arena, ArrayCallback, ArrayCopier, ArrayIntrinsics, ArrayMutator, ArrayReduction,
     ArraySearch, ArrayState, Atom, AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics,
     BoxedPrimitive, Context, ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId,
-    FunctionImplementation, HandleError, HandleKind, HashMap, HeapFunction, HeapObject,
-    HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString, NativeFunction,
-    NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord,
-    PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics,
-    RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity,
-    RuntimeLimits, RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics,
-    check_limit, predefined_string, usize_to_u64,
+    FunctionImplementation, GlobalNumericFunction, HandleError, HandleKind, HashMap, HeapFunction,
+    HeapObject, HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString,
+    NativeFunction, NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId,
+    ObjectRecord, PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId,
+    RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError,
+    RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringIntrinsics, StringMethod,
+    SymbolIntrinsics, check_limit, predefined_string, usize_to_u64,
 };
 
 const REALM_OBJECT_COUNT: usize = 22;
-const REALM_FUNCTION_COUNT: usize = 151;
-const REALM_PROPERTY_COUNT: u64 = 501;
+const REALM_FUNCTION_COUNT: usize = 155;
+const REALM_PROPERTY_COUNT: u64 = 515;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -191,6 +191,17 @@ const NUMBER_PREDICATE_STATICS: [(&str, NumberPredicate); 4] = [
     ("isNaN", NumberPredicate::IsNaN),
 ];
 
+/// The coercing numeric functions installed directly on the global object.
+///
+/// The two parsers are also exposed through `Number` as aliases of these same
+/// function identities, as required by ECMA-262.
+const GLOBAL_NUMERIC_FUNCTIONS: [(GlobalNumericFunction, i32); 4] = [
+    (GlobalNumericFunction::IsFinite, 1),
+    (GlobalNumericFunction::IsNaN, 1),
+    (GlobalNumericFunction::ParseFloat, 1),
+    (GlobalNumericFunction::ParseInt, 2),
+];
+
 /// The `String` constructor's code-unit factories.
 ///
 /// Both report arity 1 even though both are variadic, which the pinned oracle
@@ -230,6 +241,14 @@ const JSON_PARSE_ATOM_INDEX: usize = JSON_IS_RAW_JSON_ATOM_INDEX + 1;
 /// Index of the realm-local `JSON.stringify` method name.
 const JSON_STRINGIFY_ATOM_INDEX: usize = JSON_PARSE_ATOM_INDEX + 1;
 
+/// Index of the realm-local `parseFloat` name shared by the global function
+/// and `Number.parseFloat`.
+const PARSE_FLOAT_ATOM_INDEX: usize = JSON_STRINGIFY_ATOM_INDEX + 1;
+
+/// Index of the realm-local `parseInt` name shared by the global function and
+/// `Number.parseInt`.
+const PARSE_INT_ATOM_INDEX: usize = PARSE_FLOAT_ATOM_INDEX + 1;
+
 /// Exact number of non-predefined atoms interned by one realm transaction.
 const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
     + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len()
@@ -247,7 +266,7 @@ const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
     + NUMBER_FORMAT_METHODS.len()
     + ARRAY_CALLBACK_METHODS.len()
     + ARRAY_REDUCTION_METHODS.len()
-    + 5;
+    + 7;
 
 /// The `Array.prototype` reductions this profile installs.
 const ARRAY_REDUCTION_METHODS: [ArrayReduction; 2] =
@@ -813,6 +832,7 @@ struct RealmRecords {
     string: PrimitiveIntrinsicRecords,
     string_methods: [ObjectRecord; STRING_PROTOTYPE_METHODS.len()],
     number_predicates: [ObjectRecord; NUMBER_PREDICATE_STATICS.len()],
+    global_numeric_functions: [ObjectRecord; GLOBAL_NUMERIC_FUNCTIONS.len()],
     string_from_statics: [ObjectRecord; STRING_FROM_STATICS.len()],
     array_searches: [ObjectRecord; ARRAY_SEARCH_METHODS.len()],
     array_mutators: [ObjectRecord; ARRAY_MUTATOR_METHODS.len()],
@@ -838,7 +858,7 @@ impl RealmRecords {
         // Keep these reservations in the original transaction order so a
         // recoverable allocation failure reports the same `additional` value.
         let base = RealmBaseRecords {
-            global: reserved_record(21)?,
+            global: reserved_record(25)?,
             object_prototype: reserved_record(3 + OBJECT_PROTOTYPE_REFLECTION.len())?,
             function_prototype: reserved_record(10)?,
             throw_type_error: reserved_record(2)?,
@@ -877,14 +897,16 @@ impl RealmRecords {
         };
         let boolean = PrimitiveIntrinsicRecords::try_new(3)?;
         // The `Number` constructor additionally carries its value and predicate
-        // statics.
+        // statics plus the two parser aliases.
         let number = PrimitiveIntrinsicRecords::try_new_with_constructor(
             3 + NUMBER_FORMAT_METHODS.len(),
             3 + NUMBER_VALUE_STATICS.len()
                 + NUMBER_PREDEFINED_VALUE_STATICS.len()
-                + NUMBER_PREDICATE_STATICS.len(),
+                + NUMBER_PREDICATE_STATICS.len()
+                + 2,
         )?;
         let number_predicates = number_predicate_records()?;
+        let global_numeric_functions = global_numeric_function_records()?;
         let bigint = BigIntIntrinsicRecords::try_new()?;
         // `String.prototype` additionally carries `length`, its iterator, and
         // every installed method.
@@ -960,6 +982,7 @@ impl RealmRecords {
             string,
             string_methods,
             number_predicates,
+            global_numeric_functions,
             string_from_statics,
             array_searches: array_search_records()?,
             array_mutators: array_mutator_records()?,
@@ -1112,6 +1135,7 @@ struct RealmGraph {
     string: PrimitiveIntrinsicGraph,
     string_methods: [FunctionId; STRING_PROTOTYPE_METHODS.len()],
     number_predicates: [FunctionId; NUMBER_PREDICATE_STATICS.len()],
+    global_numeric_functions: [FunctionId; GLOBAL_NUMERIC_FUNCTIONS.len()],
     string_from_statics: [FunctionId; STRING_FROM_STATICS.len()],
     array_searches: [FunctionId; ARRAY_SEARCH_METHODS.len()],
     array_mutators: [FunctionId; ARRAY_MUTATOR_METHODS.len()],
@@ -1164,6 +1188,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for function in self.string_from_statics.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
+        for function in self.global_numeric_functions.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for function in self.number_predicates.into_iter().rev() {
@@ -1412,6 +1439,8 @@ impl Runtime {
         let json = self.insert_json_intrinsics(&base, records.json);
         let string_methods = self.insert_string_prototype_methods(&base, records.string_methods);
         let number_predicates = self.insert_number_predicates(&base, records.number_predicates);
+        let global_numeric_functions =
+            self.insert_global_numeric_functions(&base, records.global_numeric_functions);
         let string_from_statics =
             self.insert_string_from_statics(&base, records.string_from_statics);
         let array_searches = self.insert_array_searches(&base, records.array_searches);
@@ -1443,6 +1472,7 @@ impl Runtime {
             string,
             string_methods,
             number_predicates,
+            global_numeric_functions,
             string_from_statics,
             array_searches,
             array_mutators,
@@ -1573,6 +1603,8 @@ impl Runtime {
             intern(&mut self.atoms, &mut dynamic_atoms, &names.is_raw_json)?;
             intern(&mut self.atoms, &mut dynamic_atoms, &names.parse)?;
             intern(&mut self.atoms, &mut dynamic_atoms, &names.stringify)?;
+            interned(&mut self.atoms, &mut dynamic_atoms, "parseFloat")?;
+            interned(&mut self.atoms, &mut dynamic_atoms, "parseInt")?;
             Ok(())
         })();
         if let Err(error) = outcome {
@@ -2022,6 +2054,28 @@ impl Runtime {
         inserted.map(|slot| slot.expect("every Number predicate function was inserted"))
     }
 
+    /// Inserts the realm-owned coercing numeric globals.
+    fn insert_global_numeric_functions(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; GLOBAL_NUMERIC_FUNCTIONS.len()],
+    ) -> [FunctionId; GLOBAL_NUMERIC_FUNCTIONS.len()] {
+        let mut inserted = [None; GLOBAL_NUMERIC_FUNCTIONS.len()];
+        for ((slot, (kind, _)), record) in inserted
+            .iter_mut()
+            .zip(GLOBAL_NUMERIC_FUNCTIONS)
+            .zip(records)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::GlobalNumeric(kind),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every global numeric function was inserted"))
+    }
+
     /// Inserts one native function per installed `String.prototype` method.
     ///
     /// The result keeps `STRING_PROTOTYPE_METHODS` order so the publication step
@@ -2433,6 +2487,7 @@ impl Runtime {
         self.publish_array_intrinsic_properties(&graph.array, keys, names)?;
         self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
         self.publish_global_value_properties(graph)?;
+        self.publish_global_numeric_functions(graph, keys)?;
         self.publish_symbol_intrinsic_properties(&graph.symbol, graph, keys, names)?;
         self.publish_reflect_intrinsic_properties(graph, keys, names)?;
         self.publish_json_intrinsic_properties(graph, keys, names)?;
@@ -2583,6 +2638,60 @@ impl Runtime {
             frozen,
             StoredValue::Number(JsNumber::from_f64(f64::INFINITY)),
         )
+    }
+
+    /// Publishes the four coercing global numeric functions and the two parser
+    /// aliases on `Number`.
+    ///
+    /// `isFinite` and `isNaN` reuse the atoms already interned for their
+    /// non-coercing `Number` counterparts. `parseFloat` and `parseInt` share
+    /// both their property keys and function identities with the `Number`
+    /// aliases, so strict equality observes the specification-required alias.
+    fn publish_global_numeric_functions(
+        &mut self,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+    ) -> Result<(), TryReserveError> {
+        let predicate_atom_start = NUMBER_STATIC_ATOM_START + NUMBER_VALUE_STATICS.len();
+        let atoms = [
+            graph.dynamic_atoms[predicate_atom_start + 2].clone(),
+            graph.dynamic_atoms[predicate_atom_start + 3].clone(),
+            graph.dynamic_atoms[PARSE_FLOAT_ATOM_INDEX].clone(),
+            graph.dynamic_atoms[PARSE_INT_ATOM_INDEX].clone(),
+        ];
+
+        for (((kind, length), function), atom) in GLOBAL_NUMERIC_FUNCTIONS
+            .into_iter()
+            .zip(graph.global_numeric_functions)
+            .zip(atoms)
+        {
+            let name = atom
+                .description()
+                .expect("global numeric function name has a description")
+                .clone();
+            let key = PropertyKey::from_validated_atom(atom);
+            self.objects
+                .get_mut(graph.base.global_object)
+                .expect("new realm global object remains live")
+                .record
+                .append_data(
+                    key.clone(),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            if matches!(
+                kind,
+                GlobalNumericFunction::ParseFloat | GlobalNumericFunction::ParseInt
+            ) {
+                self.functions
+                    .get_mut(graph.number.constructor)
+                    .expect("new Number constructor remains live")
+                    .object
+                    .append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
+            }
+            self.append_function_identity(function, &name, length, keys)?;
+        }
+        Ok(())
     }
 
     fn publish_error_intrinsic_properties(
@@ -3700,6 +3809,17 @@ fn number_predicate_records() -> Result<[ObjectRecord; NUMBER_PREDICATE_STATICS.
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Number predicate record was reserved")))
+}
+
+/// Reserves one record per coercing global numeric function.
+fn global_numeric_function_records()
+-> Result<[ObjectRecord; GLOBAL_NUMERIC_FUNCTIONS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; GLOBAL_NUMERIC_FUNCTIONS.len()] =
+        [const { None }; GLOBAL_NUMERIC_FUNCTIONS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every global numeric record was reserved")))
 }
 
 /// Reserves one record per installed `String.prototype` method.

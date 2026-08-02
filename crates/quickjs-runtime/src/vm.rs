@@ -41,7 +41,8 @@ use crate::{
     RuntimeError, RuntimeResource,
     conversion::{
         number_to_index, number_to_int32, number_to_integer_or_infinity, number_to_length,
-        number_to_uint16, number_to_uint32, string_to_number,
+        number_to_uint16, number_to_uint32, string_to_number, string_to_parse_float,
+        string_to_parse_int,
     },
     define_property::{
         DefinitionDecision, PropertyDefinition, Requested, validate_and_apply_existing,
@@ -55,8 +56,8 @@ use crate::{
         ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayMutator,
         ArrayReduction, ArraySearch, BindingCell, BoundFunction, BytecodeFunction, CollectionRoot,
         EnvironmentBinding, ForInAdvance, FrameBindingAddress, FunctionImplementation,
-        HeapFunction, InstalledCode, InstalledConstant, InstalledRoot, InstalledTemplate,
-        NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
+        GlobalNumericFunction, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
+        InstalledTemplate, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
         PreparedIteratorResultPlan, RealmGlobalBindingState, ReflectMethod, SetPrototypeOutcome,
         StringArgument, StringMethod, array_length_from_number, check_execution_limit,
         global_declaration_error, usize_to_u64,
@@ -912,6 +913,17 @@ enum OperatorPrimitiveTarget {
         number: JsNumber,
         format: NumberFormat,
     },
+    /// One coercing global numeric function's first argument, awaiting the
+    /// conversion selected by that function.
+    GlobalNumeric(GlobalNumericFunction),
+    /// `parseInt`'s input, awaiting `ToString` while retaining its radix.
+    GlobalParseIntString {
+        radix: StoredValue,
+    },
+    /// `parseInt`'s radix, awaiting `ToNumber` after the input conversion.
+    GlobalParseIntRadix {
+        text: JsString,
+    },
     StringIntrinsic {
         new_target: Option<FunctionId>,
     },
@@ -975,6 +987,7 @@ impl OperatorPrimitiveTarget {
             | Self::SymbolIntrinsic { .. }
             | Self::StringIteratorIntrinsic
             | Self::JsonRawJsonText
+            | Self::GlobalNumeric(_)
             | Self::BigIntToString { .. }
             | Self::BigIntTruncationBits { .. }
             | Self::BigIntTruncationValue { .. } => 0,
@@ -983,6 +996,8 @@ impl OperatorPrimitiveTarget {
             | Self::EqualityFinish { .. }
             | Self::NumberToString { .. }
             | Self::NumberFormatDigits { .. }
+            | Self::GlobalParseIntString { .. }
+            | Self::GlobalParseIntRadix { .. }
             | Self::NumberIntrinsic {
                 new_target: Some(_),
             }
@@ -1172,6 +1187,8 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::Unary { .. }
         | OperatorPrimitiveTarget::NumberToString { .. }
         | OperatorPrimitiveTarget::NumberFormatDigits { .. }
+        | OperatorPrimitiveTarget::GlobalNumeric(_)
+        | OperatorPrimitiveTarget::GlobalParseIntRadix { .. }
         | OperatorPrimitiveTarget::SymbolIntrinsic { .. }
         | OperatorPrimitiveTarget::StringIteratorIntrinsic
         | OperatorPrimitiveTarget::JsonRawJsonText
@@ -1191,6 +1208,9 @@ fn trace_operator_primitive_target_roots(
         }
         OperatorPrimitiveTarget::EqualityFinish { other, .. } => {
             trace_stored_value_root(other, mark);
+        }
+        OperatorPrimitiveTarget::GlobalParseIntString { radix } => {
+            trace_stored_value_root(radix, mark);
         }
         OperatorPrimitiveTarget::NumberIntrinsic { new_target }
         | OperatorPrimitiveTarget::StringIntrinsic { new_target } => {

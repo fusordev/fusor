@@ -3565,6 +3565,10 @@ fn property_key_continuations_charge_every_suspended_javascript_value() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one flat target matrix keeps every retained continuation value independently auditable"
+)]
 fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
     let (mut runtime, realm, constructor, _native) = runtime_with_function_constructor();
     let object = source_object(&mut runtime, realm);
@@ -3631,6 +3635,29 @@ fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
         })
         .retained_values(),
         2
+    );
+    assert_eq!(
+        continuation(OperatorPrimitiveTarget::GlobalNumeric(
+            GlobalNumericFunction::IsFinite,
+        ))
+        .retained_values(),
+        1
+    );
+    assert_eq!(
+        continuation(OperatorPrimitiveTarget::GlobalParseIntString {
+            radix: StoredValue::Object(object),
+        })
+        .retained_values(),
+        2,
+        "parseInt retains its receiver and unconverted radix"
+    );
+    assert_eq!(
+        continuation(OperatorPrimitiveTarget::GlobalParseIntRadix {
+            text: JsString::from_utf8("10").expect("input"),
+        })
+        .retained_values(),
+        2,
+        "parseInt retains its radix receiver and converted input"
     );
     assert_eq!(
         continuation(OperatorPrimitiveTarget::ArrayLengthWrite(
@@ -4797,7 +4824,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(503))
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(517))
         .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
@@ -4819,8 +4846,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 503,
-            observed: 504,
+            limit: 517,
+            observed: 518,
         }
     ));
     let failed = runtime.usage();

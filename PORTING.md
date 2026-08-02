@@ -380,6 +380,13 @@ Known intentional runtime differences:
   compact or indented container assembly all preserve specification order and
   abrupt completion. Linear scans and output passes consume explicit fuel, and
   continuation accounting retains every suspended collection and heap edge.
+- [x] Implement the coercing global numeric functions `isFinite`, `isNaN`,
+  `parseFloat`, and `parseInt`. Their resumable conversions preserve `ToNumber`
+  and `ToString` abrupt completions and `parseInt`'s input-before-radix order;
+  the prefix scanners operate directly on UTF-16, preserve negative zero,
+  implement exact power-of-two and decimal binary64 rounding, and charge scan
+  work to the shared fuel budget. `Number.parseFloat` and `Number.parseInt`
+  reuse the corresponding realm-global function identities.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,

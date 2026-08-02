@@ -151,6 +151,208 @@ pub(crate) fn string_to_number(value: &JsString) -> Result<JsNumber, JsStringErr
     ))
 }
 
+/// Applies the string-prefix grammar used by the global `parseFloat` function.
+///
+/// Unlike [`string_to_number`], trailing code units are ignored and an
+/// incomplete exponent is excluded from the longest valid prefix. Parsing
+/// stays on UTF-16 code units so a lone surrogate terminates the prefix rather
+/// than being replaced at a host-string boundary.
+pub(crate) fn string_to_parse_float(value: &JsString) -> Result<JsNumber, JsStringError> {
+    let mut units = value.code_units().peekable();
+    consume_spaces(&mut units);
+
+    let sign = match units.peek().copied() {
+        Some(unit) if unit == u16::from(b'+') => {
+            units.next();
+            Some(b'+')
+        }
+        Some(unit) if unit == u16::from(b'-') => {
+            units.next();
+            Some(b'-')
+        }
+        _ => None,
+    };
+
+    if units.peek().copied() == Some(u16::from(b'I')) {
+        for expected in b"Infinity" {
+            if units.next() != Some(u16::from(*expected)) {
+                return Ok(nan());
+            }
+        }
+        return Ok(if sign == Some(b'-') {
+            JsNumber::from_f64(f64::NEG_INFINITY)
+        } else {
+            JsNumber::from_f64(f64::INFINITY)
+        });
+    }
+
+    let mut decimal = DecimalBytes::new();
+    if let Some(sign) = sign {
+        decimal.push(sign)?;
+    }
+
+    let mut has_mantissa_digit = false;
+    while let Some(unit) = units.peek().copied().filter(|unit| is_ascii_digit(*unit)) {
+        units.next();
+        decimal.push(ascii_byte(unit))?;
+        has_mantissa_digit = true;
+    }
+
+    if units.peek().copied() == Some(u16::from(b'.')) {
+        units.next();
+        decimal.push(b'.')?;
+        while let Some(unit) = units.peek().copied().filter(|unit| is_ascii_digit(*unit)) {
+            units.next();
+            decimal.push(ascii_byte(unit))?;
+            has_mantissa_digit = true;
+        }
+    }
+
+    if !has_mantissa_digit {
+        return Ok(nan());
+    }
+
+    if matches!(
+        units.peek().copied(),
+        Some(unit) if unit == u16::from(b'e') || unit == u16::from(b'E')
+    ) {
+        let marker = units.next().expect("the exponent marker was peeked");
+        let exponent_sign = if matches!(
+            units.peek().copied(),
+            Some(unit) if unit == u16::from(b'+') || unit == u16::from(b'-')
+        ) {
+            units.next()
+        } else {
+            None
+        };
+        if units.peek().copied().is_some_and(is_ascii_digit) {
+            decimal.push(ascii_byte(marker))?;
+            if let Some(exponent_sign) = exponent_sign {
+                decimal.push(ascii_byte(exponent_sign))?;
+            }
+            while let Some(unit) = units.peek().copied().filter(|unit| is_ascii_digit(*unit)) {
+                units.next();
+                decimal.push(ascii_byte(unit))?;
+            }
+        }
+    }
+
+    let Ok(source) = std::str::from_utf8(decimal.as_slice()) else {
+        return Ok(nan());
+    };
+    Ok(JsNumber::from_f64(
+        source.parse::<f64>().unwrap_or(f64::NAN),
+    ))
+}
+
+/// Applies the string-prefix grammar used by the global `parseInt` function.
+///
+/// `radix` is the result of the specification's prior `ToInt32` conversion.
+/// Power-of-two radices use the exact guard-and-sticky accumulator shared with
+/// `ToNumber`; decimal input delegates correctly rounded conversion to Rust's
+/// binary64 parser; the remaining radices use the implementation-approximated
+/// result explicitly permitted by ECMA-262.
+pub(crate) fn string_to_parse_int(
+    value: &JsString,
+    mut radix: i32,
+) -> Result<JsNumber, JsStringError> {
+    if radix != 0 && !(2..=36).contains(&radix) {
+        return Ok(nan());
+    }
+
+    let mut units = value.code_units().peekable();
+    consume_spaces(&mut units);
+    let negative = match units.peek().copied() {
+        Some(unit) if unit == u16::from(b'-') => {
+            units.next();
+            true
+        }
+        Some(unit) if unit == u16::from(b'+') => {
+            units.next();
+            false
+        }
+        _ => false,
+    };
+
+    let mut first = units.next();
+    if matches!(radix, 0 | 16)
+        && first == Some(u16::from(b'0'))
+        && matches!(units.peek().copied(), Some(unit) if unit == u16::from(b'x') || unit == u16::from(b'X'))
+    {
+        units.next();
+        first = None;
+        radix = 16;
+    }
+    if radix == 0 {
+        radix = 10;
+    }
+    let radix = u8::try_from(radix).expect("the radix was restricted to 2 through 36");
+
+    let mut digits = DecimalBytes::new();
+    let mut has_digit = false;
+    let mut has_significant_digit = false;
+    let significant_limit = if radix == 10 { 400 } else { 1_024 };
+    for unit in first.into_iter().chain(units) {
+        let Some(digit) = ascii_digit_value(unit) else {
+            break;
+        };
+        if digit >= radix {
+            break;
+        }
+        has_digit = true;
+        if digit != 0 || has_significant_digit {
+            has_significant_digit = true;
+            if digits.as_slice().len() == significant_limit {
+                return Ok(signed_parse_int_result(f64::INFINITY, negative));
+            }
+            digits.push(ascii_byte(unit))?;
+        }
+    }
+
+    if !has_digit {
+        return Ok(nan());
+    }
+    if !has_significant_digit {
+        return Ok(signed_parse_int_result(0.0, negative));
+    }
+
+    let magnitude = match radix {
+        2 | 4 | 8 | 16 | 32 => {
+            let bits_per_digit = match radix {
+                2 => 1,
+                4 => 2,
+                8 => 3,
+                16 => 4,
+                32 => 5,
+                _ => unreachable!("the power-of-two radix match is exhaustive"),
+            };
+            let mut accumulator = RadixAccumulator::new();
+            for byte in digits.as_slice() {
+                let digit = ascii_digit_value(u16::from(*byte))
+                    .expect("the digit buffer contains only validated ASCII digits");
+                accumulator.push_digit(digit, bits_per_digit);
+            }
+            accumulator.finish()
+        }
+        10 => {
+            let Ok(source) = std::str::from_utf8(digits.as_slice()) else {
+                return Ok(nan());
+            };
+            source.parse::<f64>().unwrap_or(f64::INFINITY)
+        }
+        _ => digits.as_slice().iter().fold(0.0_f64, |accumulator, byte| {
+            let digit = ascii_digit_value(u16::from(*byte))
+                .expect("the digit buffer contains only validated ASCII digits");
+            accumulator.mul_add(f64::from(radix), f64::from(digit))
+        }),
+    };
+    Ok(signed_parse_int_result(magnitude, negative))
+}
+
+fn signed_parse_int_result(magnitude: f64, negative: bool) -> JsNumber {
+    JsNumber::from_f64(if negative { -magnitude } else { magnitude })
+}
+
 /// Applies `ToUint32` to an already-converted ECMAScript Number.
 ///
 /// The bit-level implementation mirrors `QuickJS`'s avoidance of `fmod`: binary64
@@ -522,10 +724,10 @@ fn ascii_digit_value(unit: u16) -> Option<u8> {
         unit if (u16::from(b'0')..=u16::from(b'9')).contains(&unit) => {
             Some(ascii_byte(unit) - b'0')
         }
-        unit if (u16::from(b'a')..=u16::from(b'f')).contains(&unit) => {
+        unit if (u16::from(b'a')..=u16::from(b'z')).contains(&unit) => {
             Some(ascii_byte(unit) - b'a' + 10)
         }
-        unit if (u16::from(b'A')..=u16::from(b'F')).contains(&unit) => {
+        unit if (u16::from(b'A')..=u16::from(b'Z')).contains(&unit) => {
             Some(ascii_byte(unit) - b'A' + 10)
         }
         _ => None,
@@ -675,7 +877,8 @@ fn significant_width(digit: u8) -> u8 {
         1 => 1,
         2..=3 => 2,
         4..=7 => 3,
-        _ => 4,
+        8..=15 => 4,
+        _ => 5,
     }
 }
 
@@ -685,7 +888,7 @@ mod tests {
         MAX_SAFE_INTEGER, canonical_numeric_index_string, max_safe_integer_as_f64, number_to_index,
         number_to_int8, number_to_int16, number_to_int32, number_to_integer_or_infinity,
         number_to_length, number_to_uint8, number_to_uint8_clamp, number_to_uint16,
-        number_to_uint32, string_to_number,
+        number_to_uint32, string_to_number, string_to_parse_float, string_to_parse_int,
     };
     use crate::{JsNumber, JsString};
 
@@ -699,6 +902,16 @@ mod tests {
         string_to_number(&JsString::from_code_units(units).expect("test string"))
             .expect("temporary decimal storage")
             .as_f64()
+    }
+
+    fn parse_float(input: &str) -> JsNumber {
+        string_to_parse_float(&JsString::from_utf8(input).expect("test string"))
+            .expect("temporary decimal storage")
+    }
+
+    fn parse_int(input: &str, radix: i32) -> JsNumber {
+        string_to_parse_int(&JsString::from_utf8(input).expect("test string"), radix)
+            .expect("temporary digit storage")
     }
 
     #[test]
@@ -766,6 +979,94 @@ mod tests {
         ] {
             assert!(parse(source).is_nan(), "{source:?}");
         }
+    }
+
+    /// `parseFloat` accepts the longest decimal-literal prefix after trimming
+    /// leading ECMAScript whitespace. The expected values were checked against
+    /// the pinned `QuickJS` oracle.
+    #[test]
+    fn parse_float_uses_the_longest_decimal_prefix() {
+        for (source, expected_bits) in [
+            ("  -1.25e2tail", (-125.0_f64).to_bits()),
+            ("1e", 1.0_f64.to_bits()),
+            ("1e+", 1.0_f64.to_bits()),
+            (".5x", 0.5_f64.to_bits()),
+            ("+Infinitytail", f64::INFINITY.to_bits()),
+            ("-Infinityx", f64::NEG_INFINITY.to_bits()),
+            ("-0x", (-0.0_f64).to_bits()),
+            ("0x10", 0.0_f64.to_bits()),
+        ] {
+            assert_eq!(
+                parse_float(source).as_f64().to_bits(),
+                expected_bits,
+                "parseFloat({source:?})"
+            );
+        }
+
+        for source in ["", " \t\n", ".", "+", "-", "NaN", "infinity"] {
+            assert!(
+                parse_float(source).as_f64().is_nan(),
+                "parseFloat({source:?})"
+            );
+        }
+
+        let surrogate_terminated =
+            JsString::from_code_units([u16::from(b' '), u16::from(b'1'), 0xd800, u16::from(b'2')])
+                .expect("test string");
+        assert_eq!(
+            string_to_parse_float(&surrogate_terminated)
+                .expect("temporary decimal storage")
+                .as_f64()
+                .to_bits(),
+            1.0_f64.to_bits()
+        );
+    }
+
+    /// `parseInt` applies radix selection and prefix stripping before taking
+    /// the longest valid digit prefix. The large-integer bit patterns make the
+    /// required binary64 rounding independently visible.
+    #[test]
+    fn parse_int_applies_radix_prefix_and_binary64_rounding() {
+        for (source, radix, expected_bits) in [
+            ("  -0xFzz", 0, (-15.0_f64).to_bits()),
+            ("0x10", 0, 16.0_f64.to_bits()),
+            ("0x10", 16, 16.0_f64.to_bits()),
+            ("0x10", 10, 0.0_f64.to_bits()),
+            ("08", 0, 8.0_f64.to_bits()),
+            ("11", 2, 3.0_f64.to_bits()),
+            ("z", 36, 35.0_f64.to_bits()),
+            ("900719925474099267", 10, 0x43a9_0000_0000_0001),
+            ("ffffffffffffffff", 16, 0x43f0_0000_0000_0000),
+            ("1000000000000081", 16, 0x43b0_0000_0000_0001),
+            ("1000000000000181", 16, 0x43b0_0000_0000_0002),
+        ] {
+            assert_eq!(
+                parse_int(source, radix).as_f64().to_bits(),
+                expected_bits,
+                "parseInt({source:?}, {radix})"
+            );
+        }
+
+        assert!(parse_int("-0", 10).same_value(JsNumber::from_f64(-0.0)));
+        for (source, radix) in [
+            ("", 10),
+            ("+", 10),
+            ("0x", 0),
+            ("1", 1),
+            ("1", 37),
+            ("1", -2),
+        ] {
+            assert!(
+                parse_int(source, radix).as_f64().is_nan(),
+                "parseInt({source:?}, {radix})"
+            );
+        }
+
+        let overflowing_decimal = format!("1{}", "0".repeat(400));
+        assert_eq!(
+            parse_int(&overflowing_decimal, 10).as_f64().to_bits(),
+            f64::INFINITY.to_bits()
+        );
     }
 
     #[test]

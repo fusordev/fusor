@@ -1414,6 +1414,45 @@ pub(super) fn dispatch_native_call_with_frames(
                 boolean_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(value)))
         }
+        NativeFunctionKind::GlobalNumeric(function) => {
+            let mut arguments = inputs.arguments;
+            let argument = arguments.take_first_or_undefined();
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            match function {
+                GlobalNumericFunction::IsFinite
+                | GlobalNumericFunction::IsNaN
+                | GlobalNumericFunction::ParseFloat => {
+                    let hint = if function == GlobalNumericFunction::ParseFloat {
+                        OperatorPrimitiveHint::String
+                    } else {
+                        OperatorPrimitiveHint::Number
+                    };
+                    begin_operator_primitive_conversion(
+                        runtime,
+                        argument,
+                        hint,
+                        OperatorPrimitiveTarget::GlobalNumeric(function),
+                        native.realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    )
+                }
+                GlobalNumericFunction::ParseInt => {
+                    let radix = arguments.take_first_or_undefined();
+                    begin_operator_primitive_conversion(
+                        runtime,
+                        argument,
+                        OperatorPrimitiveHint::String,
+                        OperatorPrimitiveTarget::GlobalParseIntString { radix },
+                        native.realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    )
+                }
+            }
+        }
         NativeFunctionKind::NumberConstructor => {
             let mut arguments = inputs.arguments;
             let Some(argument) = arguments.take_first() else {
