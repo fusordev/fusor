@@ -40,7 +40,8 @@ use crate::{
     OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey, PropertyLayout, Runtime,
     RuntimeError, RuntimeResource,
     conversion::{
-        number_to_index, number_to_int32, number_to_length, number_to_uint32, string_to_number,
+        number_to_index, number_to_int32, number_to_integer_or_infinity, number_to_length,
+        number_to_uint32, string_to_number,
     },
     define_property::{
         DefinitionDecision, PropertyDefinition, Requested, validate_and_apply_existing,
@@ -54,8 +55,8 @@ use crate::{
         CollectionRoot, EnvironmentBinding, ForInAdvance, FrameBindingAddress,
         FunctionImplementation, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
         InstalledTemplate, NativeFunction, NativeFunctionKind, PreparedIteratorResultPlan,
-        RealmGlobalBindingState, SetPrototypeOutcome, array_length_from_number,
-        check_execution_limit, global_declaration_error, usize_to_u64,
+        RealmGlobalBindingState, SetPrototypeOutcome, StringArgument, StringMethod,
+        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -77,6 +78,7 @@ mod native;
 mod object_intrinsics;
 mod properties;
 mod stack;
+mod string_methods;
 
 #[allow(
     clippy::wildcard_imports,
@@ -86,6 +88,7 @@ use {
     aggregate_error::*, array_join::*, bigint_intrinsics::*, bindings::*, conversions::*,
     define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*, exceptions::*,
     execution::*, iterators::*, native::*, object_intrinsics::*, properties::*, stack::*,
+    string_methods::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -835,6 +838,10 @@ enum OperatorPrimitiveTarget {
     ArrayJoinSeparator(Box<ArrayJoinContinuation>),
     ArrayJoinElement(Box<ArrayJoinContinuation>),
     ArrayLengthWrite(ArrayLengthWriteState),
+    /// A `String.prototype` method's receiver, awaiting `ToString`.
+    StringMethodSubject(Box<StringMethodContinuation>),
+    /// A `String.prototype` method's argument, awaiting its own coercion.
+    StringMethodArgument(Box<StringMethodContinuation>),
 }
 
 impl OperatorPrimitiveTarget {
@@ -871,6 +878,9 @@ impl OperatorPrimitiveTarget {
             }
             Self::ArrayLengthWrite(state) => {
                 1_u64.saturating_add(u64::from(state.original.is_some()))
+            }
+            Self::StringMethodSubject(state) | Self::StringMethodArgument(state) => {
+                state.retained_values()
             }
         }
     }
@@ -1035,6 +1045,8 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             trace_function_apply_roots(state, mark);
         }
+        OperatorPrimitiveTarget::StringMethodSubject(state)
+        | OperatorPrimitiveTarget::StringMethodArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayJoinSeparator(state)
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
             trace_stored_value_root(state.target(), mark);

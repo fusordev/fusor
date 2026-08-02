@@ -1625,6 +1625,10 @@ fn finish_operator_primitive_target(
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
             advance_array_join(runtime, *state, Some(value), return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::StringMethodSubject(state)
+        | OperatorPrimitiveTarget::StringMethodArgument(state) => {
+            advance_string_method(runtime, *state, Some(value), return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::ArrayLengthWrite(state) => finish_array_length_write(
             runtime,
             state,

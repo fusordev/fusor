@@ -1245,6 +1245,20 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        // Every `String.prototype` method shares one resumable coercion machine,
+        // because they all convert the receiver with `ToString` and then each
+        // declared argument in order, and every one of those steps can re-enter
+        // the interpreter.
+        NativeFunctionKind::StringPrototypeMethod(method) => begin_string_method(
+            runtime,
+            method,
+            native.realm,
+            inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::StringPrototypeToString
         | NativeFunctionKind::StringPrototypeValueOf => {
             let value =

@@ -349,6 +349,93 @@ pub(crate) struct BytecodeFunction {
     pub(crate) environment: Vec<EnvironmentBinding>,
 }
 
+/// How one argument is coerced before the method body runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StringArgument {
+    /// `ToString`, which an absent argument still applies to `undefined`.
+    String,
+    /// `ToIntegerOrInfinity`, which an absent argument resolves to `0`.
+    Integer,
+    /// `ToIntegerOrInfinity`, but an absent or `undefined` argument stays absent.
+    ///
+    /// This is what separates `"hello".slice(1, undefined)` (`"ello"`) from a
+    /// present `0` end position.
+    OptionalInteger,
+    /// `ToString`, but an absent or `undefined` argument stays absent.
+    OptionalString,
+    /// `ToNumber`, kept as a Number so `NaN` remains distinguishable.
+    Number,
+}
+
+/// One `String.prototype` method's identity and argument shape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StringMethod {
+    At,
+    CharAt,
+    CharCodeAt,
+    CodePointAt,
+    Concat,
+    EndsWith,
+    Includes,
+    IndexOf,
+    LastIndexOf,
+    PadEnd,
+    PadStart,
+    Repeat,
+    Slice,
+    StartsWith,
+    Substr,
+    Substring,
+    Trim,
+    TrimEnd,
+    TrimStart,
+    IsWellFormed,
+    ToWellFormed,
+}
+
+impl StringMethod {
+    /// Returns how each declared argument is coerced, in order.
+    ///
+    /// `concat` is absent because it takes a variable number of arguments and
+    /// converts them in its own loop.
+    pub(crate) const fn argument_shape(self) -> &'static [StringArgument] {
+        match self {
+            // A no-argument method and the variadic `concat` share an empty
+            // declared shape; `concat` converts its own arguments instead.
+            Self::Trim
+            | Self::TrimEnd
+            | Self::TrimStart
+            | Self::IsWellFormed
+            | Self::ToWellFormed
+            | Self::Concat => &[],
+            Self::At | Self::CharAt | Self::CharCodeAt | Self::CodePointAt => {
+                &[StringArgument::Integer]
+            }
+            // The search argument is converted before the position argument.
+            Self::EndsWith | Self::Includes | Self::IndexOf | Self::StartsWith => {
+                &[StringArgument::String, StringArgument::OptionalInteger]
+            }
+            // `lastIndexOf` keeps its position as a Number because `NaN` means
+            // "search from the end" rather than "position zero".
+            Self::LastIndexOf => &[StringArgument::String, StringArgument::Number],
+            Self::PadEnd | Self::PadStart => {
+                &[StringArgument::Integer, StringArgument::OptionalString]
+            }
+            Self::Repeat => &[StringArgument::Integer],
+            // `substr`'s second argument is a length rather than an end index,
+            // but it is coerced identically; the difference is in the body.
+            Self::Slice | Self::Substring | Self::Substr => {
+                &[StringArgument::Integer, StringArgument::OptionalInteger]
+            }
+        }
+    }
+
+    /// Returns whether the method consumes every remaining argument.
+    pub(crate) const fn is_variadic(self) -> bool {
+        matches!(self, Self::Concat)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeFunctionKind {
     FunctionPrototype,
@@ -390,6 +477,8 @@ pub(crate) enum NativeFunctionKind {
     StringConstructor,
     StringPrototypeToString,
     StringPrototypeValueOf,
+    /// One `String.prototype` method sharing the resumable coercion machine.
+    StringPrototypeMethod(StringMethod),
     ArrayConstructor,
     SymbolConstructor,
     SymbolPrototypeToString,
@@ -708,7 +797,7 @@ impl Runtime {
     /// instruction (`INTERRUPT_POLL_INTERVAL`), so cancellation is observed
     /// within that many interpreter steps rather than immediately.
     ///
-    /// Requesting cancellation reports [`ExecutionError::Interrupted`], which is
+    /// Requesting cancellation reports [`crate::ExecutionError::Interrupted`], which is
     /// not a catchable JavaScript exception: a script must not be able to
     /// swallow a host cancellation.
     pub fn set_interrupt_handler(&mut self, handler: Arc<dyn crate::InterruptHandler>) {

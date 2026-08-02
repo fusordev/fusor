@@ -35,13 +35,13 @@ use super::{
     JsString, NativeFunction, NativeFunctionKind, NumberIntrinsics, ObjectId, ObjectRecord,
     PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics,
     RealmState, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
-    RuntimeResource, StoredValue, StringIntrinsics, SymbolIntrinsics, check_limit,
+    RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics, check_limit,
     predefined_string, usize_to_u64,
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 64;
-const REALM_PROPERTY_COUNT: u64 = 228;
+const REALM_FUNCTION_COUNT: usize = 85;
+const REALM_PROPERTY_COUNT: u64 = 291;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -61,6 +61,90 @@ const BIGINT_INTERNED_STATICS: [&str; 2] = ["asIntN", "asUintN"];
 
 const OBJECT_STATIC_ATOM_START: usize =
     SYMBOL_STATIC_ATOM_START + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len();
+
+/// Index of the first `String.prototype` method name in the dynamic atom list.
+///
+/// The String methods are interned immediately after the `BigInt` statics.
+const STRING_METHOD_ATOM_START: usize = BIGINT_STATIC_ATOM_START + BIGINT_INTERNED_STATICS.len();
+
+/// The `String.prototype` methods this profile installs.
+///
+/// The set is deliberately narrower than the pinned oracle's: it omits every
+/// method needing `RegExp` (`match`, `matchAll`, `replace`, `replaceAll`,
+/// `search`, `split`), Unicode case or collation tables (`toLowerCase`,
+/// `toUpperCase`, their locale forms, `localeCompare`, `normalize`), and the
+/// Annex B HTML wrappers. An absent method therefore fails closed as a missing
+/// property rather than behaving incorrectly.
+///
+/// Each `length` matches the pinned oracle, which reports `1` for most methods
+/// and `2` for `slice`, `substr`, and `substring`.
+const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 21] = [
+    StringPrototypeMethod::interned("at", StringMethod::At, 1),
+    StringPrototypeMethod::interned("charAt", StringMethod::CharAt, 1),
+    StringPrototypeMethod::interned("charCodeAt", StringMethod::CharCodeAt, 1),
+    StringPrototypeMethod::interned("codePointAt", StringMethod::CodePointAt, 1),
+    StringPrototypeMethod::predefined(PredefinedAtom::Concat, StringMethod::Concat, 1),
+    StringPrototypeMethod::interned("endsWith", StringMethod::EndsWith, 1),
+    StringPrototypeMethod::interned("includes", StringMethod::Includes, 1),
+    StringPrototypeMethod::interned("indexOf", StringMethod::IndexOf, 1),
+    StringPrototypeMethod::interned("lastIndexOf", StringMethod::LastIndexOf, 1),
+    StringPrototypeMethod::interned("padEnd", StringMethod::PadEnd, 1),
+    StringPrototypeMethod::interned("padStart", StringMethod::PadStart, 1),
+    StringPrototypeMethod::interned("repeat", StringMethod::Repeat, 1),
+    StringPrototypeMethod::interned("slice", StringMethod::Slice, 2),
+    StringPrototypeMethod::interned("startsWith", StringMethod::StartsWith, 1),
+    StringPrototypeMethod::interned("substr", StringMethod::Substr, 2),
+    StringPrototypeMethod::interned("substring", StringMethod::Substring, 2),
+    StringPrototypeMethod::interned("trim", StringMethod::Trim, 0),
+    StringPrototypeMethod::interned("trimEnd", StringMethod::TrimEnd, 0),
+    StringPrototypeMethod::interned("trimStart", StringMethod::TrimStart, 0),
+    StringPrototypeMethod::interned("isWellFormed", StringMethod::IsWellFormed, 0),
+    StringPrototypeMethod::interned("toWellFormed", StringMethod::ToWellFormed, 0),
+];
+
+/// The number of `String.prototype` method names that must be interned.
+const STRING_INTERNED_METHOD_COUNT: usize = {
+    let mut count = 0;
+    let mut index = 0;
+    while index < STRING_PROTOTYPE_METHODS.len() {
+        if STRING_PROTOTYPE_METHODS[index].interned_name.is_some() {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+};
+
+/// One `String.prototype` method's name, implementation, and reported `length`.
+#[derive(Clone, Copy)]
+struct StringPrototypeMethod {
+    /// The predefined atom for this name, when one exists.
+    predefined_name: Option<PredefinedAtom>,
+    /// The literal name to intern when no predefined atom exists.
+    interned_name: Option<&'static str>,
+    method: StringMethod,
+    length: i32,
+}
+
+impl StringPrototypeMethod {
+    const fn predefined(name: PredefinedAtom, method: StringMethod, length: i32) -> Self {
+        Self {
+            predefined_name: Some(name),
+            interned_name: None,
+            method,
+            length,
+        }
+    }
+
+    const fn interned(name: &'static str, method: StringMethod, length: i32) -> Self {
+        Self {
+            predefined_name: None,
+            interned_name: Some(name),
+            method,
+            length,
+        }
+    }
+}
 
 /// The `Object` constructor's static methods.
 ///
@@ -448,6 +532,7 @@ struct RealmRecords {
     number: PrimitiveIntrinsicRecords,
     bigint: BigIntIntrinsicRecords,
     string: PrimitiveIntrinsicRecords,
+    string_methods: [ObjectRecord; STRING_PROTOTYPE_METHODS.len()],
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
     symbol: SymbolIntrinsicRecords,
@@ -496,8 +581,10 @@ impl RealmRecords {
         let boolean = PrimitiveIntrinsicRecords::try_new(3)?;
         let number = PrimitiveIntrinsicRecords::try_new(3)?;
         let bigint = BigIntIntrinsicRecords::try_new()?;
-        // `String.prototype` additionally carries `length` and its iterator.
-        let string = PrimitiveIntrinsicRecords::try_new(5)?;
+        // `String.prototype` additionally carries `length`, its iterator, and
+        // every installed method.
+        let string = PrimitiveIntrinsicRecords::try_new(5 + STRING_PROTOTYPE_METHODS.len())?;
+        let string_methods = string_method_records()?;
         let mut array = ArrayIntrinsicRecords {
             prototype: reserved_record(8)?,
             constructor: reserved_record(3)?,
@@ -541,6 +628,7 @@ impl RealmRecords {
             number,
             bigint,
             string,
+            string_methods,
             array,
             iterators,
             symbol,
@@ -660,6 +748,7 @@ struct RealmGraph {
     number: PrimitiveIntrinsicGraph,
     bigint: BigIntIntrinsicGraph,
     string: PrimitiveIntrinsicGraph,
+    string_methods: [FunctionId; STRING_PROTOTYPE_METHODS.len()],
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
     symbol: SymbolIntrinsicGraph,
@@ -671,6 +760,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(intrinsic.constructor).is_some());
         }
         for function in [self.errors.is_error, self.errors.to_string] {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
+        for function in self.string_methods.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for function in [
@@ -906,6 +998,7 @@ impl Runtime {
         let array = self.insert_array_intrinsics(&base, records.array);
         let iterators = self.insert_iterator_intrinsics(&base, records.iterators);
         let symbol = self.insert_symbol_intrinsics(&base, records.symbol);
+        let string_methods = self.insert_string_prototype_methods(&base, records.string_methods);
 
         Ok(RealmGraph {
             base,
@@ -915,6 +1008,7 @@ impl Runtime {
             number,
             bigint,
             string,
+            string_methods,
             array,
             iterators,
             symbol,
@@ -924,8 +1018,9 @@ impl Runtime {
     /// Interns every realm-local atom that has no predefined identity.
     ///
     /// The list order is the transaction's contract: the `Symbol` statics
-    /// follow the fixed leading names, and the interned `Object` statics follow
-    /// those, which is what `OBJECT_STATIC_ATOM_START` indexes. A failure at
+    /// follow the fixed leading names, the interned `Object` statics follow
+    /// those, and the `String.prototype` method names come last, which is what
+    /// `OBJECT_STATIC_ATOM_START` and `STRING_METHOD_ATOM_START` index. A failure at
     /// any point rolls back every atom interned so far, so the runtime observes
     /// no partial state.
     fn intern_realm_dynamic_atoms(
@@ -938,7 +1033,8 @@ impl Runtime {
                 SYMBOL_STATIC_ATOM_START
                     + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len()
                     + OBJECT_INTERNED_STATIC_COUNT
-                    + BIGINT_INTERNED_STATICS.len(),
+                    + BIGINT_INTERNED_STATICS.len()
+                    + STRING_INTERNED_METHOD_COUNT,
             )
             .is_err()
         {
@@ -955,6 +1051,9 @@ impl Runtime {
         ];
         let symbol_statics = DYNAMIC_SYMBOL_STATIC_PROPERTIES.map(|(name, _)| name);
         let object_statics = OBJECT_STATIC_METHODS
+            .into_iter()
+            .filter_map(|method| method.interned_name);
+        let string_methods = STRING_PROTOTYPE_METHODS
             .into_iter()
             .filter_map(|method| method.interned_name);
 
@@ -986,6 +1085,9 @@ impl Runtime {
                 interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
             }
             for literal in BIGINT_INTERNED_STATICS {
+                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
+            }
+            for literal in string_methods {
                 interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
             }
             Ok(())
@@ -1242,6 +1344,31 @@ impl Runtime {
             to_string,
             value_of,
         }
+    }
+
+    /// Inserts one native function per installed `String.prototype` method.
+    ///
+    /// The result keeps `STRING_PROTOTYPE_METHODS` order so the publication step
+    /// can zip the two together.
+    fn insert_string_prototype_methods(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; STRING_PROTOTYPE_METHODS.len()],
+    ) -> [FunctionId; STRING_PROTOTYPE_METHODS.len()] {
+        let mut inserted = [None; STRING_PROTOTYPE_METHODS.len()];
+        for ((slot, method), record) in inserted
+            .iter_mut()
+            .zip(STRING_PROTOTYPE_METHODS)
+            .zip(records)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::StringPrototypeMethod(method.method),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every String method function was inserted"))
     }
 
     /// Inserts the `BigInt` constructor, prototype, and methods.
@@ -1555,6 +1682,7 @@ impl Runtime {
             keys,
             names,
         )?;
+        self.publish_string_prototype_methods(graph, keys)?;
         self.publish_bigint_intrinsic_properties(&graph.bigint, &graph.dynamic_atoms, keys, names)?;
         self.publish_array_intrinsic_properties(&graph.array, keys, names)?;
         self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
@@ -1860,6 +1988,44 @@ impl Runtime {
             keys,
         )?;
         self.append_function_identity(graph.value_of, &names.value_of, 0, keys)
+    }
+
+    /// Publishes every installed `String.prototype` method.
+    ///
+    /// Each is a `METHOD_PROPERTY`, so it is writable and configurable but not
+    /// enumerable, and carries the `name` and `length` the pinned oracle reports.
+    fn publish_string_prototype_methods(
+        &mut self,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+    ) -> Result<(), TryReserveError> {
+        let mut interned = STRING_METHOD_ATOM_START;
+        for (method, function) in STRING_PROTOTYPE_METHODS
+            .into_iter()
+            .zip(graph.string_methods)
+        {
+            let (key, name) = if let Some(atom) = method.predefined_name {
+                (
+                    self.predefined_property_key(atom),
+                    predefined_string(&self.atoms, atom),
+                )
+            } else {
+                let atom = graph.dynamic_atoms[interned].clone();
+                interned += 1;
+                let name = atom
+                    .description()
+                    .expect("interned String method name has a description")
+                    .clone();
+                (PropertyKey::from_validated_atom(atom), name)
+            };
+            self.objects
+                .get_mut(graph.string.prototype)
+                .expect("new String.prototype remains live")
+                .record
+                .append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
+            self.append_function_identity(function, &name, method.length, keys)?;
+        }
+        Ok(())
     }
 
     /// Publishes the `BigInt` prototype members and constructor statics.
@@ -2264,6 +2430,16 @@ fn object_static_records() -> Result<[ObjectRecord; OBJECT_STATIC_METHODS.len()]
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Object static record was reserved")))
+}
+
+/// Reserves one record per installed `String.prototype` method.
+fn string_method_records() -> Result<[ObjectRecord; STRING_PROTOTYPE_METHODS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; STRING_PROTOTYPE_METHODS.len()] =
+        [const { None }; STRING_PROTOTYPE_METHODS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every String method record was reserved")))
 }
 
 const fn allocation_failed(resource: RuntimeResource, additional: usize) -> RuntimeError {
