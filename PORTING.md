@@ -274,10 +274,24 @@ incorrectly, so no script can observe a wrong result.
   `[1,,3].indexOf(undefined)` is `-1`, while `includes` reads every index and
   answers `true`. The length is read once with `ToLength`, and the loop stops at
   the first match, so a second matching getter never runs.
-- [ ] Remaining String/Number/Array method surface (the callback-taking
-  `Array.prototype` methods, `splice`, `sort`, and the locale-dependent
-  renderings), shape sharing/transition interning, remaining exotics (arguments,
-  Proxy), dense indexed storage, deterministic finalization, and diagnostics.
+- [x] The callback-taking `Array.prototype` methods -- `forEach`, `map`,
+  `filter`, `every`, `some`, `find`, `findIndex`, `findLast`, and
+  `findLastIndex` -- as one resumable loop. Suspension is intrinsic here rather
+  than incidental: the callback is a user call on every iteration, so the loop
+  cannot be written any other way. Three behaviors separate the nine and all
+  three are carried as data. Holes: the first five test `HasProperty` and skip a
+  missing index, so `[1,,3].forEach` runs twice, while the `find` family visits
+  every index and sees `undefined`, so `[1,,3].find` runs three times; `map`
+  still counts a skipped hole so its result keeps the source's shape. Early exit:
+  `every` stops on a falsy result and `some` and the `find` family stop on a
+  truthy one. Result: `undefined`, a fresh Array, a Boolean, the element, or the
+  index. The length is snapshotted with `ToLength` before the first callback, so a
+  callback that grows the array is not revisited, while one that shrinks it still
+  stops early because each index is re-tested.
+- [ ] Remaining String/Number/Array method surface (`splice`, `sort`, `flat`,
+  `copyWithin`, and the locale-dependent renderings), shape sharing/transition
+  interning, remaining exotics (arguments, Proxy), dense indexed storage,
+  deterministic finalization, and diagnostics.
 
 ### Built-ins and asynchronous semantics
 

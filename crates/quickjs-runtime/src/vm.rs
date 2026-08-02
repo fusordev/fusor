@@ -52,18 +52,20 @@ use crate::{
     number::decimal::{DecimalDigits, exact_fixed, exact_significant},
     object::{ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty, PropertyDeletion},
     runtime::{
-        ArrayCopier, ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayMutator, ArraySearch,
-        BindingCell, BoundFunction, BytecodeFunction, CollectionRoot, EnvironmentBinding,
-        ForInAdvance, FrameBindingAddress, FunctionImplementation, HeapFunction, InstalledCode,
-        InstalledConstant, InstalledRoot, InstalledTemplate, NativeFunction, NativeFunctionKind,
-        NumberFormat, NumberPredicate, PreparedIteratorResultPlan, RealmGlobalBindingState,
-        SetPrototypeOutcome, StringArgument, StringMethod, array_length_from_number,
-        check_execution_limit, global_declaration_error, usize_to_u64,
+        ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayMutator,
+        ArraySearch, BindingCell, BoundFunction, BytecodeFunction, CollectionRoot,
+        EnvironmentBinding, ForInAdvance, FrameBindingAddress, FunctionImplementation,
+        HeapFunction, InstalledCode, InstalledConstant, InstalledRoot, InstalledTemplate,
+        NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
+        PreparedIteratorResultPlan, RealmGlobalBindingState, SetPrototypeOutcome, StringArgument,
+        StringMethod, array_length_from_number, check_execution_limit, global_declaration_error,
+        usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
 
 mod aggregate_error;
+mod array_callbacks;
 mod array_copiers;
 mod array_join;
 mod array_mutators;
@@ -90,10 +92,11 @@ mod string_methods;
     reason = "private VM sibling modules share one interpreter implementation namespace"
 )]
 use {
-    aggregate_error::*, array_copiers::*, array_join::*, array_mutators::*, array_search::*,
-    bigint_intrinsics::*, bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*,
-    error_stack::*, errors::*, exceptions::*, execution::*, iterators::*, native::*,
-    object_intrinsics::*, properties::*, stack::*, string_methods::*,
+    aggregate_error::*, array_callbacks::*, array_copiers::*, array_join::*, array_mutators::*,
+    array_search::*, bigint_intrinsics::*, bindings::*, conversions::*,
+    define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*, exceptions::*,
+    execution::*, iterators::*, native::*, object_intrinsics::*, properties::*, stack::*,
+    string_methods::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -291,6 +294,7 @@ enum NativeContinuation {
     ArraySearch(Box<ArraySearchContinuation>),
     ArrayMutator(Box<ArrayMutatorContinuation>),
     ArrayCopier(Box<ArrayCopierContinuation>),
+    ArrayCallback(Box<ArrayCallbackContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     InstanceOf(InstanceOfContinuation),
     FunctionCall,
@@ -320,6 +324,7 @@ impl NativeContinuation {
             Self::ArraySearch(_) => ArraySearchContinuation::retained_values(),
             Self::ArrayMutator(state) => state.retained_values(),
             Self::ArrayCopier(state) => state.retained_values(),
+            Self::ArrayCallback(_) => ArrayCallbackContinuation::retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
             Self::FunctionCall => 0,
@@ -1168,6 +1173,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ArraySearch(state) => state.trace_roots(mark),
         NativeContinuation::ArrayMutator(state) => state.trace_roots(mark),
         NativeContinuation::ArrayCopier(state) => state.trace_roots(mark),
+        NativeContinuation::ArrayCallback(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {
             trace_function_bind_roots(state, mark);

@@ -368,6 +368,55 @@ impl NumberFormat {
     }
 }
 
+/// Which callback method a continuation is performing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayCallback {
+    ForEach,
+    Map,
+    Filter,
+    Every,
+    Some,
+    Find,
+    FindIndex,
+    FindLast,
+    FindLastIndex,
+}
+
+impl ArrayCallback {
+    /// Returns the property name this method is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ForEach => "forEach",
+            Self::Map => "map",
+            Self::Filter => "filter",
+            Self::Every => "every",
+            Self::Some => "some",
+            Self::Find => "find",
+            Self::FindIndex => "findIndex",
+            Self::FindLast => "findLast",
+            Self::FindLastIndex => "findLastIndex",
+        }
+    }
+
+    /// Returns whether a missing index is skipped rather than visited.
+    pub(crate) const fn skips_holes(self) -> bool {
+        !matches!(
+            self,
+            Self::Find | Self::FindIndex | Self::FindLast | Self::FindLastIndex
+        )
+    }
+
+    /// Returns whether the loop walks the indices in descending order.
+    pub(crate) const fn is_backward(self) -> bool {
+        matches!(self, Self::FindLast | Self::FindLastIndex)
+    }
+
+    /// Returns whether the method builds a fresh Array.
+    pub(crate) const fn builds_array(self) -> bool {
+        matches!(self, Self::Map | Self::Filter)
+    }
+}
+
 /// Which copying method a continuation is performing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArrayCopier {
@@ -642,6 +691,8 @@ pub(crate) enum NativeFunctionKind {
     ArrayPrototypeMutator(ArrayMutator),
     /// One `Array.prototype` copying method sharing the resumable element read.
     ArrayPrototypeCopier(ArrayCopier),
+    /// One `Array.prototype` callback method sharing the resumable loop.
+    ArrayPrototypeCallback(ArrayCallback),
     ArrayConstructor,
     SymbolConstructor,
     SymbolPrototypeToString,

@@ -28,8 +28,8 @@
 use std::collections::TryReserveError;
 
 use super::{
-    Arc, Arena, ArrayCopier, ArrayIntrinsics, ArrayMutator, ArraySearch, ArrayState, Atom,
-    AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context,
+    Arc, Arena, ArrayCallback, ArrayCopier, ArrayIntrinsics, ArrayMutator, ArraySearch, ArrayState,
+    Atom, AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context,
     ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation,
     HandleError, HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
     IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind, NumberFormat,
@@ -40,8 +40,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 111;
-const REALM_PROPERTY_COUNT: u64 = 377;
+const REALM_FUNCTION_COUNT: usize = 120;
+const REALM_PROPERTY_COUNT: u64 = 404;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -210,6 +210,24 @@ const NUMBER_FORMAT_METHODS: [NumberFormat; 3] = [
 
 /// Index of the first `Number.prototype` rendering name in the dynamic atoms.
 const NUMBER_FORMAT_ATOM_START: usize = ARRAY_COPIER_ATOM_START + ARRAY_COPIER_METHODS.len();
+
+/// The `Array.prototype` callback methods this profile installs.
+///
+/// Every one reports arity 1, which the pinned oracle confirms.
+const ARRAY_CALLBACK_METHODS: [ArrayCallback; 9] = [
+    ArrayCallback::ForEach,
+    ArrayCallback::Map,
+    ArrayCallback::Filter,
+    ArrayCallback::Every,
+    ArrayCallback::Some,
+    ArrayCallback::Find,
+    ArrayCallback::FindIndex,
+    ArrayCallback::FindLast,
+    ArrayCallback::FindLastIndex,
+];
+
+/// Index of the first `Array.prototype` callback name in the dynamic atoms.
+const ARRAY_CALLBACK_ATOM_START: usize = NUMBER_FORMAT_ATOM_START + NUMBER_FORMAT_METHODS.len();
 
 /// The `Array.prototype` copying methods whose names must be interned.
 ///
@@ -688,6 +706,7 @@ struct RealmRecords {
     array_mutators: [ObjectRecord; ARRAY_MUTATOR_METHODS.len()],
     array_copiers: [ObjectRecord; ARRAY_COPIER_TOTAL],
     number_formats: [ObjectRecord; NUMBER_FORMAT_METHODS.len()],
+    array_callbacks: [ObjectRecord; ARRAY_CALLBACK_METHODS.len()],
     array_is_array: ObjectRecord,
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
@@ -763,7 +782,8 @@ impl RealmRecords {
                 8 + ARRAY_SEARCH_METHODS.len()
                     + ARRAY_MUTATOR_METHODS.len()
                     + ARRAY_COPIER_TOTAL
-                    + NUMBER_FORMAT_METHODS.len(),
+                    + NUMBER_FORMAT_METHODS.len()
+                    + ARRAY_CALLBACK_METHODS.len(),
             )?,
             constructor: reserved_record(3)?,
             join: reserved_record(2)?,
@@ -813,6 +833,7 @@ impl RealmRecords {
             array_mutators: array_mutator_records()?,
             array_copiers: array_copier_records()?,
             number_formats: number_format_records()?,
+            array_callbacks: array_callback_records()?,
             array_is_array: reserved_record(2)?,
             array,
             iterators,
@@ -944,6 +965,7 @@ struct RealmGraph {
     array_mutators: [FunctionId; ARRAY_MUTATOR_METHODS.len()],
     array_copiers: [FunctionId; ARRAY_COPIER_TOTAL],
     number_formats: [FunctionId; NUMBER_FORMAT_METHODS.len()],
+    array_callbacks: [FunctionId; ARRAY_CALLBACK_METHODS.len()],
     array_is_array: FunctionId,
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
@@ -959,6 +981,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         debug_assert!(runtime.functions.remove(self.array_is_array).is_some());
+        for function in self.array_callbacks.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
         for function in self.number_formats.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
@@ -1221,6 +1246,7 @@ impl Runtime {
         let array_mutators = self.insert_array_mutators(&base, records.array_mutators);
         let array_copiers = self.insert_array_copiers(&base, records.array_copiers);
         let number_formats = self.insert_number_formats(&base, records.number_formats);
+        let array_callbacks = self.insert_array_callbacks(&base, records.array_callbacks);
         let array_is_array = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -1243,6 +1269,7 @@ impl Runtime {
             array_mutators,
             array_copiers,
             number_formats,
+            array_callbacks,
             array_is_array,
             array,
             iterators,
@@ -1362,6 +1389,9 @@ impl Runtime {
             }
             for format in NUMBER_FORMAT_METHODS {
                 interned(&mut self.atoms, &mut dynamic_atoms, format.name())?;
+            }
+            for method in ARRAY_CALLBACK_METHODS {
+                interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
             }
             Ok(())
         })();
@@ -1637,6 +1667,25 @@ impl Runtime {
             to_string,
             value_of,
         }
+    }
+
+    /// Inserts one native function per `Array.prototype` callback method.
+    fn insert_array_callbacks(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; ARRAY_CALLBACK_METHODS.len()],
+    ) -> [FunctionId; ARRAY_CALLBACK_METHODS.len()] {
+        let mut inserted = [None; ARRAY_CALLBACK_METHODS.len()];
+        for ((slot, method), record) in inserted.iter_mut().zip(ARRAY_CALLBACK_METHODS).zip(records)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::ArrayPrototypeCallback(method),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every Array callback function was inserted"))
     }
 
     /// Inserts one native function per `Number.prototype` decimal rendering.
@@ -2678,6 +2727,28 @@ impl Runtime {
                 )?;
             self.append_function_identity(function, &name, 1, keys)?;
         }
+
+        for (function, atom) in graph
+            .array_callbacks
+            .into_iter()
+            .zip(&graph.dynamic_atoms[ARRAY_CALLBACK_ATOM_START..])
+        {
+            let atom = atom.clone();
+            let name = atom
+                .description()
+                .expect("interned Array callback name has a description")
+                .clone();
+            self.objects
+                .get_mut(graph.array.prototype)
+                .expect("new Array.prototype remains live")
+                .record
+                .append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            self.append_function_identity(function, &name, 1, keys)?;
+        }
         Ok(())
     }
 
@@ -3094,6 +3165,16 @@ fn object_reflection_records()
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Object reflection record was reserved")))
+}
+
+/// Reserves one record per `Array.prototype` callback method.
+fn array_callback_records() -> Result<[ObjectRecord; ARRAY_CALLBACK_METHODS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; ARRAY_CALLBACK_METHODS.len()] =
+        [const { None }; ARRAY_CALLBACK_METHODS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Array callback record was reserved")))
 }
 
 /// Reserves one record per `Number.prototype` decimal rendering.

@@ -363,6 +363,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::ArrayCallback(state) => advance_array_callback(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
@@ -1400,6 +1407,19 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::ArrayPrototypeCopier(copier) => begin_array_copier(
             runtime,
             copier,
+            native.realm,
+            inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        // The nine callback methods share one resumable loop. Suspension is
+        // intrinsic here rather than incidental: the callback is a user call on
+        // every iteration.
+        NativeFunctionKind::ArrayPrototypeCallback(method) => begin_array_callback(
+            runtime,
+            method,
             native.realm,
             inputs.receiver,
             inputs.arguments,
