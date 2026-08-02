@@ -400,6 +400,33 @@ impl ArrayByCopy {
     }
 }
 
+/// Which flattening method a continuation is performing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayFlatten {
+    Flat,
+    FlatMap,
+}
+
+impl ArrayFlatten {
+    /// Returns the reported `length` of the installed function.
+    pub(crate) const fn arity(self) -> i32 {
+        match self {
+            // `flat` reports 0 even though it accepts a depth argument;
+            // `flatMap` reports 1. The pinned oracle confirms both.
+            Self::Flat => 0,
+            Self::FlatMap => 1,
+        }
+    }
+
+    /// Returns the property name this method is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Flat => "flat",
+            Self::FlatMap => "flatMap",
+        }
+    }
+}
+
 /// Which reduction a continuation is performing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArrayReduction {
@@ -758,6 +785,9 @@ pub(crate) enum NativeFunctionKind {
     /// One `Array.prototype` change-by-copy method sharing the resumable
     /// dense snapshot read.
     ArrayPrototypeByCopy(ArrayByCopy),
+    /// One `Array.prototype` flattening method sharing the resumable
+    /// worklist driver.
+    ArrayPrototypeFlatten(ArrayFlatten),
     ArrayConstructor,
     SymbolConstructor,
     SymbolPrototypeToString,

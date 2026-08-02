@@ -391,6 +391,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::ArrayFlatten(state) => advance_array_flatten(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
@@ -1474,6 +1481,18 @@ pub(super) fn dispatch_native_call_with_frames(
         // The change-by-copy methods answer a fresh dense Array: an absent
         // source index contributes `undefined` rather than staying a hole.
         NativeFunctionKind::ArrayPrototypeByCopy(method) => begin_array_by_copy(
+            runtime,
+            method,
+            native.realm,
+            inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        // `flat` and `flatMap` walk an explicit worklist of sources; every
+        // element read and every mapper call is a suspension point.
+        NativeFunctionKind::ArrayPrototypeFlatten(method) => begin_array_flatten(
             runtime,
             method,
             native.realm,

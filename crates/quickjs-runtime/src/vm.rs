@@ -52,7 +52,7 @@ use crate::{
     number::decimal::{DecimalDigits, exact_fixed, exact_significant},
     object::{ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty, PropertyDeletion},
     runtime::{
-        ArrayByCopy, ArrayCallback, ArrayCopier, ArrayDefineOutcome,
+        ArrayByCopy, ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayFlatten,
         ArrayLengthWriteOutcome, ArrayMutator, ArrayReduction, ArraySearch, BindingCell,
         BoundFunction, BytecodeFunction, CollectionRoot,
         EnvironmentBinding, ForInAdvance, FrameBindingAddress, FunctionImplementation,
@@ -69,6 +69,7 @@ mod aggregate_error;
 mod array_by_copy;
 mod array_callbacks;
 mod array_copiers;
+mod array_flatten;
 mod array_join;
 mod array_mutators;
 mod array_search;
@@ -94,7 +95,8 @@ mod string_methods;
     reason = "private VM sibling modules share one interpreter implementation namespace"
 )]
 use {
-    aggregate_error::*, array_by_copy::*, array_callbacks::*, array_copiers::*, array_join::*, array_mutators::*, array_search::*, bigint_intrinsics::*, bindings::*,
+    aggregate_error::*, array_by_copy::*, array_callbacks::*, array_copiers::*, array_flatten::*,
+    array_join::*, array_mutators::*, array_search::*, bigint_intrinsics::*, bindings::*,
     conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*,
     exceptions::*, execution::*, iterators::*, native::*, object_intrinsics::*, properties::*,
     stack::*, string_methods::*,
@@ -299,6 +301,7 @@ enum NativeContinuation {
     ArrayReduction(Box<ArrayReductionContinuation>),
     ArraySplice(Box<ArraySpliceContinuation>),
     ArrayByCopy(Box<ArrayByCopyContinuation>),
+    ArrayFlatten(Box<ArrayFlattenContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     InstanceOf(InstanceOfContinuation),
     FunctionCall,
@@ -332,6 +335,7 @@ impl NativeContinuation {
             Self::ArrayReduction(_) => ArrayReductionContinuation::retained_values(),
             Self::ArraySplice(state) => state.retained_values(),
             Self::ArrayByCopy(state) => state.retained_values(),
+            Self::ArrayFlatten(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
             Self::FunctionCall => 0,
@@ -890,6 +894,8 @@ enum OperatorPrimitiveTarget {
     ArraySpliceArgument(Box<ArraySpliceContinuation>),
     /// A change-by-copy method's argument, awaiting `ToNumber`.
     ArrayByCopyArgument(Box<ArrayByCopyContinuation>),
+    /// `flat`'s depth argument, awaiting `ToNumber`.
+    ArrayFlattenArgument(Box<ArrayFlattenContinuation>),
     ArrayLengthWrite(ArrayLengthWriteState),
     /// A `String.prototype` method's receiver, awaiting `ToString`.
     StringMethodSubject(Box<StringMethodContinuation>),
@@ -941,6 +947,7 @@ impl OperatorPrimitiveTarget {
             Self::ArrayCopierArgument(state) => state.retained_values(),
             Self::ArraySpliceArgument(state) => state.retained_values(),
             Self::ArrayByCopyArgument(state) => state.retained_values(),
+            Self::ArrayFlattenArgument(state) => state.retained_values(),
         }
     }
 }
@@ -1114,6 +1121,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArrayCopierArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArraySpliceArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayByCopyArgument(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::ArrayFlattenArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayJoinSeparator(state)
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
             trace_stored_value_root(state.target(), mark);
@@ -1192,6 +1200,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ArrayReduction(state) => state.trace_roots(mark),
         NativeContinuation::ArraySplice(state) => state.trace_roots(mark),
         NativeContinuation::ArrayByCopy(state) => state.trace_roots(mark),
+        NativeContinuation::ArrayFlatten(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {
             trace_function_bind_roots(state, mark);

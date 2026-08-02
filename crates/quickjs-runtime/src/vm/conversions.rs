@@ -1644,6 +1644,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::ArrayByCopyArgument(state) => {
             advance_array_by_copy(runtime, *state, Some(value), return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::ArrayFlattenArgument(state) => {
+            advance_array_flatten(runtime, *state, Some(value), return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::StringMethodSubject(state)
         | OperatorPrimitiveTarget::StringMethodArgument(state) => {
             advance_string_method(runtime, *state, Some(value), return_to, execution_budget)
