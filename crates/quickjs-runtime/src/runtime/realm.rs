@@ -41,8 +41,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 21;
-const REALM_FUNCTION_COUNT: usize = 145;
-const REALM_PROPERTY_COUNT: u64 = 481;
+const REALM_FUNCTION_COUNT: usize = 146;
+const REALM_PROPERTY_COUNT: u64 = 484;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -328,7 +328,7 @@ const ARRAY_SEARCH_ATOM_START: usize = STRING_FROM_ATOM_START + STRING_FROM_STAT
 /// operations the current profile can honor completely are installed, so an
 /// absent method fails closed as a missing property rather than behaving
 /// incorrectly.
-const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 22] = [
+const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 23] = [
     ObjectStaticMethod::interned("create", NativeFunctionKind::ObjectCreate, 2),
     ObjectStaticMethod::predefined(
         PredefinedAtom::GetPrototypeOf,
@@ -360,6 +360,7 @@ const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 22] = [
         NativeFunctionKind::ObjectGetOwnPropertySymbols,
         1,
     ),
+    ObjectStaticMethod::interned("groupBy", NativeFunctionKind::ObjectGroupBy, 2),
     ObjectStaticMethod::predefined(PredefinedAtom::Keys, NativeFunctionKind::ObjectKeys, 1),
     ObjectStaticMethod::predefined(PredefinedAtom::Values, NativeFunctionKind::ObjectValues, 1),
     ObjectStaticMethod::dynamic(ENTRIES_ATOM_INDEX, NativeFunctionKind::ObjectEntries, 1),

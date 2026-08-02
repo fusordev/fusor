@@ -798,8 +798,8 @@ impl Runtime {
 
     /// Allocates an ordinary object whose prototype may be absent.
     ///
-    /// `Object.create(null)` is the only caller that needs a null prototype, and
-    /// a prototype-less object is genuinely useful as a bare dictionary, so the
+    /// `Object.create(null)` and `Object.groupBy` need a null prototype. A
+    /// prototype-less object is genuinely useful as a bare dictionary, so the
     /// absence is represented rather than substituted.
     pub(crate) fn allocate_ordinary_object_with_optional_prototype(
         &mut self,

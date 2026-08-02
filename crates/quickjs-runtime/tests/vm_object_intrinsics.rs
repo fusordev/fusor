@@ -460,7 +460,7 @@ fn object_keys_returns_an_independent_array() {
 #[test]
 fn the_extended_object_reflection_statics_have_the_specification_shape() {
     assert!(boolean(
-        "var specs=[['is',2],['hasOwn',2],['getOwnPropertySymbols',1],\
+        "var specs=[['is',2],['hasOwn',2],['getOwnPropertySymbols',1],['groupBy',2],\
           ['getOwnPropertyDescriptors',1],['values',1],['entries',1],['assign',2],\
           ['defineProperties',2],['fromEntries',1]];\
          for(var i=0;i<specs.length;i++){\
@@ -474,7 +474,7 @@ fn the_extended_object_reflection_statics_have_the_specification_shape() {
     assert_eq!(
         text("return Object.getOwnPropertyNames(Object).join(',');"),
         "length,name,create,getPrototypeOf,setPrototypeOf,defineProperty,defineProperties,\
-getOwnPropertyNames,getOwnPropertySymbols,keys,values,entries,isExtensible,preventExtensions,\
+getOwnPropertyNames,getOwnPropertySymbols,groupBy,keys,values,entries,isExtensible,preventExtensions,\
 getOwnPropertyDescriptor,getOwnPropertyDescriptors,is,assign,seal,freeze,isSealed,\
 isFrozen,fromEntries,hasOwn,prototype"
     );
@@ -665,6 +665,104 @@ fn object_from_entries_does_not_close_iterator_step_failures() {
              return:function close(){closed=true;return {};}};var iterable={};\
              iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
              try{Object.fromEntries(iterable);}catch(error){}return ''+closed;"
+        ),
+        "false"
+    );
+}
+
+/// `Object.groupBy` calls its callback with `(value, index)` and `undefined`
+/// as `this`, converts each answer with `ToPropertyKey`, and materializes
+/// first-seen groups as realm arrays on a null-prototype ordinary object.
+#[test]
+fn object_group_by_creates_null_prototype_array_groups() {
+    assert!(boolean(
+        "var symbol=Symbol('s'),log='';\
+         function callback(value,index){'use strict';\
+           log=log+value+index+(this===undefined?'u':'x');\
+           if(value===4){return symbol;}\
+           if(value===3){return {toString:function key(){log=log+'k';return 'odd';}};}\
+           return value===2?'__proto__':'odd';}\
+         var result=Object.groupBy([1,2,3,4],callback);\
+         var odd=Object.getOwnPropertyDescriptor(result,'odd');\
+         return Object.getPrototypeOf(result)===null&&log==='10u21u32uk43u'&&\
+           result.odd.join(',')==='1,3'&&result.__proto__.join(',')==='2'&&\
+           result[symbol].join(',')==='4'&&Array.isArray(result.odd)&&\
+           odd.writable&&odd.enumerable&&odd.configurable;"
+    ));
+}
+
+/// Callback execution and `ToPropertyKey` alternate once per yielded value;
+/// equal converted keys append to the same group without disturbing element
+/// order or the order in which group properties are created.
+#[test]
+fn object_group_by_preserves_callback_and_key_conversion_order() {
+    assert_eq!(
+        text(
+            "var log='',step=0;var iterator={next:function next(){\
+               return step<3?{done:false,value:++step}:{done:true};}};\
+             var iterable={};iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
+             function callback(value,index){log=log+'c'+value+index;return {\
+               toString:function key(){log=log+'k'+value;return value===2?'b':'a';}};}\
+             var result=Object.groupBy(iterable,callback);\
+             return log+'|'+Object.keys(result).join(',')+'|'+result.a.join(',')+'|'+result.b.join(',');"
+        ),
+        "c10k1c21k2c32k3|a,b|1,3|2"
+    );
+}
+
+/// Callback and property-key conversion failures are the two abrupt `GroupBy`
+/// operations guarded by `IfAbruptCloseIterator`. A throwing `return` still
+/// preserves the original throw completion.
+#[test]
+fn object_group_by_closes_post_yield_abrupt_completions() {
+    assert!(boolean(
+        "var original={},secondary={},closed=false,step=0;var iterator={\
+           next:function next(){return step++===0?{done:false,value:1}:{done:true};},\
+           return:function close(){closed=true;throw secondary;}};var iterable={};\
+         iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
+         function callback(){throw original;}\
+         try{Object.groupBy(iterable,callback);}catch(error){return error===original&&closed;}\
+         return false;"
+    ));
+    assert!(boolean(
+        "var original={},closed=false,step=0;var iterator={\
+           next:function next(){return step++===0?{done:false,value:1}:{done:true};},\
+           return:function close(){closed=true;return {};}};var iterable={};\
+         iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
+         function callback(){return {toString:function key(){throw original;}};}\
+         try{Object.groupBy(iterable,callback);}catch(error){return error===original&&closed;}\
+         return false;"
+    ));
+}
+
+/// Callback validation precedes iterator acquisition. Once an Iterator Record
+/// exists, `IteratorStepValue` failures still propagate without closing it.
+#[test]
+fn object_group_by_validates_callback_and_does_not_close_step_failures() {
+    assert_eq!(
+        text(
+            "var touched=false,iterable={};Object.defineProperty(iterable,Symbol.iterator,{\
+               get:function iteratorGetter(){touched=true;return function(){};}});\
+             try{Object.groupBy(iterable,null);}catch(error){}return ''+touched;"
+        ),
+        "false"
+    );
+    assert_eq!(
+        text(
+            "var closed=false;var iterator={next:function next(){throw 'next';},\
+             return:function close(){closed=true;return {};}};var iterable={};\
+             iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
+             try{Object.groupBy(iterable,function(){});}catch(error){}return ''+closed;"
+        ),
+        "false"
+    );
+    assert_eq!(
+        text(
+            "var closed=false;var iterator={next:function next(){return {\
+               done:false,get value(){throw 'value';}};},\
+             return:function close(){closed=true;return {};}};var iterable={};\
+             iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
+             try{Object.groupBy(iterable,function(){});}catch(error){}return ''+closed;"
         ),
         "false"
     );

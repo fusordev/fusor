@@ -148,6 +148,7 @@ pub(super) fn take_iterator_abrupt_handler(
             continuation,
             NativeContinuation::AggregateError(_)
                 | NativeContinuation::FromEntries(_)
+                | NativeContinuation::GroupBy(_)
                 | NativeContinuation::IteratorAppend(_)
                 | NativeContinuation::IteratorClose(_)
         )
@@ -174,6 +175,9 @@ pub(super) fn resume_iterator_abrupt_continuations(
             }
             NativeContinuation::FromEntries(state) => {
                 resume_from_entries_abrupt(runtime, *state, pending, return_to, execution_budget)
+            }
+            NativeContinuation::GroupBy(state) => {
+                resume_group_by_abrupt(runtime, *state, pending, return_to, execution_budget)
             }
             handler => {
                 resume_iterator_abrupt(runtime, handler, pending, return_to, execution_budget)
@@ -307,6 +311,9 @@ pub(super) fn resume_native_continuations(
             )?,
             NativeContinuation::FromEntries(state) => {
                 advance_from_entries(runtime, *state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::GroupBy(state) => {
+                advance_group_by(runtime, *state, value, return_to, execution_budget)?
             }
             NativeContinuation::ErrorConstructor(state) => {
                 advance_error_constructor(runtime, state, value, return_to, execution_budget)?
@@ -1132,6 +1139,20 @@ pub(super) fn dispatch_native_call_with_frames(
             begin_from_entries(
                 runtime,
                 arguments.take_first_or_undefined(),
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectGroupBy => {
+            let mut arguments = inputs.arguments;
+            let items = arguments.take_first_or_undefined();
+            let callback = arguments.take_first_or_undefined();
+            begin_group_by(
+                runtime,
+                items,
+                &callback,
                 native.realm,
                 return_to,
                 origin.unwrap_or_else(native_function_host_origin),

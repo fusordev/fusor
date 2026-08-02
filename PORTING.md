@@ -350,8 +350,12 @@ Known intentional runtime differences:
   acquisition, read entry indices `0` then `1` before `ToPropertyKey`, define
   full data properties for String and Symbol keys, and perform exceptional
   `IteratorClose` while preserving the original abrupt completion.
-- [ ] Complete the remaining `Object.groupBy` static,
-  remaining Function/legacy properties, and exotic
+- [x] Implement `Object.groupBy` through the resumable `GroupBy` abstract
+  operation: validate the callback before iterator acquisition, alternate
+  callback calls and `ToPropertyKey`, close only post-yield abrupt completions,
+  retain first-seen keyed lists, then materialize realm Arrays on a fresh
+  null-prototype ordinary object after normal iterator completion.
+- [ ] Complete remaining Function/legacy properties and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date/JSON, collections, binary data,
   Atomics, Unicode tables, promises, async functions/generators, weak
