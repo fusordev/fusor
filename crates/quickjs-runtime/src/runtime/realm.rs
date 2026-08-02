@@ -39,8 +39,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 62;
-const REALM_PROPERTY_COUNT: u64 = 222;
+const REALM_FUNCTION_COUNT: usize = 64;
+const REALM_PROPERTY_COUNT: u64 = 228;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -70,7 +70,7 @@ const OBJECT_STATIC_ATOM_START: usize =
 /// operations the current profile can honor completely are installed, so an
 /// absent method fails closed as a missing property rather than behaving
 /// incorrectly.
-const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 10] = [
+const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 12] = [
     ObjectStaticMethod::predefined(
         PredefinedAtom::GetPrototypeOf,
         NativeFunctionKind::ObjectGetPrototypeOf,
@@ -100,6 +100,16 @@ const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 10] = [
         "getOwnPropertyNames",
         NativeFunctionKind::ObjectGetOwnPropertyNames,
         1,
+    ),
+    ObjectStaticMethod::predefined(
+        PredefinedAtom::DefineProperty,
+        NativeFunctionKind::ObjectDefineProperty,
+        3,
+    ),
+    ObjectStaticMethod::predefined(
+        PredefinedAtom::GetOwnPropertyDescriptor,
+        NativeFunctionKind::ObjectGetOwnPropertyDescriptor,
+        2,
     ),
 ];
 

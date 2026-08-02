@@ -328,6 +328,13 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::CopyDataProperties(state) => {
                 advance_copy_data_properties(runtime, state, &value, return_to, execution_budget)?
             }
+            NativeContinuation::DefineProperty(state) => advance_define_property(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::ArrayJoin(state) => advance_array_join(
                 runtime,
                 *state,
@@ -985,6 +992,46 @@ pub(super) fn dispatch_native_call_with_frames(
                 arguments.take_first(),
                 listing,
                 origin.as_ref(),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectDefineProperty => {
+            let mut arguments = inputs.arguments;
+            let target = arguments.take_first_or_undefined();
+            let key = arguments.take_first_or_undefined();
+            let descriptor = arguments.take_first_or_undefined();
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            // The key is converted first, because `ToPropertyKey` can run a
+            // user `toString` before any descriptor field is read.
+            begin_property_key_conversion(
+                runtime,
+                key,
+                PropertyKeyTarget::DefineProperty {
+                    target,
+                    descriptor,
+                    realm: native.realm,
+                },
+                native.realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectGetOwnPropertyDescriptor => {
+            let mut arguments = inputs.arguments;
+            let target = arguments.take_first_or_undefined();
+            let key = arguments.take_first_or_undefined();
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            begin_property_key_conversion(
+                runtime,
+                key,
+                PropertyKeyTarget::OwnPropertyDescriptor {
+                    target,
+                    realm: native.realm,
+                },
+                native.realm,
+                return_to,
+                origin,
                 execution_budget,
             )
         }

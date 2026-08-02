@@ -2338,6 +2338,24 @@ fn finish_property_key_target(
                 )),
             }
         }
+        PropertyKeyTarget::DefineProperty {
+            target,
+            descriptor,
+            realm,
+        } => begin_define_property(
+            runtime,
+            realm,
+            target,
+            property.key,
+            property.name,
+            descriptor,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
+        PropertyKeyTarget::OwnPropertyDescriptor { target, realm } => {
+            own_property_descriptor(runtime, realm, &target, &property.key, origin)
+        }
         PropertyKeyTarget::Delete {
             base,
             strict,

@@ -64,6 +64,7 @@ mod array_join;
 mod bigint_intrinsics;
 mod bindings;
 mod conversions;
+mod define_property_intrinsics;
 mod dynamic;
 mod error_stack;
 mod errors;
@@ -82,8 +83,8 @@ mod stack;
 )]
 use {
     aggregate_error::*, array_join::*, bigint_intrinsics::*, bindings::*, conversions::*,
-    dynamic::*, error_stack::*, errors::*, exceptions::*, execution::*, iterators::*, native::*,
-    object_intrinsics::*, properties::*, stack::*,
+    define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*, exceptions::*,
+    execution::*, iterators::*, native::*, object_intrinsics::*, properties::*, stack::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -275,6 +276,7 @@ enum NativeContinuation {
     IteratorClose(IteratorCloseContinuation),
     CopyDataProperties(CopyDataPropertiesContinuation),
     ArrayJoin(Box<ArrayJoinContinuation>),
+    DefineProperty(Box<DefinePropertyContinuation>),
     InstanceOf(InstanceOfContinuation),
     FunctionCall,
 }
@@ -300,6 +302,7 @@ impl NativeContinuation {
             Self::IteratorClose(state) => state.retained_values(),
             Self::CopyDataProperties(state) => state.retained_values(),
             Self::ArrayJoin(_) => ArrayJoinContinuation::retained_values(),
+            Self::DefineProperty(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
             Self::FunctionCall => 0,
         }
@@ -628,6 +631,17 @@ enum PropertyKeyTarget {
         enumerable: bool,
         realm: RealmId,
     },
+    /// `Object.defineProperty`'s key, awaiting `ToPropertyKey`.
+    DefineProperty {
+        target: StoredValue,
+        descriptor: StoredValue,
+        realm: RealmId,
+    },
+    /// `Object.getOwnPropertyDescriptor`'s key, awaiting `ToPropertyKey`.
+    OwnPropertyDescriptor {
+        target: StoredValue,
+        realm: RealmId,
+    },
     /// The `delete` operator's key, awaiting `ToPropertyKey`.
     Delete {
         base: StoredValue,
@@ -640,8 +654,8 @@ impl PropertyKeyTarget {
     const fn retained_values(&self) -> u64 {
         match self {
             Self::ToKey => 0,
-            Self::Read { .. } | Self::Delete { .. } => 1,
-            Self::Write { .. } | Self::DefineMethod { .. } => 2,
+            Self::Read { .. } | Self::Delete { .. } | Self::OwnPropertyDescriptor { .. } => 1,
+            Self::Write { .. } | Self::DefineMethod { .. } | Self::DefineProperty { .. } => 2,
         }
     }
 }
@@ -958,8 +972,16 @@ fn trace_property_key_target_roots(
 ) {
     match target {
         PropertyKeyTarget::ToKey => {}
-        PropertyKeyTarget::Read { base, .. } | PropertyKeyTarget::Delete { base, .. } => {
+        PropertyKeyTarget::Read { base, .. }
+        | PropertyKeyTarget::Delete { base, .. }
+        | PropertyKeyTarget::OwnPropertyDescriptor { target: base, .. } => {
             trace_stored_value_root(base, mark);
+        }
+        PropertyKeyTarget::DefineProperty {
+            target, descriptor, ..
+        } => {
+            trace_stored_value_root(target, mark);
+            trace_stored_value_root(descriptor, mark);
         }
         PropertyKeyTarget::Write { base, value, .. } => {
             trace_stored_value_root(base, mark);
@@ -1080,6 +1102,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ArrayJoin(state) => {
             trace_stored_value_root(state.target(), mark);
         }
+        NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {
             trace_function_bind_roots(state, mark);
         }

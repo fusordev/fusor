@@ -525,7 +525,7 @@ pub(super) fn lookup_heap_property(
     Ok(None)
 }
 
-fn string_exotic_index_property(
+pub(super) fn string_exotic_index_property(
     runtime: &Runtime,
     reference: HeapReference,
     key: &PropertyKey,
@@ -1436,6 +1436,114 @@ pub(super) fn advance_copy_data_properties(
                     }
                 }
             }
+        }
+    }
+}
+
+/// Applies ECMAScript `[[DefineOwnProperty]]` from a validated descriptor.
+///
+/// This is the script-reachable entry to the descriptor authority: the decision
+/// is made by `ValidateAndApplyPropertyDescriptor`, and only the mutation
+/// happens here. An array index routes through the exotic array define so the
+/// `length` invariant is maintained.
+pub(super) fn define_own_property(
+    runtime: &mut Runtime,
+    base: &StoredValue,
+    key: PropertyKey,
+    definition: &PropertyDefinition,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<PropertyDefinitionOutcome, ExecutionError> {
+    let reference = match base {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            return Ok(PropertyDefinitionOutcome::Failed(
+                PropertyFailure::NotObject,
+            ));
+        }
+    };
+
+    // An array's `length` is not configurable and its range check lives in the
+    // resumable length-write path, so a define of it is refused here rather than
+    // silently bypassing that path.
+    if let HeapReference::Object(object) = reference
+        && runtime.is_array_object(object)?
+        && key.as_atom().and_then(crate::Atom::predefined_atom) == Some(PredefinedAtom::Length)
+    {
+        return Ok(PropertyDefinitionOutcome::Failed(
+            PropertyFailure::NotConfigurable,
+        ));
+    }
+
+    let (existing, extensible) = {
+        let record = runtime.object_record(reference)?;
+        (record.own_property(&key), record.is_extensible())
+    };
+    let decision = match &existing {
+        Some(existing) => validate_and_apply_existing(definition, existing),
+        None => validate_and_apply_new(definition, extensible),
+    };
+    match decision {
+        DefinitionDecision::Unchanged => Ok(PropertyDefinitionOutcome::Complete),
+        DefinitionDecision::Rejected if existing.is_some() => Ok(
+            PropertyDefinitionOutcome::Failed(PropertyFailure::NotConfigurable),
+        ),
+        DefinitionDecision::Rejected => Ok(PropertyDefinitionOutcome::Failed(
+            PropertyFailure::NonExtensible,
+        )),
+        DefinitionDecision::Replace(property) => {
+            if runtime
+                .object_record_mut(reference)?
+                .restore_existing_property(&key, property)
+                .is_none()
+            {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "located own property disappeared before its definition",
+                }
+                .into());
+            }
+            runtime.collection_pending = true;
+            Ok(PropertyDefinitionOutcome::Complete)
+        }
+        DefinitionDecision::Create(property) => {
+            // An array index must extend the cached length, which the exotic
+            // define owns.
+            if let HeapReference::Object(object) = reference
+                && runtime.is_array_object(object)?
+                && let Some(index) = key.as_index()
+            {
+                let work = runtime.preview_array_define_data_property_work(object)?;
+                execution_budget.charge_instructions(work)?;
+                let _ = index;
+                return Ok(match property {
+                    OwnProperty::Data { layout, value } => {
+                        match runtime.define_array_data_property(object, key, layout, value)? {
+                            ArrayDefineOutcome::Complete => PropertyDefinitionOutcome::Complete,
+                            ArrayDefineOutcome::ReadOnlyLength => {
+                                PropertyDefinitionOutcome::Failed(PropertyFailure::ReadOnly)
+                            }
+                            ArrayDefineOutcome::NonExtensible => {
+                                PropertyDefinitionOutcome::Failed(PropertyFailure::NonExtensible)
+                            }
+                        }
+                    }
+                    // An accessor at an array index leaves the dense range, so
+                    // it is stored as an ordinary property while the length is
+                    // still extended by the data path above.
+                    property @ OwnProperty::Accessor { .. } => {
+                        runtime.append_own_property(reference, key, property)?;
+                        PropertyDefinitionOutcome::Complete
+                    }
+                });
+            }
+            runtime.append_own_property(reference, key, property)?;
+            Ok(PropertyDefinitionOutcome::Complete)
         }
     }
 }
