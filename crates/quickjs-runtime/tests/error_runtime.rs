@@ -13,8 +13,8 @@ use quickjs_runtime::{
 };
 
 const REALM_ERROR_GRAPH_OBJECTS: u64 = 20;
-const REALM_ERROR_GRAPH_FUNCTIONS: u64 = 92;
-const REALM_ERROR_GRAPH_PROPERTIES: u64 = 320;
+const REALM_ERROR_GRAPH_FUNCTIONS: u64 = 95;
+const REALM_ERROR_GRAPH_PROPERTIES: u64 = 329;
 const REALM_DYNAMIC_ATOMS: u32 = 59;
 const REALM_DYNAMIC_ATOM_CODE_UNITS: u64 = 528;
 const REALM_DYNAMIC_INTERNER_SLOTS: u32 = 59;
@@ -111,16 +111,16 @@ fn error_realm_graph_limit_failures_are_atomic_and_runtime_is_reusable() {
             40,
         ),
         (
-            RuntimeLimits::default().with_max_heap_functions(183),
+            RuntimeLimits::default().with_max_heap_functions(189),
             RuntimeResource::HeapFunctions,
-            183,
-            184,
+            189,
+            190,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(639),
+            RuntimeLimits::default().with_max_object_properties(657),
             RuntimeResource::ObjectProperties,
-            639,
-            640,
+            657,
+            658,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");

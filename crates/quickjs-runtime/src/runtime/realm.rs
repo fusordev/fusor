@@ -28,20 +28,20 @@
 use std::collections::TryReserveError;
 
 use super::{
-    Arc, Arena, ArrayIntrinsics, ArrayState, Atom, AtomError, AtomTable, BigIntIntrinsics,
-    BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic, ErrorIntrinsicKind,
-    ErrorIntrinsics, FunctionId, FunctionImplementation, HandleError, HandleKind, HashMap,
-    HeapFunction, HeapObject, HeapReference, InterruptState, IteratorIntrinsics, JsNumber,
-    JsString, NativeFunction, NativeFunctionKind, NumberIntrinsics, NumberPredicate, ObjectId,
-    ObjectRecord, PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId,
-    RealmIntrinsics, RealmState, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity,
-    RuntimeLimits, RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics,
-    check_limit, predefined_string, usize_to_u64,
+    Arc, Arena, ArrayIntrinsics, ArraySearch, ArrayState, Atom, AtomError, AtomTable,
+    BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic,
+    ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation, HandleError,
+    HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
+    IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind, NumberIntrinsics,
+    NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey, PropertyLayout, Realm,
+    RealmHandle, RealmId, RealmIntrinsics, RealmState, ReleaseMailbox, Runtime, RuntimeError,
+    RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringIntrinsics, StringMethod,
+    SymbolIntrinsics, check_limit, predefined_string, usize_to_u64,
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 92;
-const REALM_PROPERTY_COUNT: u64 = 320;
+const REALM_FUNCTION_COUNT: usize = 95;
+const REALM_PROPERTY_COUNT: u64 = 329;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -198,6 +198,18 @@ const STRING_FROM_STATICS: [(&str, StringMethod); 2] = [
     ("fromCharCode", StringMethod::FromCharCode),
     ("fromCodePoint", StringMethod::FromCodePoint),
 ];
+
+/// The `Array.prototype` searches this profile installs.
+///
+/// Each reports arity 1, which the pinned oracle confirms.
+const ARRAY_SEARCH_METHODS: [(&str, ArraySearch); 3] = [
+    ("indexOf", ArraySearch::IndexOf),
+    ("lastIndexOf", ArraySearch::LastIndexOf),
+    ("includes", ArraySearch::Includes),
+];
+
+/// Index of the first `Array.prototype` search name in the dynamic atom list.
+const ARRAY_SEARCH_ATOM_START: usize = STRING_FROM_ATOM_START + STRING_FROM_STATICS.len();
 
 /// The `Object` constructor's static methods.
 ///
@@ -596,6 +608,7 @@ struct RealmRecords {
     string_methods: [ObjectRecord; STRING_PROTOTYPE_METHODS.len()],
     number_predicates: [ObjectRecord; NUMBER_PREDICATE_STATICS.len()],
     string_from_statics: [ObjectRecord; STRING_FROM_STATICS.len()],
+    array_searches: [ObjectRecord; ARRAY_SEARCH_METHODS.len()],
     array_is_array: ObjectRecord,
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
@@ -666,7 +679,7 @@ impl RealmRecords {
         let string_methods = string_method_records()?;
         let string_from_statics = string_from_records()?;
         let mut array = ArrayIntrinsicRecords {
-            prototype: reserved_record(8)?,
+            prototype: reserved_record(8 + ARRAY_SEARCH_METHODS.len())?,
             constructor: reserved_record(3)?,
             join: reserved_record(2)?,
             to_string: reserved_record(2)?,
@@ -711,6 +724,7 @@ impl RealmRecords {
             string_methods,
             number_predicates,
             string_from_statics,
+            array_searches: array_search_records()?,
             array_is_array: reserved_record(2)?,
             array,
             iterators,
@@ -834,6 +848,7 @@ struct RealmGraph {
     string_methods: [FunctionId; STRING_PROTOTYPE_METHODS.len()],
     number_predicates: [FunctionId; NUMBER_PREDICATE_STATICS.len()],
     string_from_statics: [FunctionId; STRING_FROM_STATICS.len()],
+    array_searches: [FunctionId; ARRAY_SEARCH_METHODS.len()],
     array_is_array: FunctionId,
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
@@ -849,6 +864,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         debug_assert!(runtime.functions.remove(self.array_is_array).is_some());
+        for function in self.array_searches.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
         for function in self.string_from_statics.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
@@ -1095,6 +1113,7 @@ impl Runtime {
         let number_predicates = self.insert_number_predicates(&base, records.number_predicates);
         let string_from_statics =
             self.insert_string_from_statics(&base, records.string_from_statics);
+        let array_searches = self.insert_array_searches(&base, records.array_searches);
         let array_is_array = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -1113,6 +1132,7 @@ impl Runtime {
             string_methods,
             number_predicates,
             string_from_statics,
+            array_searches,
             array_is_array,
             array,
             iterators,
@@ -1143,7 +1163,8 @@ impl Runtime {
                     + NUMBER_VALUE_STATICS.len()
                     + NUMBER_PREDICATE_STATICS.len()
                     + 1
-                    + STRING_FROM_STATICS.len(),
+                    + STRING_FROM_STATICS.len()
+                    + ARRAY_SEARCH_METHODS.len(),
             )
             .is_err()
         {
@@ -1208,6 +1229,9 @@ impl Runtime {
             }
             interned(&mut self.atoms, &mut dynamic_atoms, "isArray")?;
             for (literal, _) in STRING_FROM_STATICS {
+                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
+            }
+            for (literal, _) in ARRAY_SEARCH_METHODS {
                 interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
             }
             Ok(())
@@ -1464,6 +1488,26 @@ impl Runtime {
             to_string,
             value_of,
         }
+    }
+
+    /// Inserts one native function per `Array.prototype` search.
+    fn insert_array_searches(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; ARRAY_SEARCH_METHODS.len()],
+    ) -> [FunctionId; ARRAY_SEARCH_METHODS.len()] {
+        let mut inserted = [None; ARRAY_SEARCH_METHODS.len()];
+        for ((slot, (_, search)), record) in
+            inserted.iter_mut().zip(ARRAY_SEARCH_METHODS).zip(records)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::ArrayPrototypeSearch(search),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every Array search function was inserted"))
     }
 
     /// Inserts one native function per `String` code-unit factory.
@@ -2194,6 +2238,10 @@ impl Runtime {
     ///
     /// The value properties are frozen, matching the pinned descriptors for
     /// `Number.MAX_VALUE`; the predicates are ordinary methods.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat publication site keeps the Number, Array, and String constructor statics and their exact descriptors auditable together"
+    )]
     fn publish_number_statics(
         &mut self,
         graph: &RealmGraph,
@@ -2277,6 +2325,28 @@ impl Runtime {
                 .get_mut(graph.string.constructor)
                 .expect("new String constructor remains live")
                 .object
+                .append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            self.append_function_identity(function, &name, 1, keys)?;
+        }
+
+        for ((_, function), atom) in ARRAY_SEARCH_METHODS
+            .into_iter()
+            .zip(graph.array_searches)
+            .zip(&graph.dynamic_atoms[ARRAY_SEARCH_ATOM_START..])
+        {
+            let atom = atom.clone();
+            let name = atom
+                .description()
+                .expect("interned Array search name has a description")
+                .clone();
+            self.objects
+                .get_mut(graph.array.prototype)
+                .expect("new Array.prototype remains live")
+                .record
                 .append_data(
                     PropertyKey::from_validated_atom(atom),
                     METHOD_PROPERTY,
@@ -2689,6 +2759,16 @@ fn object_static_records() -> Result<[ObjectRecord; OBJECT_STATIC_METHODS.len()]
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Object static record was reserved")))
+}
+
+/// Reserves one record per `Array.prototype` search.
+fn array_search_records() -> Result<[ObjectRecord; ARRAY_SEARCH_METHODS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; ARRAY_SEARCH_METHODS.len()] =
+        [const { None }; ARRAY_SEARCH_METHODS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Array search record was reserved")))
 }
 
 /// Reserves one record per `String` code-unit factory.

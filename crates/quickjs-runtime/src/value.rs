@@ -195,6 +195,18 @@ impl StoredValue {
         }
     }
 
+    /// Applies ECMAScript `SameValueZero`.
+    ///
+    /// This differs from [`Self::same_value`] only in treating `+0` and `-0` as
+    /// equal, which is the comparison `Array.prototype.includes` uses:
+    /// `[NaN].includes(NaN)` is `true` while `[NaN].indexOf(NaN)` is `-1`.
+    pub(crate) fn same_value_zero(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Number(left), Self::Number(right)) => left.same_value_zero(*right),
+            _ => self.strict_equals(other),
+        }
+    }
+
     pub(crate) const fn heap_reference(&self) -> Option<HeapReference> {
         match self {
             Self::Undefined

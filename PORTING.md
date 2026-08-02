@@ -210,6 +210,16 @@ Known intentional runtime differences:
   `fromCodePoint` requires an exact code point in `0..=0x10FFFF` and otherwise
   reports `RangeError: invalid code point`. A supplementary code point is encoded
   as a surrogate pair, so `String.fromCodePoint(0x1F600).length` is `2`.
+- [x] `Array.prototype.indexOf`, `lastIndexOf`, and `includes` as one resumable
+  element loop, since every element read can run a getter. They differ in exactly
+  two observable ways, which are carried as data rather than as separate
+  implementations. The comparison: the index searches use strict equality, so
+  `[NaN].indexOf(NaN)` is `-1`, while `includes` uses `SameValueZero`, so
+  `[NaN].includes(NaN)` is `true`; both treat the signed zeros as equal. Holes:
+  the index searches test `HasProperty` first and skip a missing index, so
+  `[1,,3].indexOf(undefined)` is `-1`, while `includes` reads every index and
+  answers `true`. The length is read once with `ToLength`, and the loop stops at
+  the first match, so a second matching getter never runs.
 - [ ] Remaining String/Number/Array method surface (notably `toFixed`,
   `toPrecision`, and `toExponential`, which need exact decimal formatting, and
   the `Array.prototype` mutators), shape sharing/transition interning, remaining

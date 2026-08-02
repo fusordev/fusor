@@ -349,6 +349,32 @@ pub(crate) struct BytecodeFunction {
     pub(crate) environment: Vec<EnvironmentBinding>,
 }
 
+/// Which search a continuation is performing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArraySearch {
+    IndexOf,
+    LastIndexOf,
+    Includes,
+}
+
+impl ArraySearch {
+    /// Returns whether a missing index is skipped rather than read as
+    /// `undefined`.
+    pub(crate) const fn skips_holes(self) -> bool {
+        matches!(self, Self::IndexOf | Self::LastIndexOf)
+    }
+
+    /// Returns whether the search walks the indices in descending order.
+    pub(crate) const fn is_backward(self) -> bool {
+        matches!(self, Self::LastIndexOf)
+    }
+
+    /// Returns whether the result is a Boolean rather than an index.
+    pub(crate) const fn answers_boolean(self) -> bool {
+        matches!(self, Self::Includes)
+    }
+}
+
 /// One `Number` predicate static.
 ///
 /// Each answers `false` for a non-Number argument rather than converting it,
@@ -522,6 +548,8 @@ pub(crate) enum NativeFunctionKind {
     NumberPredicateStatic(NumberPredicate),
     /// `Array.isArray`.
     ArrayIsArray,
+    /// One `Array.prototype` search sharing the resumable element loop.
+    ArrayPrototypeSearch(ArraySearch),
     ArrayConstructor,
     SymbolConstructor,
     SymbolPrototypeToString,

@@ -342,6 +342,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::ArraySearch(state) => advance_array_search(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
@@ -1269,6 +1276,24 @@ pub(super) fn dispatch_native_call_with_frames(
                 _ => false,
             };
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(answer)))
+        }
+        // The three searches share one resumable element loop; they differ only
+        // in their equality and in whether a hole is skipped.
+        NativeFunctionKind::ArrayPrototypeSearch(search) => {
+            let mut arguments = inputs.arguments;
+            let needle = arguments.take_first_or_undefined();
+            let position = arguments.take_first();
+            begin_array_search(
+                runtime,
+                search,
+                native.realm,
+                inputs.receiver,
+                needle,
+                position,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
         }
         NativeFunctionKind::ArrayIsArray => {
             let mut arguments = inputs.arguments;

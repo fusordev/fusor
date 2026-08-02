@@ -495,6 +495,44 @@ fn read_heap_property_if_present(
     }
 }
 
+/// Applies ECMAScript `HasProperty`, walking the prototype chain.
+///
+/// This is what lets `Array.prototype.indexOf` skip a hole: a missing index is
+/// not merely `undefined`, so `[1,,3].indexOf(undefined)` is `-1` while
+/// `includes`, which reads instead of testing, answers `true`.
+pub(super) fn has_property(
+    runtime: &Runtime,
+    realm: RealmId,
+    base: &StoredValue,
+    key: &PropertyKey,
+) -> Result<bool, ExecutionError> {
+    let reference = match base {
+        // A primitive receiver tests against its wrapper prototype, matching the
+        // read path; `undefined` and `null` never reach here because the caller
+        // rejects them first.
+        StoredValue::Undefined | StoredValue::Null => return Ok(false),
+        StoredValue::Boolean(_) => HeapReference::Object(runtime.realm_boolean_prototype(realm)?),
+        StoredValue::Number(_) => HeapReference::Object(runtime.realm_number_prototype(realm)?),
+        StoredValue::BigInt(_) => HeapReference::Object(runtime.realm_bigint_prototype(realm)?),
+        StoredValue::Symbol(_) => HeapReference::Object(runtime.realm_symbol_prototype(realm)?),
+        StoredValue::String(text) => {
+            // A String's own index and `length` properties are exotic rather
+            // than stored, so they are answered before the prototype walk.
+            if let Some(index) = key.as_index() {
+                return Ok(u64::from(index.get()) < u64::from(text.len()));
+            }
+            if key.as_atom().and_then(crate::Atom::predefined_atom) == Some(PredefinedAtom::Length)
+            {
+                return Ok(true);
+            }
+            HeapReference::Object(runtime.realm_string_prototype(realm)?)
+        }
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+    };
+    Ok(lookup_heap_property(runtime, Some(reference), key)?.is_some())
+}
+
 pub(super) fn lookup_heap_property(
     runtime: &Runtime,
     mut current: Option<HeapReference>,
