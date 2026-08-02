@@ -2386,6 +2386,29 @@ fn finish_property_key_target(
         PropertyKeyTarget::OwnPropertyDescriptor { target, realm } => {
             own_property_descriptor(runtime, realm, &target, &property.key, origin)
         }
+        // `hasOwnProperty` and `propertyIsEnumerable` share one own-property
+        // resolution with `getOwnPropertyDescriptor`, so all three agree on
+        // every exotic case.
+        PropertyKeyTarget::HasOwnProperty { target, realm } => {
+            let own = resolve_own_property(runtime, realm, &target, &property.key, origin)?;
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(
+                own.is_some(),
+            )))
+        }
+        PropertyKeyTarget::PropertyIsEnumerable { target, realm } => {
+            // An absent property is not enumerable, and neither is an inherited
+            // one: the test is on the own property only.
+            let own = resolve_own_property(runtime, realm, &target, &property.key, origin)?;
+            let enumerable = own.is_some_and(|own| {
+                let layout = match own {
+                    OwnProperty::Data { layout, .. } | OwnProperty::Accessor { layout, .. } => {
+                        layout
+                    }
+                };
+                layout.is_enumerable()
+            });
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(enumerable)))
+        }
         PropertyKeyTarget::Delete {
             base,
             strict,

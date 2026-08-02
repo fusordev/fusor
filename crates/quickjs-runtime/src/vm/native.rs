@@ -1042,6 +1042,49 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::ObjectPrototypeHasOwnProperty
+        | NativeFunctionKind::ObjectPrototypePropertyIsEnumerable => {
+            let mut arguments = inputs.arguments;
+            let key = arguments.take_first_or_undefined();
+            let target = inputs.receiver;
+            let realm = native.realm;
+            let enumerable = matches!(
+                native.kind,
+                NativeFunctionKind::ObjectPrototypePropertyIsEnumerable
+            );
+            // The key is converted first, so its `toString` runs before the
+            // receiver is inspected.
+            begin_property_key_conversion(
+                runtime,
+                key,
+                if enumerable {
+                    PropertyKeyTarget::PropertyIsEnumerable { target, realm }
+                } else {
+                    PropertyKeyTarget::HasOwnProperty { target, realm }
+                },
+                realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        // `isPrototypeOf` walks the argument's prototype chain, so it needs no
+        // key conversion at all. A primitive argument has no chain to walk and a
+        // receiver never precedes itself, which is why `p.isPrototypeOf(p)` is
+        // `false`.
+        NativeFunctionKind::ObjectPrototypeIsPrototypeOf => {
+            let mut arguments = inputs.arguments;
+            let candidate = arguments.take_first_or_undefined();
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            object_prototype_is_prototype_of(
+                runtime,
+                native.realm,
+                &inputs.receiver,
+                &candidate,
+                &origin,
+                execution_budget,
+            )
+        }
         NativeFunctionKind::ObjectPrototypeToString => begin_object_prototype_to_string(
             runtime,
             native.realm,

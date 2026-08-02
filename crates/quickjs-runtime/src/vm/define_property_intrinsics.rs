@@ -443,6 +443,44 @@ pub(super) fn own_property_descriptor(
     Ok(NativeDispatch::Immediate(StoredValue::Object(descriptor)))
 }
 
+/// Resolves one own property for the `Object.prototype` reflection methods.
+///
+/// This shares `own_property_descriptor`'s resolution so `hasOwnProperty` and
+/// `propertyIsEnumerable` agree with it on every exotic case, including a
+/// primitive String's index and `length` properties.
+pub(super) fn resolve_own_property(
+    runtime: &Runtime,
+    realm: RealmId,
+    target: &StoredValue,
+    key: &PropertyKey,
+    origin: &JsStackFrame,
+) -> Result<Option<OwnProperty>, NativeFailure> {
+    match target {
+        StoredValue::Function(function) => {
+            own_property_of(runtime, HeapReference::Function(*function), key)
+        }
+        StoredValue::Object(object) => {
+            own_property_of(runtime, HeapReference::Object(*object), key)
+        }
+        StoredValue::String(value) => string_own_property(value, key),
+        StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::Symbol(_) => Ok(None),
+        // `ToObject` runs first, so a nullish receiver throws.
+        StoredValue::Undefined | StoredValue::Null => {
+            Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: JsString::from_utf8("cannot convert to object")?,
+                },
+                origin: origin.clone(),
+            }))
+        }
+    }
+}
+
 /// Reads one own property, consulting the `String` wrapper exotic first.
 fn own_property_of(
     runtime: &Runtime,

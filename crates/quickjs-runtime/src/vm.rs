@@ -653,6 +653,16 @@ enum PropertyKeyTarget {
         target: StoredValue,
         realm: RealmId,
     },
+    /// `Object.prototype.hasOwnProperty`'s key, awaiting `ToPropertyKey`.
+    HasOwnProperty {
+        target: StoredValue,
+        realm: RealmId,
+    },
+    /// `Object.prototype.propertyIsEnumerable`'s key, awaiting `ToPropertyKey`.
+    PropertyIsEnumerable {
+        target: StoredValue,
+        realm: RealmId,
+    },
     /// The `delete` operator's key, awaiting `ToPropertyKey`.
     Delete {
         base: StoredValue,
@@ -665,7 +675,11 @@ impl PropertyKeyTarget {
     const fn retained_values(&self) -> u64 {
         match self {
             Self::ToKey => 0,
-            Self::Read { .. } | Self::Delete { .. } | Self::OwnPropertyDescriptor { .. } => 1,
+            Self::Read { .. }
+            | Self::Delete { .. }
+            | Self::OwnPropertyDescriptor { .. }
+            | Self::HasOwnProperty { .. }
+            | Self::PropertyIsEnumerable { .. } => 1,
             Self::Write { .. } | Self::DefineMethod { .. } | Self::DefineProperty { .. } => 2,
         }
     }
@@ -995,7 +1009,9 @@ fn trace_property_key_target_roots(
         PropertyKeyTarget::ToKey => {}
         PropertyKeyTarget::Read { base, .. }
         | PropertyKeyTarget::Delete { base, .. }
-        | PropertyKeyTarget::OwnPropertyDescriptor { target: base, .. } => {
+        | PropertyKeyTarget::OwnPropertyDescriptor { target: base, .. }
+        | PropertyKeyTarget::HasOwnProperty { target: base, .. }
+        | PropertyKeyTarget::PropertyIsEnumerable { target: base, .. } => {
             trace_stored_value_root(base, mark);
         }
         PropertyKeyTarget::DefineProperty {

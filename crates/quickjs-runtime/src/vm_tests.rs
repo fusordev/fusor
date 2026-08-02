@@ -2334,7 +2334,11 @@ fn array_constructor_prototype_get_precedes_dense_work_fuel_charge() {
     let arguments = (0..64)
         .map(|_| StoredValue::Boolean(true))
         .collect::<Vec<_>>();
-    let mut budget = ExecutionBudget::new(ExecutionLimits::default().with_instruction_fuel(20));
+    // The budget must be large enough to reach the observable prototype Get but
+    // smaller than the 64-element dense charge, so exhaustion after the Get
+    // proves the ordering. The lower bound tracks `Object.prototype`'s property
+    // count, because the lookup charges its full shape scan.
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default().with_instruction_fuel(24));
     let Ok(dispatch) = dispatch_native_call(
         &mut runtime,
         array_constructor,
@@ -4787,7 +4791,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(331))
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(340))
         .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
@@ -4809,8 +4813,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 331,
-            observed: 332,
+            limit: 340,
+            observed: 341,
         }
     ));
     let failed = runtime.usage();

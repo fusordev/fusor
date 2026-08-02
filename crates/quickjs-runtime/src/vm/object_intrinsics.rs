@@ -206,6 +206,54 @@ pub(super) fn get_prototype_of(
     Ok(NativeDispatch::Immediate(heap_reference_value(prototype)))
 }
 
+/// Applies `Object.prototype.isPrototypeOf`.
+///
+/// The walk starts at the *candidate's* prototype, not the candidate itself, so
+/// a receiver never precedes itself and `p.isPrototypeOf(p)` is `false`. A
+/// primitive candidate has no chain of its own, so the answer is `false` without
+/// consulting its wrapper prototype, which the pinned oracle confirms:
+/// `({}).isPrototypeOf(1)` is `false`.
+pub(super) fn object_prototype_is_prototype_of(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    receiver: &StoredValue,
+    candidate: &StoredValue,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    // `ToObject(this)` runs first, so a nullish receiver throws even when the
+    // candidate would have answered `false`.
+    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("cannot convert to object")?,
+            },
+            origin: origin.clone(),
+        }));
+    }
+    let Some(target) = receiver.heap_reference() else {
+        // A primitive receiver is not on any prototype chain.
+        return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
+    };
+    let Some(start) = candidate.heap_reference() else {
+        return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
+    };
+
+    let mut current = runtime.object_record(start)?.prototype();
+    while let Some(reference) = current {
+        // The walk is bounded by the same budget every prototype lookup uses, so
+        // a long chain cannot run unaccounted.
+        execution_budget.charge_instructions(1)?;
+        if reference == target {
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)));
+        }
+        current = runtime.object_record(reference)?.prototype();
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+}
+
 /// Returns the intrinsic prototype a primitive's wrapper would inherit.
 fn primitive_prototype(
     runtime: &Runtime,

@@ -40,8 +40,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 95;
-const REALM_PROPERTY_COUNT: u64 = 329;
+const REALM_FUNCTION_COUNT: usize = 98;
+const REALM_PROPERTY_COUNT: u64 = 338;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -198,6 +198,32 @@ const STRING_FROM_STATICS: [(&str, StringMethod); 2] = [
     ("fromCharCode", StringMethod::FromCharCode),
     ("fromCodePoint", StringMethod::FromCodePoint),
 ];
+
+/// The `Object.prototype` reflection methods.
+///
+/// Each entry pairs the interned name with its implementation and reported
+/// `length`, all of which the pinned oracle reports as 1. These are the methods
+/// the Error corpus reaches through `Object.prototype.hasOwnProperty.call`.
+const OBJECT_PROTOTYPE_REFLECTION: [(&str, NativeFunctionKind, i32); 3] = [
+    (
+        "hasOwnProperty",
+        NativeFunctionKind::ObjectPrototypeHasOwnProperty,
+        1,
+    ),
+    (
+        "isPrototypeOf",
+        NativeFunctionKind::ObjectPrototypeIsPrototypeOf,
+        1,
+    ),
+    (
+        "propertyIsEnumerable",
+        NativeFunctionKind::ObjectPrototypePropertyIsEnumerable,
+        1,
+    ),
+];
+
+/// Index of the first `Object.prototype` reflection name in the dynamic atoms.
+const OBJECT_REFLECTION_ATOM_START: usize = ARRAY_SEARCH_ATOM_START + ARRAY_SEARCH_METHODS.len();
 
 /// The `Array.prototype` searches this profile installs.
 ///
@@ -491,6 +517,7 @@ struct RealmBaseRecords {
     object_statics: [ObjectRecord; OBJECT_STATIC_METHODS.len()],
     object_to_string: ObjectRecord,
     object_value_of: ObjectRecord,
+    object_reflection: [ObjectRecord; OBJECT_PROTOTYPE_REFLECTION.len()],
     function_to_string: ObjectRecord,
     function_call: ObjectRecord,
     function_apply: ObjectRecord,
@@ -625,13 +652,14 @@ impl RealmRecords {
         // recoverable allocation failure reports the same `additional` value.
         let base = RealmBaseRecords {
             global: reserved_record(20)?,
-            object_prototype: reserved_record(3)?,
+            object_prototype: reserved_record(3 + OBJECT_PROTOTYPE_REFLECTION.len())?,
             function_prototype: reserved_record(6)?,
             function_constructor: reserved_record(3)?,
             object_constructor: reserved_record(3 + OBJECT_STATIC_METHODS.len())?,
             object_statics: object_static_records()?,
             object_to_string: reserved_record(2)?,
             object_value_of: reserved_record(2)?,
+            object_reflection: object_reflection_records()?,
             function_to_string: reserved_record(2)?,
             function_call: reserved_record(2)?,
             function_apply: reserved_record(2)?,
@@ -743,6 +771,7 @@ struct RealmBase {
     object_statics: [FunctionId; OBJECT_STATIC_METHODS.len()],
     object_to_string: FunctionId,
     object_value_of: FunctionId,
+    object_reflection: [FunctionId; OBJECT_PROTOTYPE_REFLECTION.len()],
     function_to_string: FunctionId,
     function_call: FunctionId,
     function_apply: FunctionId,
@@ -815,6 +844,9 @@ struct SymbolIntrinsicGraph {
 impl RealmBase {
     fn rollback(self, runtime: &mut Runtime) {
         for function in self.object_statics.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
+        for function in self.object_reflection.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for function in [
@@ -1164,7 +1196,8 @@ impl Runtime {
                     + NUMBER_PREDICATE_STATICS.len()
                     + 1
                     + STRING_FROM_STATICS.len()
-                    + ARRAY_SEARCH_METHODS.len(),
+                    + ARRAY_SEARCH_METHODS.len()
+                    + OBJECT_PROTOTYPE_REFLECTION.len(),
             )
             .is_err()
         {
@@ -1234,6 +1267,9 @@ impl Runtime {
             for (literal, _) in ARRAY_SEARCH_METHODS {
                 interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
             }
+            for (literal, _, _) in OBJECT_PROTOTYPE_REFLECTION {
+                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
+            }
             Ok(())
         })();
         if let Err(error) = outcome {
@@ -1268,6 +1304,10 @@ impl Runtime {
         inserted.map(|slot| slot.expect("every Object static was inserted"))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat insertion site keeps every base intrinsic's realm ownership and prototype edge auditable together"
+    )]
     fn insert_realm_base(&mut self, mut records: RealmBaseRecords) -> RealmBase {
         let object_prototype =
             self.insert_reserved_object(HeapObject::ordinary(records.object_prototype));
@@ -1317,6 +1357,21 @@ impl Runtime {
             NativeFunctionKind::ObjectPrototypeValueOf,
             records.object_value_of,
         );
+        let mut object_reflection = [None; OBJECT_PROTOTYPE_REFLECTION.len()];
+        for ((slot, (_, kind, _)), record) in object_reflection
+            .iter_mut()
+            .zip(OBJECT_PROTOTYPE_REFLECTION)
+            .zip(records.object_reflection)
+        {
+            *slot = Some(self.insert_reserved_native(
+                realm,
+                HeapReference::Function(function_prototype),
+                kind,
+                record,
+            ));
+        }
+        let object_reflection = object_reflection
+            .map(|slot| slot.expect("every Object reflection method was inserted"));
         let function_to_string = self.insert_reserved_native(
             realm,
             HeapReference::Function(function_prototype),
@@ -1357,6 +1412,7 @@ impl Runtime {
             object_statics,
             object_to_string,
             object_value_of,
+            object_reflection,
             function_to_string,
             function_call,
             function_apply,
@@ -1855,6 +1911,7 @@ impl Runtime {
                 (&keys.value_of, graph.base.object_value_of),
             ],
         )?;
+        self.publish_object_reflection_methods(graph, keys)?;
         self.publish_error_intrinsic_properties(graph, keys, names)?;
         self.publish_function_intrinsic_properties(graph, keys, names)?;
         self.publish_primitive_intrinsic_properties(
@@ -2194,6 +2251,38 @@ impl Runtime {
             keys,
         )?;
         self.append_function_identity(graph.value_of, &names.value_of, 0, keys)
+    }
+
+    /// Publishes the `Object.prototype` reflection methods.
+    fn publish_object_reflection_methods(
+        &mut self,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+    ) -> Result<(), TryReserveError> {
+        for ((_, _, length), (function, atom)) in OBJECT_PROTOTYPE_REFLECTION.into_iter().zip(
+            graph
+                .base
+                .object_reflection
+                .into_iter()
+                .zip(&graph.dynamic_atoms[OBJECT_REFLECTION_ATOM_START..]),
+        ) {
+            let atom = atom.clone();
+            let name = atom
+                .description()
+                .expect("interned Object reflection name has a description")
+                .clone();
+            self.objects
+                .get_mut(graph.base.object_prototype)
+                .expect("new Object.prototype remains live")
+                .record
+                .append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            self.append_function_identity(function, &name, length, keys)?;
+        }
+        Ok(())
     }
 
     /// Publishes every installed `String.prototype` method.
@@ -2759,6 +2848,17 @@ fn object_static_records() -> Result<[ObjectRecord; OBJECT_STATIC_METHODS.len()]
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Object static record was reserved")))
+}
+
+/// Reserves one record per `Object.prototype` reflection method.
+fn object_reflection_records()
+-> Result<[ObjectRecord; OBJECT_PROTOTYPE_REFLECTION.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; OBJECT_PROTOTYPE_REFLECTION.len()] =
+        [const { None }; OBJECT_PROTOTYPE_REFLECTION.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Object reflection record was reserved")))
 }
 
 /// Reserves one record per `Array.prototype` search.
