@@ -23,7 +23,8 @@
  * THE SOFTWARE.
  */
 
-//! `Array.prototype.push`, `pop`, `shift`, `unshift`, `reverse`, and `fill`.
+//! `Array.prototype.push`, `pop`, `shift`, `unshift`, `reverse`, `fill`, and
+//! `copyWithin`.
 //!
 //! These are the mutators that move elements without a user callback. They share
 //! one resumable driver because they share one skeleton: read `length` once with
@@ -83,6 +84,10 @@ enum ArrayMutatorStage {
     /// Awaiting the `fill` arguments' numeric conversions.
     AwaitFillStart,
     AwaitFillEnd,
+    /// Awaiting the `copyWithin` arguments' numeric conversions.
+    AwaitCopyWithinTo,
+    AwaitCopyWithinFrom,
+    AwaitCopyWithinFinal,
     /// Ready to perform the next planned step.
     NextStep,
     /// Awaiting the first element read of the current step.
@@ -123,6 +128,10 @@ pub(crate) struct ArrayMutatorContinuation {
     /// `fill`'s resolved bounds.
     fill_start: u64,
     fill_end: u64,
+    /// `copyWithin`'s resolved destination, source, and end.
+    copy_to: u64,
+    copy_from: u64,
+    copy_final: u64,
     /// The value this mutator returns.
     result: StoredValue,
     /// The length to write back once the moves finish.
@@ -204,6 +213,9 @@ pub(super) fn begin_array_mutator(
         second_absent: false,
         fill_start: 0,
         fill_end: 0,
+        copy_to: 0,
+        copy_from: 0,
+        copy_final: 0,
         result: StoredValue::Undefined,
         final_length: 0,
         realm,
@@ -266,6 +278,12 @@ pub(super) fn advance_array_mutator(
                 // element, which the oracle reports as `len|start|end`.
                 if matches!(state.mutator, ArrayMutator::Fill) {
                     state.stage = ArrayMutatorStage::AwaitFillStart;
+                    continue;
+                }
+                // `copyWithin` converts its destination, source, and end in the
+                // same position (`quickjs.c:42989-42999`).
+                if matches!(state.mutator, ArrayMutator::CopyWithin) {
+                    state.stage = ArrayMutatorStage::AwaitCopyWithinTo;
                     continue;
                 }
                 plan_moves(&mut state)?;
@@ -340,6 +358,106 @@ pub(super) fn advance_array_mutator(
                         plan_moves(&mut state)?;
                         state.stage = ArrayMutatorStage::NextStep;
                     }
+                }
+            }
+            ArrayMutatorStage::AwaitCopyWithinTo => {
+                if let Some(value) = completion.take() {
+                    let number = operator_to_number(value, state.realm, &state.origin)?;
+                    state.copy_to =
+                        relative_bound(number_to_integer_or_infinity(number), state.length);
+                    state.stage = ArrayMutatorStage::AwaitCopyWithinFrom;
+                    continue;
+                }
+                match state.arguments.first() {
+                    Some(value) if needs_conversion(value) => {
+                        let value = value.duplicate();
+                        let realm = state.realm;
+                        let origin = state.origin.clone();
+                        return begin_operator_primitive_conversion(
+                            runtime,
+                            value,
+                            OperatorPrimitiveHint::Number,
+                            OperatorPrimitiveTarget::ArrayMutatorArgument(Box::new(state)),
+                            realm,
+                            return_to,
+                            origin,
+                            execution_budget,
+                        );
+                    }
+                    Some(value) => completion = Some(value.duplicate()),
+                    // An absent destination copies to the beginning.
+                    None => {
+                        state.copy_to = 0;
+                        state.stage = ArrayMutatorStage::AwaitCopyWithinFrom;
+                    }
+                }
+            }
+            ArrayMutatorStage::AwaitCopyWithinFrom => {
+                if let Some(value) = completion.take() {
+                    let number = operator_to_number(value, state.realm, &state.origin)?;
+                    state.copy_from =
+                        relative_bound(number_to_integer_or_infinity(number), state.length);
+                    state.stage = ArrayMutatorStage::AwaitCopyWithinFinal;
+                    continue;
+                }
+                match state.arguments.get(1) {
+                    Some(value) if needs_conversion(value) => {
+                        let value = value.duplicate();
+                        let realm = state.realm;
+                        let origin = state.origin.clone();
+                        return begin_operator_primitive_conversion(
+                            runtime,
+                            value,
+                            OperatorPrimitiveHint::Number,
+                            OperatorPrimitiveTarget::ArrayMutatorArgument(Box::new(state)),
+                            realm,
+                            return_to,
+                            origin,
+                            execution_budget,
+                        );
+                    }
+                    Some(value) => completion = Some(value.duplicate()),
+                    // An absent source copies from the beginning.
+                    None => {
+                        state.copy_from = 0;
+                        state.stage = ArrayMutatorStage::AwaitCopyWithinFinal;
+                    }
+                }
+            }
+            ArrayMutatorStage::AwaitCopyWithinFinal => {
+                if let Some(value) = completion.take() {
+                    let number = operator_to_number(value, state.realm, &state.origin)?;
+                    state.copy_final =
+                        relative_bound(number_to_integer_or_infinity(number), state.length);
+                    plan_moves(&mut state)?;
+                    state.stage = ArrayMutatorStage::NextStep;
+                    continue;
+                }
+                match state.arguments.get(2) {
+                    // An explicit `undefined` end is the same as an absent one,
+                    // so the copy runs to the length rather than converting to
+                    // `0` (`quickjs.c:42995-42999`).
+                    Some(StoredValue::Undefined) | None => {
+                        state.copy_final = state.length;
+                        plan_moves(&mut state)?;
+                        state.stage = ArrayMutatorStage::NextStep;
+                    }
+                    Some(value) if needs_conversion(value) => {
+                        let value = value.duplicate();
+                        let realm = state.realm;
+                        let origin = state.origin.clone();
+                        return begin_operator_primitive_conversion(
+                            runtime,
+                            value,
+                            OperatorPrimitiveHint::Number,
+                            OperatorPrimitiveTarget::ArrayMutatorArgument(Box::new(state)),
+                            realm,
+                            return_to,
+                            origin,
+                            execution_budget,
+                        );
+                    }
+                    Some(value) => completion = Some(value.duplicate()),
                 }
             }
             ArrayMutatorStage::NextStep => {
@@ -488,9 +606,12 @@ pub(super) fn advance_array_mutator(
                     state.stage = ArrayMutatorStage::Done;
                     continue;
                 }
-                // `reverse` and `fill` never change the length, so they skip the
-                // write entirely and return the receiver.
-                if matches!(state.mutator, ArrayMutator::Reverse | ArrayMutator::Fill) {
+                // `reverse`, `fill`, and `copyWithin` never change the length,
+                // so they skip the write entirely and return the receiver.
+                if matches!(
+                    state.mutator,
+                    ArrayMutator::Reverse | ArrayMutator::Fill | ArrayMutator::CopyWithin
+                ) {
                     state.result = state.target.duplicate();
                     state.stage = ArrayMutatorStage::Done;
                     continue;
@@ -676,6 +797,41 @@ fn plan_moves(state: &mut ArrayMutatorContinuation) -> Result<(), NativeFailure>
             reserve_moves(state, count)?;
             for index in state.fill_start..state.fill_end {
                 state.moves.push(ElementStep::Store { index });
+            }
+            state.final_length = length;
+        }
+        ArrayMutator::CopyWithin => {
+            // The count is `min(final - from, len - to)`; a negative difference
+            // saturates to an empty plan, which is why `[1,2,3].copyWithin(0,5)`
+            // is unchanged (`quickjs.c:43001`).
+            let count = state
+                .copy_final
+                .saturating_sub(state.copy_from)
+                .min(state.length.saturating_sub(state.copy_to));
+            let step_count = usize::try_from(count).map_err(|_| EngineFault::RuntimeInvariant {
+                message: "array copyWithin count exceeded the addressable step plan",
+            })?;
+            reserve_moves(state, step_count)?;
+            // Overlapping ranges with the source below the destination are
+            // copied backward so no destination is written before its own
+            // source is read (`quickjs.c:43003-43004`); every other case walks
+            // forward.
+            if state.copy_from < state.copy_to
+                && state.copy_to < state.copy_from.saturating_add(count)
+            {
+                for offset in (0..count).rev() {
+                    state.moves.push(ElementStep::Move {
+                        from: state.copy_from.saturating_add(offset),
+                        to: state.copy_to.saturating_add(offset),
+                    });
+                }
+            } else {
+                for offset in 0..count {
+                    state.moves.push(ElementStep::Move {
+                        from: state.copy_from.saturating_add(offset),
+                        to: state.copy_to.saturating_add(offset),
+                    });
+                }
             }
             state.final_length = length;
         }

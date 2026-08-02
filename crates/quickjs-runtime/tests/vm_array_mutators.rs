@@ -1,4 +1,5 @@
-//! `Array.prototype.push`, `pop`, `shift`, `unshift`, `reverse`, and `fill`.
+//! `Array.prototype.push`, `pop`, `shift`, `unshift`, `reverse`, `fill`, and
+//! `copyWithin`.
 //!
 //! Every expectation below was produced by the pinned oracle:
 //!
@@ -18,17 +19,24 @@
 //! [1,2,3].reverse() => "3,2,1"              [].reverse().length => 0
 //! [1,2,3].fill(0,1,2) => "1,0,3"            [1,2,3].fill(0,2,1) => "1,2,3"
 //! [1,2,3].fill(0,0,-1) => "0,0,3"           [1,2].fill()[0] => undefined
+//! [1,2,3,4].copyWithin(1,0) => "1,1,2,3"    [1,2,3,4].copyWithin(-2,-3) => "1,2,2,3"
+//! [1,2,3,4].copyWithin(1,2,3) => "1,3,3,4"  [1,2,3,4].copyWithin(2,0,-1) => "1,2,1,2"
+//! [1,2,3].copyWithin(0,5) => "1,2,3"        [1,2,3].copyWithin(5,0) => "1,2,3"
+//! [1,2,3].copyWithin(0,1,undefined) => "2,3,3"
 //! holes: [,2].shift() leaves index 0 present
 //!        [1,,3].reverse() keeps index 1 absent
 //!        [,2].unshift(0) keeps index 1 absent
+//!        [1,2,,5].copyWithin(1,2) deletes index 1 and keeps index 2 present
 //! array-likes: push on {length:1,0:"a"} => length 2, [1] === "b"
 //!              pop on {length:-3} sets length 0
 //!              reverse on {length:3,0:"a",2:"c"} => {"0":"c","2":"a"}
+//!              copyWithin on {length:3,0:"a",1:"b",2:"c"} => "bcc", same object
 //! order: push logs getlen|set1:x|setlen:2
 //!        pop  logs getlen|get1|setlen:1
 //!        fill logs len|start|end, and never coerces its value
+//!        copyWithin logs to|from|fin, and copies an overlap backward
 //! push past 2^53-1 !! TypeError: Array loo long
-//! lengths: push 1, pop 0, shift 0, unshift 1, reverse 0, fill 1
+//! lengths: push 1, pop 0, shift 0, unshift 1, reverse 0, fill 1, copyWithin 2
 //! ```
 
 use std::{error::Error, fmt, sync::Arc};
@@ -264,6 +272,36 @@ fn fill_writes_across_its_resolved_range() {
     ]);
 }
 
+/// `copyWithin` copies a range in place and returns the same object.
+///
+/// The bounds are `min(final - from, len - to)`; a negative difference is an
+/// empty copy rather than an error. An overlap with the source below the
+/// destination is copied backward so no destination is written before its own
+/// source is read (`quickjs.c:43003-43004`).
+#[test]
+fn copy_within_copies_a_range_in_place() {
+    assert_all(&[
+        ("[1,2,3,4].copyWithin(1,0).join()", "1,1,2,3"),
+        // Negative bounds count from the end.
+        ("[1,2,3,4].copyWithin(-2,-3).join()", "1,2,2,3"),
+        ("[1,2,3,4].copyWithin(1,2,3).join()", "1,3,3,4"),
+        ("[1,2,3,4].copyWithin(2,0,-1).join()", "1,2,1,2"),
+        // A source or destination outside the range copies nothing.
+        ("[1,2,3].copyWithin(0,5).join()", "1,2,3"),
+        ("[1,2,3].copyWithin(5,0).join()", "1,2,3"),
+        ("[1,2,3,4,5].copyWithin(1,3).join()", "1,4,5,4,5"),
+        // An explicit `undefined` end runs to the length.
+        ("[1,2,3].copyWithin(0,1,undefined).join()", "2,3,3"),
+        // Fractional bounds truncate toward zero.
+        ("[1,2,3].copyWithin(1.7,0.2).join()", "1,1,2"),
+        // The receiver itself is returned, not a copy.
+        (
+            "(function(){const a=[1,2,3];return a.copyWithin(0,1)===a;})()",
+            "true",
+        ),
+    ]);
+}
+
 /// Holes survive a move rather than becoming `undefined`.
 ///
 /// An absent source is deleted at its destination, so a sparse array stays
@@ -298,6 +336,17 @@ fn holes_are_preserved_across_moves() {
                 return a.join()+'|'+Object.prototype.hasOwnProperty.call(a,1);\
             })()",
             "0,,2|false",
+        ),
+        // A copied hole is deleted at its destination rather than written as
+        // `undefined`, while a copied value lands present.
+        (
+            "(function(){\
+                const a=[1,2,,5];\
+                a.copyWithin(1,2);\
+                return a.join()+'|'+Object.prototype.hasOwnProperty.call(a,1)+'|'+\
+                    Object.prototype.hasOwnProperty.call(a,2)+'|'+a.length;\
+            })()",
+            "1,,5,5|false|true|4",
         ),
     ]);
 }
@@ -360,6 +409,25 @@ fn the_mutators_accept_an_array_like_receiver() {
             })()",
             "undefined|7|7|3",
         ),
+        // `copyWithin` returns the array-like itself and leaves its length.
+        (
+            "(function(){\
+                const o={length:3,0:'a',1:'b',2:'c'};\
+                const r=Array.prototype.copyWithin.call(o,0,1);\
+                return (r===o)+'|'+o[0]+o[1]+o[2]+'|'+o.length;\
+            })()",
+            "true|bcc|3",
+        ),
+        // An absent source deletes the destination rather than writing
+        // `undefined`, even on an array-like.
+        (
+            "(function(){\
+                const o={length:4,1:'b',3:'d'};\
+                Array.prototype.copyWithin.call(o,2,0);\
+                return Object.prototype.hasOwnProperty.call(o,2)+'|'+o[3];\
+            })()",
+            "false|b",
+        ),
     ]);
 }
 
@@ -414,6 +482,39 @@ fn the_observable_order_matches_the_oracle() {
             })()",
             "0|object",
         ),
+        // `copyWithin` converts its destination, source, and end in order after
+        // the length.
+        (
+            "(function(){\
+                let log='';\
+                const o={length:2,0:'x'};\
+                Array.prototype.copyWithin.call(\
+                    o,\
+                    {valueOf(){log+='to|';return 1;}},\
+                    {valueOf(){log+='from|';return 0;}},\
+                    {valueOf(){log+='fin';return 1;}});\
+                return log;\
+            })()",
+            "to|from|fin",
+        ),
+        // An overlapping copy with the source below the destination walks
+        // backward: index 1 is read and written to 2 before index 0 is read and
+        // written to 1.
+        (
+            "(function(){\
+                let log='';\
+                const o={get length(){log+='len|';return 3;}};\
+                Object.defineProperty(o,0,{get(){log+='g0|';return 'a';},\
+                    set(v){log+='s0:'+v+'|';},configurable:true});\
+                Object.defineProperty(o,1,{get(){log+='g1|';return 'b';},\
+                    set(v){log+='s1:'+v+'|';},configurable:true});\
+                Object.defineProperty(o,2,{get(){log+='g2|';return 'c';},\
+                    set(v){log+='s2:'+v+'|';},configurable:true});\
+                Array.prototype.copyWithin.call(o,1,0);\
+                return log;\
+            })()",
+            "len|g1|s2:b|g0|s1:a|",
+        ),
     ]);
 }
 
@@ -438,7 +539,15 @@ fn growing_past_the_maximum_length_is_rejected() {
 /// A nullish receiver is rejected before the length is read.
 #[test]
 fn a_nullish_receiver_is_rejected() {
-    for method in ["push", "pop", "shift", "unshift", "reverse", "fill"] {
+    for method in [
+        "push",
+        "pop",
+        "shift",
+        "unshift",
+        "reverse",
+        "fill",
+        "copyWithin",
+    ] {
         for receiver in ["null", "undefined"] {
             assert_throws(
                 &format!("return Array.prototype.{method}.call({receiver});"),
@@ -460,9 +569,11 @@ fn the_mutators_have_the_pinned_shape() {
         ("Array.prototype.pop.length", "0"),
         ("Array.prototype.shift.length", "0"),
         ("Array.prototype.reverse.length", "0"),
+        ("Array.prototype.copyWithin.length", "2"),
         ("Array.prototype.push.name", "push"),
         ("Array.prototype.fill.name", "fill"),
         ("Array.prototype.reverse.name", "reverse"),
+        ("Array.prototype.copyWithin.name", "copyWithin"),
         (
             "Object.getOwnPropertyDescriptor(Array.prototype,'push').enumerable",
             "false",

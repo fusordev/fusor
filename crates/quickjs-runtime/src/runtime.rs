@@ -476,6 +476,7 @@ pub(crate) enum ArrayMutator {
     Unshift,
     Reverse,
     Fill,
+    CopyWithin,
 }
 
 impl ArrayMutator {
@@ -486,6 +487,8 @@ impl ArrayMutator {
             // even though it accepts three arguments.
             Self::Push | Self::Unshift | Self::Fill => 1,
             Self::Pop | Self::Shift | Self::Reverse => 0,
+            // `copyWithin` reports 2, which the pinned oracle confirms.
+            Self::CopyWithin => 2,
         }
     }
 
@@ -498,6 +501,7 @@ impl ArrayMutator {
             Self::Unshift => "unshift",
             Self::Reverse => "reverse",
             Self::Fill => "fill",
+            Self::CopyWithin => "copyWithin",
         }
     }
 }

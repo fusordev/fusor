@@ -215,6 +215,8 @@ const NUMBER_FORMAT_ATOM_START: usize = ARRAY_COPIER_ATOM_START + ARRAY_COPIER_M
 /// Index of the `Array.prototype.splice` name in the dynamic atoms.
 const ARRAY_SPLICE_ATOM_START: usize = ARRAY_REDUCTION_ATOM_START + ARRAY_REDUCTION_METHODS.len();
 
+
+
 /// The `Array.prototype` reductions this profile installs.
 const ARRAY_REDUCTION_METHODS: [ArrayReduction; 2] =
     [ArrayReduction::Reduce, ArrayReduction::ReduceRight];
@@ -261,13 +263,14 @@ const ARRAY_COPIER_ATOM_START: usize = ARRAY_MUTATOR_ATOM_START + ARRAY_MUTATOR_
 ///
 /// Each name and arity comes from the pinned oracle, which reports `1` for
 /// `push`, `unshift`, and `fill` and `0` for `pop`, `shift`, and `reverse`.
-const ARRAY_MUTATOR_METHODS: [ArrayMutator; 6] = [
+const ARRAY_MUTATOR_METHODS: [ArrayMutator; 7] = [
     ArrayMutator::Push,
     ArrayMutator::Pop,
     ArrayMutator::Shift,
     ArrayMutator::Unshift,
     ArrayMutator::Reverse,
     ArrayMutator::Fill,
+    ArrayMutator::CopyWithin,
 ];
 
 /// Index of the first `Array.prototype` mutator name in the dynamic atoms.
