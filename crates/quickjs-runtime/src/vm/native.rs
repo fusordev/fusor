@@ -377,6 +377,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::ArraySplice(state) => advance_array_splice(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
@@ -1439,6 +1446,17 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::ArrayPrototypeReduction(reduction) => begin_array_reduction(
             runtime,
             reduction,
+            native.realm,
+            inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        // `splice` both extracts and mutates, so it collects every removed
+        // element before anything shifts.
+        NativeFunctionKind::ArrayPrototypeSplice => begin_array_splice(
+            runtime,
             native.realm,
             inputs.receiver,
             inputs.arguments,

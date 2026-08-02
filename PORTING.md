@@ -295,9 +295,16 @@ incorrectly, so no script can observe a wrong result.
   an empty or all-holes array reports `TypeError: empty array`, while the latter
   simply becomes the accumulator and `[1,2].reduce((a,v)=>a+v, undefined)` is
   `NaN`.
-- [ ] Remaining String/Number/Array method surface (`splice`, `sort`, `flat`,
-  `copyWithin`, `with`, `toSorted`, and the locale-dependent renderings), shape
-  sharing/transition
+- [x] `Array.prototype.splice`, which is both a copier and a mutator. Every
+  removed element is collected into a fresh Array before anything shifts, so a
+  getter cannot observe a half-shifted array. The tail then moves by
+  `insertions - removed`, walked from whichever end keeps a source from being
+  overwritten before it is read: from the end when growing, from the front when
+  shrinking. An absent `deleteCount` removes everything from `start` while an
+  absent `start` removes nothing.
+- [ ] Remaining String/Number/Array method surface (`sort`, `flat`, `flatMap`,
+  `copyWithin`, `with`, `toSorted`, `toReversed`, `toSpliced`, and the
+  locale-dependent renderings), shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
 

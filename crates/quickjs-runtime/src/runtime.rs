@@ -717,6 +717,8 @@ pub(crate) enum NativeFunctionKind {
     ArrayPrototypeCallback(ArrayCallback),
     /// One `Array.prototype` reduction sharing the resumable fold.
     ArrayPrototypeReduction(ArrayReduction),
+    /// `Array.prototype.splice`.
+    ArrayPrototypeSplice,
     ArrayConstructor,
     SymbolConstructor,
     SymbolPrototypeToString,

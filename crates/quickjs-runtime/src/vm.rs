@@ -296,6 +296,7 @@ enum NativeContinuation {
     ArrayCopier(Box<ArrayCopierContinuation>),
     ArrayCallback(Box<ArrayCallbackContinuation>),
     ArrayReduction(Box<ArrayReductionContinuation>),
+    ArraySplice(Box<ArraySpliceContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     InstanceOf(InstanceOfContinuation),
     FunctionCall,
@@ -327,6 +328,7 @@ impl NativeContinuation {
             Self::ArrayCopier(state) => state.retained_values(),
             Self::ArrayCallback(_) => ArrayCallbackContinuation::retained_values(),
             Self::ArrayReduction(_) => ArrayReductionContinuation::retained_values(),
+            Self::ArraySplice(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
             Self::FunctionCall => 0,
@@ -881,6 +883,8 @@ enum OperatorPrimitiveTarget {
     ArrayMutatorArgument(Box<ArrayMutatorContinuation>),
     /// An `Array.prototype` copier's argument, awaiting `ToNumber`.
     ArrayCopierArgument(Box<ArrayCopierContinuation>),
+    /// `Array.prototype.splice`'s argument, awaiting `ToNumber`.
+    ArraySpliceArgument(Box<ArraySpliceContinuation>),
     ArrayLengthWrite(ArrayLengthWriteState),
     /// A `String.prototype` method's receiver, awaiting `ToString`.
     StringMethodSubject(Box<StringMethodContinuation>),
@@ -930,6 +934,7 @@ impl OperatorPrimitiveTarget {
             Self::ArraySearchPosition(_) => ArraySearchContinuation::retained_values(),
             Self::ArrayMutatorArgument(state) => state.retained_values(),
             Self::ArrayCopierArgument(state) => state.retained_values(),
+            Self::ArraySpliceArgument(state) => state.retained_values(),
         }
     }
 }
@@ -1101,6 +1106,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArraySearchPosition(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayMutatorArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayCopierArgument(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::ArraySpliceArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayJoinSeparator(state)
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
             trace_stored_value_root(state.target(), mark);
@@ -1177,6 +1183,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ArrayCopier(state) => state.trace_roots(mark),
         NativeContinuation::ArrayCallback(state) => state.trace_roots(mark),
         NativeContinuation::ArrayReduction(state) => state.trace_roots(mark),
+        NativeContinuation::ArraySplice(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {
             trace_function_bind_roots(state, mark);

@@ -41,8 +41,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 122;
-const REALM_PROPERTY_COUNT: u64 = 410;
+const REALM_FUNCTION_COUNT: usize = 123;
+const REALM_PROPERTY_COUNT: u64 = 413;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -211,6 +211,9 @@ const NUMBER_FORMAT_METHODS: [NumberFormat; 3] = [
 
 /// Index of the first `Number.prototype` rendering name in the dynamic atoms.
 const NUMBER_FORMAT_ATOM_START: usize = ARRAY_COPIER_ATOM_START + ARRAY_COPIER_METHODS.len();
+
+/// Index of the `Array.prototype.splice` name in the dynamic atoms.
+const ARRAY_SPLICE_ATOM_START: usize = ARRAY_REDUCTION_ATOM_START + ARRAY_REDUCTION_METHODS.len();
 
 /// The `Array.prototype` reductions this profile installs.
 const ARRAY_REDUCTION_METHODS: [ArrayReduction; 2] =
@@ -716,6 +719,7 @@ struct RealmRecords {
     number_formats: [ObjectRecord; NUMBER_FORMAT_METHODS.len()],
     array_callbacks: [ObjectRecord; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [ObjectRecord; ARRAY_REDUCTION_METHODS.len()],
+    array_splice: ObjectRecord,
     array_is_array: ObjectRecord,
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
@@ -793,7 +797,8 @@ impl RealmRecords {
                     + ARRAY_COPIER_TOTAL
                     + NUMBER_FORMAT_METHODS.len()
                     + ARRAY_CALLBACK_METHODS.len()
-                    + ARRAY_REDUCTION_METHODS.len(),
+                    + ARRAY_REDUCTION_METHODS.len()
+                    + 1,
             )?,
             constructor: reserved_record(3)?,
             join: reserved_record(2)?,
@@ -845,6 +850,7 @@ impl RealmRecords {
             number_formats: number_format_records()?,
             array_callbacks: array_callback_records()?,
             array_reductions: array_reduction_records()?,
+            array_splice: reserved_record(2)?,
             array_is_array: reserved_record(2)?,
             array,
             iterators,
@@ -978,6 +984,7 @@ struct RealmGraph {
     number_formats: [FunctionId; NUMBER_FORMAT_METHODS.len()],
     array_callbacks: [FunctionId; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [FunctionId; ARRAY_REDUCTION_METHODS.len()],
+    array_splice: FunctionId,
     array_is_array: FunctionId,
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
@@ -993,6 +1000,7 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         debug_assert!(runtime.functions.remove(self.array_is_array).is_some());
+        debug_assert!(runtime.functions.remove(self.array_splice).is_some());
         for function in self.array_reductions.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
@@ -1263,6 +1271,12 @@ impl Runtime {
         let number_formats = self.insert_number_formats(&base, records.number_formats);
         let array_callbacks = self.insert_array_callbacks(&base, records.array_callbacks);
         let array_reductions = self.insert_array_reductions(&base, records.array_reductions);
+        let array_splice = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ArrayPrototypeSplice,
+            records.array_splice,
+        );
         let array_is_array = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -1287,6 +1301,7 @@ impl Runtime {
             number_formats,
             array_callbacks,
             array_reductions,
+            array_splice,
             array_is_array,
             array,
             iterators,
@@ -1413,6 +1428,7 @@ impl Runtime {
             for reduction in ARRAY_REDUCTION_METHODS {
                 interned(&mut self.atoms, &mut dynamic_atoms, reduction.name())?;
             }
+            interned(&mut self.atoms, &mut dynamic_atoms, "splice")?;
             Ok(())
         })();
         if let Err(error) = outcome {
@@ -2770,17 +2786,26 @@ impl Runtime {
             self.append_function_identity(function, &name, 1, keys)?;
         }
 
-        for (function, atom) in graph
+        // Every callback method and reduction reports arity 1; `splice` reports
+        // 2, which the pinned oracle confirms.
+        let callback_arities = graph
             .array_callbacks
             .into_iter()
             .zip(&graph.dynamic_atoms[ARRAY_CALLBACK_ATOM_START..])
+            .map(|(function, atom)| (function, atom, 1))
             .chain(
                 graph
                     .array_reductions
                     .into_iter()
-                    .zip(&graph.dynamic_atoms[ARRAY_REDUCTION_ATOM_START..]),
+                    .zip(&graph.dynamic_atoms[ARRAY_REDUCTION_ATOM_START..])
+                    .map(|(function, atom)| (function, atom, 1)),
             )
-        {
+            .chain(std::iter::once((
+                graph.array_splice,
+                &graph.dynamic_atoms[ARRAY_SPLICE_ATOM_START],
+                2,
+            )));
+        for (function, atom, arity) in callback_arities {
             let atom = atom.clone();
             let name = atom
                 .description()
@@ -2795,7 +2820,7 @@ impl Runtime {
                     METHOD_PROPERTY,
                     StoredValue::Function(function),
                 )?;
-            self.append_function_identity(function, &name, 1, keys)?;
+            self.append_function_identity(function, &name, arity, keys)?;
         }
         Ok(())
     }
