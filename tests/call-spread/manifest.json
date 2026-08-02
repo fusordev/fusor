@@ -108,9 +108,8 @@
       ],
       "body": "let message = \"\";\ntry { (42)(...[1]); } catch (e) { message = e.message; }\nreturn message;",
       "expect": {
-        "kind": "throw",
-        "name": "TypeError",
-        "message": "not a function"
+        "kind": "string",
+        "value": "not a function"
       }
     },
     {
@@ -120,9 +119,8 @@
       ],
       "body": "let message = \"\";\nfunction f() {}\ntry { f.apply(null, 42); } catch (e) { message = e.message; }\nreturn message;",
       "expect": {
-        "kind": "throw",
-        "name": "TypeError",
-        "message": "not a object"
+        "kind": "string",
+        "value": "not a object"
       }
     },
     {
@@ -165,9 +163,8 @@
       ],
       "body": "let message = \"\";\nfunction f() {}\ntry { f(...42); } catch (e) { message = e.message; }\nreturn message;",
       "expect": {
-        "kind": "throw",
-        "name": "TypeError",
-        "message": "value is not iterable"
+        "kind": "string",
+        "value": "value is not iterable"
       }
     }
   ]
