@@ -49,15 +49,16 @@ use crate::{
     },
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     interrupt::InterruptCounter,
+    number::decimal::{DecimalDigits, exact_fixed, exact_significant},
     object::{ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty, PropertyDeletion},
     runtime::{
         ArrayCopier, ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayMutator, ArraySearch,
         BindingCell, BoundFunction, BytecodeFunction, CollectionRoot, EnvironmentBinding,
         ForInAdvance, FrameBindingAddress, FunctionImplementation, HeapFunction, InstalledCode,
         InstalledConstant, InstalledRoot, InstalledTemplate, NativeFunction, NativeFunctionKind,
-        NumberPredicate, PreparedIteratorResultPlan, RealmGlobalBindingState, SetPrototypeOutcome,
-        StringArgument, StringMethod, array_length_from_number, check_execution_limit,
-        global_declaration_error, usize_to_u64,
+        NumberFormat, NumberPredicate, PreparedIteratorResultPlan, RealmGlobalBindingState,
+        SetPrototypeOutcome, StringArgument, StringMethod, array_length_from_number,
+        check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -833,6 +834,12 @@ enum OperatorPrimitiveTarget {
     NumberToString {
         number: JsNumber,
     },
+    /// A `Number.prototype` decimal rendering's digit count, awaiting
+    /// `ToNumber`.
+    NumberFormatDigits {
+        number: JsNumber,
+        format: NumberFormat,
+    },
     StringIntrinsic {
         new_target: Option<FunctionId>,
     },
@@ -891,6 +898,7 @@ impl OperatorPrimitiveTarget {
             | Self::BinaryFinish { .. }
             | Self::EqualityFinish { .. }
             | Self::NumberToString { .. }
+            | Self::NumberFormatDigits { .. }
             | Self::NumberIntrinsic {
                 new_target: Some(_),
             }
@@ -1051,6 +1059,7 @@ fn trace_operator_primitive_target_roots(
         // A `BigInt` payload is not a heap node, so these carry no roots.
         OperatorPrimitiveTarget::Unary { .. }
         | OperatorPrimitiveTarget::NumberToString { .. }
+        | OperatorPrimitiveTarget::NumberFormatDigits { .. }
         | OperatorPrimitiveTarget::SymbolIntrinsic { .. }
         | OperatorPrimitiveTarget::StringIteratorIntrinsic
         | OperatorPrimitiveTarget::BigIntToString { .. }

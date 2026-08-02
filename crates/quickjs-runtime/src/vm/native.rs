@@ -1198,6 +1198,33 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        // The three decimal renderings share one entry point: each converts its
+        // digit-count argument and then renders the receiver's exact value.
+        NativeFunctionKind::NumberPrototypeFormat(format) => {
+            let number =
+                number_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;
+            let mut arguments = inputs.arguments;
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            match arguments.take_first() {
+                // An absent or `undefined` count needs no conversion; each
+                // method's default follows from `ToIntegerOrInfinity(undefined)`
+                // being `0`, except `toPrecision`, which then renders the value
+                // the way `ToString` would.
+                None | Some(StoredValue::Undefined) => {
+                    finish_number_format_default(number, format, native.realm, &origin)
+                }
+                Some(digits) => begin_operator_primitive_conversion(
+                    runtime,
+                    digits,
+                    OperatorPrimitiveHint::Number,
+                    OperatorPrimitiveTarget::NumberFormatDigits { number, format },
+                    native.realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                ),
+            }
+        }
         NativeFunctionKind::NumberPrototypeToString => {
             let number =
                 number_receiver_value(runtime, native.realm, &inputs.receiver, origin.as_ref())?;

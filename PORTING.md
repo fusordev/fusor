@@ -245,6 +245,18 @@ incorrectly, so no script can observe a wrong result.
   array-like itself at index `0`; nesting is never flattened. Holes survive into
   the result because an absent source index is skipped rather than written, and
   the destination length is set once at the end so a trailing hole still counts.
+- [x] `Number.prototype.toFixed`, `toExponential`, and `toPrecision`, rendered
+  from the *exact* value the binary64 holds rather than from its shortest decimal
+  spelling. That distinction is observable and is why these use `JsBigInt`
+  integer arithmetic instead of a floating-point formatter: `(1.005).toFixed(2)`
+  is `"1.00"` because the stored value is just below 1.005, while
+  `(1.55).toFixed(1)` is `"1.6"` because that one is just above, and a formatter
+  working from the shortest spelling would round both up. Every binary64 is
+  exactly `significand * 2^exponent`, so the digits follow from scaling by a power
+  of ten, dividing by a power of two, and rounding the integer quotient half away
+  from zero. Only `toFixed` validates its digit count before short-circuiting a
+  non-finite value, which the oracle draws sharply: `(NaN).toFixed(101)` is a
+  `RangeError` while `(NaN).toExponential(101)` is `"NaN"`.
 - [x] `String.fromCharCode` and `String.fromCodePoint`, sharing the same
   resumable machine as the prototype methods because their arguments are also
   arbitrary objects. The two differ in coercion and range: `fromCharCode` applies
@@ -262,11 +274,10 @@ incorrectly, so no script can observe a wrong result.
   `[1,,3].indexOf(undefined)` is `-1`, while `includes` reads every index and
   answers `true`. The length is read once with `ToLength`, and the loop stops at
   the first match, so a second matching getter never runs.
-- [ ] Remaining String/Number/Array method surface (notably `toFixed`,
-  `toPrecision`, and `toExponential`, which need exact decimal formatting, and
-  the `Array.prototype` mutators), shape sharing/transition interning, remaining
-  exotics (arguments, Proxy), dense indexed storage, deterministic finalization,
-  and diagnostics.
+- [ ] Remaining String/Number/Array method surface (the callback-taking
+  `Array.prototype` methods, `splice`, `sort`, and the locale-dependent
+  renderings), shape sharing/transition interning, remaining exotics (arguments,
+  Proxy), dense indexed storage, deterministic finalization, and diagnostics.
 
 ### Built-ins and asynchronous semantics
 

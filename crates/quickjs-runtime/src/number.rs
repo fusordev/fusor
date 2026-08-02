@@ -27,6 +27,7 @@ use std::fmt;
 
 use crate::string::{JsString, JsStringError, MAX_STRING_CODE_UNITS};
 
+pub(crate) mod decimal;
 mod radix;
 
 /// An ECMAScript Number with the pinned `QuickJS` integer fast-path invariant.

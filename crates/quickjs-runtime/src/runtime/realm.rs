@@ -32,16 +32,16 @@ use super::{
     AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context,
     ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation,
     HandleError, HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
-    IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind, NumberIntrinsics,
-    NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey, PropertyLayout, Realm,
-    RealmHandle, RealmId, RealmIntrinsics, RealmState, ReleaseMailbox, Runtime, RuntimeError,
-    RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringIntrinsics, StringMethod,
-    SymbolIntrinsics, check_limit, predefined_string, usize_to_u64,
+    IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind, NumberFormat,
+    NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey,
+    PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, ReleaseMailbox,
+    Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue,
+    StringIntrinsics, StringMethod, SymbolIntrinsics, check_limit, predefined_string, usize_to_u64,
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 108;
-const REALM_PROPERTY_COUNT: u64 = 368;
+const REALM_FUNCTION_COUNT: usize = 111;
+const REALM_PROPERTY_COUNT: u64 = 377;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -199,9 +199,31 @@ const STRING_FROM_STATICS: [(&str, StringMethod); 2] = [
     ("fromCodePoint", StringMethod::FromCodePoint),
 ];
 
-/// The `Array.prototype` copying methods this profile installs.
-const ARRAY_COPIER_METHODS: [ArrayCopier; 3] =
-    [ArrayCopier::Slice, ArrayCopier::Concat, ArrayCopier::At];
+/// The `Number.prototype` decimal renderings this profile installs.
+///
+/// Each reports arity 1, which the pinned oracle confirms.
+const NUMBER_FORMAT_METHODS: [NumberFormat; 3] = [
+    NumberFormat::Fixed,
+    NumberFormat::Exponential,
+    NumberFormat::Precision,
+];
+
+/// Index of the first `Number.prototype` rendering name in the dynamic atoms.
+const NUMBER_FORMAT_ATOM_START: usize = ARRAY_COPIER_ATOM_START + ARRAY_COPIER_METHODS.len();
+
+/// The `Array.prototype` copying methods whose names must be interned.
+///
+/// `concat` is excluded because it already has a predefined atom. Interning a
+/// duplicate breaks the atom table's rollback invariant, which is exactly how
+/// this was caught.
+const ARRAY_COPIER_METHODS: [ArrayCopier; 2] = [ArrayCopier::Slice, ArrayCopier::At];
+
+/// The `Array.prototype` copying method that reuses a predefined atom.
+const ARRAY_PREDEFINED_COPIERS: [(PredefinedAtom, ArrayCopier); 1] =
+    [(PredefinedAtom::Concat, ArrayCopier::Concat)];
+
+/// The total number of installed copying methods.
+const ARRAY_COPIER_TOTAL: usize = ARRAY_COPIER_METHODS.len() + ARRAY_PREDEFINED_COPIERS.len();
 
 /// Index of the first `Array.prototype` copier name in the dynamic atoms.
 const ARRAY_COPIER_ATOM_START: usize = ARRAY_MUTATOR_ATOM_START + ARRAY_MUTATOR_METHODS.len();
@@ -664,7 +686,8 @@ struct RealmRecords {
     string_from_statics: [ObjectRecord; STRING_FROM_STATICS.len()],
     array_searches: [ObjectRecord; ARRAY_SEARCH_METHODS.len()],
     array_mutators: [ObjectRecord; ARRAY_MUTATOR_METHODS.len()],
-    array_copiers: [ObjectRecord; ARRAY_COPIER_METHODS.len()],
+    array_copiers: [ObjectRecord; ARRAY_COPIER_TOTAL],
+    number_formats: [ObjectRecord; NUMBER_FORMAT_METHODS.len()],
     array_is_array: ObjectRecord,
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
@@ -720,7 +743,7 @@ impl RealmRecords {
         // The `Number` constructor additionally carries its value and predicate
         // statics.
         let number = PrimitiveIntrinsicRecords::try_new_with_constructor(
-            3,
+            3 + NUMBER_FORMAT_METHODS.len(),
             3 + NUMBER_VALUE_STATICS.len()
                 + NUMBER_PREDEFINED_VALUE_STATICS.len()
                 + NUMBER_PREDICATE_STATICS.len(),
@@ -739,7 +762,8 @@ impl RealmRecords {
             prototype: reserved_record(
                 8 + ARRAY_SEARCH_METHODS.len()
                     + ARRAY_MUTATOR_METHODS.len()
-                    + ARRAY_COPIER_METHODS.len(),
+                    + ARRAY_COPIER_TOTAL
+                    + NUMBER_FORMAT_METHODS.len(),
             )?,
             constructor: reserved_record(3)?,
             join: reserved_record(2)?,
@@ -788,6 +812,7 @@ impl RealmRecords {
             array_searches: array_search_records()?,
             array_mutators: array_mutator_records()?,
             array_copiers: array_copier_records()?,
+            number_formats: number_format_records()?,
             array_is_array: reserved_record(2)?,
             array,
             iterators,
@@ -917,7 +942,8 @@ struct RealmGraph {
     string_from_statics: [FunctionId; STRING_FROM_STATICS.len()],
     array_searches: [FunctionId; ARRAY_SEARCH_METHODS.len()],
     array_mutators: [FunctionId; ARRAY_MUTATOR_METHODS.len()],
-    array_copiers: [FunctionId; ARRAY_COPIER_METHODS.len()],
+    array_copiers: [FunctionId; ARRAY_COPIER_TOTAL],
+    number_formats: [FunctionId; NUMBER_FORMAT_METHODS.len()],
     array_is_array: FunctionId,
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
@@ -933,6 +959,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         debug_assert!(runtime.functions.remove(self.array_is_array).is_some());
+        for function in self.number_formats.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
         for function in self.array_copiers.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
@@ -1191,6 +1220,7 @@ impl Runtime {
         let array_searches = self.insert_array_searches(&base, records.array_searches);
         let array_mutators = self.insert_array_mutators(&base, records.array_mutators);
         let array_copiers = self.insert_array_copiers(&base, records.array_copiers);
+        let number_formats = self.insert_number_formats(&base, records.number_formats);
         let array_is_array = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -1212,6 +1242,7 @@ impl Runtime {
             array_searches,
             array_mutators,
             array_copiers,
+            number_formats,
             array_is_array,
             array,
             iterators,
@@ -1227,6 +1258,10 @@ impl Runtime {
     /// `OBJECT_STATIC_ATOM_START` and `STRING_METHOD_ATOM_START` index. A failure at
     /// any point rolls back every atom interned so far, so the runtime observes
     /// no partial state.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat interning transaction keeps the dynamic atom list's order, which every ATOM_START index depends on, auditable in a single place"
+    )]
     fn intern_realm_dynamic_atoms(
         &mut self,
         names: &RealmNames,
@@ -1324,6 +1359,9 @@ impl Runtime {
             }
             for copier in ARRAY_COPIER_METHODS {
                 interned(&mut self.atoms, &mut dynamic_atoms, copier.name())?;
+            }
+            for format in NUMBER_FORMAT_METHODS {
+                interned(&mut self.atoms, &mut dynamic_atoms, format.name())?;
             }
             Ok(())
         })();
@@ -1601,14 +1639,40 @@ impl Runtime {
         }
     }
 
+    /// Inserts one native function per `Number.prototype` decimal rendering.
+    fn insert_number_formats(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; NUMBER_FORMAT_METHODS.len()],
+    ) -> [FunctionId; NUMBER_FORMAT_METHODS.len()] {
+        let mut inserted = [None; NUMBER_FORMAT_METHODS.len()];
+        for ((slot, format), record) in inserted.iter_mut().zip(NUMBER_FORMAT_METHODS).zip(records)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::NumberPrototypeFormat(format),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every Number format function was inserted"))
+    }
+
     /// Inserts one native function per `Array.prototype` copying method.
     fn insert_array_copiers(
         &mut self,
         base: &RealmBase,
-        records: [ObjectRecord; ARRAY_COPIER_METHODS.len()],
-    ) -> [FunctionId; ARRAY_COPIER_METHODS.len()] {
-        let mut inserted = [None; ARRAY_COPIER_METHODS.len()];
-        for ((slot, copier), record) in inserted.iter_mut().zip(ARRAY_COPIER_METHODS).zip(records) {
+        records: [ObjectRecord; ARRAY_COPIER_TOTAL],
+    ) -> [FunctionId; ARRAY_COPIER_TOTAL] {
+        let mut inserted = [None; ARRAY_COPIER_TOTAL];
+        // The interned names come first, then the predefined one, which is the
+        // order the publication step walks.
+        let copiers = ARRAY_COPIER_METHODS.into_iter().chain(
+            ARRAY_PREDEFINED_COPIERS
+                .into_iter()
+                .map(|(_, copier)| copier),
+        );
+        for ((slot, copier), record) in inserted.iter_mut().zip(copiers).zip(records) {
             *slot = Some(self.insert_reserved_native(
                 base.realm,
                 HeapReference::Function(base.function_prototype),
@@ -2559,27 +2623,60 @@ impl Runtime {
             self.append_function_identity(function, &name, mutator.arity(), keys)?;
         }
 
-        for (copier, (function, atom)) in ARRAY_COPIER_METHODS.into_iter().zip(
-            graph
-                .array_copiers
-                .into_iter()
-                .zip(&graph.dynamic_atoms[ARRAY_COPIER_ATOM_START..]),
-        ) {
-            let atom = atom.clone();
-            let name = atom
-                .description()
-                .expect("interned Array copier name has a description")
-                .clone();
+        // The interned names come first, matching the insertion order, and the
+        // predefined `concat` follows.
+        let copier_keys = ARRAY_COPIER_METHODS
+            .into_iter()
+            .zip(&graph.dynamic_atoms[ARRAY_COPIER_ATOM_START..])
+            .map(|(copier, atom)| {
+                let atom = atom.clone();
+                let name = atom
+                    .description()
+                    .expect("interned Array copier name has a description")
+                    .clone();
+                (copier, PropertyKey::from_validated_atom(atom), name)
+            })
+            .collect::<Vec<_>>();
+        let predefined_keys = ARRAY_PREDEFINED_COPIERS.map(|(atom, copier)| {
+            (
+                copier,
+                self.predefined_property_key(atom),
+                predefined_string(&self.atoms, atom),
+            )
+        });
+        for ((copier, key, name), function) in copier_keys
+            .into_iter()
+            .chain(predefined_keys)
+            .zip(graph.array_copiers)
+        {
             self.objects
                 .get_mut(graph.array.prototype)
                 .expect("new Array.prototype remains live")
+                .record
+                .append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
+            self.append_function_identity(function, &name, copier.arity(), keys)?;
+        }
+
+        for (function, atom) in graph
+            .number_formats
+            .into_iter()
+            .zip(&graph.dynamic_atoms[NUMBER_FORMAT_ATOM_START..])
+        {
+            let atom = atom.clone();
+            let name = atom
+                .description()
+                .expect("interned Number format name has a description")
+                .clone();
+            self.objects
+                .get_mut(graph.number.prototype)
+                .expect("new Number.prototype remains live")
                 .record
                 .append_data(
                     PropertyKey::from_validated_atom(atom),
                     METHOD_PROPERTY,
                     StoredValue::Function(function),
                 )?;
-            self.append_function_identity(function, &name, copier.arity(), keys)?;
+            self.append_function_identity(function, &name, 1, keys)?;
         }
         Ok(())
     }
@@ -2999,10 +3096,20 @@ fn object_reflection_records()
     Ok(records.map(|record| record.expect("every Object reflection record was reserved")))
 }
 
+/// Reserves one record per `Number.prototype` decimal rendering.
+fn number_format_records() -> Result<[ObjectRecord; NUMBER_FORMAT_METHODS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; NUMBER_FORMAT_METHODS.len()] =
+        [const { None }; NUMBER_FORMAT_METHODS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Number format record was reserved")))
+}
+
 /// Reserves one record per `Array.prototype` copying method.
-fn array_copier_records() -> Result<[ObjectRecord; ARRAY_COPIER_METHODS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; ARRAY_COPIER_METHODS.len()] =
-        [const { None }; ARRAY_COPIER_METHODS.len()];
+fn array_copier_records() -> Result<[ObjectRecord; ARRAY_COPIER_TOTAL], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; ARRAY_COPIER_TOTAL] =
+        [const { None }; ARRAY_COPIER_TOTAL];
     for slot in &mut records {
         *slot = Some(reserved_record(2)?);
     }

@@ -349,6 +349,25 @@ pub(crate) struct BytecodeFunction {
     pub(crate) environment: Vec<EnvironmentBinding>,
 }
 
+/// Which decimal rendering a `Number.prototype` method performs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NumberFormat {
+    Fixed,
+    Exponential,
+    Precision,
+}
+
+impl NumberFormat {
+    /// Returns the property name this method is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Fixed => "toFixed",
+            Self::Exponential => "toExponential",
+            Self::Precision => "toPrecision",
+        }
+    }
+}
+
 /// Which copying method a continuation is performing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArrayCopier {
@@ -601,6 +620,8 @@ pub(crate) enum NativeFunctionKind {
     NumberConstructor,
     NumberPrototypeToString,
     NumberPrototypeValueOf,
+    /// One `Number.prototype` decimal rendering.
+    NumberPrototypeFormat(NumberFormat),
     BigIntConstructor,
     BigIntPrototypeToString,
     BigIntPrototypeValueOf,

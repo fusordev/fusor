@@ -1536,6 +1536,10 @@ fn finish_operator_primitive_target(
             let radix = operator_to_number(value, realm, origin)?;
             finish_number_to_string_radix(number, radix, realm, origin)
         }
+        OperatorPrimitiveTarget::NumberFormatDigits { number, format } => {
+            let digits = operator_to_number(value, realm, origin)?;
+            finish_number_format(number, format, digits, realm, origin)
+        }
         OperatorPrimitiveTarget::StringIntrinsic { new_target } => {
             let value = operator_primitive_to_string(value, realm, origin)?;
             if let Some(new_target) = new_target {
@@ -2559,4 +2563,269 @@ fn primitive_conversion_type_error(
         },
         origin: origin.clone(),
     }))
+}
+
+/// Completes one `Number.prototype` decimal rendering.
+///
+/// The digit count has already been converted; this applies its bounds and then
+/// renders the value exactly. The bounds differ per method: `toFixed` and
+/// `toExponential` admit `0..=100`, while `toPrecision` admits `1..=100`, and an
+/// out-of-range count reports `RangeError: invalid number of digits`.
+pub(super) fn finish_number_format(
+    number: JsNumber,
+    format: NumberFormat,
+    digits: JsNumber,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = number.as_f64();
+    // Only `toFixed` validates its digit count before short-circuiting a
+    // non-finite value. The oracle draws that line sharply:
+    // `(NaN).toFixed(101)` is a `RangeError` while `(NaN).toExponential(101)`
+    // and `(NaN).toPrecision(101)` are both `"NaN"`.
+    // An absent argument arrives as `undefined`, which `ToIntegerOrInfinity`
+    // maps to `0`; that is the correct default for all three methods.
+    let requested = number_to_integer_or_infinity(digits);
+
+    match format {
+        NumberFormat::Fixed => {
+            let count = bounded_digits(requested, 0, 100, realm, origin)?;
+            if !value.is_finite() {
+                return Ok(NativeDispatch::Immediate(StoredValue::String(
+                    value_to_string(value)?,
+                )));
+            }
+            // A magnitude at or above 1e21 falls back to the ordinary Number
+            // rendering, so `(1e21).toFixed(2)` is `"1e+21"`.
+            if value.abs() >= 1e21 {
+                return Ok(NativeDispatch::Immediate(StoredValue::String(
+                    number.to_javascript_string()?,
+                )));
+            }
+            let rendered = exact_fixed(value, count).map_err(bigint_render_failure)?;
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(&rendered)?,
+            )))
+        }
+        NumberFormat::Exponential => {
+            // Like `toPrecision`, this short-circuits before validating.
+            if !value.is_finite() {
+                return Ok(NativeDispatch::Immediate(StoredValue::String(
+                    value_to_string(value)?,
+                )));
+            }
+            let count = bounded_digits(requested, 0, 100, realm, origin)?;
+            let rendered = render_exponential(value, count).map_err(bigint_render_failure)?;
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(&rendered)?,
+            )))
+        }
+        NumberFormat::Precision => {
+            // Non-finite values short-circuit before the digit check.
+            if !value.is_finite() {
+                return Ok(NativeDispatch::Immediate(StoredValue::String(
+                    value_to_string(value)?,
+                )));
+            }
+            let count = bounded_digits(requested, 1, 100, realm, origin)?;
+            let rendered = render_precision(value, count).map_err(bigint_render_failure)?;
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(&rendered)?,
+            )))
+        }
+    }
+}
+
+/// Validates a digit count against its inclusive bounds.
+fn bounded_digits(
+    requested: f64,
+    low: u32,
+    high: u32,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<u32, NativeFailure> {
+    if requested >= f64::from(low) && requested <= f64::from(high) {
+        // The bounds prove the value is a small non-negative integer.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the preceding bounds keep the count within 0..=100"
+        )]
+        let count = requested as u32;
+        return Ok(count);
+    }
+    Err(NativeFailure::Abrupt(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::RangeError,
+            message: JsString::from_utf8("invalid number of digits")?,
+        },
+        origin: origin.clone(),
+    }))
+}
+
+/// Renders `NaN` and the infinities.
+fn value_to_string(value: f64) -> Result<JsString, JsStringError> {
+    if value.is_nan() {
+        return JsString::from_utf8("NaN");
+    }
+    if value > 0.0 {
+        return JsString::from_utf8("Infinity");
+    }
+    JsString::from_utf8("-Infinity")
+}
+
+/// Renders `value` in exponential notation with `fraction_digits` after the
+/// point.
+fn render_exponential(value: f64, fraction_digits: u32) -> Result<String, BigIntError> {
+    let rendered = exact_significant(value, fraction_digits.saturating_add(1))?;
+    Ok(assemble_exponential(&rendered))
+}
+
+/// Renders `value` with `precision` significant digits.
+///
+/// The exponent decides the spelling: a value whose exponent falls outside
+/// `-6..precision` uses exponential notation, which is why
+/// `(0.000001).toPrecision(2)` is `"0.0000010"` while `(12345).toPrecision(2)` is
+/// `"1.2e+4"`.
+fn render_precision(value: f64, precision: u32) -> Result<String, BigIntError> {
+    let rendered = exact_significant(value, precision)?;
+    let exponent = rendered.exponent;
+    let precision_bound = i32::try_from(precision).unwrap_or(i32::MAX);
+    if exponent < -6 || exponent >= precision_bound {
+        return Ok(assemble_exponential(&rendered));
+    }
+    Ok(assemble_fixed(&rendered))
+}
+
+/// Assembles a `d.ddde±x` spelling from exact digits.
+fn assemble_exponential(rendered: &DecimalDigits) -> String {
+    let mut out = String::new();
+    if rendered.negative && !rendered.digits.bytes().all(|byte| byte == b'0') {
+        out.push('-');
+    }
+    let mut characters = rendered.digits.chars();
+    if let Some(first) = characters.next() {
+        out.push(first);
+    }
+    let remainder: String = characters.collect();
+    if !remainder.is_empty() {
+        out.push('.');
+        out.push_str(&remainder);
+    }
+    out.push('e');
+    // Zero always reports exponent `0`, so the sign is always explicit.
+    let exponent = if rendered.digits.bytes().all(|byte| byte == b'0') {
+        0
+    } else {
+        rendered.exponent
+    };
+    if exponent < 0 {
+        out.push('-');
+    } else {
+        out.push('+');
+    }
+    out.push_str(&exponent.abs().to_string());
+    out
+}
+
+/// Assembles a positional spelling from exact digits.
+fn assemble_fixed(rendered: &DecimalDigits) -> String {
+    let mut out = String::new();
+    if rendered.negative && !rendered.digits.bytes().all(|byte| byte == b'0') {
+        out.push('-');
+    }
+    let exponent = rendered.exponent;
+    let digits = rendered.digits.as_bytes();
+    if exponent < 0 {
+        // A leading `0.` plus enough zeroes to place the first digit.
+        out.push_str("0.");
+        for _ in 0..(-exponent - 1) {
+            out.push('0');
+        }
+        for byte in digits {
+            out.push(char::from(*byte));
+        }
+        return out;
+    }
+    let integer_digits = usize::try_from(exponent).unwrap_or(0).saturating_add(1);
+    for (index, byte) in digits.iter().enumerate() {
+        if index == integer_digits {
+            out.push('.');
+        }
+        out.push(char::from(*byte));
+    }
+    // A precision shorter than the integer part pads with zeroes.
+    for _ in digits.len()..integer_digits {
+        out.push('0');
+    }
+    out
+}
+
+/// Reports an exact-rendering failure as an engine fault.
+///
+/// Every admitted input stays far inside the `BigInt` limb cap, so reaching this
+/// means an internal invariant broke rather than a script doing something the
+/// specification allows.
+fn bigint_render_failure(_error: BigIntError) -> NativeFailure {
+    EngineFault::RuntimeInvariant {
+        message: "exact decimal rendering exceeded the BigInt limb cap",
+    }
+    .into()
+}
+
+/// Completes a decimal rendering whose digit count was absent.
+///
+/// The three defaults differ. `toFixed()` is `toFixed(0)`. `toPrecision()` is
+/// plain `ToString`, so `(123.456).toPrecision()` is `"123.456"`.
+/// `toExponential()` uses as many fraction digits as the value needs rather than
+/// a fixed count, which is why `(123.456).toExponential()` is `"1.23456e+2"`.
+pub(super) fn finish_number_format_default(
+    number: JsNumber,
+    format: NumberFormat,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    match format {
+        NumberFormat::Fixed => {
+            finish_number_format(number, format, JsNumber::from_i32(0), realm, origin)
+        }
+        NumberFormat::Precision => Ok(NativeDispatch::Immediate(StoredValue::String(
+            number.to_javascript_string()?,
+        ))),
+        NumberFormat::Exponential => {
+            let value = number.as_f64();
+            if !value.is_finite() {
+                return Ok(NativeDispatch::Immediate(StoredValue::String(
+                    value_to_string(value)?,
+                )));
+            }
+            let rendered = render_shortest_exponential(value).map_err(bigint_render_failure)?;
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(&rendered)?,
+            )))
+        }
+    }
+}
+
+/// Renders exponential notation with the fewest digits that round-trip.
+///
+/// `toExponential` with no argument uses "as many digits as necessary to
+/// uniquely specify the number", so the shortest round-tripping precision is
+/// found by trying each in turn.
+fn render_shortest_exponential(value: f64) -> Result<String, BigIntError> {
+    for precision in 1..=17_u32 {
+        let rendered = exact_significant(value, precision)?;
+        let candidate = assemble_exponential(&rendered);
+        // A candidate that parses back to the same bits is short enough.
+        if candidate
+            .parse::<f64>()
+            .is_ok_and(|parsed| parsed.to_bits() == value.to_bits())
+        {
+            return Ok(candidate);
+        }
+    }
+    // Seventeen significant digits always round-trip a binary64.
+    let rendered = exact_significant(value, 17)?;
+    Ok(assemble_exponential(&rendered))
 }
