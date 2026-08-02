@@ -1067,7 +1067,7 @@ fn aggregate_object_limit_failure_is_atomic_and_runtime_is_reusable() {
 #[test]
 fn aggregate_property_limit_failure_is_atomic_and_runtime_is_reusable() {
     let authority = compile("function make(){return {value:1};}", "make");
-    let mut runtime = runtime(RuntimeLimits::default().with_max_object_properties(292));
+    let mut runtime = runtime(RuntimeLimits::default().with_max_object_properties(315));
     let realm = runtime.create_realm().expect("realm");
     let (make, first, baseline, before_failure) = with_context(&mut runtime, &realm, |context| {
         let make = context.instantiate(authority).expect("make");
@@ -1083,8 +1083,8 @@ fn aggregate_property_limit_failure_is_atomic_and_runtime_is_reusable() {
             context.call(&make, &[], ExecutionLimits::default()),
             Err(ExecutionError::LimitExceeded {
                 resource: RuntimeResource::ObjectProperties,
-                limit: 292,
-                observed: 293,
+                limit: 315,
+                observed: 316,
             })
         ));
         assert_eq!(

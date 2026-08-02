@@ -32,16 +32,16 @@ use super::{
     BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic, ErrorIntrinsicKind,
     ErrorIntrinsics, FunctionId, FunctionImplementation, HandleError, HandleKind, HashMap,
     HeapFunction, HeapObject, HeapReference, InterruptState, IteratorIntrinsics, JsNumber,
-    JsString, NativeFunction, NativeFunctionKind, NumberIntrinsics, ObjectId, ObjectRecord,
-    PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics,
-    RealmState, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
-    RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics, check_limit,
-    predefined_string, usize_to_u64,
+    JsString, NativeFunction, NativeFunctionKind, NumberIntrinsics, NumberPredicate, ObjectId,
+    ObjectRecord, PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId,
+    RealmIntrinsics, RealmState, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity,
+    RuntimeLimits, RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics,
+    check_limit, predefined_string, usize_to_u64,
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 85;
-const REALM_PROPERTY_COUNT: u64 = 291;
+const REALM_FUNCTION_COUNT: usize = 90;
+const REALM_PROPERTY_COUNT: u64 = 314;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -145,6 +145,44 @@ impl StringPrototypeMethod {
         }
     }
 }
+
+/// Index of the first `Number` static name in the realm's dynamic atom list.
+const NUMBER_STATIC_ATOM_START: usize = STRING_METHOD_ATOM_START + STRING_INTERNED_METHOD_COUNT;
+
+/// The `Number` constructor's numeric value properties.
+///
+/// Each is non-writable, non-enumerable, and non-configurable, which the pinned
+/// oracle confirms for `Number.MAX_VALUE`. The values are given as exact binary64
+/// bit patterns so no decimal literal has to round-trip: the oracle reports
+/// `MAX_VALUE` as `0x7fefffffffffffff`, `MIN_VALUE` as `0x1` (the smallest
+/// subnormal), and `EPSILON` as `0x3cb0000000000000`.
+/// `Number.NaN` is excluded because `NaN` already has a predefined atom, which
+/// [`NUMBER_PREDEFINED_VALUE_STATICS`] reuses instead of interning a duplicate.
+const NUMBER_VALUE_STATICS: [(&str, u64); 7] = [
+    ("MAX_VALUE", 0x7fef_ffff_ffff_ffff),
+    ("MIN_VALUE", 0x1),
+    ("EPSILON", 0x3cb0_0000_0000_0000),
+    ("MAX_SAFE_INTEGER", 0x433f_ffff_ffff_ffff),
+    ("MIN_SAFE_INTEGER", 0xc33f_ffff_ffff_ffff),
+    ("POSITIVE_INFINITY", 0x7ff0_0000_0000_0000),
+    ("NEGATIVE_INFINITY", 0xfff0_0000_0000_0000),
+];
+
+/// The `Number` value statics whose names already have a predefined atom.
+const NUMBER_PREDEFINED_VALUE_STATICS: [(PredefinedAtom, u64); 1] =
+    [(PredefinedAtom::Nan, 0x7ff8_0000_0000_0000)];
+
+/// The `Number` constructor's predicate statics.
+///
+/// Each takes exactly one argument and answers `false` for a non-Number without
+/// converting it, which is what separates `Number.isNaN` from the global `isNaN`:
+/// the oracle reports `Number.isFinite('1')` as `false`.
+const NUMBER_PREDICATE_STATICS: [(&str, NumberPredicate); 4] = [
+    ("isInteger", NumberPredicate::IsInteger),
+    ("isSafeInteger", NumberPredicate::IsSafeInteger),
+    ("isFinite", NumberPredicate::IsFinite),
+    ("isNaN", NumberPredicate::IsNaN),
+];
 
 /// The `Object` constructor's static methods.
 ///
@@ -485,9 +523,17 @@ impl PrimitiveIntrinsicRecords {
     /// `prototype_properties` differs per family because each prototype carries
     /// its own extra members beyond `constructor`, `toString`, and `valueOf`.
     fn try_new(prototype_properties: usize) -> Result<Self, RuntimeError> {
+        Self::try_new_with_constructor(prototype_properties, 3)
+    }
+
+    /// Reserves records when the constructor also carries static members.
+    fn try_new_with_constructor(
+        prototype_properties: usize,
+        constructor_properties: usize,
+    ) -> Result<Self, RuntimeError> {
         Ok(Self {
             prototype: reserved_record(prototype_properties)?,
-            constructor: reserved_record(3)?,
+            constructor: reserved_record(constructor_properties)?,
             to_string: reserved_record(2)?,
             value_of: reserved_record(2)?,
         })
@@ -533,6 +579,8 @@ struct RealmRecords {
     bigint: BigIntIntrinsicRecords,
     string: PrimitiveIntrinsicRecords,
     string_methods: [ObjectRecord; STRING_PROTOTYPE_METHODS.len()],
+    number_predicates: [ObjectRecord; NUMBER_PREDICATE_STATICS.len()],
+    array_is_array: ObjectRecord,
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
     symbol: SymbolIntrinsicRecords,
@@ -579,7 +627,15 @@ impl RealmRecords {
             is_error: reserved_record(2)?,
         };
         let boolean = PrimitiveIntrinsicRecords::try_new(3)?;
-        let number = PrimitiveIntrinsicRecords::try_new(3)?;
+        // The `Number` constructor additionally carries its value and predicate
+        // statics.
+        let number = PrimitiveIntrinsicRecords::try_new_with_constructor(
+            3,
+            3 + NUMBER_VALUE_STATICS.len()
+                + NUMBER_PREDEFINED_VALUE_STATICS.len()
+                + NUMBER_PREDICATE_STATICS.len(),
+        )?;
+        let number_predicates = number_predicate_records()?;
         let bigint = BigIntIntrinsicRecords::try_new()?;
         // `String.prototype` additionally carries `length`, its iterator, and
         // every installed method.
@@ -629,6 +685,8 @@ impl RealmRecords {
             bigint,
             string,
             string_methods,
+            number_predicates,
+            array_is_array: reserved_record(2)?,
             array,
             iterators,
             symbol,
@@ -749,6 +807,8 @@ struct RealmGraph {
     bigint: BigIntIntrinsicGraph,
     string: PrimitiveIntrinsicGraph,
     string_methods: [FunctionId; STRING_PROTOTYPE_METHODS.len()],
+    number_predicates: [FunctionId; NUMBER_PREDICATE_STATICS.len()],
+    array_is_array: FunctionId,
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
     symbol: SymbolIntrinsicGraph,
@@ -760,6 +820,10 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(intrinsic.constructor).is_some());
         }
         for function in [self.errors.is_error, self.errors.to_string] {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
+        debug_assert!(runtime.functions.remove(self.array_is_array).is_some());
+        for function in self.number_predicates.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for function in self.string_methods.into_iter().rev() {
@@ -999,6 +1063,13 @@ impl Runtime {
         let iterators = self.insert_iterator_intrinsics(&base, records.iterators);
         let symbol = self.insert_symbol_intrinsics(&base, records.symbol);
         let string_methods = self.insert_string_prototype_methods(&base, records.string_methods);
+        let number_predicates = self.insert_number_predicates(&base, records.number_predicates);
+        let array_is_array = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ArrayIsArray,
+            records.array_is_array,
+        );
 
         Ok(RealmGraph {
             base,
@@ -1009,6 +1080,8 @@ impl Runtime {
             bigint,
             string,
             string_methods,
+            number_predicates,
+            array_is_array,
             array,
             iterators,
             symbol,
@@ -1034,7 +1107,10 @@ impl Runtime {
                     + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len()
                     + OBJECT_INTERNED_STATIC_COUNT
                     + BIGINT_INTERNED_STATICS.len()
-                    + STRING_INTERNED_METHOD_COUNT,
+                    + STRING_INTERNED_METHOD_COUNT
+                    + NUMBER_VALUE_STATICS.len()
+                    + NUMBER_PREDICATE_STATICS.len()
+                    + 1,
             )
             .is_err()
         {
@@ -1056,6 +1132,10 @@ impl Runtime {
         let string_methods = STRING_PROTOTYPE_METHODS
             .into_iter()
             .filter_map(|method| method.interned_name);
+        let number_statics = NUMBER_VALUE_STATICS
+            .into_iter()
+            .map(|(name, _)| name)
+            .chain(NUMBER_PREDICATE_STATICS.into_iter().map(|(name, _)| name));
 
         let intern = |atoms: &mut AtomTable,
                       collected: &mut Vec<Atom>,
@@ -1090,6 +1170,10 @@ impl Runtime {
             for literal in string_methods {
                 interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
             }
+            for literal in number_statics {
+                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
+            }
+            interned(&mut self.atoms, &mut dynamic_atoms, "isArray")?;
             Ok(())
         })();
         if let Err(error) = outcome {
@@ -1344,6 +1428,28 @@ impl Runtime {
             to_string,
             value_of,
         }
+    }
+
+    /// Inserts one native function per `Number` predicate static.
+    fn insert_number_predicates(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; NUMBER_PREDICATE_STATICS.len()],
+    ) -> [FunctionId; NUMBER_PREDICATE_STATICS.len()] {
+        let mut inserted = [None; NUMBER_PREDICATE_STATICS.len()];
+        for ((slot, (_, predicate)), record) in inserted
+            .iter_mut()
+            .zip(NUMBER_PREDICATE_STATICS)
+            .zip(records)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::NumberPredicateStatic(predicate),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every Number predicate function was inserted"))
     }
 
     /// Inserts one native function per installed `String.prototype` method.
@@ -1683,6 +1789,7 @@ impl Runtime {
             names,
         )?;
         self.publish_string_prototype_methods(graph, keys)?;
+        self.publish_number_statics(graph, keys)?;
         self.publish_bigint_intrinsic_properties(&graph.bigint, &graph.dynamic_atoms, keys, names)?;
         self.publish_array_intrinsic_properties(&graph.array, keys, names)?;
         self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
@@ -2025,6 +2132,81 @@ impl Runtime {
                 .append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
             self.append_function_identity(function, &name, method.length, keys)?;
         }
+        Ok(())
+    }
+
+    /// Publishes the `Number` value and predicate statics plus `Array.isArray`.
+    ///
+    /// The value properties are frozen, matching the pinned descriptors for
+    /// `Number.MAX_VALUE`; the predicates are ordinary methods.
+    fn publish_number_statics(
+        &mut self,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+    ) -> Result<(), TryReserveError> {
+        for (atom, bits) in NUMBER_PREDEFINED_VALUE_STATICS {
+            let key = self.predefined_property_key(atom);
+            self.functions
+                .get_mut(graph.number.constructor)
+                .expect("new Number constructor remains live")
+                .object
+                .append_data(
+                    key,
+                    FROZEN_PROPERTY,
+                    StoredValue::Number(JsNumber::from_f64(f64::from_bits(bits))),
+                )?;
+        }
+        let mut interned = NUMBER_STATIC_ATOM_START;
+        for (_, bits) in NUMBER_VALUE_STATICS {
+            let atom = graph.dynamic_atoms[interned].clone();
+            interned += 1;
+            self.functions
+                .get_mut(graph.number.constructor)
+                .expect("new Number constructor remains live")
+                .object
+                .append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    FROZEN_PROPERTY,
+                    StoredValue::Number(JsNumber::from_f64(f64::from_bits(bits))),
+                )?;
+        }
+        for (_, function) in NUMBER_PREDICATE_STATICS
+            .into_iter()
+            .zip(graph.number_predicates)
+        {
+            let atom = graph.dynamic_atoms[interned].clone();
+            interned += 1;
+            let name = atom
+                .description()
+                .expect("interned Number static name has a description")
+                .clone();
+            self.functions
+                .get_mut(graph.number.constructor)
+                .expect("new Number constructor remains live")
+                .object
+                .append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            self.append_function_identity(function, &name, 1, keys)?;
+        }
+
+        let atom = graph.dynamic_atoms[interned].clone();
+        let name = atom
+            .description()
+            .expect("interned Array.isArray name has a description")
+            .clone();
+        self.functions
+            .get_mut(graph.array.constructor)
+            .expect("new Array constructor remains live")
+            .object
+            .append_data(
+                PropertyKey::from_validated_atom(atom),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.array_is_array),
+            )?;
+        self.append_function_identity(graph.array_is_array, &name, 1, keys)?;
         Ok(())
     }
 
@@ -2430,6 +2612,17 @@ fn object_static_records() -> Result<[ObjectRecord; OBJECT_STATIC_METHODS.len()]
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Object static record was reserved")))
+}
+
+/// Reserves one record per `Number` predicate static.
+fn number_predicate_records() -> Result<[ObjectRecord; NUMBER_PREDICATE_STATICS.len()], RuntimeError>
+{
+    let mut records: [Option<ObjectRecord>; NUMBER_PREDICATE_STATICS.len()] =
+        [const { None }; NUMBER_PREDICATE_STATICS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Number predicate record was reserved")))
 }
 
 /// Reserves one record per installed `String.prototype` method.

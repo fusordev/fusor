@@ -195,9 +195,19 @@ Known intentional runtime differences:
   steps can re-enter the interpreter. The pinned oracle fixes that order, logging
   `recv,arg,pos` for `indexOf` with side-effecting conversions. Indices remain
   UTF-16 code-unit indices, so a lone surrogate stays observable.
-- [ ] Remaining String/Number/Array method surface, shape sharing/transition
-  interning, remaining exotics (arguments, Proxy), dense indexed storage,
-  deterministic finalization, and diagnostics.
+- [x] `Number` statics and `Array.isArray`: the value properties
+  (`MAX_VALUE`, `MIN_VALUE`, `EPSILON`, `MAX_SAFE_INTEGER`, `MIN_SAFE_INTEGER`,
+  `POSITIVE_INFINITY`, `NEGATIVE_INFINITY`, `NaN`) are stored as exact binary64
+  bit patterns rather than decimal literals and carry the pinned frozen
+  descriptor, while `isInteger`, `isSafeInteger`, `isFinite`, and `isNaN` answer
+  `false` for a non-Number without converting it, which is what separates them
+  from the global `isNaN`. `Number.isInteger(2**53)` is `true` while
+  `Number.isSafeInteger(2**53)` is `false`.
+- [ ] Remaining String/Number/Array method surface (notably `toFixed`,
+  `toPrecision`, and `toExponential`, which need exact decimal formatting, and
+  the `Array.prototype` mutators), shape sharing/transition interning, remaining
+  exotics (arguments, Proxy), dense indexed storage, deterministic finalization,
+  and diagnostics.
 
 ### Built-ins and asynchronous semantics
 

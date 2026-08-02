@@ -1245,6 +1245,39 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        // A `Number` predicate never converts its argument: it answers `false`
+        // for anything that is not already a Number, which is what separates
+        // `Number.isNaN` from the global `isNaN`.
+        NativeFunctionKind::NumberPredicateStatic(predicate) => {
+            let mut arguments = inputs.arguments;
+            let argument = arguments.take_first_or_undefined();
+            let answer = match argument {
+                StoredValue::Number(value) => {
+                    let value = value.as_f64();
+                    match predicate {
+                        NumberPredicate::IsNaN => value.is_nan(),
+                        NumberPredicate::IsFinite => value.is_finite(),
+                        // Integrality is an exact property of a finite value.
+                        NumberPredicate::IsInteger => is_integral(value),
+                        // A safe integer additionally fits the exact binary64
+                        // integer range, so `2**53` is an integer but not safe.
+                        NumberPredicate::IsSafeInteger => {
+                            is_integral(value) && value.abs() <= max_safe_integer()
+                        }
+                    }
+                }
+                _ => false,
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(answer)))
+        }
+        NativeFunctionKind::ArrayIsArray => {
+            let mut arguments = inputs.arguments;
+            let answer = match arguments.take_first_or_undefined() {
+                StoredValue::Object(object) => runtime.is_array_object(object)?,
+                _ => false,
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(answer)))
+        }
         // Every `String.prototype` method shares one resumable coercion machine,
         // because they all convert the receiver with `ToString` and then each
         // declared argument in order, and every one of those steps can re-enter
@@ -2079,4 +2112,21 @@ fn bind_name_value(
     runtime.object_properties = runtime.object_properties.saturating_add(2);
     runtime.collection_pending = true;
     Ok(NativeDispatch::Immediate(StoredValue::Function(function)))
+}
+
+/// Returns whether a binary64 value is an exact integer.
+fn is_integral(value: f64) -> bool {
+    // The comparison is deliberately exact: a finite value equal to its own
+    // truncation is an integer, and no tolerance applies.
+    #[expect(
+        clippy::float_cmp,
+        reason = "integrality is an exact property, so an epsilon comparison would be wrong"
+    )]
+    let integral = value.is_finite() && value.trunc() == value;
+    integral
+}
+
+/// Returns `Number.MAX_SAFE_INTEGER` as an exact binary64 value.
+fn max_safe_integer() -> f64 {
+    f64::from_bits(0x433f_ffff_ffff_ffff)
 }

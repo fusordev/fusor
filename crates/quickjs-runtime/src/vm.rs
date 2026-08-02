@@ -54,9 +54,10 @@ use crate::{
         ArrayDefineOutcome, ArrayLengthWriteOutcome, BindingCell, BoundFunction, BytecodeFunction,
         CollectionRoot, EnvironmentBinding, ForInAdvance, FrameBindingAddress,
         FunctionImplementation, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
-        InstalledTemplate, NativeFunction, NativeFunctionKind, PreparedIteratorResultPlan,
-        RealmGlobalBindingState, SetPrototypeOutcome, StringArgument, StringMethod,
-        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
+        InstalledTemplate, NativeFunction, NativeFunctionKind, NumberPredicate,
+        PreparedIteratorResultPlan, RealmGlobalBindingState, SetPrototypeOutcome, StringArgument,
+        StringMethod, array_length_from_number, check_execution_limit, global_declaration_error,
+        usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };

@@ -349,6 +349,18 @@ pub(crate) struct BytecodeFunction {
     pub(crate) environment: Vec<EnvironmentBinding>,
 }
 
+/// One `Number` predicate static.
+///
+/// Each answers `false` for a non-Number argument rather than converting it,
+/// which is what separates `Number.isNaN` from the global `isNaN`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NumberPredicate {
+    IsInteger,
+    IsSafeInteger,
+    IsFinite,
+    IsNaN,
+}
+
 /// How one argument is coerced before the method body runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StringArgument {
@@ -479,6 +491,10 @@ pub(crate) enum NativeFunctionKind {
     StringPrototypeValueOf,
     /// One `String.prototype` method sharing the resumable coercion machine.
     StringPrototypeMethod(StringMethod),
+    /// One `Number` predicate static.
+    NumberPredicateStatic(NumberPredicate),
+    /// `Array.isArray`.
+    ArrayIsArray,
     ArrayConstructor,
     SymbolConstructor,
     SymbolPrototypeToString,

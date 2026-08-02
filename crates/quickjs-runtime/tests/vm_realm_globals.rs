@@ -453,7 +453,7 @@ fn failed_global_function_allocation_commits_the_declaration_without_leaking_cod
         ],
     );
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_functions(86)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_functions(91)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let baseline = runtime.usage();
     let mut context = runtime.context(&realm).expect("context");
@@ -465,8 +465,8 @@ fn failed_global_function_allocation_commits_the_declaration_without_leaking_cod
         error,
         DynamicFunctionScriptError::Execution(ExecutionError::LimitExceeded {
             resource: RuntimeResource::HeapFunctions,
-            limit: 86,
-            observed: 87,
+            limit: 91,
+            observed: 92,
         })
     ));
     let committed = context.runtime_usage();
@@ -595,7 +595,7 @@ fn global_var_property_limit_failure_is_atomic() {
             (FinalOpcode::Return, Operands::None),
         ],
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(291))
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(314))
         .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let baseline = runtime.usage();
@@ -608,8 +608,8 @@ fn global_var_property_limit_failure_is_atomic() {
         error,
         DynamicFunctionScriptError::Install(quickjs_runtime::InstallError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 291,
-            observed: 292,
+            limit: 314,
+            observed: 315,
         })
     ));
     assert_eq!(context.runtime_usage(), baseline);
