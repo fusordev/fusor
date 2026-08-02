@@ -83,6 +83,7 @@ mod from_entries;
 mod group_by;
 mod instanceof;
 mod iterators;
+mod json_parse;
 mod native;
 mod object_intrinsics;
 mod properties;
@@ -98,8 +99,8 @@ use {
     aggregate_error::*, array_callbacks::*, array_copiers::*, array_join::*, array_mutators::*,
     array_search::*, bigint_intrinsics::*, bindings::*, conversions::*,
     define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*, exceptions::*,
-    execution::*, from_entries::*, group_by::*, iterators::*, native::*, object_intrinsics::*,
-    properties::*, reflect::*, stack::*, string_methods::*,
+    execution::*, from_entries::*, group_by::*, iterators::*, json_parse::*, native::*,
+    object_intrinsics::*, properties::*, reflect::*, stack::*, string_methods::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -286,6 +287,7 @@ enum NativeContinuation {
     AggregateError(AggregateErrorContinuation),
     FromEntries(Box<FromEntriesContinuation>),
     GroupBy(Box<GroupByContinuation>),
+    JsonParse(Box<JsonParseContinuation>),
     ErrorConstructor(ErrorConstructorContinuation),
     ErrorToString(ErrorToStringContinuation),
     ArrayIteratorNext(ArrayIteratorNextContinuation),
@@ -326,6 +328,7 @@ impl NativeContinuation {
             Self::AggregateError(state) => state.retained_values(),
             Self::FromEntries(state) => state.retained_values(),
             Self::GroupBy(state) => state.retained_values(),
+            Self::JsonParse(state) => state.retained_values(),
             Self::ErrorConstructor(state) => state.retained_values(),
             Self::ErrorToString(state) => state.retained_values(),
             Self::ArrayIteratorNext(state) => state.retained_values(),
@@ -913,6 +916,8 @@ enum OperatorPrimitiveTarget {
         global_registry: bool,
     },
     StringIteratorIntrinsic,
+    /// `JSON.parse`'s source text, awaiting `ToString`.
+    JsonParseText(JsonParseTextContinuation),
     ErrorConstructorMessage(ErrorConstructorContinuation),
     ErrorToStringName(ErrorToStringContinuation),
     ErrorToStringMessage(ErrorToStringContinuation),
@@ -974,6 +979,7 @@ impl OperatorPrimitiveTarget {
                 new_target: Some(_),
             } => 1,
             Self::ErrorConstructorMessage(state) => state.retained_values(),
+            Self::JsonParseText(state) => state.retained_values(),
             Self::ErrorToStringName(state) | Self::ErrorToStringMessage(state) => {
                 state.retained_values()
             }
@@ -1154,6 +1160,7 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::StringIteratorIntrinsic
         | OperatorPrimitiveTarget::BigIntToString { .. }
         | OperatorPrimitiveTarget::BigIntTruncationValue { .. } => {}
+        OperatorPrimitiveTarget::JsonParseText(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::BinaryRight { right, .. } => {
             trace_stored_value_root(right, mark);
         }
@@ -1301,6 +1308,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::AggregateError(state) => state.trace_roots(mark),
         NativeContinuation::FromEntries(state) => state.trace_roots(mark),
         NativeContinuation::GroupBy(state) => state.trace_roots(mark),
+        NativeContinuation::JsonParse(state) => state.trace_roots(mark),
         NativeContinuation::ErrorConstructor(state) => state.trace_roots(mark),
         NativeContinuation::ErrorToString(state) => state.trace_roots(mark),
         NativeContinuation::ArrayIteratorNext(state) => {

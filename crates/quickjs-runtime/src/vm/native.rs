@@ -315,6 +315,9 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::GroupBy(state) => {
                 advance_group_by(runtime, *state, value, return_to, execution_budget)?
             }
+            NativeContinuation::JsonParse(state) => {
+                advance_json_parse(runtime, *state, value, return_to, execution_budget)?
+            }
             NativeContinuation::ErrorConstructor(state) => {
                 advance_error_constructor(runtime, state, value, return_to, execution_budget)?
             }
@@ -1305,6 +1308,15 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             active_frames,
             active_frame_values,
+            execution_budget,
+        ),
+        NativeFunctionKind::JsonParse => begin_json_parse(
+            runtime,
+            inputs.arguments.take_first_or_undefined(),
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
         NativeFunctionKind::ObjectPrototypeToString => begin_object_prototype_to_string(

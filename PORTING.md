@@ -359,9 +359,16 @@ Known intentional runtime differences:
   realm-owned `%ThrowTypeError%`: `Function.prototype.caller` and `arguments`
   share it as getter and setter, remain configurable and non-enumerable, and
   expose frozen empty-name/zero-length thrower identity properties.
+- [x] Implement `JSON.parse` on a realm-owned `%JSON%` object: an iterative
+  UTF-16 parser accepts exactly the ECMA-404 JSON grammar, preserves escapes,
+  lone surrogates, duplicate-member evaluation, and `__proto__` as data, then
+  materializes ordinary objects and Arrays in source order. A resumable
+  post-order `InternalizeJSONProperty` machine re-reads mutated properties,
+  preserves getter and callback abrupt completions, applies delete-or-define
+  results, and supplies the ECMAScript 2026 primitive `context.source` record.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
-  RegExp/Date/JSON, collections, binary data,
+  RegExp/Date, JSON serialization and raw JSON, collections, binary data,
   Atomics, Unicode tables, promises, async functions/generators, weak
   references, and finalization registries.
 - [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide

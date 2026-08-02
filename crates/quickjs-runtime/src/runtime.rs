@@ -695,6 +695,8 @@ pub(crate) enum NativeFunctionKind {
     ObjectPrototypePropertyIsEnumerable,
     /// One method on the ordinary `%Reflect%` object.
     Reflect(ReflectMethod),
+    /// `JSON.parse`.
+    JsonParse,
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,

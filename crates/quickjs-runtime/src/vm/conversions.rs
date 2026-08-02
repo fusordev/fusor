@@ -1569,6 +1569,18 @@ fn finish_operator_primitive_target(
                 runtime.allocate_string_iterator(realm, string)?,
             )))
         }
+        OperatorPrimitiveTarget::JsonParseText(state) => {
+            let text = operator_primitive_to_string(value, realm, origin)?;
+            finish_json_parse_text(
+                runtime,
+                state,
+                text,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::ErrorConstructorMessage(state) => {
             let message = operator_primitive_to_string(value, realm, origin)?;
             finish_error_constructor_message(runtime, state, message, return_to, execution_budget)
