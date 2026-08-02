@@ -28,7 +28,7 @@
 use std::collections::TryReserveError;
 
 use super::{
-    Arc, Arena, ArrayIntrinsics, ArraySearch, ArrayState, Atom, AtomError, AtomTable,
+    Arc, Arena, ArrayIntrinsics, ArrayMutator, ArraySearch, ArrayState, Atom, AtomError, AtomTable,
     BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic,
     ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation, HandleError,
     HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
@@ -40,8 +40,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 99;
-const REALM_PROPERTY_COUNT: u64 = 341;
+const REALM_FUNCTION_COUNT: usize = 105;
+const REALM_PROPERTY_COUNT: u64 = 359;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -198,6 +198,23 @@ const STRING_FROM_STATICS: [(&str, StringMethod); 2] = [
     ("fromCharCode", StringMethod::FromCharCode),
     ("fromCodePoint", StringMethod::FromCodePoint),
 ];
+
+/// The `Array.prototype` mutators this profile installs.
+///
+/// Each name and arity comes from the pinned oracle, which reports `1` for
+/// `push`, `unshift`, and `fill` and `0` for `pop`, `shift`, and `reverse`.
+const ARRAY_MUTATOR_METHODS: [ArrayMutator; 6] = [
+    ArrayMutator::Push,
+    ArrayMutator::Pop,
+    ArrayMutator::Shift,
+    ArrayMutator::Unshift,
+    ArrayMutator::Reverse,
+    ArrayMutator::Fill,
+];
+
+/// Index of the first `Array.prototype` mutator name in the dynamic atoms.
+const ARRAY_MUTATOR_ATOM_START: usize =
+    OBJECT_REFLECTION_ATOM_START + OBJECT_PROTOTYPE_REFLECTION.len();
 
 /// The `Object.prototype` reflection methods.
 ///
@@ -639,6 +656,7 @@ struct RealmRecords {
     number_predicates: [ObjectRecord; NUMBER_PREDICATE_STATICS.len()],
     string_from_statics: [ObjectRecord; STRING_FROM_STATICS.len()],
     array_searches: [ObjectRecord; ARRAY_SEARCH_METHODS.len()],
+    array_mutators: [ObjectRecord; ARRAY_MUTATOR_METHODS.len()],
     array_is_array: ObjectRecord,
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
@@ -710,7 +728,9 @@ impl RealmRecords {
         let string_methods = string_method_records()?;
         let string_from_statics = string_from_records()?;
         let mut array = ArrayIntrinsicRecords {
-            prototype: reserved_record(8 + ARRAY_SEARCH_METHODS.len())?,
+            prototype: reserved_record(
+                8 + ARRAY_SEARCH_METHODS.len() + ARRAY_MUTATOR_METHODS.len(),
+            )?,
             constructor: reserved_record(3)?,
             join: reserved_record(2)?,
             to_string: reserved_record(2)?,
@@ -756,6 +776,7 @@ impl RealmRecords {
             number_predicates,
             string_from_statics,
             array_searches: array_search_records()?,
+            array_mutators: array_mutator_records()?,
             array_is_array: reserved_record(2)?,
             array,
             iterators,
@@ -884,6 +905,7 @@ struct RealmGraph {
     number_predicates: [FunctionId; NUMBER_PREDICATE_STATICS.len()],
     string_from_statics: [FunctionId; STRING_FROM_STATICS.len()],
     array_searches: [FunctionId; ARRAY_SEARCH_METHODS.len()],
+    array_mutators: [FunctionId; ARRAY_MUTATOR_METHODS.len()],
     array_is_array: FunctionId,
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
@@ -899,6 +921,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         debug_assert!(runtime.functions.remove(self.array_is_array).is_some());
+        for function in self.array_mutators.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
         for function in self.array_searches.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
@@ -1149,6 +1174,7 @@ impl Runtime {
         let string_from_statics =
             self.insert_string_from_statics(&base, records.string_from_statics);
         let array_searches = self.insert_array_searches(&base, records.array_searches);
+        let array_mutators = self.insert_array_mutators(&base, records.array_mutators);
         let array_is_array = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -1168,6 +1194,7 @@ impl Runtime {
             number_predicates,
             string_from_statics,
             array_searches,
+            array_mutators,
             array_is_array,
             array,
             iterators,
@@ -1200,7 +1227,8 @@ impl Runtime {
                     + 1
                     + STRING_FROM_STATICS.len()
                     + ARRAY_SEARCH_METHODS.len()
-                    + OBJECT_PROTOTYPE_REFLECTION.len(),
+                    + OBJECT_PROTOTYPE_REFLECTION.len()
+                    + ARRAY_MUTATOR_METHODS.len(),
             )
             .is_err()
         {
@@ -1272,6 +1300,9 @@ impl Runtime {
             }
             for (literal, _, _) in OBJECT_PROTOTYPE_REFLECTION {
                 interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
+            }
+            for mutator in ARRAY_MUTATOR_METHODS {
+                interned(&mut self.atoms, &mut dynamic_atoms, mutator.name())?;
             }
             Ok(())
         })();
@@ -1547,6 +1578,25 @@ impl Runtime {
             to_string,
             value_of,
         }
+    }
+
+    /// Inserts one native function per `Array.prototype` mutator.
+    fn insert_array_mutators(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; ARRAY_MUTATOR_METHODS.len()],
+    ) -> [FunctionId; ARRAY_MUTATOR_METHODS.len()] {
+        let mut inserted = [None; ARRAY_MUTATOR_METHODS.len()];
+        for ((slot, mutator), record) in inserted.iter_mut().zip(ARRAY_MUTATOR_METHODS).zip(records)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::ArrayPrototypeMutator(mutator),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every Array mutator function was inserted"))
     }
 
     /// Inserts one native function per `Array.prototype` search.
@@ -2446,6 +2496,29 @@ impl Runtime {
                 )?;
             self.append_function_identity(function, &name, 1, keys)?;
         }
+
+        for (mutator, (function, atom)) in ARRAY_MUTATOR_METHODS.into_iter().zip(
+            graph
+                .array_mutators
+                .into_iter()
+                .zip(&graph.dynamic_atoms[ARRAY_MUTATOR_ATOM_START..]),
+        ) {
+            let atom = atom.clone();
+            let name = atom
+                .description()
+                .expect("interned Array mutator name has a description")
+                .clone();
+            self.objects
+                .get_mut(graph.array.prototype)
+                .expect("new Array.prototype remains live")
+                .record
+                .append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            self.append_function_identity(function, &name, mutator.arity(), keys)?;
+        }
         Ok(())
     }
 
@@ -2862,6 +2935,16 @@ fn object_reflection_records()
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Object reflection record was reserved")))
+}
+
+/// Reserves one record per `Array.prototype` mutator.
+fn array_mutator_records() -> Result<[ObjectRecord; ARRAY_MUTATOR_METHODS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; ARRAY_MUTATOR_METHODS.len()] =
+        [const { None }; ARRAY_MUTATOR_METHODS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Array mutator record was reserved")))
 }
 
 /// Reserves one record per `Array.prototype` search.

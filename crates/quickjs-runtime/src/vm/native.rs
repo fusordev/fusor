@@ -349,6 +349,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::ArrayMutator(state) => advance_array_mutator(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
@@ -1341,6 +1348,19 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        // The six mutators share one resumable driver: each reads `length`
+        // once, performs a planned sequence of element steps, and writes
+        // `length` back, with every step a possible accessor entry.
+        NativeFunctionKind::ArrayPrototypeMutator(mutator) => begin_array_mutator(
+            runtime,
+            mutator,
+            native.realm,
+            inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::ArrayIsArray => {
             let mut arguments = inputs.arguments;
             let answer = match arguments.take_first_or_undefined() {

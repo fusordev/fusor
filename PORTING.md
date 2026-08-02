@@ -223,6 +223,20 @@ incorrectly, so no script can observe a wrong result.
   walk at the candidate's prototype, so nothing precedes itself, and charges the
   shared budget per link. `Object.create` represents a null prototype rather than
   substituting one; see `QJS-CREATE-001` for its narrowed descriptors argument.
+- [x] `Array.prototype.push`, `pop`, `shift`, `unshift`, `reverse`, and `fill` as
+  one resumable driver. Each reads `length` once with `ToLength`, performs a
+  planned sequence of element steps, and writes `length` back; every read, write,
+  and delete can enter an accessor, so each is a suspension point. Expressing the
+  differences as an explicit step plan (`Move`, `Take`, `Drop`, `Store`, `Swap`)
+  rather than as five implementations is what keeps hole handling uniform: an
+  absent source is deleted at its destination, so `[1,,3].reverse()` stays sparse
+  while `[,2].shift()` leaves index `0` present. The pinned oracle fixes the
+  order, reporting `getlen|set1:x|setlen:2` for `push` and `getlen|get1|setlen:1`
+  for `pop`. Growing past `2^53 - 1` reports upstream's misspelled
+  `Array loo long` (`quickjs.c:41933`), which is observable and therefore
+  reproduced. A real Array's exotic `length` reaches the array write path
+  directly, because the ordinary path deliberately refuses a `length` write that
+  has not run a resumable numeric conversion.
 - [x] `String.fromCharCode` and `String.fromCodePoint`, sharing the same
   resumable machine as the prototype methods because their arguments are also
   arbitrary objects. The two differ in coercion and range: `fromCharCode` applies
@@ -301,11 +315,12 @@ fixture declares an unreachable one, or when an observed oracle message does not
 match the pinned format string.
 
 Current corpus status: parser 196/196, Number radix 991/991, control flow 63/63,
-iterators 40/40, function apply 15/15, function bind 21/21. The Error corpus
-stands at 26/35; every remaining mismatch needs a built-in this profile does not
-install yet (`Reflect`, and the `Function.prototype.call` reachable from a
-descriptor lookup), so each fails closed as a missing property rather than
-producing a wrong answer.
+iterators 40/40, function apply 15/15, function bind 21/21, call spread 15/15.
+The Error corpus stands at 31/35. Three remaining mismatches need `Reflect`,
+which belongs to the built-ins milestone; the fourth needs the harness to
+normalize a script-thrown Error object, which it currently reports as an
+arbitrary value. Each fails closed as a missing property rather than producing a
+wrong answer.
 
 ## Engineering rules
 

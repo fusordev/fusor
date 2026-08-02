@@ -349,6 +349,41 @@ pub(crate) struct BytecodeFunction {
     pub(crate) environment: Vec<EnvironmentBinding>,
 }
 
+/// Which mutator a continuation is performing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayMutator {
+    Push,
+    Pop,
+    Shift,
+    Unshift,
+    Reverse,
+    Fill,
+}
+
+impl ArrayMutator {
+    /// Returns the reported `length` of the installed function.
+    pub(crate) const fn arity(self) -> i32 {
+        match self {
+            // `push` and `unshift` are variadic but report 1; `fill` reports 1
+            // even though it accepts three arguments.
+            Self::Push | Self::Unshift | Self::Fill => 1,
+            Self::Pop | Self::Shift | Self::Reverse => 0,
+        }
+    }
+
+    /// Returns the property name this mutator is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Push => "push",
+            Self::Pop => "pop",
+            Self::Shift => "shift",
+            Self::Unshift => "unshift",
+            Self::Reverse => "reverse",
+            Self::Fill => "fill",
+        }
+    }
+}
+
 /// Which search a continuation is performing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArraySearch {
@@ -554,6 +589,8 @@ pub(crate) enum NativeFunctionKind {
     ArrayIsArray,
     /// One `Array.prototype` search sharing the resumable element loop.
     ArrayPrototypeSearch(ArraySearch),
+    /// One `Array.prototype` mutator sharing the resumable element driver.
+    ArrayPrototypeMutator(ArrayMutator),
     ArrayConstructor,
     SymbolConstructor,
     SymbolPrototypeToString,

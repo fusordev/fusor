@@ -1628,6 +1628,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::ArraySearchPosition(state) => {
             advance_array_search(runtime, *state, Some(value), return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::ArrayMutatorArgument(state) => {
+            advance_array_mutator(runtime, *state, Some(value), return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::StringMethodSubject(state)
         | OperatorPrimitiveTarget::StringMethodArgument(state) => {
             advance_string_method(runtime, *state, Some(value), return_to, execution_budget)

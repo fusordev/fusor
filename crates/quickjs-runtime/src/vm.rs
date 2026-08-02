@@ -51,19 +51,20 @@ use crate::{
     interrupt::InterruptCounter,
     object::{ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty, PropertyDeletion},
     runtime::{
-        ArrayDefineOutcome, ArrayLengthWriteOutcome, ArraySearch, BindingCell, BoundFunction,
-        BytecodeFunction, CollectionRoot, EnvironmentBinding, ForInAdvance, FrameBindingAddress,
-        FunctionImplementation, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
-        InstalledTemplate, NativeFunction, NativeFunctionKind, NumberPredicate,
-        PreparedIteratorResultPlan, RealmGlobalBindingState, SetPrototypeOutcome, StringArgument,
-        StringMethod, array_length_from_number, check_execution_limit, global_declaration_error,
-        usize_to_u64,
+        ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayMutator, ArraySearch, BindingCell,
+        BoundFunction, BytecodeFunction, CollectionRoot, EnvironmentBinding, ForInAdvance,
+        FrameBindingAddress, FunctionImplementation, HeapFunction, InstalledCode,
+        InstalledConstant, InstalledRoot, InstalledTemplate, NativeFunction, NativeFunctionKind,
+        NumberPredicate, PreparedIteratorResultPlan, RealmGlobalBindingState, SetPrototypeOutcome,
+        StringArgument, StringMethod, array_length_from_number, check_execution_limit,
+        global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
 
 mod aggregate_error;
 mod array_join;
+mod array_mutators;
 mod array_search;
 mod bigint_intrinsics;
 mod bindings;
@@ -87,10 +88,10 @@ mod string_methods;
     reason = "private VM sibling modules share one interpreter implementation namespace"
 )]
 use {
-    aggregate_error::*, array_join::*, array_search::*, bigint_intrinsics::*, bindings::*,
-    conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*,
-    exceptions::*, execution::*, iterators::*, native::*, object_intrinsics::*, properties::*,
-    stack::*, string_methods::*,
+    aggregate_error::*, array_join::*, array_mutators::*, array_search::*, bigint_intrinsics::*,
+    bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*,
+    errors::*, exceptions::*, execution::*, iterators::*, native::*, object_intrinsics::*,
+    properties::*, stack::*, string_methods::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -286,6 +287,7 @@ enum NativeContinuation {
     CopyDataProperties(CopyDataPropertiesContinuation),
     ArrayJoin(Box<ArrayJoinContinuation>),
     ArraySearch(Box<ArraySearchContinuation>),
+    ArrayMutator(Box<ArrayMutatorContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     InstanceOf(InstanceOfContinuation),
     FunctionCall,
@@ -313,6 +315,7 @@ impl NativeContinuation {
             Self::CopyDataProperties(state) => state.retained_values(),
             Self::ArrayJoin(_) => ArrayJoinContinuation::retained_values(),
             Self::ArraySearch(_) => ArraySearchContinuation::retained_values(),
+            Self::ArrayMutator(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
             Self::FunctionCall => 0,
@@ -857,6 +860,8 @@ enum OperatorPrimitiveTarget {
     ArrayJoinElement(Box<ArrayJoinContinuation>),
     /// An `Array.prototype` search's position argument, awaiting `ToNumber`.
     ArraySearchPosition(Box<ArraySearchContinuation>),
+    /// An `Array.prototype` mutator's argument, awaiting `ToNumber`.
+    ArrayMutatorArgument(Box<ArrayMutatorContinuation>),
     ArrayLengthWrite(ArrayLengthWriteState),
     /// A `String.prototype` method's receiver, awaiting `ToString`.
     StringMethodSubject(Box<StringMethodContinuation>),
@@ -903,6 +908,7 @@ impl OperatorPrimitiveTarget {
                 state.retained_values()
             }
             Self::ArraySearchPosition(_) => ArraySearchContinuation::retained_values(),
+            Self::ArrayMutatorArgument(state) => state.retained_values(),
         }
     }
 }
@@ -1071,6 +1077,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::StringMethodSubject(state)
         | OperatorPrimitiveTarget::StringMethodArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArraySearchPosition(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::ArrayMutatorArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayJoinSeparator(state)
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
             trace_stored_value_root(state.target(), mark);
@@ -1143,6 +1150,7 @@ fn trace_native_continuation_roots(
             trace_stored_value_root(state.target(), mark);
         }
         NativeContinuation::ArraySearch(state) => state.trace_roots(mark),
+        NativeContinuation::ArrayMutator(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {
             trace_function_bind_roots(state, mark);
