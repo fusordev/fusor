@@ -695,6 +695,7 @@ impl Runtime {
                             | crate::ExecutionError::DynamicFunctionCompilation(_)
                             | crate::ExecutionError::DynamicFunctionInstallation(_)
                             | crate::ExecutionError::Exception(_)
+                            | crate::ExecutionError::Interrupted { .. }
                             | crate::ExecutionError::InstructionLimitExceeded { .. }
                             | crate::ExecutionError::EngineFault(_) => {
                                 InstallError::AuthorityInvariant {

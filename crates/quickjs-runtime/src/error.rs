@@ -831,6 +831,16 @@ pub enum ExecutionError {
     /// Verified dynamic-Function bytecode could not be installed while the
     /// current interpreter session remained active.
     DynamicFunctionInstallation(InstallError),
+    /// The host's interrupt handler requested cancellation.
+    ///
+    /// This is deliberately not a [`JsException`]: upstream marks an interrupt
+    /// uncatchable (`quickjs.c:7861`) so a script cannot swallow a host
+    /// cancellation, and a structured error bypasses the JavaScript unwinder by
+    /// construction.
+    Interrupted {
+        /// Instructions completed before the handler stopped execution.
+        executed: u64,
+    },
     /// Per-call instruction fuel was exhausted.
     InstructionLimitExceeded {
         /// Inclusive configured fuel.
@@ -868,6 +878,10 @@ impl fmt::Display for ExecutionError {
             Self::Exception(exception) => exception.fmt(formatter),
             Self::DynamicFunctionCompilation(source) => source.fmt(formatter),
             Self::DynamicFunctionInstallation(source) => source.fmt(formatter),
+            Self::Interrupted { executed } => write!(
+                formatter,
+                "execution was interrupted by the host after {executed} instructions"
+            ),
             Self::InstructionLimitExceeded { limit, executed } => write!(
                 formatter,
                 "instruction limit {limit} exhausted after {executed} instructions"
@@ -903,6 +917,7 @@ impl Error for ExecutionError {
             Self::String(source) => Some(source),
             Self::EngineFault(source) => Some(source),
             Self::Exception(_)
+            | Self::Interrupted { .. }
             | Self::InstructionLimitExceeded { .. }
             | Self::LimitExceeded { .. }
             | Self::AllocationFailed { .. } => None,

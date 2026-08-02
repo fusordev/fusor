@@ -23,6 +23,7 @@ mod define_property;
 mod error;
 mod host;
 mod ids;
+mod interrupt;
 mod number;
 mod object;
 mod predefined_atoms;
@@ -45,6 +46,7 @@ pub use error::{
     RuntimeResource, ValueKind,
 };
 pub use host::{OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource};
+pub use interrupt::{INTERRUPT_POLL_INTERVAL, InterruptHandler};
 pub use number::JsNumber;
 pub use predefined_atoms::PredefinedAtom;
 pub use property::{

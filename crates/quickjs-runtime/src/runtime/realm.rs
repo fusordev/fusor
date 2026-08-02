@@ -31,11 +31,12 @@ use super::{
     Arc, Arena, ArrayIntrinsics, ArrayState, Atom, AtomError, AtomTable, BigIntIntrinsics,
     BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic, ErrorIntrinsicKind,
     ErrorIntrinsics, FunctionId, FunctionImplementation, HandleError, HandleKind, HashMap,
-    HeapFunction, HeapObject, HeapReference, IteratorIntrinsics, JsNumber, JsString,
-    NativeFunction, NativeFunctionKind, NumberIntrinsics, ObjectId, ObjectRecord, PredefinedAtom,
-    PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState,
-    ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource,
-    StoredValue, StringIntrinsics, SymbolIntrinsics, check_limit, predefined_string, usize_to_u64,
+    HeapFunction, HeapObject, HeapReference, InterruptState, IteratorIntrinsics, JsNumber,
+    JsString, NativeFunction, NativeFunctionKind, NumberIntrinsics, ObjectId, ObjectRecord,
+    PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics,
+    RealmState, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
+    RuntimeResource, StoredValue, StringIntrinsics, SymbolIntrinsics, check_limit,
+    predefined_string, usize_to_u64,
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
@@ -754,6 +755,7 @@ impl Runtime {
             for_in_entries: 0,
             public_roots: 0,
             collection_pending: false,
+            interrupts: InterruptState::default(),
         })
     }
 

@@ -47,6 +47,7 @@ use crate::{
         validate_and_apply_new,
     },
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
+    interrupt::InterruptCounter,
     object::{ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty, PropertyDeletion},
     runtime::{
         ArrayDefineOutcome, ArrayLengthWriteOutcome, BindingCell, BoundFunction, BytecodeFunction,
@@ -135,6 +136,8 @@ impl Default for ExecutionLimits {
 }
 
 struct ExecutionBudget {
+    /// The decrementing interrupt poll counter for this session.
+    interrupt_counter: InterruptCounter,
     instruction_limit: u64,
     executed_instructions: u64,
     compilation_limit: u64,
@@ -146,6 +149,7 @@ struct ExecutionBudget {
 impl ExecutionBudget {
     const fn new(limits: ExecutionLimits) -> Self {
         Self {
+            interrupt_counter: InterruptCounter::new(),
             instruction_limit: limits.instruction_fuel,
             executed_instructions: 0,
             compilation_limit: limits.dynamic_compilations,
@@ -1850,6 +1854,15 @@ fn execute_frame_loop(
 ) -> Result<StoredValue, ExecutionError> {
     'frames: loop {
         execution_budget.charge_instructions(1)?;
+        // The interrupt poll is separate from the fuel charge: fuel is a
+        // pre-committed budget, while an interrupt is a decision the host makes
+        // during execution.
+        if execution_budget.interrupt_counter.charge_step() && runtime.interrupts.should_interrupt()
+        {
+            return Err(ExecutionError::Interrupted {
+                executed: execution_budget.executed_instructions,
+            });
+        }
         let frame = frames.last_mut().ok_or(EngineFault::MissingInstruction {
             function: FunctionTemplateId::new(0),
             instruction: 0,

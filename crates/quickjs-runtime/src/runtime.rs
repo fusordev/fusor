@@ -41,6 +41,7 @@ use crate::{
     PropertyLayout, PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
+    interrupt::InterruptState,
     object::{
         ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, ForInIterator, ForInSnapshot,
         HeapObject, IntegrityLevel, KeyPhases, ObjectRecord, OwnProperty, PropertyDeletion,
@@ -697,6 +698,33 @@ pub struct Runtime {
     pub(crate) for_in_entries: u64,
     public_roots: u64,
     pub(crate) collection_pending: bool,
+    pub(crate) interrupts: InterruptState,
+}
+
+impl Runtime {
+    /// Installs the host interrupt handler, replacing any previous one.
+    ///
+    /// The handler is polled on a decrementing counter rather than on every
+    /// instruction (`INTERRUPT_POLL_INTERVAL`), so cancellation is observed
+    /// within that many interpreter steps rather than immediately.
+    ///
+    /// Requesting cancellation reports [`ExecutionError::Interrupted`], which is
+    /// not a catchable JavaScript exception: a script must not be able to
+    /// swallow a host cancellation.
+    pub fn set_interrupt_handler(&mut self, handler: Arc<dyn crate::InterruptHandler>) {
+        self.interrupts.set_handler(handler);
+    }
+
+    /// Removes the installed interrupt handler.
+    pub fn clear_interrupt_handler(&mut self) {
+        self.interrupts.clear_handler();
+    }
+
+    /// Returns whether an interrupt handler is installed.
+    #[must_use]
+    pub fn has_interrupt_handler(&self) -> bool {
+        self.interrupts.is_installed()
+    }
 }
 
 mod arrays;
