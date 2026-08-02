@@ -270,6 +270,13 @@ accepted fixture, when a reachable pinned diagnostic has no fixture, when a
 fixture declares an unreachable one, or when an observed oracle message does not
 match the pinned format string.
 
+Current corpus status: parser 196/196, Number radix 991/991, control flow 63/63,
+iterators 40/40, function apply 15/15, function bind 21/21. The Error corpus
+stands at 26/35; every remaining mismatch needs a built-in this profile does not
+install yet (`Reflect`, and the `Function.prototype.call` reachable from a
+descriptor lookup), so each fails closed as a missing property rather than
+producing a wrong answer.
+
 ## Engineering rules
 
 1. Preserve observable ECMAScript behavior, not QuickJS private representation.
