@@ -624,6 +624,52 @@ fn object_from_entries_closes_on_abrupt_completion() {
     ));
 }
 
+/// Abrupt completions produced while obtaining the next iterator value are
+/// propagated by `IteratorStepValue` itself. They happen before
+/// `AddEntriesFromIterable` reaches an operation guarded by
+/// `IfAbruptCloseIterator`, so they must not invoke the iterator's `return`.
+#[test]
+fn object_from_entries_does_not_close_iterator_step_failures() {
+    assert_eq!(
+        text(
+            "var closed=false;var iterator={next:function next(){throw 'next';},\
+             return:function close(){closed=true;return {};}};var iterable={};\
+             iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
+             try{Object.fromEntries(iterable);}catch(error){}return ''+closed;"
+        ),
+        "false"
+    );
+    assert_eq!(
+        text(
+            "var closed=false;var iterator={next:function next(){return 1;},\
+             return:function close(){closed=true;return {};}};var iterable={};\
+             iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
+             try{Object.fromEntries(iterable);}catch(error){}return ''+closed;"
+        ),
+        "false"
+    );
+    assert_eq!(
+        text(
+            "var closed=false;var iterator={next:function next(){\
+               return {get done(){throw 'done';}};},\
+             return:function close(){closed=true;return {};}};var iterable={};\
+             iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
+             try{Object.fromEntries(iterable);}catch(error){}return ''+closed;"
+        ),
+        "false"
+    );
+    assert_eq!(
+        text(
+            "var closed=false;var iterator={next:function next(){\
+               return {done:false,get value(){throw 'value';}};},\
+             return:function close(){closed=true;return {};}};var iterable={};\
+             iterable[Symbol.iterator]=function iteratorMethod(){return iterator;};\
+             try{Object.fromEntries(iterable);}catch(error){}return ''+closed;"
+        ),
+        "false"
+    );
+}
+
 /// `Object.is` is exactly ECMA-262 `SameValue`: unlike strict equality it
 /// equates NaNs and distinguishes the two signed zeros while retaining object
 /// and Symbol identity.

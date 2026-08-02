@@ -92,8 +92,13 @@ impl FromEntriesContinuation {
         }
     }
 
-    const fn next_acquired(&self) -> bool {
-        self.next.is_some()
+    const fn closes_on_abrupt(&self) -> bool {
+        matches!(
+            self.stage,
+            FromEntriesStage::AwaitEntryKey
+                | FromEntriesStage::AwaitEntryValue
+                | FromEntriesStage::AwaitPropertyKey
+        )
     }
 }
 
@@ -167,17 +172,11 @@ pub(super) fn advance_from_entries(
         }
         FromEntriesStage::AwaitNextMethod => {
             state.next = Some(completion);
-            call_from_entries_next(runtime, state, return_to, execution_budget)
+            call_from_entries_next(state, return_to, execution_budget)
         }
         FromEntriesStage::AwaitNextResult => {
             if completion.heap_reference().is_none() {
-                return close_from_entries_with_type_error(
-                    runtime,
-                    state,
-                    "iterator must return an object",
-                    return_to,
-                    execution_budget,
-                );
+                return abrupt_from_entries_type_error(&state, "iterator must return an object");
             }
             state.result = Some(completion);
             state.stage = FromEntriesStage::AwaitDone;
@@ -307,7 +306,7 @@ pub(super) fn advance_from_entries(
             }
             state.result = None;
             state.entry = None;
-            call_from_entries_next(runtime, state, return_to, execution_budget)
+            call_from_entries_next(state, return_to, execution_budget)
         }
     }
 }
@@ -375,7 +374,7 @@ fn read_from_entries_property(
             let name = JsString::from_utf8(property_name)?;
             let pending =
                 property_exception_at(state.realm, state.origin.clone(), Some(&name), failure)?;
-            if state.next_acquired() {
+            if state.closes_on_abrupt() {
                 begin_from_entries_close(runtime, state, pending, return_to, execution_budget)
             } else {
                 Err(NativeFailure::Abrupt(pending))
@@ -385,7 +384,6 @@ fn read_from_entries_property(
 }
 
 fn call_from_entries_next(
-    runtime: &mut Runtime,
     mut state: FromEntriesContinuation,
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
@@ -394,13 +392,7 @@ fn call_from_entries_next(
         message: "fromEntries iterator advance has no retained next method",
     })?;
     let StoredValue::Function(next) = next else {
-        return close_from_entries_with_type_error(
-            runtime,
-            state,
-            "not a function",
-            return_to,
-            execution_budget,
-        );
+        return abrupt_from_entries_type_error(&state, "not a function");
     };
     execution_budget.charge_instructions(1)?;
     let receiver = state
@@ -539,7 +531,7 @@ pub(super) fn resume_from_entries_abrupt(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    if state.next_acquired() {
+    if state.closes_on_abrupt() {
         begin_from_entries_close(runtime, state, pending, return_to, execution_budget)
     } else {
         Err(NativeFailure::Abrupt(pending))
