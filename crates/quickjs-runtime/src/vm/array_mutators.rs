@@ -688,10 +688,14 @@ pub(super) fn advance_array_mutator(
 
 /// Plans the element moves each mutator performs.
 ///
-/// Planning up front is what lets one driver serve all six: the differences
+/// Planning up front is what lets one driver serve all seven: the differences
 /// between them are entirely in this table of source/destination pairs and in
 /// the final length, so the stepping, suspension, and hole handling are shared.
 /// A `from` of `u64::MAX` marks a write of a call argument rather than a move.
+#[expect(
+    clippy::too_many_lines,
+    reason = "each mutator's step plan is one arm of a single audited table, and splitting it would scatter the ordering contract"
+)]
 fn plan_moves(state: &mut ArrayMutatorContinuation) -> Result<(), NativeFailure> {
     let length = state.length;
     match state.mutator {

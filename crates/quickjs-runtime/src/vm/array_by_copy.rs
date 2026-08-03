@@ -512,11 +512,10 @@ fn invalid_array_index(
     let mut message = JsString::from_utf8("invalid array index: ")?;
     let mut digits = [0_u8; 20];
     let length = render_i64(index, &mut digits);
-    let rendered = std::str::from_utf8(&digits[..length]).map_err(|_| {
-        EngineFault::RuntimeInvariant {
+    let rendered =
+        std::str::from_utf8(&digits[..length]).map_err(|_| EngineFault::RuntimeInvariant {
             message: "an i64 rendering was not valid UTF-8",
-        }
-    })?;
+        })?;
     message = message.concat(&JsString::from_utf8(rendered)?)?;
     Ok(NativeFailure::Abrupt(PendingException {
         realm: state.realm,
@@ -534,13 +533,10 @@ fn render_i64(value: i64, buffer: &mut [u8; 20]) -> usize {
     let mut reversed = [0_u8; 20];
     let mut digits = 0;
     loop {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "a decimal digit is always below 10"
-        )]
-        {
-            reversed[digits] = b'0' + (magnitude % 10) as u8;
-        }
+        // A value taken modulo 10 is always below 10, so the conversion cannot
+        // truncate, which Clippy proves as well.
+        let digit = (magnitude % 10) as u8;
+        reversed[digits] = b'0' + digit;
         magnitude /= 10;
         digits = digits.saturating_add(1);
         if magnitude == 0 {

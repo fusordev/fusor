@@ -427,6 +427,31 @@ impl ArrayFlatten {
     }
 }
 
+/// Which sort a continuation is performing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArraySort {
+    Sort,
+    ToSorted,
+}
+
+impl ArraySort {
+    /// Returns the reported `length` of the installed function.
+    pub(crate) const fn arity(self) -> i32 {
+        // Both report 1, which the pinned oracle confirms.
+        match self {
+            Self::Sort | Self::ToSorted => 1,
+        }
+    }
+
+    /// Returns the property name this method is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Sort => "sort",
+            Self::ToSorted => "toSorted",
+        }
+    }
+}
+
 /// Which reduction a continuation is performing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArrayReduction {
@@ -788,6 +813,8 @@ pub(crate) enum NativeFunctionKind {
     /// One `Array.prototype` flattening method sharing the resumable
     /// worklist driver.
     ArrayPrototypeFlatten(ArrayFlatten),
+    /// One `Array.prototype` sort sharing the resumable merge driver.
+    ArrayPrototypeSort(ArraySort),
     ArrayConstructor,
     SymbolConstructor,
     SymbolPrototypeToString,

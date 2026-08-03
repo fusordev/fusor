@@ -29,21 +29,20 @@ use std::collections::TryReserveError;
 
 use super::{
     Arc, Arena, ArrayByCopy, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics,
-    ArrayMutator, ArrayReduction,
-    ArraySearch, ArrayState, Atom, AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics,
-    BoxedPrimitive, Context, ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId,
-    FunctionImplementation, HandleError, HandleKind, HashMap, HeapFunction, HeapObject,
-    HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString, NativeFunction,
-    NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord,
-    PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics,
-    RealmState, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
-    RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics, check_limit,
-    predefined_string, usize_to_u64,
+    ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayState, Atom, AtomError, AtomTable,
+    BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic,
+    ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation, HandleError,
+    HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
+    IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind, NumberFormat,
+    NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey,
+    PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, ReleaseMailbox,
+    Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue,
+    StringIntrinsics, StringMethod, SymbolIntrinsics, check_limit, predefined_string, usize_to_u64,
 };
 
 const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 123;
-const REALM_PROPERTY_COUNT: u64 = 413;
+const REALM_FUNCTION_COUNT: usize = 131;
+const REALM_PROPERTY_COUNT: u64 = 437;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -220,15 +219,19 @@ const ARRAY_SPLICE_ATOM_START: usize = ARRAY_REDUCTION_ATOM_START + ARRAY_REDUCT
 /// atoms.
 const ARRAY_BY_COPY_ATOM_START: usize = ARRAY_SPLICE_ATOM_START + 1;
 
-/// The `Array.prototype` change-by-copy methods this profile installs.
+/// The `Array.prototype` change-by-copy methods whose names must be interned.
 ///
-/// `with` and `toSpliced` report arity 2 and `toReversed` reports 0, which the
-/// pinned oracle confirms.
-const ARRAY_BY_COPY_METHODS: [ArrayByCopy; 3] = [
-    ArrayByCopy::With,
-    ArrayByCopy::ToReversed,
-    ArrayByCopy::ToSpliced,
-];
+/// `with` is excluded because it already has a predefined atom
+/// (`PredefinedAtom::With`), which [`ARRAY_PREDEFINED_BY_COPIES`] reuses;
+/// interning a duplicate breaks the atom table's rollback invariant.
+const ARRAY_BY_COPY_METHODS: [ArrayByCopy; 2] = [ArrayByCopy::ToReversed, ArrayByCopy::ToSpliced];
+
+/// The `Array.prototype` change-by-copy method that reuses a predefined atom.
+const ARRAY_PREDEFINED_BY_COPIES: [(PredefinedAtom, ArrayByCopy); 1] =
+    [(PredefinedAtom::With, ArrayByCopy::With)];
+
+/// The total number of installed change-by-copy methods.
+const ARRAY_BY_COPY_TOTAL: usize = ARRAY_BY_COPY_METHODS.len() + ARRAY_PREDEFINED_BY_COPIES.len();
 
 /// Index of the first `Array.prototype` flattening name in the dynamic atoms.
 const ARRAY_FLATTEN_ATOM_START: usize = ARRAY_BY_COPY_ATOM_START + ARRAY_BY_COPY_METHODS.len();
@@ -238,6 +241,14 @@ const ARRAY_FLATTEN_ATOM_START: usize = ARRAY_BY_COPY_ATOM_START + ARRAY_BY_COPY
 /// `flatMap` reports arity 1 and `flat` reports 0, which the pinned oracle
 /// confirms.
 const ARRAY_FLATTEN_METHODS: [ArrayFlatten; 2] = [ArrayFlatten::FlatMap, ArrayFlatten::Flat];
+
+/// Index of the first `Array.prototype` sort name in the dynamic atoms.
+const ARRAY_SORT_ATOM_START: usize = ARRAY_FLATTEN_ATOM_START + ARRAY_FLATTEN_METHODS.len();
+
+/// The `Array.prototype` sorts this profile installs.
+///
+/// Both report arity 1, which the pinned oracle confirms.
+const ARRAY_SORT_METHODS: [ArraySort; 2] = [ArraySort::Sort, ArraySort::ToSorted];
 
 /// The `Array.prototype` reductions this profile installs.
 const ARRAY_REDUCTION_METHODS: [ArrayReduction; 2] =
@@ -745,8 +756,9 @@ struct RealmRecords {
     array_callbacks: [ObjectRecord; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [ObjectRecord; ARRAY_REDUCTION_METHODS.len()],
     array_splice: ObjectRecord,
-    array_by_copies: [ObjectRecord; ARRAY_BY_COPY_METHODS.len()],
+    array_by_copies: [ObjectRecord; ARRAY_BY_COPY_TOTAL],
     array_flattens: [ObjectRecord; ARRAY_FLATTEN_METHODS.len()],
+    array_sorts: [ObjectRecord; ARRAY_SORT_METHODS.len()],
     array_is_array: ObjectRecord,
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
@@ -826,8 +838,9 @@ impl RealmRecords {
                     + ARRAY_CALLBACK_METHODS.len()
                     + ARRAY_REDUCTION_METHODS.len()
                     + 1
-                    + ARRAY_BY_COPY_METHODS.len()
-                    + ARRAY_FLATTEN_METHODS.len(),
+                    + ARRAY_BY_COPY_TOTAL
+                    + ARRAY_FLATTEN_METHODS.len()
+                    + ARRAY_SORT_METHODS.len(),
             )?,
             constructor: reserved_record(3)?,
             join: reserved_record(2)?,
@@ -882,6 +895,7 @@ impl RealmRecords {
             array_splice: reserved_record(2)?,
             array_by_copies: array_by_copy_records()?,
             array_flattens: array_flatten_records()?,
+            array_sorts: array_sort_records()?,
             array_is_array: reserved_record(2)?,
             array,
             iterators,
@@ -1016,8 +1030,9 @@ struct RealmGraph {
     array_callbacks: [FunctionId; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [FunctionId; ARRAY_REDUCTION_METHODS.len()],
     array_splice: FunctionId,
-    array_by_copies: [FunctionId; ARRAY_BY_COPY_METHODS.len()],
+    array_by_copies: [FunctionId; ARRAY_BY_COPY_TOTAL],
     array_flattens: [FunctionId; ARRAY_FLATTEN_METHODS.len()],
+    array_sorts: [FunctionId; ARRAY_SORT_METHODS.len()],
     array_is_array: FunctionId,
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
@@ -1033,6 +1048,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         debug_assert!(runtime.functions.remove(self.array_is_array).is_some());
+        for function in self.array_sorts.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
         for function in self.array_flattens.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
@@ -1318,6 +1336,7 @@ impl Runtime {
         );
         let array_by_copies = self.insert_array_by_copies(&base, records.array_by_copies);
         let array_flattens = self.insert_array_flattens(&base, records.array_flattens);
+        let array_sorts = self.insert_array_sorts(&base, records.array_sorts);
         let array_is_array = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -1345,6 +1364,7 @@ impl Runtime {
             array_splice,
             array_by_copies,
             array_flattens,
+            array_sorts,
             array_is_array,
             array,
             iterators,
@@ -1476,6 +1496,9 @@ impl Runtime {
                 interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
             }
             for method in ARRAY_FLATTEN_METHODS {
+                interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
+            }
+            for method in ARRAY_SORT_METHODS {
                 interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
             }
             Ok(())
@@ -1754,6 +1777,24 @@ impl Runtime {
         }
     }
 
+    /// Inserts one native function per `Array.prototype` sort.
+    fn insert_array_sorts(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; ARRAY_SORT_METHODS.len()],
+    ) -> [FunctionId; ARRAY_SORT_METHODS.len()] {
+        let mut inserted = [None; ARRAY_SORT_METHODS.len()];
+        for ((slot, method), record) in inserted.iter_mut().zip(ARRAY_SORT_METHODS).zip(records) {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::ArrayPrototypeSort(method),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every Array sort function was inserted"))
+    }
+
     /// Inserts one native function per `Array.prototype` flattening method.
     fn insert_array_flattens(
         &mut self,
@@ -1761,10 +1802,7 @@ impl Runtime {
         records: [ObjectRecord; ARRAY_FLATTEN_METHODS.len()],
     ) -> [FunctionId; ARRAY_FLATTEN_METHODS.len()] {
         let mut inserted = [None; ARRAY_FLATTEN_METHODS.len()];
-        for ((slot, method), record) in inserted
-            .iter_mut()
-            .zip(ARRAY_FLATTEN_METHODS)
-            .zip(records)
+        for ((slot, method), record) in inserted.iter_mut().zip(ARRAY_FLATTEN_METHODS).zip(records)
         {
             *slot = Some(self.insert_reserved_native(
                 base.realm,
@@ -1780,14 +1818,17 @@ impl Runtime {
     fn insert_array_by_copies(
         &mut self,
         base: &RealmBase,
-        records: [ObjectRecord; ARRAY_BY_COPY_METHODS.len()],
-    ) -> [FunctionId; ARRAY_BY_COPY_METHODS.len()] {
-        let mut inserted = [None; ARRAY_BY_COPY_METHODS.len()];
-        for ((slot, method), record) in inserted
-            .iter_mut()
-            .zip(ARRAY_BY_COPY_METHODS)
-            .zip(records)
-        {
+        records: [ObjectRecord; ARRAY_BY_COPY_TOTAL],
+    ) -> [FunctionId; ARRAY_BY_COPY_TOTAL] {
+        let mut inserted = [None; ARRAY_BY_COPY_TOTAL];
+        // The interned names come first, then the predefined one, which is the
+        // order the publication step walks.
+        let methods = ARRAY_BY_COPY_METHODS.into_iter().chain(
+            ARRAY_PREDEFINED_BY_COPIES
+                .into_iter()
+                .map(|(_, method)| method),
+        );
+        for ((slot, method), record) in inserted.iter_mut().zip(methods).zip(records) {
             *slot = Some(self.insert_reserved_native(
                 base.realm,
                 HeapReference::Function(base.function_prototype),
@@ -2916,26 +2957,37 @@ impl Runtime {
             self.append_function_identity(function, &name, arity, keys)?;
         }
 
-        for (method, (function, atom)) in ARRAY_BY_COPY_METHODS.into_iter().zip(
-            graph
-                .array_by_copies
-                .into_iter()
-                .zip(&graph.dynamic_atoms[ARRAY_BY_COPY_ATOM_START..]),
-        ) {
-            let atom = atom.clone();
-            let name = atom
-                .description()
-                .expect("interned Array by-copy name has a description")
-                .clone();
+        // The interned names come first, matching the insertion order, and the
+        // predefined `with` follows.
+        let by_copy_keys = ARRAY_BY_COPY_METHODS
+            .into_iter()
+            .zip(&graph.dynamic_atoms[ARRAY_BY_COPY_ATOM_START..])
+            .map(|(method, atom)| {
+                let atom = atom.clone();
+                let name = atom
+                    .description()
+                    .expect("interned Array by-copy name has a description")
+                    .clone();
+                (method, PropertyKey::from_validated_atom(atom), name)
+            })
+            .collect::<Vec<_>>();
+        let predefined_keys = ARRAY_PREDEFINED_BY_COPIES.map(|(atom, method)| {
+            (
+                method,
+                self.predefined_property_key(atom),
+                predefined_string(&self.atoms, atom),
+            )
+        });
+        for ((method, key, name), function) in by_copy_keys
+            .into_iter()
+            .chain(predefined_keys)
+            .zip(graph.array_by_copies)
+        {
             self.objects
                 .get_mut(graph.array.prototype)
                 .expect("new Array.prototype remains live")
                 .record
-                .append_data(
-                    PropertyKey::from_validated_atom(atom),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
+                .append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
             self.append_function_identity(function, &name, method.arity(), keys)?;
         }
 
@@ -2949,6 +3001,29 @@ impl Runtime {
             let name = atom
                 .description()
                 .expect("interned Array flatten name has a description")
+                .clone();
+            self.objects
+                .get_mut(graph.array.prototype)
+                .expect("new Array.prototype remains live")
+                .record
+                .append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            self.append_function_identity(function, &name, method.arity(), keys)?;
+        }
+
+        for (method, (function, atom)) in ARRAY_SORT_METHODS.into_iter().zip(
+            graph
+                .array_sorts
+                .into_iter()
+                .zip(&graph.dynamic_atoms[ARRAY_SORT_ATOM_START..]),
+        ) {
+            let atom = atom.clone();
+            let name = atom
+                .description()
+                .expect("interned Array sort name has a description")
                 .clone();
             self.objects
                 .get_mut(graph.array.prototype)
@@ -3430,6 +3505,16 @@ fn array_mutator_records() -> Result<[ObjectRecord; ARRAY_MUTATOR_METHODS.len()]
     Ok(records.map(|record| record.expect("every Array mutator record was reserved")))
 }
 
+/// Reserves one record per `Array.prototype` sort.
+fn array_sort_records() -> Result<[ObjectRecord; ARRAY_SORT_METHODS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; ARRAY_SORT_METHODS.len()] =
+        [const { None }; ARRAY_SORT_METHODS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Array sort record was reserved")))
+}
+
 /// Reserves one record per `Array.prototype` flattening method.
 fn array_flatten_records() -> Result<[ObjectRecord; ARRAY_FLATTEN_METHODS.len()], RuntimeError> {
     let mut records: [Option<ObjectRecord>; ARRAY_FLATTEN_METHODS.len()] =
@@ -3441,9 +3526,9 @@ fn array_flatten_records() -> Result<[ObjectRecord; ARRAY_FLATTEN_METHODS.len()]
 }
 
 /// Reserves one record per `Array.prototype` change-by-copy method.
-fn array_by_copy_records() -> Result<[ObjectRecord; ARRAY_BY_COPY_METHODS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; ARRAY_BY_COPY_METHODS.len()] =
-        [const { None }; ARRAY_BY_COPY_METHODS.len()];
+fn array_by_copy_records() -> Result<[ObjectRecord; ARRAY_BY_COPY_TOTAL], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; ARRAY_BY_COPY_TOTAL] =
+        [const { None }; ARRAY_BY_COPY_TOTAL];
     for slot in &mut records {
         *slot = Some(reserved_record(2)?);
     }

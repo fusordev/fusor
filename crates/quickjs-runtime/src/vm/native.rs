@@ -398,6 +398,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::ArraySort(state) => advance_array_sort(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
@@ -1493,6 +1500,19 @@ pub(super) fn dispatch_native_call_with_frames(
         // `flat` and `flatMap` walk an explicit worklist of sources; every
         // element read and every mapper call is a suspension point.
         NativeFunctionKind::ArrayPrototypeFlatten(method) => begin_array_flatten(
+            runtime,
+            method,
+            native.realm,
+            inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        // `sort` and `toSorted` collect, merge, and write back; every
+        // comparison is a user call or a conversion, so suspension is
+        // intrinsic.
+        NativeFunctionKind::ArrayPrototypeSort(method) => begin_array_sort(
             runtime,
             method,
             native.realm,

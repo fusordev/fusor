@@ -121,7 +121,9 @@ impl ArrayFlattenContinuation {
     /// Reports the traced roots this continuation retains.
     pub(crate) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         trace_stored_value_root(&self.receiver, mark);
-        mark(CollectionRoot::Heap(HeapReference::Object(self.destination)));
+        mark(CollectionRoot::Heap(HeapReference::Object(
+            self.destination,
+        )));
         for argument in &self.arguments {
             trace_stored_value_root(argument, mark);
         }

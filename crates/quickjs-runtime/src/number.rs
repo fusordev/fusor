@@ -214,6 +214,25 @@ impl JsNumber {
         left == right || (left.is_nan() && right.is_nan())
     }
 
+    /// Returns whether two Numbers share `QuickJS`'s exact `JSValue` bit pattern.
+    ///
+    /// This is the comparison upstream's `js_array_cmp_generic` performs with
+    /// `memcmp` before deciding a comparator call can be skipped
+    /// (`quickjs.c:43151`): the int32 and binary64 representations are
+    /// distinct tags, so `5` and `5.0` are not identical even though they
+    /// compare equal numerically, while two NaNs with the same payload are.
+    #[must_use]
+    pub(crate) fn same_bits(self, other: Self) -> bool {
+        match (self.0, other.0) {
+            (NumberRepr::Int(left), NumberRepr::Int(right)) => left == right,
+            (NumberRepr::Float(left), NumberRepr::Float(right)) => {
+                left.to_bits() == right.to_bits()
+            }
+            (NumberRepr::Int(_), NumberRepr::Float(_))
+            | (NumberRepr::Float(_), NumberRepr::Int(_)) => false,
+        }
+    }
+
     #[cfg(test)]
     const fn is_int32_optimized(self) -> bool {
         matches!(self.0, NumberRepr::Int(_))

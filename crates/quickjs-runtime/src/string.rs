@@ -287,6 +287,17 @@ impl JsString {
         CodeUnits::new(self)
     }
 
+    /// Returns whether two strings share one backing allocation.
+    ///
+    /// This is the identity upstream's `js_array_cmp_generic` observes with
+    /// `memcmp` before deciding a comparator call can be skipped
+    /// (`quickjs.c:43151`): two references to the same `JSString` compare
+    /// identical, while two equal strings with different allocations do not.
+    #[must_use]
+    pub(crate) fn shares_allocation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// Concatenates two strings.
     ///
     /// Short leaves are copied directly. Longer results use a depth-bounded
