@@ -495,6 +495,14 @@ Known intentional runtime differences:
   concatenation preserves lone surrogates, scans and output consume shared
   instruction fuel, and the constructor exposes the pinned
   `length,name,fromCharCode,fromCodePoint,raw,prototype` own-key order.
+- [x] Materialize publicly instantiated verified root functions with the same
+  `OrdinaryFunctionCreate`, `SetFunctionLength`, `SetFunctionName`, and
+  `MakeConstructor` surface already used for nested functions. Constructable
+  roots now expose exact `length,name,prototype` order and descriptors, own a
+  fresh `%Object.prototype%`-linked prototype whose `constructor` points back
+  to the function, and participate in aggregate heap/property preflight,
+  rollback, tracing, and reclamation without changing internal dynamic-Script
+  roots.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,

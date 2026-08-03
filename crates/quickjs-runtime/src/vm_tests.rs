@@ -4828,7 +4828,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(595))
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(599))
         .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
@@ -4850,8 +4850,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 595,
-            observed: 596,
+            limit: 599,
+            observed: 600,
         }
     ));
     let failed = runtime.usage();
@@ -6302,8 +6302,8 @@ fn bind_length_uses_the_exact_quickjs_number_rules() {
     let (bind, native) = function_prototype_bind_native(&mut runtime, realm_id);
     let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
 
-    // The instantiated root function carries no own name/length metadata, so
-    // the missing-property rule (QuickJS: no own `length` -> 0) applies.
+    // A public root carries its verified arity and source name just like every
+    // nested ordinary function.
     let bound = bind_target(
         &mut runtime,
         bind,
@@ -6312,11 +6312,11 @@ fn bind_length_uses_the_exact_quickjs_number_rules() {
         vec![StoredValue::Undefined],
     )
     .expect("plain bind");
-    assert_eq!(bound_own_length(&runtime, bound).as_f64(), 0.0);
+    assert_eq!(bound_own_length(&runtime, bound).as_f64(), 3.0);
     assert_eq!(
         bound_own_name(&runtime, bound),
-        "bound ",
-        "missing name becomes the empty string"
+        "bound target",
+        "the root's source name receives the bound prefix"
     );
 
     let set_target_length = |runtime: &mut Runtime, value: StoredValue| {

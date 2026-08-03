@@ -27,13 +27,135 @@
 
 use super::{
     Arc, AtomError, BytecodeFunction, CompilerExecutableKind, Context, DynamicFunctionScriptError,
-    ExceptionKind, ExecutionLimits, Function, FunctionImplementation, HeapFunction, HeapReference,
-    InstallError, InstalledCode, InstalledRoot, JsNumber, JsString, JsValue, ObjectRecord,
-    OrdinaryDynamicFunctionCompiler, PendingRootEnvironment, PredefinedAtom, PrimitiveValue,
-    RootPublication, RuntimeResource, RuntimeUsage, StoredValue, VerifiedBytecode,
+    ExceptionKind, ExecutionLimits, Function, FunctionId, FunctionImplementation, HeapFunction,
+    HeapObject, HeapReference, InstallError, InstalledCode, InstalledRoot, InstalledTemplate,
+    JsNumber, JsString, JsValue, ObjectId, ObjectRecord, OrdinaryDynamicFunctionCompiler,
+    PendingRootEnvironment, PredefinedAtom, PrimitiveValue, PropertyKey, PropertyLayout,
+    RootPublication, Runtime, RuntimeResource, RuntimeUsage, StoredValue, VerifiedBytecode,
     check_install_limit, global_declaration_error, preflight_opcodes, require_root_kind,
     usize_to_u64,
 };
+
+struct RootFunctionRecords {
+    function: ObjectRecord,
+    prototype: Option<ObjectRecord>,
+    property_count: u64,
+}
+
+fn append_root_data(
+    record: &mut ObjectRecord,
+    key: PropertyKey,
+    layout: PropertyLayout,
+    value: StoredValue,
+) -> Result<(), InstallError> {
+    record
+        .append_data(key, layout, value)
+        .map_err(|_| InstallError::AllocationFailed {
+            resource: RuntimeResource::ObjectProperties,
+            additional: 1,
+        })
+}
+
+fn build_root_function_records(
+    runtime: &Runtime,
+    authority: &VerifiedBytecode,
+    templates: &[InstalledTemplate],
+    publication: RootPublication,
+    function_prototype: FunctionId,
+    object_prototype: Option<ObjectId>,
+) -> Result<RootFunctionRecords, InstallError> {
+    let mut function = ObjectRecord::empty(Some(HeapReference::Function(function_prototype)));
+    if !publication.is_public() {
+        return Ok(RootFunctionRecords {
+            function,
+            prototype: None,
+            property_count: 0,
+        });
+    }
+
+    let root = authority.root();
+    let header = root.function().control_flow().function_header();
+    let has_prototype = header.flags().has_prototype();
+    let installed_index = usize::try_from(authority.root_id().get()).map_err(|_| {
+        InstallError::AuthorityInvariant {
+            message: "root template index is not representable",
+        }
+    })?;
+    let installed = templates
+        .get(installed_index)
+        .ok_or(InstallError::AuthorityInvariant {
+            message: "root template is absent from staged installation",
+        })?;
+    let name = root.metadata().function_name().map_or_else(
+        || Ok(JsString::empty()),
+        |index| {
+            installed
+                .atoms
+                .get(index.get() as usize)
+                .and_then(super::Atom::description)
+                .cloned()
+                .ok_or(InstallError::AuthorityInvariant {
+                    message: "root function name atom is absent",
+                })
+        },
+    )?;
+    let function_property_count = 2_usize + usize::from(has_prototype);
+    function
+        .try_reserve_data(function_property_count)
+        .map_err(|_| InstallError::AllocationFailed {
+            resource: RuntimeResource::ObjectProperties,
+            additional: function_property_count,
+        })?;
+    append_root_data(
+        &mut function,
+        runtime.predefined_property_key(PredefinedAtom::Length),
+        PropertyLayout::data(false, false, true),
+        StoredValue::Number(JsNumber::from_f64(f64::from(
+            header.defined_argument_count(),
+        ))),
+    )?;
+    append_root_data(
+        &mut function,
+        runtime.predefined_property_key(PredefinedAtom::Name),
+        PropertyLayout::data(false, false, true),
+        StoredValue::String(name),
+    )?;
+
+    let prototype = if has_prototype {
+        let object_prototype = object_prototype.ok_or(InstallError::AuthorityInvariant {
+            message: "constructable root has no Object.prototype intrinsic",
+        })?;
+        let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+        append_root_data(
+            &mut function,
+            prototype_key,
+            PropertyLayout::data(true, false, false),
+            StoredValue::Undefined,
+        )?;
+        let mut prototype = ObjectRecord::empty(Some(HeapReference::Object(object_prototype)));
+        prototype
+            .try_reserve_data(1)
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        append_root_data(
+            &mut prototype,
+            runtime.predefined_property_key(PredefinedAtom::Constructor),
+            PropertyLayout::data(true, false, true),
+            StoredValue::Undefined,
+        )?;
+        Some(prototype)
+    } else {
+        None
+    };
+
+    Ok(RootFunctionRecords {
+        function,
+        prototype,
+        property_count: usize_to_u64(function_property_count + usize::from(has_prototype)),
+    })
+}
 
 impl Context<'_> {
     /// Returns current logical usage without ending the exclusive context.
@@ -282,6 +404,31 @@ impl Context<'_> {
             self.runtime.limits.max_heap_functions,
             usize_to_u64(self.runtime.functions.len()).saturating_add(1),
         )?;
+        let root_header = authority.root().function().control_flow().function_header();
+        let root_has_prototype = publication.is_public() && root_header.flags().has_prototype();
+        let object_prototype = root_has_prototype
+            .then(|| self.runtime.realm_object_prototype(self.realm))
+            .transpose()
+            .map_err(|_| InstallError::AuthorityInvariant {
+                message: "constructor realm has no Object.prototype intrinsic",
+            })?;
+        let root_property_count = if publication.is_public() {
+            2_u64.saturating_add(2 * u64::from(root_has_prototype))
+        } else {
+            0
+        };
+        check_install_limit(
+            RuntimeResource::HeapObjects,
+            self.runtime.limits.max_heap_objects,
+            usize_to_u64(self.runtime.objects.len()).saturating_add(u64::from(root_has_prototype)),
+        )?;
+        check_install_limit(
+            RuntimeResource::ObjectProperties,
+            self.runtime.limits.max_object_properties,
+            self.runtime
+                .object_properties
+                .saturating_add(root_property_count),
+        )?;
         if publication.is_public() {
             check_install_limit(
                 RuntimeResource::PublicRoots,
@@ -316,6 +463,13 @@ impl Context<'_> {
                 resource: RuntimeResource::HeapFunctions,
                 additional: 1,
             })?;
+        self.runtime
+            .objects
+            .try_reserve(usize::from(root_has_prototype))
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: usize::from(root_has_prototype),
+            })?;
         if publication.is_public() {
             self.runtime.mailbox.try_reserve_root().map_err(|_| {
                 InstallError::AllocationFailed {
@@ -327,6 +481,23 @@ impl Context<'_> {
 
         let templates = match self.runtime.stage_templates(&authority) {
             Ok(templates) => templates,
+            Err(error) => {
+                if publication.is_public() {
+                    self.runtime.mailbox.cancel_reserved_root();
+                }
+                self.runtime.atoms.collect_dead();
+                return Err(error);
+            }
+        };
+        let mut root_records = match build_root_function_records(
+            self.runtime,
+            &authority,
+            &templates,
+            publication,
+            function_prototype,
+            object_prototype,
+        ) {
+            Ok(records) => records,
             Err(error) => {
                 if publication.is_public() {
                     self.runtime.mailbox.cancel_reserved_root();
@@ -349,6 +520,47 @@ impl Context<'_> {
             }
         };
 
+        let prototype_object = if let Some(record) = root_records.prototype.take() {
+            let Ok(object) = self
+                .runtime
+                .objects
+                .try_insert(HeapObject::ordinary(record))
+            else {
+                self.runtime
+                    .rollback_root_environment(self.realm, &root_environment);
+                if publication.is_public() {
+                    self.runtime.mailbox.cancel_reserved_root();
+                }
+                self.runtime.atoms.collect_dead();
+                return Err(InstallError::AllocationFailed {
+                    resource: RuntimeResource::HeapObjects,
+                    additional: 1,
+                });
+            };
+            let updated = root_records.function.replace_existing_data(
+                &self
+                    .runtime
+                    .predefined_property_key(PredefinedAtom::Prototype),
+                StoredValue::Object(object),
+            );
+            if !updated {
+                let removed = self.runtime.objects.remove(object);
+                debug_assert!(removed.is_some());
+                self.runtime
+                    .rollback_root_environment(self.realm, &root_environment);
+                if publication.is_public() {
+                    self.runtime.mailbox.cancel_reserved_root();
+                }
+                self.runtime.atoms.collect_dead();
+                return Err(InstallError::AuthorityInvariant {
+                    message: "constructable root lost its prototype property",
+                });
+            }
+            Some(object)
+        } else {
+            None
+        };
+
         let root_template = authority.root_id();
         let Ok(code) = self.runtime.code.try_insert(InstalledCode {
             authority,
@@ -356,6 +568,10 @@ impl Context<'_> {
             templates,
             live_functions: 1,
         }) else {
+            if let Some(object) = prototype_object {
+                let removed = self.runtime.objects.remove(object);
+                debug_assert!(removed.is_some());
+            }
             self.runtime
                 .rollback_root_environment(self.realm, &root_environment);
             if publication.is_public() {
@@ -374,11 +590,15 @@ impl Context<'_> {
                 template: root_template,
                 environment: root_bindings,
             }),
-            object: ObjectRecord::empty(Some(HeapReference::Function(function_prototype))),
+            object: root_records.function,
             public_roots: u32::from(publication.is_public()),
         }) else {
             let removed = self.runtime.code.remove(code);
             debug_assert!(removed.is_some());
+            if let Some(object) = prototype_object {
+                let removed = self.runtime.objects.remove(object);
+                debug_assert!(removed.is_some());
+            }
             self.runtime
                 .rollback_root_environment(self.realm, &root_environment);
             if publication.is_public() {
@@ -390,10 +610,45 @@ impl Context<'_> {
                 additional: 1,
             });
         };
+        if let Some(object) = prototype_object {
+            let constructor_key = self
+                .runtime
+                .predefined_property_key(PredefinedAtom::Constructor);
+            let updated = self
+                .runtime
+                .objects
+                .get_mut(object)
+                .is_some_and(|prototype| {
+                    prototype
+                        .record
+                        .replace_existing_data(&constructor_key, StoredValue::Function(root))
+                });
+            if !updated {
+                let removed = self.runtime.functions.remove(root);
+                debug_assert!(removed.is_some());
+                let removed = self.runtime.objects.remove(object);
+                debug_assert!(removed.is_some());
+                let removed = self.runtime.code.remove(code);
+                debug_assert!(removed.is_some());
+                self.runtime
+                    .rollback_root_environment(self.realm, &root_environment);
+                if publication.is_public() {
+                    self.runtime.mailbox.cancel_reserved_root();
+                }
+                self.runtime.atoms.collect_dead();
+                return Err(InstallError::AuthorityInvariant {
+                    message: "new root prototype lost its constructor property",
+                });
+            }
+        }
 
         self.runtime.installed_templates += functions;
         self.runtime.installed_atoms += atoms;
         self.runtime.installed_constants += constants;
+        self.runtime.object_properties = self
+            .runtime
+            .object_properties
+            .saturating_add(root_records.property_count);
         if publication.is_public() {
             self.runtime.public_roots += 1;
         }
