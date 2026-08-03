@@ -607,6 +607,16 @@ The atom deltas are the audit: a name that another intrinsic already interned
 must be reused rather than interned twice, so an unexpected atom delta means the
 new intrinsic broke the atom table's rollback invariant.
 
+A completed intrinsic surface is proved by comparing its own key listing against
+the oracle's rather than by reading the checklist. `Object` and `Reflect` both
+report byte-identical listings today:
+
+```console
+$ qjs -e 'print(Object.getOwnPropertyNames(Object).sort().join(","))'
+$ qjs -e 'print(Object.getOwnPropertyNames(Object.prototype).sort().join(","))'
+$ qjs -e 'print(Reflect.ownKeys(Reflect).map(String).sort().join(","))'
+```
+
 ## Engineering rules
 
 1. Preserve observable ECMAScript behavior, not QuickJS private representation.
