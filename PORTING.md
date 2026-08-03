@@ -101,6 +101,16 @@ incorrectly, so no script can observe a wrong result.
   being silently ignored. The reported `length` stays `2` to match the pinned
   oracle, because arity is part of the observable shape.
 
+Known intentional write-path differences:
+
+- `QJS-WRITE-001`: writing an element through a String primitive receiver
+  reports `TypeError: not an object`, where the pinned oracle boxes the
+  receiver and reports `TypeError: '0' is read-only` (for example
+  `Array.prototype.fill.call("abc", 0)`, and likewise `copyWithin`, `splice`,
+  and `sort`). Both reject the write with a `TypeError`, so the surface fails
+  closed; boxing primitives in the shared write path is deferred with the
+  remaining exotics.
+
 ### Compiler, bytecode, and execution
 
 - [x] Complete opcode metadata, checked codec/disassembly, typed operands,
@@ -302,17 +312,71 @@ incorrectly, so no script can observe a wrong result.
   overwritten before it is read: from the end when growing, from the front when
   shrinking. An absent `deleteCount` removes everything from `start` while an
   absent `start` removes nothing.
-- [ ] Remaining String/Number/Array method surface (`sort`, `flat`, `flatMap`,
-  `copyWithin`, `with`, `toSorted`, `toReversed`, `toSpliced`, and the
-  locale-dependent renderings), shape sharing/transition
-  interning, remaining exotics (arguments, Proxy), dense indexed storage,
-  deterministic finalization, and diagnostics.
 
 ### Built-ins and asynchronous semantics
 
 - [x] Initial Error family: Error, native Error subclasses, AggregateError,
   constructor/prototype graphs, causes, `Error.isError`, `toString`, iterator
   ordering/close behavior, and snapshotted engine-error stacks.
+- [x] `Array.prototype.copyWithin` as a planned sequence of `Move` steps in the
+  mutators' resumable driver: the length is read once with `ToLength`, the
+  destination, source, and end arguments convert in that order, and the count
+  `min(final - from, len - to)` saturates to an empty plan when negative, so
+  `[1,2,3].copyWithin(0,5)` is unchanged. An overlap with the source below the
+  destination is copied backward (`quickjs.c:43003-43004`), which the oracle
+  pins as `len|g1|s2:b|g0|s1:a|`, and an absent source is deleted at its
+  destination, so `[1,2,,5].copyWithin(1,2)` deletes index 1 while index 2
+  stays present. The receiver is returned and the length is never written
+  back.
+- [x] The change-by-copy methods `with`, `toReversed`, and `toSpliced` as one
+  resumable snapshot read: each source index is read with the pinned
+  `JS_TryGetPropertyInt64` shape (`quickjs.c:9115-9142`), which reports an
+  absent index as `undefined`, so the fresh result Array is dense rather than
+  sparse. `with` converts its index with `JS_ToInt64Sat`, which truncates and
+  saturates, and reports a rejected index after the negative adjustment
+  (`quickjs.c:41859-41868`), so `[1].with(1e20, 0)` is
+  `RangeError: invalid array index: 9223372036854775807`; the replaced index
+  itself is never read. `toReversed` reads descending because the pinned
+  source marks the order observable (`quickjs.c:42775`). `toSpliced` resolves
+  its window the way `splice` does but reports an over-long result as
+  `TypeError: invalid array length` (`quickjs.c:42932-42936`). `with` reuses
+  `PredefinedAtom::With` rather than interning a duplicate, which the atom
+  table's rollback invariant forbids.
+- [x] `Array.prototype.flat` and `flatMap` as an explicit worklist of source
+  frames replacing upstream's recursion in `JS_FlattenIntoArray`
+  (`quickjs.c:43014-43074`): sources read ascending, innermost first, holes
+  skipped so `[1,,[3]].flat()` has length `2`, and every read can enter a
+  getter. `flatMap` validates its mapper after the length read
+  (`quickjs.c:43086-43098`), calls it with `(element, index, source)` and the
+  `thisArg` receiver, and maps only the outermost source, so
+  `[1,2].flatMap(x=>[x,[x]])` flattens exactly one level. `flat`'s depth
+  converts with `JS_ToInt32Sat`, so `flat(1.9)` flattens one level while
+  `flat(NaN)` flattens none (`quickjs.c:43100-43103`). The destination is a
+  fresh base Array, the same `Symbol.species` narrowing `concat` and `splice`
+  already carry.
+- [x] `Array.prototype.sort` and `toSorted` as an iterative merge sort over
+  continuation state, replacing upstream's `rqsort` inside the comparator
+  callback (`quickjs.c:43196-43280`). The number and order of comparisons is
+  implementation-defined by ECMAScript and intentionally not pinned; the
+  outcome is, because every comparison falls back to the element's original
+  position (`quickjs.c:43187-43189`) and the sort is stable. `undefined`
+  never reaches the comparator and moves to the end; holes are skipped during
+  collection and deleted at the tail with upstream's throwing delete
+  (`could not delete property`), while `toSorted` reads holes as `undefined`
+  and answers a fresh dense Array. A non-Number comparator result converts
+  with `ToNumber` and `NaN` means `0`; the default comparison computes each
+  element's `ToString` at most once and compares UTF-16 code units. A pair
+  sharing one bit pattern skips the comparator call entirely
+  (`quickjs.c:43151-43153`), reproduced as `JsNumber::same_bits` and
+  `JsString::shares_allocation`, so a throwing comparator on `[5,5,5,5]` is
+  never invoked, and the write-back skips `Set` for an element that did not
+  move (`quickjs.c:43249-43251`).
+- [ ] Remaining String/Number/Array method surface (`String.prototype` case
+  conversions and `localeCompare`, the RegExp-dependent `match`, `matchAll`,
+  `replace`, `search`, and `split`, `normalize`, `String.raw`, and the
+  locale-dependent renderings), shape sharing/transition
+  interning, remaining exotics (arguments, Proxy), dense indexed storage,
+  deterministic finalization, and diagnostics.
 - [ ] Close Error compatibility gaps, then implement Object/Function/Reflect,
   Proxy, remaining built-ins, RegExp/Date/JSON, collections, binary data,
   Atomics, Unicode tables, promises, async functions/generators, weak
