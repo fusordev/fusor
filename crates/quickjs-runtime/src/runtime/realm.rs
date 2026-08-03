@@ -25,6 +25,7 @@
 
 //! Runtime construction and failure-atomic realm intrinsic graph publication.
 
+mod atoms;
 mod schema;
 mod validation;
 
@@ -32,7 +33,7 @@ use std::collections::TryReserveError;
 
 use super::{
     Arc, Arena, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics, ArrayMutator,
-    ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic, Atom, AtomError, AtomTable,
+    ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic, AtomError, AtomTable,
     BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic,
     ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation, GlobalNumericFunction,
     HandleError, HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
@@ -44,33 +45,15 @@ use super::{
     UriFunction, check_limit, predefined_string, usize_to_u64,
 };
 
+use atoms::{RealmAtomBindings, RealmAtomPlan};
+use schema::RealmNameId;
+
 const REALM_OBJECT_COUNT: usize = 23;
 const REALM_FUNCTION_COUNT: usize = 219;
 const REALM_PROPERTY_COUNT: u64 = 718;
-const CALL_ATOM_INDEX: usize = 0;
-const ENTRIES_ATOM_INDEX: usize = 1;
-const KEY_FOR_ATOM_INDEX: usize = 2;
-const DESCRIPTION_ATOM_INDEX: usize = 3;
-const IS_ERROR_ATOM_INDEX: usize = 4;
-const BIND_ATOM_INDEX: usize = 5;
-const SYMBOL_STATIC_ATOM_START: usize = 6;
-/// Index of the first `Object` static name in the realm's dynamic atom list.
-const OBJECT_STATIC_ATOM_START: usize =
-    SYMBOL_STATIC_ATOM_START + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len();
-
-/// Index of the first `BigInt` static name in the realm's dynamic atom list.
-///
-/// The `BigInt` statics are interned immediately after the `Object` statics, so
-/// this base is the end of that block.
-const BIGINT_STATIC_ATOM_START: usize = OBJECT_STATIC_ATOM_START + OBJECT_INTERNED_STATIC_COUNT;
 
 /// The `BigInt` static names that have no predefined atom.
 const BIGINT_INTERNED_STATICS: [&str; 2] = ["asIntN", "asUintN"];
-
-/// Index of the first `String.prototype` method name in the dynamic atom list.
-///
-/// The String methods are interned immediately after the `BigInt` statics.
-const STRING_METHOD_ATOM_START: usize = BIGINT_STATIC_ATOM_START + BIGINT_INTERNED_STATICS.len();
 
 /// The `String.prototype` methods this profile installs.
 ///
@@ -113,19 +96,6 @@ const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 28] = [
     StringPrototypeMethod::interned("localeCompare", StringMethod::LocaleCompare, 1),
 ];
 
-/// The number of `String.prototype` method names that must be interned.
-const STRING_INTERNED_METHOD_COUNT: usize = {
-    let mut count = 0;
-    let mut index = 0;
-    while index < STRING_PROTOTYPE_METHODS.len() {
-        if STRING_PROTOTYPE_METHODS[index].interned_name.is_some() {
-            count += 1;
-        }
-        index += 1;
-    }
-    count
-};
-
 /// One `String.prototype` method's name, implementation, and reported `length`.
 #[derive(Clone, Copy)]
 struct StringPrototypeMethod {
@@ -156,13 +126,6 @@ impl StringPrototypeMethod {
         }
     }
 }
-
-/// Index of the first `Number` static name in the realm's dynamic atom list.
-const NUMBER_STATIC_ATOM_START: usize = STRING_METHOD_ATOM_START + STRING_INTERNED_METHOD_COUNT;
-
-/// Index of the first `String` factory name in the realm's dynamic atom list.
-const STRING_FROM_ATOM_START: usize =
-    NUMBER_STATIC_ATOM_START + NUMBER_VALUE_STATICS.len() + NUMBER_PREDICATE_STATICS.len() + 1;
 
 /// The `Number` constructor's numeric value properties.
 ///
@@ -236,55 +199,11 @@ const NUMBER_FORMAT_METHODS: [NumberFormat; 3] = [
     NumberFormat::Precision,
 ];
 
-/// Index of the first `Number.prototype` rendering name in the dynamic atoms.
-const NUMBER_FORMAT_ATOM_START: usize = ARRAY_COPIER_ATOM_START + ARRAY_COPIER_METHODS.len();
-
-/// Index of the `Array.prototype.splice` name in the dynamic atoms.
-const ARRAY_SPLICE_ATOM_START: usize = ARRAY_REDUCTION_ATOM_START + ARRAY_REDUCTION_METHODS.len();
-
-/// Index of the realm-local `Reflect` global name.
-///
-/// Keeping it after every existing method name preserves all established
-/// dynamic-atom offsets while the reflection surface grows incrementally.
-const REFLECT_ATOM_INDEX: usize = ARRAY_SPLICE_ATOM_START + 1;
-
-/// Index of the realm-local `JSON.isRawJSON` method name.
-const JSON_IS_RAW_JSON_ATOM_INDEX: usize = REFLECT_ATOM_INDEX + 1;
-
-/// Index of the realm-local `JSON.parse` method name.
-const JSON_PARSE_ATOM_INDEX: usize = JSON_IS_RAW_JSON_ATOM_INDEX + 1;
-
-/// Index of the realm-local `JSON.stringify` method name.
-const JSON_STRINGIFY_ATOM_INDEX: usize = JSON_PARSE_ATOM_INDEX + 1;
-
-/// Index of the realm-local `parseFloat` name shared by the global function
-/// and `Number.parseFloat`.
-const PARSE_FLOAT_ATOM_INDEX: usize = JSON_STRINGIFY_ATOM_INDEX + 1;
-
-/// Index of the realm-local `parseInt` name shared by the global function and
-/// `Number.parseInt`.
-const PARSE_INT_ATOM_INDEX: usize = PARSE_FLOAT_ATOM_INDEX + 1;
-
-/// Index of the first realm-local URI function name.
-const URI_ATOM_START: usize = PARSE_INT_ATOM_INDEX + 1;
-
-/// Index of the first sorting method name, appended after existing realm atoms.
-const ARRAY_SORT_ATOM_START: usize = URI_ATOM_START + URI_FUNCTIONS.len();
-
 /// The stable sorting methods sharing `SortIndexedProperties`.
 const ARRAY_SORT_METHODS: [ArraySort; 2] = [ArraySort::Sort, ArraySort::ToSorted];
 
-/// Index of the first flattening method name, appended after sorting names.
-const ARRAY_FLATTEN_ATOM_START: usize = ARRAY_SORT_ATOM_START + ARRAY_SORT_METHODS.len();
-
 /// The methods sharing the resumable `FlattenIntoArray` implementation.
 const ARRAY_FLATTEN_METHODS: [ArrayFlatten; 2] = [ArrayFlatten::Flat, ArrayFlatten::FlatMap];
-
-/// Index of the first `%Math%` method name in the realm's dynamic atoms.
-const MATH_METHOD_ATOM_START: usize = ARRAY_FLATTEN_ATOM_START + ARRAY_FLATTEN_METHODS.len();
-
-/// Index of the first `%Math%` numeric constant name in the realm's atoms.
-const MATH_CONSTANT_ATOM_START: usize = MATH_METHOD_ATOM_START + MathMethod::ALL.len();
 
 /// The `%Math%` numeric constants in specification and pinned-oracle order.
 ///
@@ -309,35 +228,9 @@ const LOCALE_STRING_METHODS: [LocaleStringMethod; 4] = [
     LocaleStringMethod::Array,
 ];
 
-/// Exact number of non-predefined atoms interned by one realm transaction.
-const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
-    + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len()
-    + OBJECT_INTERNED_STATIC_COUNT
-    + BIGINT_INTERNED_STATICS.len()
-    + STRING_INTERNED_METHOD_COUNT
-    + NUMBER_VALUE_STATICS.len()
-    + NUMBER_PREDICATE_STATICS.len()
-    + 1
-    + STRING_FROM_STATICS.len()
-    + ARRAY_SEARCH_METHODS.len()
-    + OBJECT_PROTOTYPE_REFLECTION.len()
-    + ARRAY_MUTATOR_METHODS.len()
-    + ARRAY_COPIER_METHODS.len()
-    + NUMBER_FORMAT_METHODS.len()
-    + ARRAY_CALLBACK_METHODS.len()
-    + ARRAY_REDUCTION_METHODS.len()
-    + ARRAY_SORT_METHODS.len()
-    + ARRAY_FLATTEN_METHODS.len()
-    + MathMethod::ALL.len()
-    + MATH_CONSTANTS.len()
-    + 11;
-
 /// The `Array.prototype` reductions this profile installs.
 const ARRAY_REDUCTION_METHODS: [ArrayReduction; 2] =
     [ArrayReduction::Reduce, ArrayReduction::ReduceRight];
-
-/// Index of the first `Array.prototype` reduction name in the dynamic atoms.
-const ARRAY_REDUCTION_ATOM_START: usize = ARRAY_CALLBACK_ATOM_START + ARRAY_CALLBACK_METHODS.len();
 
 /// The `Array.prototype` callback methods this profile installs.
 ///
@@ -353,9 +246,6 @@ const ARRAY_CALLBACK_METHODS: [ArrayCallback; 9] = [
     ArrayCallback::FindLast,
     ArrayCallback::FindLastIndex,
 ];
-
-/// Index of the first `Array.prototype` callback name in the dynamic atoms.
-const ARRAY_CALLBACK_ATOM_START: usize = NUMBER_FORMAT_ATOM_START + NUMBER_FORMAT_METHODS.len();
 
 /// The `Array.prototype` copying methods whose names must be interned.
 ///
@@ -378,9 +268,6 @@ const ARRAY_PREDEFINED_COPIERS: [(PredefinedAtom, ArrayCopier); 2] = [
 /// The total number of installed copying methods.
 const ARRAY_COPIER_TOTAL: usize = ARRAY_COPIER_METHODS.len() + ARRAY_PREDEFINED_COPIERS.len();
 
-/// Index of the first `Array.prototype` copier name in the dynamic atoms.
-const ARRAY_COPIER_ATOM_START: usize = ARRAY_MUTATOR_ATOM_START + ARRAY_MUTATOR_METHODS.len();
-
 /// The `Array.prototype` mutators this profile installs.
 ///
 /// Each name and arity comes from the pinned oracle, which reports `2` for
@@ -395,10 +282,6 @@ const ARRAY_MUTATOR_METHODS: [ArrayMutator; 7] = [
     ArrayMutator::Fill,
     ArrayMutator::CopyWithin,
 ];
-
-/// Index of the first `Array.prototype` mutator name in the dynamic atoms.
-const ARRAY_MUTATOR_ATOM_START: usize =
-    OBJECT_REFLECTION_ATOM_START + OBJECT_PROTOTYPE_REFLECTION.len();
 
 /// The `Object.prototype` reflection methods.
 ///
@@ -423,9 +306,6 @@ const OBJECT_PROTOTYPE_REFLECTION: [(&str, NativeFunctionKind, i32); 3] = [
     ),
 ];
 
-/// Index of the first `Object.prototype` reflection name in the dynamic atoms.
-const OBJECT_REFLECTION_ATOM_START: usize = ARRAY_SEARCH_ATOM_START + ARRAY_SEARCH_METHODS.len();
-
 /// The `Array.prototype` searches this profile installs.
 ///
 /// Each reports arity 1, which the pinned oracle confirms.
@@ -434,9 +314,6 @@ const ARRAY_SEARCH_METHODS: [(&str, ArraySearch); 3] = [
     ("lastIndexOf", ArraySearch::LastIndexOf),
     ("includes", ArraySearch::Includes),
 ];
-
-/// Index of the first `Array.prototype` search name in the dynamic atom list.
-const ARRAY_SEARCH_ATOM_START: usize = STRING_FROM_ATOM_START + STRING_FROM_STATICS.len();
 
 /// The admitted `Object` constructor static methods in `QuickJS` property-table
 /// order.
@@ -483,7 +360,7 @@ const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 23] = [
     ObjectStaticMethod::interned("groupBy", NativeFunctionKind::ObjectGroupBy, 2),
     ObjectStaticMethod::predefined(PredefinedAtom::Keys, NativeFunctionKind::ObjectKeys, 1),
     ObjectStaticMethod::predefined(PredefinedAtom::Values, NativeFunctionKind::ObjectValues, 1),
-    ObjectStaticMethod::dynamic(ENTRIES_ATOM_INDEX, NativeFunctionKind::ObjectEntries, 1),
+    ObjectStaticMethod::realm_name(RealmNameId::Entries, NativeFunctionKind::ObjectEntries, 1),
     ObjectStaticMethod::predefined(
         PredefinedAtom::IsExtensible,
         NativeFunctionKind::ObjectIsExtensible,
@@ -514,27 +391,13 @@ const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 23] = [
     ObjectStaticMethod::interned("hasOwn", NativeFunctionKind::ObjectHasOwn, 2),
 ];
 
-/// The number of `Object` statics whose names must be interned at realm
-/// construction because they have no predefined atom.
-const OBJECT_INTERNED_STATIC_COUNT: usize = {
-    let mut count = 0;
-    let mut index = 0;
-    while index < OBJECT_STATIC_METHODS.len() {
-        if OBJECT_STATIC_METHODS[index].interned_name.is_some() {
-            count += 1;
-        }
-        index += 1;
-    }
-    count
-};
-
 /// One `Object` static method's name, implementation, and reported `length`.
 #[derive(Clone, Copy)]
 struct ObjectStaticMethod {
     /// The predefined atom for this name, when one exists.
     predefined_name: Option<PredefinedAtom>,
-    /// A realm dynamic atom already interned for another intrinsic name.
-    dynamic_atom_index: Option<usize>,
+    /// A Realm-local atom already declared by another intrinsic name.
+    realm_name: Option<RealmNameId>,
     /// The literal name to intern when no predefined atom exists.
     interned_name: Option<&'static str>,
     kind: NativeFunctionKind,
@@ -545,7 +408,7 @@ impl ObjectStaticMethod {
     const fn predefined(name: PredefinedAtom, kind: NativeFunctionKind, length: i32) -> Self {
         Self {
             predefined_name: Some(name),
-            dynamic_atom_index: None,
+            realm_name: None,
             interned_name: None,
             kind,
             length,
@@ -555,17 +418,17 @@ impl ObjectStaticMethod {
     const fn interned(name: &'static str, kind: NativeFunctionKind, length: i32) -> Self {
         Self {
             predefined_name: None,
-            dynamic_atom_index: None,
+            realm_name: None,
             interned_name: Some(name),
             kind,
             length,
         }
     }
 
-    const fn dynamic(index: usize, kind: NativeFunctionKind, length: i32) -> Self {
+    const fn realm_name(name: RealmNameId, kind: NativeFunctionKind, length: i32) -> Self {
         Self {
             predefined_name: None,
-            dynamic_atom_index: Some(index),
+            realm_name: Some(name),
             interned_name: None,
             kind,
             length,
@@ -1249,7 +1112,7 @@ impl RealmBase {
 
 struct RealmGraph {
     base: RealmBase,
-    dynamic_atoms: Vec<Atom>,
+    dynamic_atoms: RealmAtomBindings,
     errors: ErrorIntrinsics,
     boolean: PrimitiveIntrinsicGraph,
     number: PrimitiveIntrinsicGraph,
@@ -1401,9 +1264,7 @@ impl RealmGraph {
             debug_assert!(runtime.objects.remove(object).is_some());
         }
         self.base.rollback(runtime);
-        for atom in self.dynamic_atoms.into_iter().rev() {
-            runtime.atoms.rollback_interned_string(atom);
-        }
+        self.dynamic_atoms.rollback(&mut runtime.atoms);
     }
 }
 
@@ -1460,8 +1321,9 @@ impl Runtime {
 
         let keys = RealmKeys::new(&self.atoms);
         let names = RealmNames::try_new(&self.atoms)?;
+        let atom_plan = RealmAtomPlan::try_new(&names)?;
         let records = RealmRecords::try_new(&keys.length)?;
-        let graph = self.build_realm_graph(records, &names)?;
+        let graph = self.build_realm_graph(records, &atom_plan)?;
 
         if self
             .publish_realm_properties(&graph, &keys, &names)
@@ -1583,9 +1445,9 @@ impl Runtime {
     fn build_realm_graph(
         &mut self,
         records: RealmRecords,
-        names: &RealmNames,
+        atom_plan: &RealmAtomPlan<'_>,
     ) -> Result<RealmGraph, RuntimeError> {
-        let dynamic_atoms = self.intern_realm_dynamic_atoms(names)?;
+        let dynamic_atoms = self.intern_realm_atom_plan(atom_plan)?;
         let base = self.insert_realm_base(records.base);
 
         let errors = self.insert_error_intrinsics(&base, records.errors);
@@ -1690,148 +1552,6 @@ impl Runtime {
             json,
             math,
         })
-    }
-
-    /// Interns every realm-local atom that has no predefined identity.
-    ///
-    /// The list order is the transaction's contract: the `Symbol` statics
-    /// follow the fixed leading names, the interned `Object` statics follow
-    /// those, and the `String.prototype` method names come last, which is what
-    /// `OBJECT_STATIC_ATOM_START` and `STRING_METHOD_ATOM_START` index. A failure at
-    /// any point rolls back every atom interned so far, so the runtime observes
-    /// no partial state.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one flat interning transaction keeps the dynamic atom list's order, which every ATOM_START index depends on, auditable in a single place"
-    )]
-    fn intern_realm_dynamic_atoms(
-        &mut self,
-        names: &RealmNames,
-    ) -> Result<Vec<Atom>, RuntimeError> {
-        let mut dynamic_atoms = Vec::new();
-        if dynamic_atoms
-            .try_reserve_exact(REALM_DYNAMIC_ATOM_COUNT)
-            .is_err()
-        {
-            return Err(allocation_failed(
-                RuntimeResource::ObjectProperties,
-                REALM_DYNAMIC_ATOM_COUNT,
-            ));
-        }
-
-        let leading = [
-            &names.call,
-            &names.entries,
-            &names.key_for,
-            &names.description,
-            &names.is_error,
-            &names.bind,
-        ];
-        let symbol_statics = DYNAMIC_SYMBOL_STATIC_PROPERTIES.map(|(name, _)| name);
-        let object_statics = OBJECT_STATIC_METHODS
-            .into_iter()
-            .filter_map(|method| method.interned_name);
-        let string_methods = STRING_PROTOTYPE_METHODS
-            .into_iter()
-            .filter_map(|method| method.interned_name);
-        let number_statics = NUMBER_VALUE_STATICS
-            .into_iter()
-            .map(|(name, _)| name)
-            .chain(NUMBER_PREDICATE_STATICS.into_iter().map(|(name, _)| name));
-
-        let intern = |atoms: &mut AtomTable,
-                      collected: &mut Vec<Atom>,
-                      name: &JsString|
-         -> Result<(), RuntimeError> {
-            let atom = atoms.intern_string(name)?;
-            collected.push(atom);
-            Ok(())
-        };
-
-        let interned = |atoms: &mut AtomTable,
-                        collected: &mut Vec<Atom>,
-                        literal: &str|
-         -> Result<(), RuntimeError> {
-            let name = JsString::from_utf8(literal).map_err(AtomError::from)?;
-            intern(atoms, collected, &name)
-        };
-
-        let outcome = (|| -> Result<(), RuntimeError> {
-            for name in leading {
-                intern(&mut self.atoms, &mut dynamic_atoms, name)?;
-            }
-            for literal in symbol_statics {
-                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
-            }
-            for literal in object_statics {
-                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
-            }
-            for literal in BIGINT_INTERNED_STATICS {
-                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
-            }
-            for literal in string_methods {
-                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
-            }
-            for literal in number_statics {
-                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
-            }
-            interned(&mut self.atoms, &mut dynamic_atoms, "isArray")?;
-            for (literal, _) in STRING_FROM_STATICS {
-                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
-            }
-            for (literal, _) in ARRAY_SEARCH_METHODS {
-                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
-            }
-            for (literal, _, _) in OBJECT_PROTOTYPE_REFLECTION {
-                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
-            }
-            for mutator in ARRAY_MUTATOR_METHODS {
-                interned(&mut self.atoms, &mut dynamic_atoms, mutator.name())?;
-            }
-            for copier in ARRAY_COPIER_METHODS {
-                interned(&mut self.atoms, &mut dynamic_atoms, copier.name())?;
-            }
-            for format in NUMBER_FORMAT_METHODS {
-                interned(&mut self.atoms, &mut dynamic_atoms, format.name())?;
-            }
-            for method in ARRAY_CALLBACK_METHODS {
-                interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
-            }
-            for reduction in ARRAY_REDUCTION_METHODS {
-                interned(&mut self.atoms, &mut dynamic_atoms, reduction.name())?;
-            }
-            interned(&mut self.atoms, &mut dynamic_atoms, "splice")?;
-            intern(&mut self.atoms, &mut dynamic_atoms, &names.reflect)?;
-            intern(&mut self.atoms, &mut dynamic_atoms, &names.is_raw_json)?;
-            intern(&mut self.atoms, &mut dynamic_atoms, &names.parse)?;
-            intern(&mut self.atoms, &mut dynamic_atoms, &names.stringify)?;
-            interned(&mut self.atoms, &mut dynamic_atoms, "parseFloat")?;
-            interned(&mut self.atoms, &mut dynamic_atoms, "parseInt")?;
-            for (literal, _) in URI_FUNCTIONS {
-                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
-            }
-            for method in ARRAY_SORT_METHODS {
-                interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
-            }
-            for method in ARRAY_FLATTEN_METHODS {
-                interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
-            }
-            for method in MathMethod::ALL {
-                interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
-            }
-            for (name, _) in MATH_CONSTANTS {
-                interned(&mut self.atoms, &mut dynamic_atoms, name)?;
-            }
-            Ok(())
-        })();
-        if let Err(error) = outcome {
-            for atom in dynamic_atoms.into_iter().rev() {
-                self.atoms.rollback_interned_string(atom);
-            }
-            return Err(error);
-        }
-        debug_assert_eq!(dynamic_atoms.len(), REALM_DYNAMIC_ATOM_COUNT);
-        Ok(dynamic_atoms)
     }
 
     /// Inserts one reserved native function per `Object` static method.
@@ -2898,8 +2618,9 @@ impl Runtime {
         keys: &RealmKeys,
         names: &RealmNames,
     ) -> Result<(), TryReserveError> {
-        let reflect_key =
-            PropertyKey::from_validated_atom(graph.dynamic_atoms[REFLECT_ATOM_INDEX].clone());
+        let reflect_key = PropertyKey::from_validated_atom(
+            graph.dynamic_atoms.atom(RealmNameId::Reflect).clone(),
+        );
         let method_keys =
             ReflectMethod::ALL.map(|method| self.predefined_property_key(method.predefined_atom()));
         {
@@ -2940,13 +2661,14 @@ impl Runtime {
         names: &RealmNames,
     ) -> Result<(), TryReserveError> {
         let is_raw_json_key = PropertyKey::from_validated_atom(
-            graph.dynamic_atoms[JSON_IS_RAW_JSON_ATOM_INDEX].clone(),
+            graph.dynamic_atoms.atom(RealmNameId::JsonIsRawJson).clone(),
         );
-        let parse_key =
-            PropertyKey::from_validated_atom(graph.dynamic_atoms[JSON_PARSE_ATOM_INDEX].clone());
+        let parse_key = PropertyKey::from_validated_atom(
+            graph.dynamic_atoms.atom(RealmNameId::JsonParse).clone(),
+        );
         let raw_json_key = self.predefined_property_key(PredefinedAtom::RawJson);
         let stringify_key = PropertyKey::from_validated_atom(
-            graph.dynamic_atoms[JSON_STRINGIFY_ATOM_INDEX].clone(),
+            graph.dynamic_atoms.atom(RealmNameId::JsonStringify).clone(),
         );
         let json = self
             .objects
@@ -3000,26 +2722,32 @@ impl Runtime {
         keys: &RealmKeys,
         names: &RealmNames,
     ) -> Result<(), TryReserveError> {
-        let method_atoms = &graph.dynamic_atoms
-            [MATH_METHOD_ATOM_START..MATH_METHOD_ATOM_START + MathMethod::ALL.len()];
         {
             let record = &mut self
                 .objects
                 .get_mut(graph.math.object)
                 .expect("new Math object remains live")
                 .record;
-            for (atom, function) in method_atoms.iter().cloned().zip(graph.math.methods) {
+            for (method, function) in MathMethod::ALL.into_iter().zip(graph.math.methods) {
                 record.append_data(
-                    PropertyKey::from_validated_atom(atom),
+                    PropertyKey::from_validated_atom(
+                        graph
+                            .dynamic_atoms
+                            .atom(RealmNameId::MathMethod(method))
+                            .clone(),
+                    ),
                     METHOD_PROPERTY,
                     StoredValue::Function(function),
                 )?;
             }
-            let constant_atoms = &graph.dynamic_atoms
-                [MATH_CONSTANT_ATOM_START..MATH_CONSTANT_ATOM_START + MATH_CONSTANTS.len()];
-            for (atom, (_, bits)) in constant_atoms.iter().cloned().zip(MATH_CONSTANTS) {
+            for (name, bits) in MATH_CONSTANTS {
                 record.append_data(
-                    PropertyKey::from_validated_atom(atom),
+                    PropertyKey::from_validated_atom(
+                        graph
+                            .dynamic_atoms
+                            .atom(RealmNameId::MathConstant(name))
+                            .clone(),
+                    ),
                     FROZEN_PROPERTY,
                     StoredValue::Number(JsNumber::from_f64(f64::from_bits(bits))),
                 )?;
@@ -3030,11 +2758,8 @@ impl Runtime {
                 StoredValue::String(names.math.clone()),
             )?;
         }
-        for ((method, function), atom) in MathMethod::ALL
-            .into_iter()
-            .zip(graph.math.methods)
-            .zip(method_atoms)
-        {
+        for (method, function) in MathMethod::ALL.into_iter().zip(graph.math.methods) {
+            let atom = graph.dynamic_atoms.atom(RealmNameId::MathMethod(method));
             let name = atom
                 .description()
                 .expect("interned Math method name has a description")
@@ -3104,19 +2829,21 @@ impl Runtime {
         graph: &RealmGraph,
         keys: &RealmKeys,
     ) -> Result<(), TryReserveError> {
-        let predicate_atom_start = NUMBER_STATIC_ATOM_START + NUMBER_VALUE_STATICS.len();
-        let atoms = [
-            graph.dynamic_atoms[predicate_atom_start + 2].clone(),
-            graph.dynamic_atoms[predicate_atom_start + 3].clone(),
-            graph.dynamic_atoms[PARSE_FLOAT_ATOM_INDEX].clone(),
-            graph.dynamic_atoms[PARSE_INT_ATOM_INDEX].clone(),
-        ];
-
-        for (((kind, length), function), atom) in GLOBAL_NUMERIC_FUNCTIONS
+        for ((kind, length), function) in GLOBAL_NUMERIC_FUNCTIONS
             .into_iter()
             .zip(graph.global_numeric_functions)
-            .zip(atoms)
         {
+            let atom_id = match kind {
+                GlobalNumericFunction::IsFinite => {
+                    RealmNameId::NumberPredicate(NumberPredicate::IsFinite)
+                }
+                GlobalNumericFunction::IsNaN => {
+                    RealmNameId::NumberPredicate(NumberPredicate::IsNaN)
+                }
+                GlobalNumericFunction::ParseFloat => RealmNameId::ParseFloat,
+                GlobalNumericFunction::ParseInt => RealmNameId::ParseInt,
+            };
+            let atom = graph.dynamic_atoms.atom(atom_id).clone();
             let name = atom
                 .description()
                 .expect("global numeric function name has a description")
@@ -3152,12 +2879,8 @@ impl Runtime {
         graph: &RealmGraph,
         keys: &RealmKeys,
     ) -> Result<(), TryReserveError> {
-        for (((_, _), function), atom) in URI_FUNCTIONS
-            .into_iter()
-            .zip(graph.uri_functions)
-            .zip(&graph.dynamic_atoms[URI_ATOM_START..])
-        {
-            let atom = atom.clone();
+        for ((_, kind), function) in URI_FUNCTIONS.into_iter().zip(graph.uri_functions) {
+            let atom = graph.dynamic_atoms.atom(RealmNameId::Uri(kind)).clone();
             let name = atom
                 .description()
                 .expect("URI function name has a description")
@@ -3217,8 +2940,9 @@ impl Runtime {
         self.append_function_identity(errors.to_string, &names.to_string, 0, keys)?;
         self.append_function_identity(errors.is_error, &names.is_error, 1, keys)?;
 
-        let is_error_key =
-            PropertyKey::from_validated_atom(graph.dynamic_atoms[IS_ERROR_ATOM_INDEX].clone());
+        let is_error_key = PropertyKey::from_validated_atom(
+            graph.dynamic_atoms.atom(RealmNameId::IsError).clone(),
+        );
         for kind in ErrorIntrinsicKind::ALL {
             let intrinsic = errors.intrinsic(kind);
             let length = if kind == ErrorIntrinsicKind::AggregateError {
@@ -3311,7 +3035,9 @@ impl Runtime {
                 Some(graph.base.throw_type_error),
             )?;
             record.append_data(
-                PropertyKey::from_validated_atom(graph.dynamic_atoms[CALL_ATOM_INDEX].clone()),
+                PropertyKey::from_validated_atom(
+                    graph.dynamic_atoms.atom(RealmNameId::Call).clone(),
+                ),
                 METHOD_PROPERTY,
                 StoredValue::Function(graph.base.function_call),
             )?;
@@ -3321,7 +3047,9 @@ impl Runtime {
                 StoredValue::Function(graph.base.function_apply),
             )?;
             record.append_data(
-                PropertyKey::from_validated_atom(graph.dynamic_atoms[BIND_ATOM_INDEX].clone()),
+                PropertyKey::from_validated_atom(
+                    graph.dynamic_atoms.atom(RealmNameId::Bind).clone(),
+                ),
                 METHOD_PROPERTY,
                 StoredValue::Function(graph.base.function_bind),
             )?;
@@ -3391,7 +3119,6 @@ impl Runtime {
         // Keeping this order makes `[[OwnPropertyKeys]]` match the pinned
         // constructor shape while retaining the specification descriptors.
         self.append_function_identity(graph.base.object_constructor, &names.object, 1, keys)?;
-        let mut interned = OBJECT_STATIC_ATOM_START;
         for (method, function) in OBJECT_STATIC_METHODS
             .into_iter()
             .zip(graph.base.object_statics)
@@ -3401,16 +3128,18 @@ impl Runtime {
                     self.predefined_property_key(atom),
                     predefined_string(&self.atoms, atom),
                 )
-            } else if let Some(index) = method.dynamic_atom_index {
-                let atom = graph.dynamic_atoms[index].clone();
+            } else if let Some(id) = method.realm_name {
+                let atom = graph.dynamic_atoms.atom(id).clone();
                 let name = atom
                     .description()
                     .expect("shared dynamic Object static name has a description")
                     .clone();
                 (PropertyKey::from_validated_atom(atom), name)
             } else {
-                let atom = graph.dynamic_atoms[interned].clone();
-                interned += 1;
+                let atom = graph
+                    .dynamic_atoms
+                    .atom(RealmNameId::ObjectStatic(method.kind))
+                    .clone();
                 let name = atom
                     .description()
                     .expect("interned Object static name has a description")
@@ -3517,14 +3246,14 @@ impl Runtime {
         graph: &RealmGraph,
         keys: &RealmKeys,
     ) -> Result<(), TryReserveError> {
-        for ((_, _, length), (function, atom)) in OBJECT_PROTOTYPE_REFLECTION.into_iter().zip(
-            graph
-                .base
-                .object_reflection
-                .into_iter()
-                .zip(&graph.dynamic_atoms[OBJECT_REFLECTION_ATOM_START..]),
-        ) {
-            let atom = atom.clone();
+        for ((_, kind, length), function) in OBJECT_PROTOTYPE_REFLECTION
+            .into_iter()
+            .zip(graph.base.object_reflection)
+        {
+            let atom = graph
+                .dynamic_atoms
+                .atom(RealmNameId::ObjectPrototypeMethod(kind))
+                .clone();
             let name = atom
                 .description()
                 .expect("interned Object reflection name has a description")
@@ -3552,7 +3281,6 @@ impl Runtime {
         graph: &RealmGraph,
         keys: &RealmKeys,
     ) -> Result<(), TryReserveError> {
-        let mut interned = STRING_METHOD_ATOM_START;
         for (method, function) in STRING_PROTOTYPE_METHODS
             .into_iter()
             .zip(graph.string_methods)
@@ -3563,8 +3291,10 @@ impl Runtime {
                     predefined_string(&self.atoms, atom),
                 )
             } else {
-                let atom = graph.dynamic_atoms[interned].clone();
-                interned += 1;
+                let atom = graph
+                    .dynamic_atoms
+                    .atom(RealmNameId::StringMethod(method.method))
+                    .clone();
                 let name = atom
                     .description()
                     .expect("interned String method name has a description")
@@ -3606,10 +3336,11 @@ impl Runtime {
                     StoredValue::Number(JsNumber::from_f64(f64::from_bits(bits))),
                 )?;
         }
-        let mut interned = NUMBER_STATIC_ATOM_START;
-        for (_, bits) in NUMBER_VALUE_STATICS {
-            let atom = graph.dynamic_atoms[interned].clone();
-            interned += 1;
+        for (name, bits) in NUMBER_VALUE_STATICS {
+            let atom = graph
+                .dynamic_atoms
+                .atom(RealmNameId::NumberValue(name))
+                .clone();
             self.functions
                 .get_mut(graph.number.constructor)
                 .expect("new Number constructor remains live")
@@ -3620,12 +3351,14 @@ impl Runtime {
                     StoredValue::Number(JsNumber::from_f64(f64::from_bits(bits))),
                 )?;
         }
-        for (_, function) in NUMBER_PREDICATE_STATICS
+        for ((_, predicate), function) in NUMBER_PREDICATE_STATICS
             .into_iter()
             .zip(graph.number_predicates)
         {
-            let atom = graph.dynamic_atoms[interned].clone();
-            interned += 1;
+            let atom = graph
+                .dynamic_atoms
+                .atom(RealmNameId::NumberPredicate(predicate))
+                .clone();
             let name = atom
                 .description()
                 .expect("interned Number static name has a description")
@@ -3642,7 +3375,7 @@ impl Runtime {
             self.append_function_identity(function, &name, 1, keys)?;
         }
 
-        let atom = graph.dynamic_atoms[interned].clone();
+        let atom = graph.dynamic_atoms.atom(RealmNameId::ArrayIsArray).clone();
         let name = atom
             .description()
             .expect("interned Array.isArray name has a description")
@@ -3676,12 +3409,14 @@ impl Runtime {
             self.append_function_identity(function, &name, method.length(), keys)?;
         }
 
-        for ((_, function), atom) in STRING_FROM_STATICS
+        for ((_, method), function) in STRING_FROM_STATICS
             .into_iter()
             .zip(graph.string_from_statics)
-            .zip(&graph.dynamic_atoms[STRING_FROM_ATOM_START..])
         {
-            let atom = atom.clone();
+            let atom = graph
+                .dynamic_atoms
+                .atom(RealmNameId::StringStatic(method))
+                .clone();
             let name = atom
                 .description()
                 .expect("interned String factory name has a description")
@@ -3698,12 +3433,11 @@ impl Runtime {
             self.append_function_identity(function, &name, 1, keys)?;
         }
 
-        for ((_, function), atom) in ARRAY_SEARCH_METHODS
-            .into_iter()
-            .zip(graph.array_searches)
-            .zip(&graph.dynamic_atoms[ARRAY_SEARCH_ATOM_START..])
-        {
-            let atom = atom.clone();
+        for ((_, search), function) in ARRAY_SEARCH_METHODS.into_iter().zip(graph.array_searches) {
+            let atom = graph
+                .dynamic_atoms
+                .atom(RealmNameId::ArraySearch(search))
+                .clone();
             let name = atom
                 .description()
                 .expect("interned Array search name has a description")
@@ -3720,13 +3454,11 @@ impl Runtime {
             self.append_function_identity(function, &name, 1, keys)?;
         }
 
-        for (mutator, (function, atom)) in ARRAY_MUTATOR_METHODS.into_iter().zip(
-            graph
-                .array_mutators
-                .into_iter()
-                .zip(&graph.dynamic_atoms[ARRAY_MUTATOR_ATOM_START..]),
-        ) {
-            let atom = atom.clone();
+        for (mutator, function) in ARRAY_MUTATOR_METHODS.into_iter().zip(graph.array_mutators) {
+            let atom = graph
+                .dynamic_atoms
+                .atom(RealmNameId::ArrayMutator(mutator))
+                .clone();
             let name = atom
                 .description()
                 .expect("interned Array mutator name has a description")
@@ -3747,9 +3479,11 @@ impl Runtime {
         // predefined `concat` follows.
         let copier_keys = ARRAY_COPIER_METHODS
             .into_iter()
-            .zip(&graph.dynamic_atoms[ARRAY_COPIER_ATOM_START..])
-            .map(|(copier, atom)| {
-                let atom = atom.clone();
+            .map(|copier| {
+                let atom = graph
+                    .dynamic_atoms
+                    .atom(RealmNameId::ArrayCopier(copier))
+                    .clone();
                 let name = atom
                     .description()
                     .expect("interned Array copier name has a description")
@@ -3777,12 +3511,11 @@ impl Runtime {
             self.append_function_identity(function, &name, copier.arity(), keys)?;
         }
 
-        for (function, atom) in graph
-            .array_sorts
-            .into_iter()
-            .zip(&graph.dynamic_atoms[ARRAY_SORT_ATOM_START..])
-        {
-            let atom = atom.clone();
+        for (method, function) in ARRAY_SORT_METHODS.into_iter().zip(graph.array_sorts) {
+            let atom = graph
+                .dynamic_atoms
+                .atom(RealmNameId::ArraySort(method))
+                .clone();
             let name = atom
                 .description()
                 .expect("interned Array sort name has a description")
@@ -3799,13 +3532,11 @@ impl Runtime {
             self.append_function_identity(function, &name, 1, keys)?;
         }
 
-        for ((function, method), atom) in graph
-            .array_flattens
-            .into_iter()
-            .zip(ARRAY_FLATTEN_METHODS)
-            .zip(&graph.dynamic_atoms[ARRAY_FLATTEN_ATOM_START..])
-        {
-            let atom = atom.clone();
+        for (method, function) in ARRAY_FLATTEN_METHODS.into_iter().zip(graph.array_flattens) {
+            let atom = graph
+                .dynamic_atoms
+                .atom(RealmNameId::ArrayFlatten(method))
+                .clone();
             let name = atom
                 .description()
                 .expect("interned Array flatten name has a description")
@@ -3822,12 +3553,11 @@ impl Runtime {
             self.append_function_identity(function, &name, method.arity(), keys)?;
         }
 
-        for (function, atom) in graph
-            .number_formats
-            .into_iter()
-            .zip(&graph.dynamic_atoms[NUMBER_FORMAT_ATOM_START..])
-        {
-            let atom = atom.clone();
+        for (method, function) in NUMBER_FORMAT_METHODS.into_iter().zip(graph.number_formats) {
+            let atom = graph
+                .dynamic_atoms
+                .atom(RealmNameId::NumberFormat(method))
+                .clone();
             let name = atom
                 .description()
                 .expect("interned Number format name has a description")
@@ -3846,25 +3576,23 @@ impl Runtime {
 
         // Every callback method and reduction reports arity 1; `splice` reports
         // 2, which the pinned oracle confirms.
-        let callback_arities = graph
-            .array_callbacks
+        let callback_arities = ARRAY_CALLBACK_METHODS
             .into_iter()
-            .zip(&graph.dynamic_atoms[ARRAY_CALLBACK_ATOM_START..])
-            .map(|(function, atom)| (function, atom, 1))
+            .zip(graph.array_callbacks)
+            .map(|(method, function)| (function, RealmNameId::ArrayCallback(method), 1))
             .chain(
-                graph
-                    .array_reductions
+                ARRAY_REDUCTION_METHODS
                     .into_iter()
-                    .zip(&graph.dynamic_atoms[ARRAY_REDUCTION_ATOM_START..])
-                    .map(|(function, atom)| (function, atom, 1)),
+                    .zip(graph.array_reductions)
+                    .map(|(method, function)| (function, RealmNameId::ArrayReduction(method), 1)),
             )
             .chain(std::iter::once((
                 graph.array_splice,
-                &graph.dynamic_atoms[ARRAY_SPLICE_ATOM_START],
+                RealmNameId::ArraySplice,
                 2,
             )));
-        for (function, atom, arity) in callback_arities {
-            let atom = atom.clone();
+        for (function, atom_id, arity) in callback_arities {
+            let atom = graph.dynamic_atoms.atom(atom_id).clone();
             let name = atom
                 .description()
                 .expect("interned Array callback name has a description")
@@ -3893,7 +3621,7 @@ impl Runtime {
     fn publish_bigint_intrinsic_properties(
         &mut self,
         graph: &BigIntIntrinsicGraph,
-        dynamic_atoms: &[Atom],
+        dynamic_atoms: &RealmAtomBindings,
         keys: &RealmKeys,
         names: &RealmNames,
     ) -> Result<(), TryReserveError> {
@@ -3935,10 +3663,15 @@ impl Runtime {
         self.append_function_identity(graph.to_string, &names.to_string, 0, keys)?;
         self.append_function_identity(graph.value_of, &names.value_of, 0, keys)?;
         {
-            let signed_key =
-                PropertyKey::from_validated_atom(dynamic_atoms[BIGINT_STATIC_ATOM_START].clone());
+            let signed_key = PropertyKey::from_validated_atom(
+                dynamic_atoms
+                    .atom(RealmNameId::BigIntStatic(NativeFunctionKind::BigIntAsIntN))
+                    .clone(),
+            );
             let unsigned_key = PropertyKey::from_validated_atom(
-                dynamic_atoms[BIGINT_STATIC_ATOM_START + 1].clone(),
+                dynamic_atoms
+                    .atom(RealmNameId::BigIntStatic(NativeFunctionKind::BigIntAsUintN))
+                    .clone(),
             );
             let record = &mut self
                 .functions
@@ -4042,8 +3775,9 @@ impl Runtime {
             )?;
         self.append_function_identity(iterators.array_iterator_next, &names.next, 0, keys)?;
 
-        let entries =
-            PropertyKey::from_validated_atom(graph.dynamic_atoms[ENTRIES_ATOM_INDEX].clone());
+        let entries = PropertyKey::from_validated_atom(
+            graph.dynamic_atoms.atom(RealmNameId::Entries).clone(),
+        );
         self.append_object_methods(
             graph.array.prototype,
             [
@@ -4094,8 +3828,9 @@ impl Runtime {
         keys: &RealmKeys,
         names: &RealmNames,
     ) -> Result<(), TryReserveError> {
-        let description_key =
-            PropertyKey::from_validated_atom(graph.dynamic_atoms[DESCRIPTION_ATOM_INDEX].clone());
+        let description_key = PropertyKey::from_validated_atom(
+            graph.dynamic_atoms.atom(RealmNameId::Description).clone(),
+        );
         {
             let record = &mut self
                 .objects
@@ -4131,58 +3866,7 @@ impl Runtime {
             )?;
         }
 
-        {
-            let key_for_key =
-                PropertyKey::from_validated_atom(graph.dynamic_atoms[KEY_FOR_ATOM_INDEX].clone());
-            let record = &mut self
-                .functions
-                .get_mut(symbol.constructor)
-                .expect("new Symbol constructor remains live")
-                .object;
-            record.append_data(
-                keys.prototype.clone(),
-                CONSTRUCTOR_PROTOTYPE_PROPERTY,
-                StoredValue::Object(symbol.prototype),
-            )?;
-            record.append_data(
-                keys.length.clone(),
-                IDENTITY_PROPERTY,
-                StoredValue::Number(JsNumber::from_i32(0)),
-            )?;
-            record.append_data(
-                keys.name.clone(),
-                IDENTITY_PROPERTY,
-                StoredValue::String(names.symbol.clone()),
-            )?;
-            record.append_data(
-                keys.for_key.clone(),
-                METHOD_PROPERTY,
-                StoredValue::Function(symbol.symbol_for),
-            )?;
-            record.append_data(
-                key_for_key,
-                METHOD_PROPERTY,
-                StoredValue::Function(symbol.key_for),
-            )?;
-            for (index, ((_, symbol_atom), name_atom)) in DYNAMIC_SYMBOL_STATIC_PROPERTIES
-                .iter()
-                .zip(&graph.dynamic_atoms[SYMBOL_STATIC_ATOM_START..])
-                .enumerate()
-            {
-                if index == 6 {
-                    record.append_data(
-                        keys.split.clone(),
-                        FROZEN_PROPERTY,
-                        StoredValue::Symbol(self.atoms.predefined(PredefinedAtom::SymbolSplit)),
-                    )?;
-                }
-                record.append_data(
-                    PropertyKey::from_validated_atom(name_atom.clone()),
-                    FROZEN_PROPERTY,
-                    StoredValue::Symbol(self.atoms.predefined(*symbol_atom)),
-                )?;
-            }
-        }
+        self.publish_symbol_constructor_properties(symbol, graph, keys, names)?;
         for (function, name, length) in [
             (symbol.to_string, &names.to_string, 0),
             (symbol.value_of, &names.value_of, 0),
@@ -4192,6 +3876,67 @@ impl Runtime {
             (symbol.key_for, &names.key_for, 1),
         ] {
             self.append_function_identity(function, name, length, keys)?;
+        }
+        Ok(())
+    }
+
+    fn publish_symbol_constructor_properties(
+        &mut self,
+        symbol: &SymbolIntrinsicGraph,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        let key_for_key =
+            PropertyKey::from_validated_atom(graph.dynamic_atoms.atom(RealmNameId::KeyFor).clone());
+        let record = &mut self
+            .functions
+            .get_mut(symbol.constructor)
+            .expect("new Symbol constructor remains live")
+            .object;
+        record.append_data(
+            keys.prototype.clone(),
+            CONSTRUCTOR_PROTOTYPE_PROPERTY,
+            StoredValue::Object(symbol.prototype),
+        )?;
+        record.append_data(
+            keys.length.clone(),
+            IDENTITY_PROPERTY,
+            StoredValue::Number(JsNumber::from_i32(0)),
+        )?;
+        record.append_data(
+            keys.name.clone(),
+            IDENTITY_PROPERTY,
+            StoredValue::String(names.symbol.clone()),
+        )?;
+        record.append_data(
+            keys.for_key.clone(),
+            METHOD_PROPERTY,
+            StoredValue::Function(symbol.symbol_for),
+        )?;
+        record.append_data(
+            key_for_key,
+            METHOD_PROPERTY,
+            StoredValue::Function(symbol.key_for),
+        )?;
+        for (index, (_, symbol_atom)) in DYNAMIC_SYMBOL_STATIC_PROPERTIES.iter().enumerate() {
+            if index == 6 {
+                record.append_data(
+                    keys.split.clone(),
+                    FROZEN_PROPERTY,
+                    StoredValue::Symbol(self.atoms.predefined(PredefinedAtom::SymbolSplit)),
+                )?;
+            }
+            record.append_data(
+                PropertyKey::from_validated_atom(
+                    graph
+                        .dynamic_atoms
+                        .atom(RealmNameId::SymbolStatic(*symbol_atom))
+                        .clone(),
+                ),
+                FROZEN_PROPERTY,
+                StoredValue::Symbol(self.atoms.predefined(*symbol_atom)),
+            )?;
         }
         Ok(())
     }

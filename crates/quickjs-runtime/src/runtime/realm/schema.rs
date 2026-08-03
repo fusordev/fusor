@@ -64,6 +64,7 @@ pub(in crate::runtime) enum RealmNameId {
     JsonStringify,
     ParseFloat,
     ParseInt,
+    SymbolStatic(PredefinedAtom),
     Uri(UriFunction),
     ObjectStatic(NativeFunctionKind),
     BigIntStatic(NativeFunctionKind),
@@ -79,6 +80,7 @@ pub(in crate::runtime) enum RealmNameId {
     ArrayCallback(ArrayCallback),
     ArrayReduction(ArrayReduction),
     ArraySplice,
+    ArrayIsArray,
     ArraySort(ArraySort),
     ArrayFlatten(ArrayFlatten),
     MathMethod(MathMethod),
@@ -98,7 +100,9 @@ pub(in crate::runtime) enum IntrinsicKeySpec {
     /// A predefined atom whose namespace is String.
     PredefinedString(PredefinedAtom),
     /// A string name interned by this Realm transaction.
-    RealmName(RealmNameId),
+    InternedString(RealmNameId),
+    /// A name whose [`super::JsString`] is built as part of Realm setup.
+    RealmCreatedName(RealmNameId),
     /// A predefined atom whose namespace is Symbol.
     WellKnownSymbol(PredefinedAtom),
     /// An integer-indexed own property.
