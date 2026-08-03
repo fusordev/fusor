@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use oxc_ast::{
     AstKind,
@@ -47,12 +47,13 @@ use quickjs_frontend::{
 use crate::storage::{
     BindingId, CaptureSource, CompilationUnitKind, DeclarationKind, DeclarationPolicy, Executable,
     ExecutableId, ExecutableKind, InitializationPolicy, NativeReferenceId, ReferenceAccess,
-    StoragePlacement, StoragePlan, UnresolvedGlobalId, WritePolicy,
+    StoragePlacement, UnresolvedGlobalId, WritePolicy,
 };
 
 mod artifacts;
 mod context;
 mod error;
+mod layouts;
 
 pub use artifacts::{
     CompiledClosureSource, CompiledClosureVariable, CompiledConstant, CompiledFunction,
@@ -61,6 +62,10 @@ pub use artifacts::{
 };
 pub use context::{CompilationContext, CompilationExecutable};
 pub use error::{LeafCompilationError, UnsupportedLeafFeature};
+use layouts::{
+    ArgumentSlot, FrameLayout, FrameLayoutInput, FrameSlot, FunctionTreeLayout,
+    FunctionTreeLayoutInput, FunctionTreeLayoutSeed, FunctionTreeLayoutSeedInput,
+};
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
     fn compile_subtree_with_all_limits(
@@ -278,10 +283,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     }
 
     fn function_tree_layout(&self) -> Result<FunctionTreeLayout, LeafCompilationError> {
-        let mut layout = FunctionTreeLayout::new(
-            &self.planned.plan,
-            self.unit.goal() == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function),
-        )?;
+        let seed = FunctionTreeLayoutSeed::new(FunctionTreeLayoutSeedInput {
+            plan: &self.planned.plan,
+            allow_realm_globals: self.unit.goal()
+                == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function),
+        })?;
+        let mut function_declarations =
+            vec![None; self.planned.plan.bindings().len()].into_boxed_slice();
         for executable in self.planned.plan.executables() {
             let node_id = self
                 .planned
@@ -316,11 +324,20 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     span: Some(identifier.span),
                 });
             }
-            layout.record_function_declaration(binding, executable.id())?;
+            let target = function_declarations.get_mut(binding.index()).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "function declaration binding indexes instantiation layout",
+                    span: None,
+                },
+            )?;
+            *target = Some(executable.id());
         }
-        let constant_pools = self.compiled_constant_pools(&layout)?;
-        layout.install_constant_pools(constant_pools)?;
-        Ok(layout)
+        let constant_pools = self.compiled_constant_pools(&seed)?;
+        FunctionTreeLayout::new(FunctionTreeLayoutInput {
+            seed,
+            constant_pools,
+            function_declarations,
+        })
     }
 
     fn validate_function(
@@ -330,7 +347,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         limits: VerificationLimits,
     ) -> Result<ValidatedFunction, LeafCompilationError> {
         let (executable, function, form) = self.selected_ordinary_function(executable_id)?;
-        let layout = FrameLayout::new(&self.planned.plan, executable_id)?;
+        let layout = FrameLayout::new(FrameLayoutInput::new(&self.planned.plan, executable_id))?;
         let body = function
             .body
             .as_ref()
@@ -430,8 +447,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         limits: VerificationLimits,
     ) -> Result<ValidatedFunction, LeafCompilationError> {
         let (executable, program) = self.selected_dynamic_function_script(executable_id)?;
-        let mut layout = FrameLayout::new(&self.planned.plan, executable_id)?;
-        let completion = layout.push_internal_local()?;
+        let layout = FrameLayout::new(
+            FrameLayoutInput::new(&self.planned.plan, executable_id).with_internal_locals(1),
+        )?;
+        let completion = layout.internal_local(0)?;
         let mut flow = PlannedControlFlow::new(limits);
         let constants = tree_layout.constant_pool(executable_id)?;
         let planning = FunctionPlanningContext {
@@ -497,7 +516,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
 
     fn compiled_constant_pools(
         &self,
-        tree_layout: &FunctionTreeLayout,
+        tree_layout: &FunctionTreeLayoutSeed,
     ) -> Result<Box<[CompiledConstantPool]>, LeafCompilationError> {
         let executables = self.planned.plan.executables();
         let mut candidates = (0..executables.len())
@@ -553,7 +572,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
 
     fn record_metadata_atom_candidates(
         &self,
-        tree_layout: &FunctionTreeLayout,
+        tree_layout: &FunctionTreeLayoutSeed,
         candidates: &mut [Vec<CompiledMetadataAtomCandidate>],
     ) -> Result<(), LeafCompilationError> {
         for executable in self.planned.plan.executables() {
@@ -9698,16 +9717,6 @@ where
 }
 
 #[derive(Clone, Copy)]
-struct ArgumentSlot(u16);
-
-#[derive(Clone, Copy)]
-enum FrameSlot {
-    Argument(ArgumentSlot),
-    Local(LocalSlot),
-    Capture(u16),
-}
-
-#[derive(Clone, Copy)]
 enum LoweredReference {
     Frame {
         binding: BindingId,
@@ -9767,748 +9776,6 @@ impl ScopeEntryInitialization {
                 ..
             } => (2, *slot),
         }
-    }
-}
-
-struct RealmGlobalBinding {
-    name: Arc<str>,
-    first_span: Span,
-    policy: CompilerBindingPolicy,
-    declaration: Option<BindingId>,
-}
-
-struct RealmGlobalLayout {
-    bindings: Box<[RealmGlobalBinding]>,
-    by_binding: Box<[Option<RealmGlobalId>]>,
-    by_unresolved: Box<[Option<RealmGlobalId>]>,
-    import_ranges: Box<[Range<usize>]>,
-    imports: Box<[RealmGlobalId]>,
-}
-
-struct RealmGlobalLayoutBuilder {
-    bindings: Vec<RealmGlobalBinding>,
-    by_name: HashMap<Arc<str>, RealmGlobalId>,
-    by_binding: Vec<Option<RealmGlobalId>>,
-    by_unresolved: Vec<Option<RealmGlobalId>>,
-    needs: Vec<Vec<RealmGlobalId>>,
-}
-
-impl RealmGlobalLayoutBuilder {
-    fn new(plan: &StoragePlan) -> Self {
-        Self {
-            bindings: Vec::new(),
-            by_name: HashMap::new(),
-            by_binding: vec![None; plan.bindings().len()],
-            by_unresolved: vec![None; plan.unresolved_globals().len()],
-            needs: (0..plan.executables().len()).map(|_| Vec::new()).collect(),
-        }
-    }
-
-    fn collect_declarations(&mut self, plan: &StoragePlan) -> Result<(), LeafCompilationError> {
-        for binding in plan.bindings() {
-            match binding.placement() {
-                StoragePlacement::GlobalObject => {
-                    self.collect_declaration(plan, binding)?;
-                }
-                StoragePlacement::GlobalLexical => {
-                    return unsupported(
-                        UnsupportedLeafFeature::GlobalEnvironment,
-                        binding
-                            .declaration_spans()
-                            .first()
-                            .copied()
-                            .unwrap_or_default(),
-                    );
-                }
-                StoragePlacement::Argument { .. }
-                | StoragePlacement::Local
-                | StoragePlacement::ModuleLocal
-                | StoragePlacement::ModuleImport => {}
-            }
-        }
-        Ok(())
-    }
-
-    fn collect_declaration(
-        &mut self,
-        plan: &StoragePlan,
-        binding: &crate::storage::BindingStorage,
-    ) -> Result<(), LeafCompilationError> {
-        let first_span = binding.declaration_spans().first().copied().ok_or(
-            LeafCompilationError::SemanticInvariant {
-                invariant: "constructor-realm declaration retains a source span",
-                span: None,
-            },
-        )?;
-        let supported_policy = matches!(
-            (binding.policy().kind(), binding.policy().initialization()),
-            (
-                DeclarationKind::Var,
-                InitializationPolicy::UndefinedAtInstantiation
-            ) | (
-                DeclarationKind::Function,
-                InitializationPolicy::FunctionAtInstantiation
-            )
-        );
-        if !supported_policy
-            || binding.policy().writes() != WritePolicy::Mutable
-            || binding.policy().has_temporal_dead_zone()
-        {
-            return unsupported(UnsupportedLeafFeature::GlobalEnvironment, first_span);
-        }
-        let owner = plan.executable(binding.executable()).ok_or(
-            LeafCompilationError::InvalidExecutable {
-                executable: binding.executable(),
-            },
-        )?;
-        if binding.executable().index() != 0 || owner.parent().is_some() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "constructor-realm declaration belongs to the dynamic Script root",
-                span: Some(first_span),
-            });
-        }
-
-        let name: Arc<str> = Arc::from(binding.name());
-        if self.by_name.contains_key(&name) {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "one declared constructor-realm binding per name",
-                span: Some(first_span),
-            });
-        }
-        let id = self.push_binding(RealmGlobalBinding {
-            name: Arc::clone(&name),
-            first_span,
-            policy: verified_storage_policy(binding)?,
-            declaration: Some(binding.id()),
-        })?;
-        self.by_name.insert(name, id);
-        let mapping = self.by_binding.get_mut(binding.id().index()).ok_or(
-            LeafCompilationError::SemanticInvariant {
-                invariant: "binding identity indexes its realm-global mapping",
-                span: Some(first_span),
-            },
-        )?;
-        if mapping.replace(id).is_some() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "one realm-global mapping per declared binding",
-                span: Some(first_span),
-            });
-        }
-        self.push_need(binding.executable(), id)
-    }
-
-    fn collect_unresolved(&mut self, plan: &StoragePlan) -> Result<(), LeafCompilationError> {
-        for reference in plan.unresolved_globals() {
-            let name: Arc<str> = Arc::from(reference.name());
-            let id = if let Some(&id) = self.by_name.get(&name) {
-                id
-            } else {
-                let id = self.push_binding(RealmGlobalBinding {
-                    name: Arc::clone(&name),
-                    first_span: reference.span(),
-                    policy: constructor_realm_lookup_policy(),
-                    declaration: None,
-                })?;
-                self.by_name.insert(name, id);
-                id
-            };
-            let mapping = self.by_unresolved.get_mut(reference.id().index()).ok_or(
-                LeafCompilationError::SemanticInvariant {
-                    invariant: "unresolved global identity indexes its realm-global mapping",
-                    span: Some(reference.span()),
-                },
-            )?;
-            if mapping.replace(id).is_some() {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "one realm-global mapping per unresolved reference",
-                    span: Some(reference.span()),
-                });
-            }
-            self.push_need(reference.executable(), id)?;
-        }
-        Ok(())
-    }
-
-    fn collect_resolved_needs(&mut self, plan: &StoragePlan) -> Result<(), LeafCompilationError> {
-        for reference in plan.resolved_references() {
-            let Some(global) = self
-                .by_binding
-                .get(reference.binding().index())
-                .copied()
-                .flatten()
-            else {
-                continue;
-            };
-            self.push_need(reference.executable(), global)?;
-        }
-        Ok(())
-    }
-
-    fn push_binding(
-        &mut self,
-        binding: RealmGlobalBinding,
-    ) -> Result<RealmGlobalId, LeafCompilationError> {
-        let raw = u32::try_from(self.bindings.len()).map_err(|_| {
-            LeafCompilationError::CapacityExceeded {
-                domain: "constructor-realm global names",
-            }
-        })?;
-        let id = RealmGlobalId(raw);
-        self.bindings.push(binding);
-        Ok(id)
-    }
-
-    fn push_need(
-        &mut self,
-        executable: ExecutableId,
-        global: RealmGlobalId,
-    ) -> Result<(), LeafCompilationError> {
-        self.needs
-            .get_mut(executable.index())
-            .ok_or(LeafCompilationError::InvalidExecutable { executable })?
-            .push(global);
-        Ok(())
-    }
-
-    fn finish(mut self, plan: &StoragePlan) -> Result<RealmGlobalLayout, LeafCompilationError> {
-        for index in (0..self.needs.len()).rev() {
-            self.needs[index].sort_unstable();
-            self.needs[index].dedup();
-            let Some(parent) = plan.executables()[index].parent() else {
-                continue;
-            };
-            let inherited = self.needs[index].clone();
-            self.needs
-                .get_mut(parent.index())
-                .ok_or(LeafCompilationError::InvalidExecutable { executable: parent })?
-                .extend(inherited);
-        }
-
-        let mut import_ranges = Vec::with_capacity(self.needs.len());
-        let mut imports = Vec::new();
-        for mut executable_needs in self.needs {
-            executable_needs.sort_unstable();
-            executable_needs.dedup();
-            checked_function_entry_count(executable_needs.len(), "constructor-realm global slots")?;
-            let start = imports.len();
-            imports.extend(executable_needs);
-            import_ranges.push(start..imports.len());
-        }
-        Ok(RealmGlobalLayout {
-            bindings: self.bindings.into_boxed_slice(),
-            by_binding: self.by_binding.into_boxed_slice(),
-            by_unresolved: self.by_unresolved.into_boxed_slice(),
-            import_ranges: import_ranges.into_boxed_slice(),
-            imports: imports.into_boxed_slice(),
-        })
-    }
-}
-
-impl RealmGlobalLayout {
-    fn new(plan: &StoragePlan, enabled: bool) -> Result<Self, LeafCompilationError> {
-        let executable_count = plan.executables().len();
-        if !enabled {
-            return Ok(Self {
-                bindings: Box::default(),
-                by_binding: vec![None; plan.bindings().len()].into_boxed_slice(),
-                by_unresolved: vec![None; plan.unresolved_globals().len()].into_boxed_slice(),
-                import_ranges: vec![0..0; executable_count].into_boxed_slice(),
-                imports: Box::default(),
-            });
-        }
-
-        let mut builder = RealmGlobalLayoutBuilder::new(plan);
-        builder.collect_declarations(plan)?;
-        builder.collect_unresolved(plan)?;
-        builder.collect_resolved_needs(plan)?;
-        builder.finish(plan)
-    }
-
-    fn binding(&self, id: RealmGlobalId) -> Option<&RealmGlobalBinding> {
-        self.bindings.get(id.index())
-    }
-
-    fn for_unresolved(&self, id: UnresolvedGlobalId) -> Option<RealmGlobalId> {
-        self.by_unresolved.get(id.index()).copied().flatten()
-    }
-
-    fn for_binding(&self, id: BindingId) -> Option<RealmGlobalId> {
-        self.by_binding.get(id.index()).copied().flatten()
-    }
-
-    fn imports_for(
-        &self,
-        executable: ExecutableId,
-    ) -> Result<&[RealmGlobalId], LeafCompilationError> {
-        let range = self
-            .import_ranges
-            .get(executable.index())
-            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
-        self.imports
-            .get(range.clone())
-            .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "constructor-realm global range indexes flat imports",
-                span: None,
-            })
-    }
-
-    fn closure_slot(
-        &self,
-        plan: &StoragePlan,
-        executable: ExecutableId,
-        global: RealmGlobalId,
-    ) -> Result<u16, LeafCompilationError> {
-        let captures = plan
-            .frame_captures_for(executable)
-            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
-        let imports = self.imports_for(executable)?;
-        let offset = imports.binary_search(&global).map_err(|_| {
-            LeafCompilationError::SemanticInvariant {
-                invariant: "referenced constructor-realm global is imported by its executable",
-                span: self.binding(global).map(|binding| binding.first_span),
-            }
-        })?;
-        let index =
-            captures
-                .len()
-                .checked_add(offset)
-                .ok_or(LeafCompilationError::CapacityExceeded {
-                    domain: "function closure variables",
-                })?;
-        checked_function_index(index, "function closure variables")
-    }
-}
-
-struct FunctionTreeLayout {
-    child_ranges: Box<[Range<usize>]>,
-    children: Box<[ExecutableId]>,
-    constant_pools: Box<[CompiledConstantPool]>,
-    variable_references: Box<[Option<u16>]>,
-    function_declarations: Box<[Option<ExecutableId>]>,
-    realm_globals: RealmGlobalLayout,
-}
-
-struct FunctionChildLayout {
-    child_ranges: Box<[Range<usize>]>,
-    children: Box<[ExecutableId]>,
-}
-
-impl FunctionTreeLayout {
-    fn new(plan: &StoragePlan, allow_realm_globals: bool) -> Result<Self, LeafCompilationError> {
-        let executables = plan.executables();
-        let FunctionChildLayout {
-            child_ranges,
-            children,
-        } = Self::build_child_layout(executables)?;
-        let variable_references = Self::build_variable_references(plan, executables)?;
-        Ok(Self {
-            child_ranges,
-            children,
-            constant_pools: Box::default(),
-            variable_references,
-            function_declarations: vec![None; plan.bindings().len()].into_boxed_slice(),
-            realm_globals: RealmGlobalLayout::new(plan, allow_realm_globals)?,
-        })
-    }
-
-    fn build_child_layout(
-        executables: &[Executable],
-    ) -> Result<FunctionChildLayout, LeafCompilationError> {
-        let child_counts = Self::count_children(executables)?;
-        let (child_ranges, child_total) = Self::build_child_ranges(child_counts)?;
-        let children = Self::populate_child_tables(executables, &child_ranges, child_total)?;
-        Ok(FunctionChildLayout {
-            child_ranges: child_ranges.into_boxed_slice(),
-            children,
-        })
-    }
-
-    fn count_children(executables: &[Executable]) -> Result<Vec<usize>, LeafCompilationError> {
-        let mut child_counts = vec![0_usize; executables.len()];
-        for (expected_index, executable) in executables.iter().enumerate() {
-            if executable.id().index() != expected_index {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "executable identities are dense and ordered",
-                    span: Some(executable.span()),
-                });
-            }
-            let Some(parent) = executable.parent() else {
-                continue;
-            };
-            if parent.index() >= expected_index {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "executable parent precedes its child",
-                    span: Some(executable.span()),
-                });
-            }
-            let count = child_counts
-                .get_mut(parent.index())
-                .ok_or(LeafCompilationError::InvalidExecutable { executable: parent })?;
-            *count = count
-                .checked_add(1)
-                .ok_or(LeafCompilationError::CapacityExceeded {
-                    domain: "function constants",
-                })?;
-        }
-        Ok(child_counts)
-    }
-
-    fn build_child_ranges(
-        child_counts: Vec<usize>,
-    ) -> Result<(Vec<Range<usize>>, usize), LeafCompilationError> {
-        let mut child_ranges = Vec::with_capacity(child_counts.len());
-        let mut child_total = 0_usize;
-        for count in child_counts {
-            let start = child_total;
-            child_total =
-                child_total
-                    .checked_add(count)
-                    .ok_or(LeafCompilationError::CapacityExceeded {
-                        domain: "function constants",
-                    })?;
-            child_ranges.push(start..child_total);
-        }
-        Ok((child_ranges, child_total))
-    }
-
-    fn populate_child_tables(
-        executables: &[Executable],
-        child_ranges: &[Range<usize>],
-        child_total: usize,
-    ) -> Result<Box<[ExecutableId]>, LeafCompilationError> {
-        let mut children = vec![None; child_total];
-        let mut child_cursors = child_ranges
-            .iter()
-            .map(|range| range.start)
-            .collect::<Vec<_>>();
-        for executable in executables {
-            let Some(parent) = executable.parent() else {
-                continue;
-            };
-            let cursor = child_cursors
-                .get_mut(parent.index())
-                .ok_or(LeafCompilationError::InvalidExecutable { executable: parent })?;
-            let range = child_ranges
-                .get(parent.index())
-                .ok_or(LeafCompilationError::InvalidExecutable { executable: parent })?;
-            if !range.contains(cursor) {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "child cursor remains inside its parent range",
-                    span: Some(executable.span()),
-                });
-            }
-            let target =
-                children
-                    .get_mut(*cursor)
-                    .ok_or(LeafCompilationError::SemanticInvariant {
-                        invariant: "child cursor indexes the flat child table",
-                        span: Some(executable.span()),
-                    })?;
-            if target.replace(executable.id()).is_some() {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "child executable has one flat table position",
-                    span: Some(executable.span()),
-                });
-            }
-            *cursor = cursor
-                .checked_add(1)
-                .ok_or(LeafCompilationError::CapacityExceeded {
-                    domain: "function constants",
-                })?;
-        }
-        let children = children
-            .into_iter()
-            .enumerate()
-            .map(|(index, child)| {
-                child.ok_or_else(|| LeafCompilationError::SemanticInvariant {
-                    invariant: "flat child table is completely populated",
-                    span: Self::child_owner_span(executables, child_ranges, index),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(children.into_boxed_slice())
-    }
-
-    fn child_owner_span(
-        executables: &[Executable],
-        child_ranges: &[Range<usize>],
-        child_index: usize,
-    ) -> Option<Span> {
-        let owner_index = child_ranges.partition_point(|range| range.end <= child_index);
-        child_ranges
-            .get(owner_index)
-            .filter(|range| range.contains(&child_index))?;
-        executables.get(owner_index).map(Executable::span)
-    }
-
-    fn build_variable_references(
-        plan: &StoragePlan,
-        executables: &[Executable],
-    ) -> Result<Box<[Option<u16>]>, LeafCompilationError> {
-        let mut variable_references = vec![None; plan.bindings().len()];
-        for executable in executables {
-            let bindings = plan.bindings_for(executable.id()).ok_or(
-                LeafCompilationError::InvalidExecutable {
-                    executable: executable.id(),
-                },
-            )?;
-            let mut capture_count = 0_usize;
-            for binding in bindings {
-                if !binding.is_frame_captured() {
-                    continue;
-                }
-                let index = checked_function_index(capture_count, "function variable references")?;
-                let slot = variable_references.get_mut(binding.id().index()).ok_or(
-                    LeafCompilationError::SemanticInvariant {
-                        invariant: "captured binding indexes variable-reference layout",
-                        span: binding.declaration_spans().first().copied(),
-                    },
-                )?;
-                if slot.replace(index).is_some() {
-                    return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "captured binding has one variable-reference index",
-                        span: binding.declaration_spans().first().copied(),
-                    });
-                }
-                capture_count =
-                    capture_count
-                        .checked_add(1)
-                        .ok_or(LeafCompilationError::CapacityExceeded {
-                            domain: "function variable references",
-                        })?;
-            }
-            checked_function_entry_count(capture_count, "function variable references")?;
-        }
-        Ok(variable_references.into_boxed_slice())
-    }
-
-    fn children(&self, executable: ExecutableId) -> Result<&[ExecutableId], LeafCompilationError> {
-        let range = self
-            .child_ranges
-            .get(executable.index())
-            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
-        self.children
-            .get(range.clone())
-            .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "executable child range indexes the flat child table",
-                span: None,
-            })
-    }
-
-    fn install_constant_pools(
-        &mut self,
-        constant_pools: Box<[CompiledConstantPool]>,
-    ) -> Result<(), LeafCompilationError> {
-        if !self.constant_pools.is_empty() || constant_pools.len() != self.child_ranges.len() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "constant pools install exactly once for every executable",
-                span: None,
-            });
-        }
-        self.constant_pools = constant_pools;
-        Ok(())
-    }
-
-    fn constant_pool(
-        &self,
-        executable: ExecutableId,
-    ) -> Result<&CompiledConstantPool, LeafCompilationError> {
-        self.constant_pools
-            .get(executable.index())
-            .ok_or(LeafCompilationError::InvalidExecutable { executable })
-    }
-
-    fn variable_reference(&self, binding: BindingId) -> Option<u16> {
-        self.variable_references
-            .get(binding.index())
-            .copied()
-            .flatten()
-    }
-
-    fn record_function_declaration(
-        &mut self,
-        binding: BindingId,
-        executable: ExecutableId,
-    ) -> Result<(), LeafCompilationError> {
-        let target = self.function_declarations.get_mut(binding.index()).ok_or(
-            LeafCompilationError::SemanticInvariant {
-                invariant: "function declaration binding indexes instantiation layout",
-                span: None,
-            },
-        )?;
-        *target = Some(executable);
-        Ok(())
-    }
-
-    fn function_declaration(&self, binding: BindingId) -> Option<ExecutableId> {
-        self.function_declarations
-            .get(binding.index())
-            .copied()
-            .flatten()
-    }
-
-    fn subtree_preorder(
-        &self,
-        root: ExecutableId,
-    ) -> Result<Vec<ExecutableId>, LeafCompilationError> {
-        self.children(root)?;
-        let mut visited = vec![false; self.child_ranges.len()];
-        let mut preorder = Vec::new();
-        let mut work = vec![root];
-        while let Some(executable) = work.pop() {
-            let seen = visited
-                .get_mut(executable.index())
-                .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
-            if std::mem::replace(seen, true) {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "function subtree has one acyclic parent path",
-                    span: None,
-                });
-            }
-            preorder.push(executable);
-            for child in self.children(executable)?.iter().rev() {
-                work.push(*child);
-            }
-        }
-        Ok(preorder)
-    }
-}
-
-struct FrameLocal {
-    binding: BindingId,
-    slot: LocalSlot,
-}
-
-#[derive(Clone, Copy)]
-struct FrameBindingSlot {
-    binding: BindingId,
-    slot: FrameSlot,
-}
-
-struct FrameLayout {
-    executable: ExecutableId,
-    slots: Vec<FrameBindingSlot>,
-    locals: Vec<FrameLocal>,
-    local_count: u32,
-}
-
-impl FrameLayout {
-    fn new(plan: &StoragePlan, executable: ExecutableId) -> Result<Self, LeafCompilationError> {
-        let bindings = plan
-            .bindings_for(executable)
-            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
-        let captures = plan
-            .frame_captures_for(executable)
-            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
-        let slot_capacity = bindings.len().checked_add(captures.len()).ok_or(
-            LeafCompilationError::CapacityExceeded {
-                domain: "function frame bindings",
-            },
-        )?;
-        let mut slots = Vec::with_capacity(slot_capacity);
-        let mut locals = Vec::new();
-        let mut local_count = 0_u32;
-        let executable_metadata = plan
-            .executable(executable)
-            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
-        checked_function_entry_count(
-            executable_metadata.parameter_count(),
-            "function argument slots",
-        )?;
-        for binding in bindings {
-            let slot = match binding.placement() {
-                StoragePlacement::Argument { parameter_index } => {
-                    let parameter_index =
-                        checked_function_index(parameter_index, "function argument slots")?;
-                    Some(FrameSlot::Argument(ArgumentSlot(parameter_index)))
-                }
-                StoragePlacement::Local => {
-                    let slot =
-                        LocalSlot(checked_function_index(local_count, "function local slots")?);
-                    local_count += 1;
-                    locals.push(FrameLocal {
-                        binding: binding.id(),
-                        slot,
-                    });
-                    Some(FrameSlot::Local(slot))
-                }
-                StoragePlacement::GlobalObject => None,
-                StoragePlacement::GlobalLexical
-                | StoragePlacement::ModuleLocal
-                | StoragePlacement::ModuleImport => {
-                    let span = binding
-                        .declaration_spans()
-                        .first()
-                        .copied()
-                        .unwrap_or_default();
-                    return unsupported(UnsupportedLeafFeature::UnsupportedBinding, span);
-                }
-            };
-            let Some(slot) = slot else {
-                continue;
-            };
-            slots.push(FrameBindingSlot {
-                binding: binding.id(),
-                slot,
-            });
-        }
-        checked_function_entry_count(captures.len(), "function capture slots")?;
-        for (expected_capture_index, capture) in captures.iter().enumerate() {
-            let capture_index =
-                checked_function_index(capture.slot().index(), "function capture slots")?;
-            if capture.slot().index() != expected_capture_index {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "function capture slots are dense and ordered",
-                    span: plan
-                        .binding(capture.binding())
-                        .and_then(|binding| binding.declaration_spans().first().copied()),
-                });
-            }
-            slots.push(FrameBindingSlot {
-                binding: capture.binding(),
-                slot: FrameSlot::Capture(capture_index),
-            });
-        }
-        slots.sort_unstable_by_key(|entry| entry.binding);
-        for duplicate in slots.windows(2) {
-            if duplicate[0].binding == duplicate[1].binding {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "one frame or capture slot per compiler binding",
-                    span: plan
-                        .binding(duplicate[0].binding)
-                        .and_then(|binding| binding.declaration_spans().first().copied()),
-                });
-            }
-        }
-        Ok(Self {
-            executable,
-            slots,
-            locals,
-            local_count,
-        })
-    }
-
-    fn push_internal_local(&mut self) -> Result<LocalSlot, LeafCompilationError> {
-        let slot = LocalSlot(checked_function_index(
-            self.local_count,
-            "function local slots",
-        )?);
-        self.local_count =
-            self.local_count
-                .checked_add(1)
-                .ok_or(LeafCompilationError::CapacityExceeded {
-                    domain: "function local slots",
-                })?;
-        checked_function_entry_count(self.local_count, "function local slots")?;
-        Ok(slot)
-    }
-
-    fn slot(&self, binding: BindingId) -> Option<FrameSlot> {
-        let index = self
-            .slots
-            .binary_search_by_key(&binding, |entry| entry.binding)
-            .ok()?;
-        Some(self.slots[index].slot)
     }
 }
 

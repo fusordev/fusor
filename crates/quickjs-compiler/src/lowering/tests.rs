@@ -1,6 +1,14 @@
 use super::*;
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
+fn test_frame_layout(
+    context: &CompilationContext<'_, '_, '_>,
+    executable: ExecutableId,
+) -> FrameLayout {
+    FrameLayout::new(FrameLayoutInput::new(context.storage_plan(), executable))
+        .expect("frame layout")
+}
+
 #[test]
 fn function_index_capacity_checks_count_and_index_boundaries() {
     assert_eq!(
@@ -84,8 +92,7 @@ fn own_capture_layout_distinguishes_argument_function_and_scoped_cells() {
             let Statement::FunctionDeclaration(function) = &unit.program().body[0] else {
                 panic!("function declaration");
             };
-            let layout =
-                FrameLayout::new(context.storage_plan(), executable.id()).expect("frame layout");
+            let layout = test_frame_layout(&context, executable.id());
             let tree_layout = context
                 .function_tree_layout()
                 .expect("function tree layout");
@@ -137,8 +144,7 @@ fn captured_block_exit_closes_exact_scope_locals_in_reverse_slot_order() {
             let function_scope = context
                 .created_scope(function.scope_id.get(), function.node_id.get(), function.span)
                 .expect("function scope");
-            let layout =
-                FrameLayout::new(context.storage_plan(), executable.id()).expect("layout");
+            let layout = test_frame_layout(&context, executable.id());
             let tree_layout = context.function_tree_layout().expect("function tree layout");
             let capture_layout = context
                 .compiler_capture_layout(
@@ -240,8 +246,7 @@ fn abrupt_cleanup_fixture(
             let function_scope = function.scope_id.get().expect("function scope");
             let loop_scope = loop_body.scope_id.get().expect("loop body scope");
             let inner_scope = inner.scope_id.get().expect("inner scope");
-            let layout =
-                FrameLayout::new(context.storage_plan(), executable.id()).expect("frame layout");
+            let layout = test_frame_layout(&context, executable.id());
             let tree_layout = context.function_tree_layout().expect("function tree layout");
             let capture_layout = context
                 .compiler_capture_layout(
@@ -528,8 +533,7 @@ fn captured_for_continue_fixture() -> (Vec<SourceInstruction>, VerifiedControlFl
                 panic!("continue statement");
             };
             let scope = statement.scope_id.get().expect("for scope");
-            let layout =
-                FrameLayout::new(context.storage_plan(), executable.id()).expect("frame layout");
+            let layout = test_frame_layout(&context, executable.id());
             let tree_layout = context
                 .function_tree_layout()
                 .expect("function tree layout");
