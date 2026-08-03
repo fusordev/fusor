@@ -487,13 +487,29 @@ Known intentional write-path differences:
   a refused *definition* leaves the earlier ones — see `QJS-DEFPROPS-001` for the
   divergence this closes. `Object.create`'s argument therefore stopped being a
   profile narrowing, retiring `QJS-CREATE-001`.
+- [x] `Object.fromEntries`, which drains an iterable of `[key, value]` pairs. The
+  iterator protocol it needs is exactly call spread's, so the existing append
+  machine became a shared drain with a destination: spread appends each value to
+  an array at a running index, while `fromEntries` treats each value as an entry.
+  The probe of `Symbol.iterator`, the call, the `next` acquisition, the per-step
+  `done` and `value` reads, and the `return`-on-abrupt-exit close are therefore
+  one state machine that cannot drift between the two. Each entry must be an
+  object before either index is read; its `0` and `1` are read in that order and
+  can each enter an accessor; and the key then converts with `ToPropertyKey`,
+  which can run a `toString`, so the drain rides inside that resumable
+  conversion. The property is defined with `CreateDataPropertyOrThrow`, so it is
+  fully mutable and a repeated key overwrites the earlier entry. An absent index
+  reads as `undefined`, so `Object.fromEntries([[]])` has one property named
+  `"undefined"`. A rejected entry, a throwing index read, and a throwing key
+  conversion all close the iterator with `return` before the throw propagates,
+  while an iterator that finishes on its own is never closed.
 - [ ] Remaining String/Number/Array method surface (`String.prototype` case
   conversions and `localeCompare`, the RegExp-dependent `match`, `matchAll`,
   `replace`, `search`, and `split`, `normalize`, `String.raw`, and the
   locale-dependent renderings), shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
-- [ ] Complete the `Object` surface (`fromEntries`, `groupBy`,
+- [ ] Complete the `Object` surface (`groupBy`,
   `Object.prototype.toLocaleString`, and the `__proto__` accessor pair), then
   Proxy, remaining built-ins, RegExp/Date/JSON, collections, binary data,
   Atomics, Unicode tables, promises, async functions/generators, weak

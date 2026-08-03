@@ -2472,6 +2472,14 @@ fn finish_property_key_target(
                 property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
             )),
         },
+        PropertyKeyTarget::EntryKey { drain, value } => finish_entry_key(
+            runtime,
+            *drain,
+            value,
+            property,
+            return_to,
+            execution_budget,
+        ),
         PropertyKeyTarget::Reflect { target, realm } => finish_reflect_keyed_target(
             runtime,
             realm,

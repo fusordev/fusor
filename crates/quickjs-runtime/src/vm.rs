@@ -538,11 +538,32 @@ enum IteratorAppendStage {
     AwaitNextResult,
     AwaitDone,
     AwaitValue,
+    /// `Object.fromEntries` only: the entry's `0` property, its key.
+    AwaitEntryKey,
+    /// `Object.fromEntries` only: the entry's `1` property, its value.
+    AwaitEntryValue,
+}
+
+/// Where a drained iterator's values land.
+///
+/// Both destinations share one iterator-protocol state machine, so the probe,
+/// the `Symbol.iterator` call, the `next` acquisition, the per-step `done` and
+/// `value` reads, and the `return`-on-abrupt-exit close cannot drift apart
+/// between call spread and `Object.fromEntries`.
+enum IteratorDrain {
+    /// Call spread and array spread: each value is appended at `next_index`.
+    AppendToArray { array: ObjectId, next_index: u32 },
+    /// `Object.fromEntries`: each value is an entry whose `0` and `1` are read
+    /// and defined as one own property of `target`.
+    EntriesIntoObject {
+        target: ObjectId,
+        entry: Option<StoredValue>,
+        key: Option<StoredValue>,
+    },
 }
 
 struct IteratorAppendContinuation {
-    array: ObjectId,
-    next_index: u32,
+    drain: IteratorDrain,
     iterable: StoredValue,
     iterator: Option<StoredValue>,
     next_acquired: bool,
@@ -556,9 +577,50 @@ struct IteratorAppendContinuation {
 impl IteratorAppendContinuation {
     fn retained_values(&self) -> u64 {
         2_u64
+            .saturating_add(self.drain.retained_values())
             .saturating_add(u64::from(self.iterator.is_some()))
             .saturating_add(u64::from(self.next_method.is_some()))
             .saturating_add(u64::from(self.result.is_some()))
+    }
+
+    /// Reports every heap edge a suspended drain keeps alive.
+    fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        self.drain.trace_roots(mark);
+        trace_stored_value_root(&self.iterable, mark);
+        if let Some(iterator) = &self.iterator {
+            trace_stored_value_root(iterator, mark);
+        }
+        if let Some(method) = self.next_method {
+            mark(CollectionRoot::Heap(HeapReference::Function(method)));
+        }
+        if let Some(result) = &self.result {
+            trace_stored_value_root(result, mark);
+        }
+    }
+}
+
+impl IteratorDrain {
+    const fn retained_values(&self) -> u64 {
+        match self {
+            Self::AppendToArray { .. } => 0,
+            Self::EntriesIntoObject { entry, key, .. } => {
+                (entry.is_some() as u64).saturating_add(key.is_some() as u64)
+            }
+        }
+    }
+
+    fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        match self {
+            Self::AppendToArray { array, .. } => {
+                mark(CollectionRoot::Heap(HeapReference::Object(*array)));
+            }
+            Self::EntriesIntoObject { target, entry, key } => {
+                mark(CollectionRoot::Heap(HeapReference::Object(*target)));
+                for value in [entry.as_ref(), key.as_ref()].into_iter().flatten() {
+                    trace_stored_value_root(value, mark);
+                }
+            }
+        }
     }
 }
 
@@ -710,6 +772,15 @@ enum PropertyKeyTarget {
         strict: bool,
         realm: RealmId,
     },
+    /// `Object.fromEntries`' entry key, awaiting `ToPropertyKey`.
+    ///
+    /// The value is already read, so the conversion is the last step before the
+    /// property is defined; a conversion that throws closes the iterator, which
+    /// is why the whole drain rides along.
+    EntryKey {
+        drain: Box<IteratorAppendContinuation>,
+        value: StoredValue,
+    },
     /// One keyed `Reflect` method's key, awaiting `ToPropertyKey`.
     ///
     /// The target has already been validated as an object, which is why the
@@ -722,7 +793,7 @@ enum PropertyKeyTarget {
 }
 
 impl PropertyKeyTarget {
-    const fn retained_values(&self) -> u64 {
+    fn retained_values(&self) -> u64 {
         match self {
             Self::ToKey => 0,
             Self::Read { .. }
@@ -731,6 +802,7 @@ impl PropertyKeyTarget {
             | Self::HasOwnProperty { .. }
             | Self::PropertyIsEnumerable { .. } => 1,
             Self::Write { .. } | Self::DefineMethod { .. } | Self::DefineProperty { .. } => 2,
+            Self::EntryKey { drain, .. } => 1_u64.saturating_add(drain.retained_values()),
             Self::Reflect { target, .. } => target.retained_values(),
         }
     }
@@ -1153,6 +1225,10 @@ fn trace_property_key_target_roots(
             trace_stored_value_root(base, mark);
             trace_stored_value_root(function, mark);
         }
+        PropertyKeyTarget::EntryKey { drain, value } => {
+            drain.trace_roots(mark);
+            trace_stored_value_root(value, mark);
+        }
         PropertyKeyTarget::Reflect { target, .. } => target.trace_roots(mark),
     }
 }
@@ -1363,19 +1439,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ForOfClose(state) => {
             trace_stored_value_root(&state.iterator, mark);
         }
-        NativeContinuation::IteratorAppend(state) => {
-            mark(CollectionRoot::Heap(HeapReference::Object(state.array)));
-            trace_stored_value_root(&state.iterable, mark);
-            if let Some(iterator) = &state.iterator {
-                trace_stored_value_root(iterator, mark);
-            }
-            if let Some(method) = state.next_method {
-                mark(CollectionRoot::Heap(HeapReference::Function(method)));
-            }
-            if let Some(result) = &state.result {
-                trace_stored_value_root(result, mark);
-            }
-        }
+        NativeContinuation::IteratorAppend(state) => state.trace_roots(mark),
         NativeContinuation::IteratorClose(state) => {
             trace_stored_value_root(&state.iterator, mark);
             if let PendingExceptionPayload::ThrownValue(value) = &state.original.payload {

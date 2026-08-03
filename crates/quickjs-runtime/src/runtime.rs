@@ -871,6 +871,8 @@ pub(crate) enum NativeFunctionKind {
     /// `Object.defineProperties`, which validates every descriptor before
     /// applying any of them.
     ObjectDefineProperties,
+    /// `Object.fromEntries`, which drains an iterable of `[key, value]` pairs.
+    ObjectFromEntries,
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
     ObjectPrototypeHasOwnProperty,

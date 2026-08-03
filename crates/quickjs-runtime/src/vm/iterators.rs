@@ -868,9 +868,71 @@ pub(super) fn begin_iterator_append(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    begin_iterator_drain(
+        runtime,
+        IteratorDrain::AppendToArray { array, next_index },
+        iterable,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+/// Starts `Object.fromEntries(iterable)`.
+///
+/// The result object is created before the iterable is touched, so an iterable
+/// that throws still allocated it — which no script can observe, since the
+/// object is unreachable. Each drained value must be an object, and its `0` and
+/// `1` become one own property through `CreateDataPropertyOrThrow`, so the
+/// property is fully mutable and a repeated key overwrites the earlier entry
+/// (`quickjs.c:40481-40520`).
+pub(super) fn begin_object_from_entries(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    iterable: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = runtime.realm_object_prototype(realm)?;
+    let target = runtime.allocate_ordinary_object(prototype)?;
+    begin_iterator_drain(
+        runtime,
+        IteratorDrain::EntriesIntoObject {
+            target,
+            entry: None,
+            key: None,
+        },
+        iterable,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+/// Starts draining one iterable into the requested destination.
+///
+/// Everything before the destination's own step is the iterator protocol:
+/// probing `Symbol.iterator`, calling it, acquiring `next`, and then reading
+/// `done` and `value` per step. An abrupt exit after the iterator exists closes
+/// it with `return`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a drain starts with explicit destination, realm, provenance, and execution authority"
+)]
+pub(super) fn begin_iterator_drain(
+    runtime: &mut Runtime,
+    drain: IteratorDrain,
+    iterable: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
     let state = IteratorAppendContinuation {
-        array,
-        next_index,
+        drain,
         iterable,
         iterator: None,
         next_acquired: false,
@@ -998,10 +1060,16 @@ pub(super) fn advance_iterator_append(
         }
         IteratorAppendStage::AwaitDone => {
             if completion.is_truthy() {
-                return Ok(NativeDispatch::Pair(
-                    StoredValue::Object(state.array),
-                    StoredValue::Number(JsNumber::from_u32(state.next_index)),
-                ));
+                // The iterator finished on its own, so no `return` is called.
+                return Ok(match state.drain {
+                    IteratorDrain::AppendToArray { array, next_index } => NativeDispatch::Pair(
+                        StoredValue::Object(array),
+                        StoredValue::Number(JsNumber::from_u32(next_index)),
+                    ),
+                    IteratorDrain::EntriesIntoObject { target, .. } => {
+                        NativeDispatch::Immediate(StoredValue::Object(target))
+                    }
+                });
             }
             state.stage = IteratorAppendStage::AwaitValue;
             read_append_property(
@@ -1012,34 +1080,22 @@ pub(super) fn advance_iterator_append(
                 execution_budget,
             )
         }
-        IteratorAppendStage::AwaitValue => {
-            let Some(index) = ArrayIndex::new(state.next_index) else {
-                let pending = iterator_exception(
-                    state.realm,
-                    state.origin.clone(),
-                    ExceptionKind::RangeError,
-                    "invalid array length",
-                )?;
-                let NativeFailure::Abrupt(pending) = pending else {
-                    unreachable!("iterator_exception always returns an abrupt completion")
-                };
-                return begin_iterator_close(runtime, state, pending, return_to, execution_budget);
-            };
-            let work = runtime.preview_array_define_data_property_work(state.array)?;
-            execution_budget.charge_instructions(work)?;
-            match runtime.define_array_data_property(
-                state.array,
-                PropertyKey::from_index(index),
-                PropertyLayout::data(true, true, true),
-                completion,
-            )? {
-                ArrayDefineOutcome::Complete => {}
-                ArrayDefineOutcome::ReadOnlyLength | ArrayDefineOutcome::NonExtensible => {
+        IteratorAppendStage::AwaitValue => match state.drain {
+            IteratorDrain::AppendToArray { .. } => {
+                append_drained_value(runtime, state, completion, return_to, execution_budget)
+            }
+            // An entry must be an object before either of its two indices is
+            // read, and a rejected one closes the iterator.
+            IteratorDrain::EntriesIntoObject { .. } => {
+                if !matches!(
+                    completion,
+                    StoredValue::Function(_) | StoredValue::Object(_)
+                ) {
                     let pending = iterator_exception(
                         state.realm,
                         state.origin.clone(),
                         ExceptionKind::TypeError,
-                        "cannot append iterator value",
+                        "not an object",
                     )?;
                     let NativeFailure::Abrupt(pending) = pending else {
                         unreachable!("iterator_exception always returns an abrupt completion")
@@ -1052,12 +1108,190 @@ pub(super) fn advance_iterator_append(
                         execution_budget,
                     );
                 }
+                if let IteratorDrain::EntriesIntoObject { entry, key, .. } = &mut state.drain {
+                    *entry = Some(completion);
+                    *key = None;
+                }
+                state.stage = IteratorAppendStage::AwaitEntryKey;
+                read_append_property(
+                    runtime,
+                    state,
+                    PropertyKey::from_index(ArrayIndex::new(0).ok_or(
+                        EngineFault::RuntimeInvariant {
+                            message: "zero is not a valid array index",
+                        },
+                    )?),
+                    return_to,
+                    execution_budget,
+                )
             }
-            state.next_index = state.next_index.saturating_add(1);
-            state.result = None;
-            call_append_next(state, return_to, execution_budget)
+        },
+        IteratorAppendStage::AwaitEntryKey => {
+            if let IteratorDrain::EntriesIntoObject { key, .. } = &mut state.drain {
+                *key = Some(completion);
+            }
+            state.stage = IteratorAppendStage::AwaitEntryValue;
+            read_append_property(
+                runtime,
+                state,
+                PropertyKey::from_index(ArrayIndex::new(1).ok_or(
+                    EngineFault::RuntimeInvariant {
+                        message: "one is not a valid array index",
+                    },
+                )?),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorAppendStage::AwaitEntryValue => {
+            define_drained_entry(runtime, state, completion, return_to, execution_budget)
         }
     }
+}
+
+/// Appends one drained value to the destination array.
+fn append_drained_value(
+    runtime: &mut Runtime,
+    mut state: IteratorAppendContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let IteratorDrain::AppendToArray { array, next_index } = state.drain else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "array append reached a non-array drain",
+        }
+        .into());
+    };
+    let Some(index) = ArrayIndex::new(next_index) else {
+        let pending = iterator_exception(
+            state.realm,
+            state.origin.clone(),
+            ExceptionKind::RangeError,
+            "invalid array length",
+        )?;
+        let NativeFailure::Abrupt(pending) = pending else {
+            unreachable!("iterator_exception always returns an abrupt completion")
+        };
+        return begin_iterator_close(runtime, state, pending, return_to, execution_budget);
+    };
+    let work = runtime.preview_array_define_data_property_work(array)?;
+    execution_budget.charge_instructions(work)?;
+    match runtime.define_array_data_property(
+        array,
+        PropertyKey::from_index(index),
+        PropertyLayout::data(true, true, true),
+        value,
+    )? {
+        ArrayDefineOutcome::Complete => {}
+        ArrayDefineOutcome::ReadOnlyLength | ArrayDefineOutcome::NonExtensible => {
+            let pending = iterator_exception(
+                state.realm,
+                state.origin.clone(),
+                ExceptionKind::TypeError,
+                "cannot append iterator value",
+            )?;
+            let NativeFailure::Abrupt(pending) = pending else {
+                unreachable!("iterator_exception always returns an abrupt completion")
+            };
+            return begin_iterator_close(runtime, state, pending, return_to, execution_budget);
+        }
+    }
+    state.drain = IteratorDrain::AppendToArray {
+        array,
+        next_index: next_index.saturating_add(1),
+    };
+    state.result = None;
+    call_append_next(state, return_to, execution_budget)
+}
+
+/// Defines one drained entry as an own property of the destination object.
+///
+/// The key converts with `ToPropertyKey`, which can run a `toString`, so the
+/// conversion happens here rather than during the entry's reads. The definition
+/// is `CreateDataPropertyOrThrow`, so the property is fully mutable and a later
+/// entry with the same key simply overwrites the earlier one.
+fn define_drained_entry(
+    runtime: &mut Runtime,
+    mut state: IteratorAppendContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let IteratorDrain::EntriesIntoObject { target, key, .. } = &mut state.drain else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "entry definition reached a non-entries drain",
+        }
+        .into());
+    };
+    let _ = target;
+    let requested = key.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "entry definition has no key",
+    })?;
+    // The key converts with `ToPropertyKey`, which can run a user `toString`,
+    // so the conversion is resumable and the drain rides along inside it.
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_property_key_conversion(
+        runtime,
+        requested,
+        PropertyKeyTarget::EntryKey {
+            drain: Box::new(state),
+            value,
+        },
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+/// Defines one entry's property once its key has been converted.
+pub(super) fn finish_entry_key(
+    runtime: &mut Runtime,
+    mut state: IteratorAppendContinuation,
+    value: StoredValue,
+    property: StaticPropertyOperand,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let IteratorDrain::EntriesIntoObject { target, .. } = &state.drain else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "entry definition reached a non-entries drain",
+        }
+        .into());
+    };
+    let target = *target;
+    let definition = PropertyDefinition::data(Requested::Present(value), Requested::Present(true))
+        .with_enumerable(Requested::Present(true))
+        .with_configurable(Requested::Present(true));
+    match define_own_property(
+        runtime,
+        &StoredValue::Object(target),
+        property.key,
+        &definition,
+        execution_budget,
+    )? {
+        PropertyDefinitionOutcome::Complete => {}
+        PropertyDefinitionOutcome::Failed(_) => {
+            let pending = iterator_exception(
+                state.realm,
+                state.origin.clone(),
+                ExceptionKind::TypeError,
+                "cannot define entry property",
+            )?;
+            let NativeFailure::Abrupt(pending) = pending else {
+                unreachable!("iterator_exception always returns an abrupt completion")
+            };
+            return begin_iterator_close(runtime, state, pending, return_to, execution_budget);
+        }
+    }
+    if let IteratorDrain::EntriesIntoObject { entry, key, .. } = &mut state.drain {
+        *entry = None;
+        *key = None;
+    }
+    state.result = None;
+    call_append_next(state, return_to, execution_budget)
 }
 
 #[allow(
@@ -1085,6 +1319,23 @@ fn read_append_property(
             state.result.as_ref().ok_or(EngineFault::RuntimeInvariant {
                 message: "iterator result lookup has no result object",
             })?
+        }
+        // An entry's two indices are read from the entry itself, which the
+        // preceding `value` read produced.
+        IteratorAppendStage::AwaitEntryKey | IteratorAppendStage::AwaitEntryValue => {
+            match &state.drain {
+                IteratorDrain::EntriesIntoObject { entry, .. } => {
+                    entry.as_ref().ok_or(EngineFault::RuntimeInvariant {
+                        message: "entry index lookup has no entry object",
+                    })?
+                }
+                IteratorDrain::AppendToArray { .. } => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "array drain reached an entry index lookup",
+                    }
+                    .into());
+                }
+            }
         }
         IteratorAppendStage::AwaitIterator | IteratorAppendStage::AwaitNextResult => {
             return Err(EngineFault::RuntimeInvariant {
