@@ -1726,6 +1726,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::ArraySortValue(state) => {
             advance_array_sort(runtime, *state, Some(value), return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::ArrayFlattenValue(state) => {
+            advance_array_flatten(runtime, *state, Some(value), return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::StringMethodSubject(state)
         | OperatorPrimitiveTarget::StringMethodArgument(state) => {
             advance_string_method(runtime, *state, Some(value), return_to, execution_budget)

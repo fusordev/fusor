@@ -28,11 +28,11 @@
 use std::collections::TryReserveError;
 
 use super::{
-    Arc, Arena, ArrayCallback, ArrayCopier, ArrayIntrinsics, ArrayMutator, ArrayReduction,
-    ArraySearch, ArraySort, ArrayState, Atom, AtomError, AtomTable, BigIntIntrinsics,
-    BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic, ErrorIntrinsicKind,
-    ErrorIntrinsics, FunctionId, FunctionImplementation, GlobalNumericFunction, HandleError,
-    HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
+    Arc, Arena, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics, ArrayMutator,
+    ArrayReduction, ArraySearch, ArraySort, ArrayState, Atom, AtomError, AtomTable,
+    BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic,
+    ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation, GlobalNumericFunction,
+    HandleError, HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
     IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind, NumberFormat,
     NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey,
     PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, ReflectMethod,
@@ -42,8 +42,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 22;
-const REALM_FUNCTION_COUNT: usize = 165;
-const REALM_PROPERTY_COUNT: u64 = 545;
+const REALM_FUNCTION_COUNT: usize = 168;
+const REALM_PROPERTY_COUNT: u64 = 554;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -267,6 +267,12 @@ const ARRAY_SORT_ATOM_START: usize = URI_ATOM_START + URI_FUNCTIONS.len();
 /// The stable sorting methods sharing `SortIndexedProperties`.
 const ARRAY_SORT_METHODS: [ArraySort; 2] = [ArraySort::Sort, ArraySort::ToSorted];
 
+/// Index of the first flattening method name, appended after sorting names.
+const ARRAY_FLATTEN_ATOM_START: usize = ARRAY_SORT_ATOM_START + ARRAY_SORT_METHODS.len();
+
+/// The methods sharing the resumable `FlattenIntoArray` implementation.
+const ARRAY_FLATTEN_METHODS: [ArrayFlatten; 2] = [ArrayFlatten::Flat, ArrayFlatten::FlatMap];
+
 /// Exact number of non-predefined atoms interned by one realm transaction.
 const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
     + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len()
@@ -285,6 +291,7 @@ const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
     + ARRAY_CALLBACK_METHODS.len()
     + ARRAY_REDUCTION_METHODS.len()
     + ARRAY_SORT_METHODS.len()
+    + ARRAY_FLATTEN_METHODS.len()
     + 11;
 
 /// The `Array.prototype` reductions this profile installs.
@@ -580,6 +587,7 @@ struct RealmKeys {
     symbol_to_primitive: PropertyKey,
     symbol_to_string_tag: PropertyKey,
     symbol_has_instance: PropertyKey,
+    symbol_species: PropertyKey,
     for_key: PropertyKey,
     split: PropertyKey,
 }
@@ -623,6 +631,9 @@ impl RealmKeys {
             symbol_has_instance: PropertyKey::from_validated_symbol(
                 atoms.predefined(PredefinedAtom::SymbolHasInstance),
             ),
+            symbol_species: PropertyKey::from_validated_symbol(
+                atoms.predefined(PredefinedAtom::SymbolSpecies),
+            ),
             for_key: key(PredefinedAtom::For),
             split: key(PredefinedAtom::Split),
         }
@@ -662,6 +673,7 @@ struct RealmNames {
     symbol_iterator_name: JsString,
     symbol_to_primitive_name: JsString,
     get_description: JsString,
+    get_species: JsString,
     reflect: JsString,
     json: JsString,
     is_raw_json: JsString,
@@ -708,6 +720,7 @@ impl RealmNames {
             symbol_to_primitive_name: JsString::from_utf8("[Symbol.toPrimitive]")
                 .map_err(AtomError::from)?,
             get_description: JsString::from_utf8("get description").map_err(AtomError::from)?,
+            get_species: JsString::from_utf8("get [Symbol.species]").map_err(AtomError::from)?,
             reflect: JsString::from_utf8("Reflect").map_err(AtomError::from)?,
             json: predefined_string(atoms, PredefinedAtom::Json),
             is_raw_json: JsString::from_utf8("isRawJSON").map_err(AtomError::from)?,
@@ -823,6 +836,7 @@ impl PrimitiveIntrinsicRecords {
 struct ArrayIntrinsicRecords {
     prototype: ObjectRecord,
     constructor: ObjectRecord,
+    species: ObjectRecord,
     join: ObjectRecord,
     to_string: ObjectRecord,
 }
@@ -867,6 +881,7 @@ struct RealmRecords {
     array_mutators: [ObjectRecord; ARRAY_MUTATOR_METHODS.len()],
     array_copiers: [ObjectRecord; ARRAY_COPIER_TOTAL],
     array_sorts: [ObjectRecord; ARRAY_SORT_METHODS.len()],
+    array_flattens: [ObjectRecord; ARRAY_FLATTEN_METHODS.len()],
     number_formats: [ObjectRecord; NUMBER_FORMAT_METHODS.len()],
     array_callbacks: [ObjectRecord; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [ObjectRecord; ARRAY_REDUCTION_METHODS.len()],
@@ -953,12 +968,14 @@ impl RealmRecords {
                     + ARRAY_MUTATOR_METHODS.len()
                     + ARRAY_COPIER_TOTAL
                     + ARRAY_SORT_METHODS.len()
+                    + ARRAY_FLATTEN_METHODS.len()
                     + NUMBER_FORMAT_METHODS.len()
                     + ARRAY_CALLBACK_METHODS.len()
                     + ARRAY_REDUCTION_METHODS.len()
                     + 1,
             )?,
-            constructor: reserved_record(3)?,
+            constructor: reserved_record(4)?,
+            species: reserved_record(2)?,
             join: reserved_record(2)?,
             to_string: reserved_record(2)?,
         };
@@ -1021,6 +1038,7 @@ impl RealmRecords {
             array_mutators: array_mutator_records()?,
             array_copiers: array_copier_records()?,
             array_sorts: array_sort_records()?,
+            array_flattens: array_flatten_records()?,
             number_formats: number_format_records()?,
             array_callbacks: array_callback_records()?,
             array_reductions: array_reduction_records()?,
@@ -1088,6 +1106,7 @@ struct BigIntIntrinsicGraph {
 struct ArrayIntrinsicGraph {
     prototype: ObjectId,
     constructor: FunctionId,
+    species: FunctionId,
     join: FunctionId,
     to_string: FunctionId,
 }
@@ -1176,6 +1195,7 @@ struct RealmGraph {
     array_mutators: [FunctionId; ARRAY_MUTATOR_METHODS.len()],
     array_copiers: [FunctionId; ARRAY_COPIER_TOTAL],
     array_sorts: [FunctionId; ARRAY_SORT_METHODS.len()],
+    array_flattens: [FunctionId; ARRAY_FLATTEN_METHODS.len()],
     number_formats: [FunctionId; NUMBER_FORMAT_METHODS.len()],
     array_callbacks: [FunctionId; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [FunctionId; ARRAY_REDUCTION_METHODS.len()],
@@ -1189,6 +1209,10 @@ struct RealmGraph {
 }
 
 impl RealmGraph {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "failure rollback mirrors the complete realm graph's insertion order in one auditable reverse sequence"
+    )]
     fn rollback(self, runtime: &mut Runtime) {
         debug_assert!(runtime.functions.remove(self.json.stringify).is_some());
         debug_assert!(runtime.functions.remove(self.json.raw_json).is_some());
@@ -1212,6 +1236,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for function in self.number_formats.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
+        for function in self.array_flattens.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for function in self.array_sorts.into_iter().rev() {
@@ -1256,6 +1283,9 @@ impl RealmGraph {
             self.iterators.array_values,
             self.iterators.array_iterator_next,
             self.iterators.iterator_method,
+            self.array.to_string,
+            self.array.join,
+            self.array.species,
             self.array.constructor,
             self.string.value_of,
             self.string.to_string,
@@ -1490,6 +1520,7 @@ impl Runtime {
         let array_mutators = self.insert_array_mutators(&base, records.array_mutators);
         let array_copiers = self.insert_array_copiers(&base, records.array_copiers);
         let array_sorts = self.insert_array_sorts(&base, records.array_sorts);
+        let array_flattens = self.insert_array_flattens(&base, records.array_flattens);
         let number_formats = self.insert_number_formats(&base, records.number_formats);
         let array_callbacks = self.insert_array_callbacks(&base, records.array_callbacks);
         let array_reductions = self.insert_array_reductions(&base, records.array_reductions);
@@ -1523,6 +1554,7 @@ impl Runtime {
             array_mutators,
             array_copiers,
             array_sorts,
+            array_flattens,
             number_formats,
             array_callbacks,
             array_reductions,
@@ -1655,6 +1687,9 @@ impl Runtime {
                 interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
             }
             for method in ARRAY_SORT_METHODS {
+                interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
+            }
+            for method in ARRAY_FLATTEN_METHODS {
                 interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
             }
             Ok(())
@@ -2063,6 +2098,25 @@ impl Runtime {
         inserted.map(|slot| slot.expect("every Array sort function was inserted"))
     }
 
+    /// Inserts one native function per `FlattenIntoArray` method.
+    fn insert_array_flattens(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; ARRAY_FLATTEN_METHODS.len()],
+    ) -> [FunctionId; ARRAY_FLATTEN_METHODS.len()] {
+        let mut inserted = [None; ARRAY_FLATTEN_METHODS.len()];
+        for ((slot, method), record) in inserted.iter_mut().zip(ARRAY_FLATTEN_METHODS).zip(records)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::ArrayPrototypeFlatten(method),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every Array flatten function was inserted"))
+    }
+
     /// Inserts one native function per `Array.prototype` search.
     fn insert_array_searches(
         &mut self,
@@ -2259,6 +2313,12 @@ impl Runtime {
             NativeFunctionKind::ArrayConstructor,
             records.constructor,
         );
+        let species = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ArraySpeciesGetter,
+            records.species,
+        );
         let join = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -2274,6 +2334,7 @@ impl Runtime {
         ArrayIntrinsicGraph {
             prototype,
             constructor,
+            species,
             join,
             to_string,
         }
@@ -3384,6 +3445,29 @@ impl Runtime {
             self.append_function_identity(function, &name, 1, keys)?;
         }
 
+        for ((function, method), atom) in graph
+            .array_flattens
+            .into_iter()
+            .zip(ARRAY_FLATTEN_METHODS)
+            .zip(&graph.dynamic_atoms[ARRAY_FLATTEN_ATOM_START..])
+        {
+            let atom = atom.clone();
+            let name = atom
+                .description()
+                .expect("interned Array flatten name has a description")
+                .clone();
+            self.objects
+                .get_mut(graph.array.prototype)
+                .expect("new Array.prototype remains live")
+                .record
+                .append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            self.append_function_identity(function, &name, method.arity(), keys)?;
+        }
+
         for (function, atom) in graph
             .number_formats
             .into_iter()
@@ -3541,6 +3625,17 @@ impl Runtime {
             &names.array,
             keys,
         )?;
+        self.functions
+            .get_mut(graph.constructor)
+            .expect("new Array constructor remains live")
+            .object
+            .append_accessor(
+                keys.symbol_species.clone(),
+                PropertyLayout::accessor(false, true),
+                Some(graph.species),
+                None,
+            )?;
+        self.append_function_identity(graph.species, &names.get_species, 0, keys)?;
         // The pinned table reports `join` with length 1 and `toString` with
         // length 0 (`quickjs.c:44557-44558`).
         self.append_function_identity(graph.join, &names.join, 1, keys)?;
@@ -3919,6 +4014,16 @@ fn array_sort_records() -> Result<[ObjectRecord; ARRAY_SORT_METHODS.len()], Runt
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Array sort record was reserved")))
+}
+
+/// Reserves one record per `FlattenIntoArray` method.
+fn array_flatten_records() -> Result<[ObjectRecord; ARRAY_FLATTEN_METHODS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; ARRAY_FLATTEN_METHODS.len()] =
+        [const { None }; ARRAY_FLATTEN_METHODS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Array flatten record was reserved")))
 }
 
 /// Reserves one record per `Array.prototype` mutator.

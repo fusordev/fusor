@@ -224,9 +224,9 @@ fn symbol_handles_report_orphaning_after_runtime_drop() {
 #[test]
 fn symbol_creation_returns_the_atom_limit_error_without_partial_usage() {
     let limits = AtomLimits::new(
-        PREDEFINED_ATOM_COUNT + 106,
-        PREDEFINED_DESCRIPTION_CODE_UNITS + 945,
-        PREDEFINED_INTERNER_SLOTS + 106,
+        PREDEFINED_ATOM_COUNT + 108,
+        PREDEFINED_DESCRIPTION_CODE_UNITS + 956,
+        PREDEFINED_INTERNER_SLOTS + 108,
     );
     let mut runtime =
         Runtime::try_new(RuntimeLimits::default().with_atom_limits(limits)).expect("runtime");
@@ -240,9 +240,9 @@ fn symbol_creation_returns_the_atom_limit_error_without_partial_usage() {
     assert_eq!(
         error,
         AtomError::LiveAtomLimit {
-            current: PREDEFINED_ATOM_COUNT + 106,
+            current: PREDEFINED_ATOM_COUNT + 108,
             additional: 1,
-            maximum: PREDEFINED_ATOM_COUNT + 106,
+            maximum: PREDEFINED_ATOM_COUNT + 108,
         }
     );
     assert_eq!(runtime.atom_usage(), before);

@@ -267,6 +267,19 @@ Known intentional runtime differences:
   `sort` skips holes, performs strict ordered writes, then applies
   `DeletePropertyOrThrow`; `toSorted` allocates first, reads through holes, and
   defines a fresh dense base Array without touching the source.
+- [x] `Array.prototype.flat` and `flatMap` through an explicit, traced
+  `FlattenIntoArray` frame stack rather than host recursion. Root and nested
+  lengths are snapshotted with resumable `ToLength`, indexed traversal uses
+  `HasProperty` before `Get`, holes disappear, only real Arrays descend, and
+  `flatMap` invokes its validated mapper only for present root elements before
+  flattening the result by one level. `flat` performs observable depth coercion
+  before allocation and supports finite, clamped-negative, and infinite depth.
+  Both methods now use `ArraySpeciesCreate`, including the exact constructor and
+  `%Symbol.species%` getter order, custom construction with length `0`, the
+  current cross-realm intrinsic-Array rule, null fallback, and generic
+  non-Array receivers. `%Array%[Symbol.species]` is installed as the specified
+  non-enumerable configurable accessor, and each mapper, getter, conversion,
+  property creation, and constructor call is a suspension or fuel boundary.
 - [x] `Number.prototype.toFixed`, `toExponential`, and `toPrecision`, rendered
   from the *exact* value the binary64 holds rather than from its shortest decimal
   spelling. That distinction is observable and is why these use `JsBigInt`
@@ -338,8 +351,8 @@ Known intentional runtime differences:
   definitions run their two observable numeric conversions, preserve partial
   shrink results at non-configurable indices, and install a requested
   non-writable final state even when that shrink returns `false`.
-- [ ] Remaining String/Number/Array method surface (`flat`, `flatMap`, and the
-  locale-dependent renderings), shape
+- [ ] Remaining String/Number/Array method surface (the locale-dependent
+  renderings), shape
   sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.

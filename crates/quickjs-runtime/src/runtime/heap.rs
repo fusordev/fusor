@@ -28,10 +28,11 @@
 use super::{
     Arc, Atom, AtomError, BoxedPrimitive, ErrorIntrinsicKind, ExceptionKind, FunctionId,
     FunctionImplementation, HandleError, HandleKind, HeapObject, HeapReference, IntegrityLevel,
-    JsBigInt, JsNumber, JsString, NativeFunctionKind, ObjectId, ObjectRecord, OwnProperty,
-    PredefinedAtom, PropertyDeletion, PropertyKey, PropertyLayout, PropertyLayoutKind, RealmId,
-    RealmIntrinsics, ReleaseMailbox, Runtime, RuntimeResource, SetPrototypeOutcome, StoredValue,
-    array_length_from_number, check_execution_limit, stale_heap_reference, usize_to_u64,
+    JsBigInt, JsNumber, JsString, NativeFunction, NativeFunctionKind, ObjectId, ObjectRecord,
+    OwnProperty, PredefinedAtom, PropertyDeletion, PropertyKey, PropertyLayout, PropertyLayoutKind,
+    RealmId, RealmIntrinsics, ReleaseMailbox, Runtime, RuntimeResource, SetPrototypeOutcome,
+    StoredValue, array_length_from_number, check_execution_limit, stale_heap_reference,
+    usize_to_u64,
 };
 
 impl Runtime {
@@ -340,6 +341,46 @@ impl Runtime {
             });
         }
         Ok(array.prototype)
+    }
+
+    /// Returns the realm's intrinsic `%Array%` constructor.
+    pub(crate) fn realm_array_constructor(
+        &self,
+        realm: RealmId,
+    ) -> Result<FunctionId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { array, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm Array intrinsics are not initialized",
+            });
+        };
+        let function =
+            self.functions
+                .get(array.constructor)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "Array constructor intrinsic",
+                    index: array.constructor.index(),
+                    generation: array.constructor.generation(),
+                })?;
+        if !matches!(
+            function.native(),
+            Some(NativeFunction {
+                realm: function_realm,
+                kind: NativeFunctionKind::ArrayConstructor,
+            }) if *function_realm == realm
+        ) {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm Array constructor intrinsic has the wrong implementation",
+            });
+        }
+        Ok(array.constructor)
     }
 
     pub(crate) fn realm_error_intrinsic_prototype(
