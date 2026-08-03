@@ -268,32 +268,43 @@ fn compile_leaf_remains_an_explicit_nested_function_free_boundary() {
 }
 
 #[test]
-fn anonymous_function_assignment_inferred_name_remains_fail_closed() {
-    let source = "function outer(){ let inferred; inferred = (function(){}); }";
-    let error = with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage planning must succeed");
-            let outer = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some("outer"))
-                .expect("outer function");
-            context
-                .compile_tree(&outer, VerificationLimits::default())
-                .expect_err("inferred names need exact name-setting bytecode")
-        },
-    )
-    .expect("front-end acceptance");
-    assert!(
-        matches!(
-            error,
-            LeafCompilationError::Unsupported {
-                feature: UnsupportedLeafFeature::InferredFunctionName,
-                ..
-            }
-        ),
-        "{source}"
+fn anonymous_identifier_assignments_emit_adjacent_inferred_name_pairs() {
+    let tree = compile_tree(
+        "function outer(){\
+             let direct, logicalAnd=true, logicalOr=false, logicalNullish=null, captured;\
+             direct=(function(){});\
+             logicalAnd&&=function(){};\
+             logicalOr||=(function(){});\
+             logicalNullish??=function(){};\
+             captured=function(){};\
+             const holder={};\
+             holder.member=function(){};\
+             holder['computed']=function(){};\
+             ({}=function(){});\
+             let compound=0;compound+=function(){};\
+             return function(){return captured;};\
+         }",
+        "outer",
+    );
+    let outer = tree.root();
+    assert_eq!(
+        inferred_names(outer),
+        [
+            "direct",
+            "logicalAnd",
+            "logicalOr",
+            "logicalNullish",
+            "captured"
+        ]
+    );
+    assert_eq!(
+        outer
+            .constants()
+            .iter()
+            .filter(|constant| constant.function().is_some())
+            .count(),
+        10,
+        "member targets, a whole assignment pattern, compound assignment, and return remain unnamed"
     );
 }
 

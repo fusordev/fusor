@@ -241,6 +241,28 @@ fn generated_function_infers_anonymous_declaration_names() {
 }
 
 #[test]
+fn generated_function_infers_anonymous_assignment_names() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let f=Function('let local,logical=false;local=(function(){});\
+            logical||=function(){};generatedGlobal=function(){};\
+            return local.name===\"local\"&&logical.name===\"logical\"&&\
+                generatedGlobal.name===\"generatedGlobal\";');\
+            return f();",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function anonymous assignment names");
+
+    assert_eq!(result.as_boolean().expect("live Boolean"), Some(true));
+}
+
+#[test]
 fn generated_function_splits_parameter_and_body_environments() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

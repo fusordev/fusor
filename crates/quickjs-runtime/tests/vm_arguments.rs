@@ -392,6 +392,39 @@ fn anonymous_declaration_initializers_receive_spec_inferred_names() {
 }
 
 #[test]
+fn anonymous_identifier_assignments_receive_spec_inferred_names() {
+    let result = string_result(
+        "function inspect(){\
+            let direct,logicalAnd=true,logicalOr=false,logicalNullish=null,captured;\
+            direct=(function(){});\
+            logicalAnd&&=function(){};\
+            logicalOr||=(function(){});\
+            logicalNullish??=function(){};\
+            captured=function(){};\
+            assignmentGlobal=function(){};\
+            function supplied(){}\
+            supplied||=function(){};\
+            const holder={};\
+            holder.member=function(){};\
+            holder['computed']=function(){};\
+            const whole=({}=function(){});\
+            const closure=function(){return captured;};\
+            const descriptor=Object.getOwnPropertyDescriptor(direct,'name');\
+            return direct.name+':'+logicalAnd.name+':'+logicalOr.name+':'+\
+                logicalNullish.name+':'+closure().name+':'+assignmentGlobal.name+':'+\
+                supplied.name+':'+(holder.member.name==='')+(holder.computed.name==='')+\
+                (whole.name==='')+':'+descriptor.writable+descriptor.enumerable+\
+                descriptor.configurable;}\
+         return inspect();",
+    );
+    assert_eq!(
+        result,
+        "direct:logicalAnd:logicalOr:logicalNullish:captured:assignmentGlobal:supplied:\
+         truetruetrue:falsefalsetrue"
+    );
+}
+
+#[test]
 fn parameter_expression_body_environments_copy_and_then_diverge() {
     let result = string_result(
         "function copied(a=1){var a;return ''+a;}\

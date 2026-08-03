@@ -7690,9 +7690,6 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
-        if let Some(span) = anonymous_named_evaluation_span(&assignment.right) {
-            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
-        }
         if let AssignmentTarget::StaticMemberExpression(member) = &assignment.left {
             return Self::plan_static_member_assignment(assignment, member, constants, work);
         }
@@ -7756,16 +7753,40 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             tree_layout,
         )?;
         self.validate_lowered_mutation_reference(reference, needs_read, identifier.span)?;
+        let inferred_name = if matches!(
+            assignment.operator,
+            AssignmentOperator::Assign
+                | AssignmentOperator::LogicalOr
+                | AssignmentOperator::LogicalAnd
+                | AssignmentOperator::LogicalNullish
+        ) {
+            Self::plan_inferred_reference_name_for_initializer(
+                reference,
+                &assignment.right,
+                constants,
+            )?
+        } else {
+            None
+        };
         let (binding, frame_slot) = match reference {
             LoweredReference::Frame { binding, slot, .. } => (binding, slot),
             LoweredReference::RealmGlobal { slot, .. } => {
-                return Self::plan_realm_global_assignment(assignment, slot, flow, work);
+                return Self::plan_realm_global_assignment(
+                    assignment,
+                    slot,
+                    inferred_name,
+                    flow,
+                    work,
+                );
             }
         };
 
         match assignment.operator {
             AssignmentOperator::Assign => {
                 self.push_slot_write(binding, frame_slot, true, identifier.span, work)?;
+                if let Some(set_name) = inferred_name {
+                    work.push(ExpressionWork::Emit(set_name));
+                }
                 work.push(ExpressionWork::Visit(&assignment.right));
             }
             AssignmentOperator::LogicalOr
@@ -7786,6 +7807,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 };
                 work.push(ExpressionWork::Bind(done.clone()));
                 self.push_slot_write(binding, frame_slot, true, identifier.span, work)?;
+                if let Some(set_name) = inferred_name {
+                    work.push(ExpressionWork::Emit(set_name));
+                }
                 work.push(ExpressionWork::Visit(&assignment.right));
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
                     FinalOpcode::Drop,
@@ -7839,9 +7863,34 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    fn plan_inferred_reference_name_for_initializer(
+        reference: LoweredReference,
+        initializer: &Expression<'arena>,
+        constants: &CompiledConstantPool,
+    ) -> Result<Option<PlannedInstruction>, LeafCompilationError> {
+        let Some(span) = anonymous_named_evaluation_span(initializer) else {
+            return Ok(None);
+        };
+        if anonymous_ordinary_function_span(initializer).is_none() {
+            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+        }
+        let key = match reference {
+            LoweredReference::Frame { binding, .. } => CompiledMetadataAtomKey::Binding(binding),
+            LoweredReference::RealmGlobal { global, .. } => {
+                CompiledMetadataAtomKey::RealmGlobal(global)
+            }
+        };
+        Ok(Some(PlannedInstruction::new(
+            FinalOpcode::SetName,
+            Operands::Atom(constants.metadata_atom_index(key)?),
+            span,
+        )))
+    }
+
     fn plan_realm_global_assignment<'expression>(
         assignment: &'expression AssignmentExpression<'arena>,
         slot: u16,
+        inferred_name: Option<PlannedInstruction>,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -7863,6 +7912,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     Operands::None,
                     assignment.span,
                 )));
+                if let Some(set_name) = inferred_name {
+                    work.push(ExpressionWork::Emit(set_name));
+                }
                 work.push(ExpressionWork::Visit(&assignment.right));
             }
             AssignmentOperator::LogicalOr
@@ -7888,6 +7940,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     Operands::None,
                     assignment.span,
                 )));
+                if let Some(set_name) = inferred_name {
+                    work.push(ExpressionWork::Emit(set_name));
+                }
                 work.push(ExpressionWork::Visit(&assignment.right));
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
                     FinalOpcode::Drop,
@@ -8095,7 +8150,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     layout,
                     tree_layout,
                 )?;
-                if let LoweredReference::RealmGlobal { slot, access } = reference {
+                if let LoweredReference::RealmGlobal { slot, access, .. } = reference {
                     if !access.reads() || access.writes() {
                         return unsupported(
                             UnsupportedLeafFeature::UnsupportedReference,
@@ -9339,6 +9394,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             global,
         )?;
         Ok(LoweredReference::RealmGlobal {
+            global,
             slot,
             access: reference.access(),
         })
@@ -9366,7 +9422,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             layout.executable,
             global,
         )?;
-        Ok(LoweredReference::RealmGlobal { slot, access })
+        Ok(LoweredReference::RealmGlobal {
+            global,
+            slot,
+            access,
+        })
     }
 
     fn validate_lowered_mutation_reference(
@@ -10215,6 +10275,7 @@ enum LoweredReference {
         access: ReferenceAccess,
     },
     RealmGlobal {
+        global: RealmGlobalId,
         slot: u16,
         access: ReferenceAccess,
     },

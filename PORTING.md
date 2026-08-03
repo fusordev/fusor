@@ -512,10 +512,19 @@ Known intentional runtime differences:
   initializer follows the distinct specification production and remains
   unnamed. Parenthesized initializers, exact `name` descriptor flags, source
   functions, and generated `Function` bodies match the pinned oracle.
-  Assignment-expression and object-property inferred names remain fail closed
-  until their distinct reference/key evaluation-order certificates land;
-  anonymous class and arrow initializers remain part of their unsupported
-  lowering families.
+  Object-property inferred names remain fail closed until their distinct key
+  evaluation-order certificate lands; anonymous class and arrow initializers
+  remain part of their unsupported lowering families.
+- [x] Extend assignment-expression `NamedEvaluation` across the exact
+  identifier-reference operator set: plain `=`, `&&=`, `||=`, and `??=`.
+  Local, captured, and constructor-realm global targets all select their
+  certified binding-name atom, and logical forms set the name only on the
+  evaluated RHS path. Member targets, whole destructuring RHS values, and
+  non-logical compound assignments retain ordinary unnamed evaluation. Source
+  and generated `Function` bodies cover parenthesized RHS forms, short-circuit
+  behavior, descriptor flags, and the pinned-oracle result. Inferred names in
+  destructuring-assignment defaults remain fail closed pending their separate
+  target-before-iterator/property evaluation certificate.
 - [x] Implement formal rest parameters through the pinned `rest firstArgument`
   entry operation. The fixed argument domain and observable function `length`
   stop before the rest binding; exactly one non-simple rest site snapshots the
