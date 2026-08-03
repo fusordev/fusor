@@ -243,6 +243,13 @@ Known intentional runtime differences:
   element read, rejects an out-of-range relative index, and skips the replaced
   source getter. Their shared copier now also applies resumable `ToLength` when
   an array-like `length` getter returns an object instead of assuming a primitive.
+- [x] `Array.prototype.toSpliced` through the same change-by-copy continuation.
+  It distinguishes absent `start`, absent `skipCount`, and explicit `undefined`,
+  performs both observable numeric conversions before reading an element,
+  copies the prefix and suffix with read-through-hole `Get`, and stores insertion
+  values without coercion. The result length is checked against the safe-integer
+  ceiling before `ArrayCreate`; large array-like source indices above the Array
+  index domain are read through their ordinary decimal String property keys.
 - [x] `Number.prototype.toFixed`, `toExponential`, and `toPrecision`, rendered
   from the *exact* value the binary64 holds rather than from its shortest decimal
   spelling. That distinction is observable and is why these use `JsBigInt`
@@ -315,8 +322,8 @@ Known intentional runtime differences:
   shrink results at non-configurable indices, and install a requested
   non-writable final state even when that shrink returns `false`.
 - [ ] Remaining String/Number/Array method surface (`sort`, `flat`, `flatMap`,
-  `copyWithin`, `toSorted`, `toSpliced`, and the locale-dependent renderings),
-  shape sharing/transition
+  `copyWithin`, `toSorted`, and the locale-dependent renderings), shape
+  sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
 

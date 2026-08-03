@@ -40,9 +40,9 @@ use crate::{
     OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey,
     PropertyLayout, Runtime, RuntimeError, RuntimeResource,
     conversion::{
-        number_to_index, number_to_int32, number_to_integer_or_infinity, number_to_length,
-        number_to_uint16, number_to_uint32, string_to_number, string_to_parse_float,
-        string_to_parse_int,
+        MAX_SAFE_INTEGER, number_to_index, number_to_int32, number_to_integer_or_infinity,
+        number_to_length, number_to_uint16, number_to_uint32, string_to_number,
+        string_to_parse_float, string_to_parse_int,
     },
     define_property::{
         DefinitionDecision, PropertyDefinition, Requested, validate_and_apply_existing,

@@ -23,7 +23,8 @@
  * THE SOFTWARE.
  */
 
-//! `Array.prototype.slice`, `concat`, `at`, `toReversed`, and `with`.
+//! `Array.prototype.slice`, `concat`, `at`, `toReversed`, `toSpliced`, and
+//! `with`.
 //!
 //! These read without mutating. All except `at` build a fresh Array, but every
 //! method shares the same resumable element read because each read can enter a
@@ -59,6 +60,8 @@ enum ArrayCopierStage {
     AwaitEnd,
     /// Ready to read the next source element.
     NextElement,
+    /// Ready to append the next `toSpliced` insertion argument.
+    NextInsertion,
     /// Awaiting an element read that may have entered a getter.
     AwaitElement,
     /// Ready to advance `concat` to its next source.
@@ -93,8 +96,12 @@ pub(crate) struct ArrayCopierContinuation {
     written: u64,
     /// `at`'s answer.
     result: StoredValue,
-    /// The validated replacement index for `with`.
+    /// The validated replacement index for `with` or start for `toSpliced`.
     selected: Option<u64>,
+    /// The validated source span skipped by `toSpliced`.
+    skipped: u64,
+    /// Whether `toSpliced` has appended its insertion arguments.
+    inserted: bool,
     realm: RealmId,
     stage: ArrayCopierStage,
     origin: JsStackFrame,
@@ -163,7 +170,9 @@ pub(super) fn begin_array_copier(
         ArrayCopier::Slice | ArrayCopier::Concat => {
             Some(runtime.allocate_array(realm, Vec::new())?)
         }
-        ArrayCopier::At | ArrayCopier::ToReversed | ArrayCopier::With => None,
+        ArrayCopier::At | ArrayCopier::ToReversed | ArrayCopier::ToSpliced | ArrayCopier::With => {
+            None
+        }
     };
     // `concat` applies the same spread test to its receiver as to every later
     // source: only a real Array is spread. An array-like receiver therefore
@@ -171,9 +180,14 @@ pub(super) fn begin_array_copier(
     // `Array.prototype.concat.call({length:2,0:"a"},9)` reporting length 2.
     // Every other copier always reads its receiver's elements.
     let spreading = match (copier, &receiver) {
-        (ArrayCopier::Slice | ArrayCopier::At | ArrayCopier::ToReversed | ArrayCopier::With, _) => {
-            true
-        }
+        (
+            ArrayCopier::Slice
+            | ArrayCopier::At
+            | ArrayCopier::ToReversed
+            | ArrayCopier::ToSpliced
+            | ArrayCopier::With,
+            _,
+        ) => true,
         (ArrayCopier::Concat, StoredValue::Object(object)) => runtime.is_array_object(*object)?,
         (ArrayCopier::Concat, _) => false,
     };
@@ -191,6 +205,8 @@ pub(super) fn begin_array_copier(
         written: 0,
         result: StoredValue::Undefined,
         selected: None,
+        skipped: 0,
+        inserted: false,
         realm,
         stage: ArrayCopierStage::AwaitLength,
         origin,
@@ -201,7 +217,7 @@ pub(super) fn begin_array_copier(
 /// Resumes a copying method after an awaited read or conversion.
 #[allow(
     clippy::too_many_lines,
-    reason = "the length, range, element, and source-advance stages form one traced continuation shared by all five copying methods"
+    reason = "the length, range, insertion, element, and source-advance stages form one traced continuation shared by all six copying methods"
 )]
 pub(super) fn advance_array_copier(
     runtime: &mut Runtime,
@@ -263,11 +279,15 @@ pub(super) fn advance_array_copier(
                         state.end = state.length;
                         state.stage = ArrayCopierStage::NextElement;
                     }
-                    ArrayCopier::Slice | ArrayCopier::At | ArrayCopier::With => {
+                    ArrayCopier::Slice
+                    | ArrayCopier::At
+                    | ArrayCopier::ToSpliced
+                    | ArrayCopier::With => {
                         state.stage = ArrayCopierStage::AwaitStart;
                     }
                     ArrayCopier::ToReversed => {
-                        allocate_change_by_copy_destination(runtime, &mut state)?;
+                        let length = state.length;
+                        allocate_change_by_copy_destination(runtime, &mut state, length)?;
                         state.next = 0;
                         state.end = state.length;
                         state.stage = ArrayCopierStage::NextElement;
@@ -303,6 +323,49 @@ pub(super) fn advance_array_copier(
                 }
             }
             ArrayCopierStage::AwaitEnd => {
+                if matches!(state.copier, ArrayCopier::ToSpliced) {
+                    if let Some(value) = completion.take() {
+                        let number = operator_to_number(value, state.realm, &state.origin)?;
+                        let integer = number_to_integer_or_infinity(number);
+                        let start = state.selected.ok_or(EngineFault::RuntimeInvariant {
+                            message: "toSpliced lost its validated start index",
+                        })?;
+                        let skipped = clamp_splice_skip(integer, state.length - start);
+                        prepare_to_spliced(runtime, &mut state, skipped)?;
+                        continue;
+                    }
+                    match state.arguments.get(1) {
+                        None => {
+                            let start = state.selected.ok_or(EngineFault::RuntimeInvariant {
+                                message: "toSpliced lost its validated start index",
+                            })?;
+                            let skipped = if state.arguments.is_empty() {
+                                0
+                            } else {
+                                state.length - start
+                            };
+                            prepare_to_spliced(runtime, &mut state, skipped)?;
+                            continue;
+                        }
+                        Some(value) if needs_conversion(value) => {
+                            let value = value.duplicate();
+                            let realm = state.realm;
+                            let origin = state.origin.clone();
+                            return begin_operator_primitive_conversion(
+                                runtime,
+                                value,
+                                OperatorPrimitiveHint::Number,
+                                OperatorPrimitiveTarget::ArrayCopierArgument(Box::new(state)),
+                                realm,
+                                return_to,
+                                origin,
+                                execution_budget,
+                            );
+                        }
+                        Some(value) => completion = Some(value.duplicate()),
+                    }
+                    continue;
+                }
                 if let Some(value) = completion.take() {
                     let number = operator_to_number(value, state.realm, &state.origin)?;
                     state.end = relative_bound(number_to_integer_or_infinity(number), state.length);
@@ -336,7 +399,15 @@ pub(super) fn advance_array_copier(
             }
             ArrayCopierStage::NextElement => {
                 if state.next >= state.end {
-                    state.stage = ArrayCopierStage::NextSource;
+                    state.stage = if matches!(state.copier, ArrayCopier::ToSpliced) {
+                        if state.inserted {
+                            ArrayCopierStage::Done
+                        } else {
+                            ArrayCopierStage::NextInsertion
+                        }
+                    } else {
+                        ArrayCopierStage::NextSource
+                    };
                     continue;
                 }
                 execution_budget.charge_instructions(1)?;
@@ -355,13 +426,15 @@ pub(super) fn advance_array_copier(
                 } else {
                     index
                 };
-                let key = element_key(source_index)?;
+                let key = source_element_key(runtime, source_index)?;
                 charge_copier_lookup(runtime, &state.source, execution_budget)?;
                 // The older copying methods preserve holes. The change-by-copy
                 // methods use Get directly and therefore materialize a missing
                 // source index as an own `undefined` property.
-                if !matches!(state.copier, ArrayCopier::ToReversed | ArrayCopier::With)
-                    && !has_property(runtime, state.realm, &state.source, &key)?
+                if !matches!(
+                    state.copier,
+                    ArrayCopier::ToReversed | ArrayCopier::ToSpliced | ArrayCopier::With
+                ) && !has_property(runtime, state.realm, &state.source, &key)?
                 {
                     if matches!(state.copier, ArrayCopier::At) {
                         state.stage = ArrayCopierStage::Done;
@@ -392,6 +465,22 @@ pub(super) fn advance_array_copier(
                     continue;
                 }
                 append_element(runtime, &mut state, value)?;
+                state.stage = ArrayCopierStage::NextElement;
+            }
+            ArrayCopierStage::NextInsertion => {
+                if let Some(item) = state.arguments.get(state.next_source) {
+                    execution_budget.charge_instructions(1)?;
+                    let item = item.duplicate();
+                    state.next_source = state.next_source.saturating_add(1);
+                    append_element(runtime, &mut state, item)?;
+                    continue;
+                }
+                let start = state.selected.ok_or(EngineFault::RuntimeInvariant {
+                    message: "toSpliced lost its validated start index",
+                })?;
+                state.inserted = true;
+                state.next = start.saturating_add(state.skipped);
+                state.end = state.length;
                 state.stage = ArrayCopierStage::NextElement;
             }
             ArrayCopierStage::NextSource => {
@@ -430,7 +519,7 @@ pub(super) fn advance_array_copier(
     }
 }
 
-/// Applies `slice`'s start, `at`'s index, or `with`'s replacement index.
+/// Applies `slice`'s start, `at`'s index, or a change-by-copy relative index.
 fn apply_start(
     runtime: &mut Runtime,
     state: &mut ArrayCopierContinuation,
@@ -465,6 +554,10 @@ fn apply_start(
             }
             .into());
         }
+        ArrayCopier::ToSpliced => {
+            state.selected = Some(relative_bound(integer, state.length));
+            state.stage = ArrayCopierStage::AwaitEnd;
+        }
         ArrayCopier::With => {
             let length = length_as_f64(state.length);
             let actual = if integer >= 0.0 {
@@ -473,8 +566,9 @@ fn apply_start(
                 length + integer
             };
             if actual < 0.0 || actual >= length {
-                return Err(NativeFailure::Abrupt(copier_range_error(
+                return Err(NativeFailure::Abrupt(copier_error(
                     state,
+                    ExceptionKind::RangeError,
                     "invalid array index",
                 )?));
             }
@@ -485,7 +579,8 @@ fn apply_start(
             )]
             let selected = actual as u64;
             state.selected = Some(selected);
-            allocate_change_by_copy_destination(runtime, state)?;
+            let length = state.length;
+            allocate_change_by_copy_destination(runtime, state, length)?;
             state.next = 0;
             state.end = state.length;
             state.stage = ArrayCopierStage::NextElement;
@@ -498,10 +593,12 @@ fn apply_start(
 fn allocate_change_by_copy_destination(
     runtime: &mut Runtime,
     state: &mut ArrayCopierContinuation,
+    result_length: u64,
 ) -> Result<(), NativeFailure> {
-    let Ok(length) = u32::try_from(state.length) else {
-        return Err(NativeFailure::Abrupt(copier_range_error(
+    let Ok(length) = u32::try_from(result_length) else {
+        return Err(NativeFailure::Abrupt(copier_error(
             state,
+            ExceptionKind::RangeError,
             "invalid array length",
         )?));
     };
@@ -510,6 +607,51 @@ fn allocate_change_by_copy_destination(
         runtime.allocate_sparse_array_with_prototype(HeapReference::Object(prototype), length)?;
     state.destination = Some(destination);
     Ok(())
+}
+
+/// Finalizes `toSpliced`'s result length and initializes its three copy phases.
+fn prepare_to_spliced(
+    runtime: &mut Runtime,
+    state: &mut ArrayCopierContinuation,
+    skipped: u64,
+) -> Result<(), NativeFailure> {
+    let insertion_count = usize_to_u64(state.arguments.len().saturating_sub(2));
+    let retained = state.length.saturating_sub(skipped);
+    let result_length = retained.saturating_add(insertion_count);
+    if result_length > MAX_SAFE_INTEGER {
+        return Err(NativeFailure::Abrupt(copier_error(
+            state,
+            ExceptionKind::TypeError,
+            "invalid array length",
+        )?));
+    }
+    allocate_change_by_copy_destination(runtime, state, result_length)?;
+    state.skipped = skipped;
+    state.next = 0;
+    state.end = state.selected.ok_or(EngineFault::RuntimeInvariant {
+        message: "toSpliced lost its validated start index",
+    })?;
+    state.next_source = 2;
+    state.inserted = false;
+    state.stage = ArrayCopierStage::NextElement;
+    Ok(())
+}
+
+/// Clamps `skipCount` between zero and the remaining source length.
+fn clamp_splice_skip(integer: f64, maximum: u64) -> u64 {
+    if integer <= 0.0 {
+        return 0;
+    }
+    if integer >= length_as_f64(maximum) {
+        return maximum;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "ToIntegerOrInfinity plus the preceding bounds produce a u64"
+    )]
+    let skipped = integer as u64;
+    skipped
 }
 
 /// Appends one element to the destination array.
@@ -601,19 +743,32 @@ fn copier_failure(state: &ArrayCopierContinuation, failure: PropertyFailure) -> 
     }
 }
 
-/// Builds one realm-owned range exception for a change-by-copy precondition.
-fn copier_range_error(
+/// Builds one realm-owned exception for a change-by-copy precondition.
+fn copier_error(
     state: &ArrayCopierContinuation,
+    kind: ExceptionKind,
     message: &str,
 ) -> Result<PendingException, NativeFailure> {
     Ok(PendingException {
         realm: state.realm,
         payload: PendingExceptionPayload::EngineError {
-            kind: ExceptionKind::RangeError,
+            kind,
             message: JsString::from_utf8(message)?,
         },
         origin: state.origin.clone(),
     })
+}
+
+/// Returns an integer-index key, including ordinary string keys above the
+/// Array-index domain admitted by `LengthOfArrayLike`.
+fn source_element_key(runtime: &mut Runtime, index: u64) -> Result<PropertyKey, NativeFailure> {
+    if let Ok(index) = u32::try_from(index)
+        && let Some(index) = ArrayIndex::new(index)
+    {
+        return Ok(PropertyKey::from_index(index));
+    }
+    let name = JsNumber::from_f64(length_as_f64(index)).to_javascript_string()?;
+    Ok(runtime.property_key_from_string(&name)?)
 }
 
 /// Charges one property lookup, tolerating a primitive source.

@@ -1,4 +1,5 @@
-//! `Array.prototype.slice`, `concat`, `at`, `toReversed`, and `with`.
+//! `Array.prototype.slice`, `concat`, `at`, `toReversed`, `toSpliced`, and
+//! `with`.
 //!
 //! Every expectation below was produced by the pinned oracle:
 //!
@@ -486,4 +487,129 @@ fn change_by_copy_scans_consume_shared_instruction_fuel() {
         result,
         Err(ExecutionError::InstructionLimitExceeded { limit: 100, .. })
     ));
+}
+
+/// `toSpliced` copies a prefix, inserts its items, and then copies the suffix.
+#[test]
+fn to_spliced_builds_a_fresh_changed_array() {
+    assert_all(&[
+        ("[1,2,3,4].toSpliced(1,2,'a','b').join()", "1,a,b,4"),
+        ("[1,2,3,4].toSpliced(-2,1,'x').join()", "1,2,x,4"),
+        ("[1,2,3].toSpliced(Infinity,1,'x').join()", "1,2,3,x"),
+        ("[1,2,3].toSpliced(-Infinity,1,'x').join()", "x,2,3"),
+        (
+            "Array.prototype.toSpliced.call({length:3,0:'a',2:'c'},1,1,'b').join()",
+            "a,b,c",
+        ),
+        (
+            "(function(){const a=[1,2,3];const r=a.toSpliced(1,1,9);return a.join()+'|'+r.join()+'|'+Array.isArray(r);})()",
+            "1,2,3|1,9,3|true",
+        ),
+    ]);
+}
+
+/// Argument presence controls `toSpliced` independently from coercion value.
+#[test]
+fn to_spliced_distinguishes_absent_and_undefined_arguments() {
+    assert_all(&[
+        // With no start argument, the skip count is zero and the source copies.
+        ("[1,2,3].toSpliced().join()", "1,2,3"),
+        // A present start with no skip count removes the remaining suffix.
+        ("[1,2,3].toSpliced(1).join()", "1"),
+        // Present undefined start converts to zero, then the absent skip count
+        // removes everything.
+        ("[1,2,3].toSpliced(undefined).join()", ""),
+        // Present undefined skip count converts to zero instead of removing the
+        // suffix.
+        ("[1,2,3].toSpliced(1,undefined,'x').join()", "1,x,2,3"),
+        ("[1,2,3].toSpliced(1,-4,'x').join()", "1,x,2,3"),
+        ("[1,2,3].toSpliced(1,99,'x').join()", "1,x"),
+    ]);
+}
+
+/// `toSpliced` reads through holes and inherited indexed properties.
+#[test]
+fn to_spliced_materializes_every_copied_index() {
+    assert_all(&[
+        (
+            "(function(){const r=[1,,3].toSpliced(1,0);const own=Object.prototype.hasOwnProperty;return r.length+'|'+own.call(r,0)+'|'+own.call(r,1)+'|'+own.call(r,2)+'|'+r.join();})()",
+            "3|true|true|true|1,,3",
+        ),
+        (
+            "(function(){const p={1:'p'};const o=Object.create(p);o.length=3;o[0]='a';o[2]='c';return Array.prototype.toSpliced.call(o,1,0,'x').join();})()",
+            "a,x,p,c",
+        ),
+    ]);
+}
+
+/// Start and skip conversions finish before any source index is observed.
+#[test]
+fn to_spliced_conversion_and_getter_order_is_exact() {
+    assert_all(&[
+        (
+            "(function(){let log='';const o={get length(){log+='l';return 3},get 0(){log+='0';return'a'},get 1(){log+='1';return'b'},get 2(){log+='2';return'c'}};const s={valueOf(){log+='s';return 1}},d={valueOf(){log+='d';return 1}};const r=Array.prototype.toSpliced.call(o,s,d,'x');return log+'|'+r.join();})()",
+            "lsd02|a,x,c",
+        ),
+        (
+            "(function(){let read=false;const o={length:2,get 0(){read=true;return 1}};try{Array.prototype.toSpliced.call(o,{valueOf(){throw 41}},0);}catch(error){return (error===41)+'|'+read;}})()",
+            "true|false",
+        ),
+        (
+            "(function(){let read=false;const o={length:2,get 0(){read=true;return 1}};try{Array.prototype.toSpliced.call(o,0,{valueOf(){throw 42}});}catch(error){return (error===42)+'|'+read;}})()",
+            "true|false",
+        ),
+        (
+            "(function(){let later=false;const o={length:2,get 0(){throw 43},get 1(){later=true;return 2}};try{Array.prototype.toSpliced.call(o,1,0);}catch(error){return (error===43)+'|'+later;}})()",
+            "true|false",
+        ),
+    ]);
+}
+
+/// Result length validation precedes copying and supports large source keys.
+#[test]
+fn to_spliced_validates_only_the_result_array_length() {
+    assert_throws(
+        "return Array.prototype.toSpliced.call({length:9007199254740991},0,0,1);",
+        ExceptionKind::TypeError,
+        "invalid array length",
+    );
+    assert_throws(
+        "return Array.prototype.toSpliced.call({length:4294967296});",
+        ExceptionKind::RangeError,
+        "invalid array length",
+    );
+    assert_all(&[
+        (
+            "Array.prototype.toSpliced.call({length:4294967296},0,4294967296).length",
+            "0",
+        ),
+        (
+            "Array.prototype.toSpliced.call({length:4294967296,'4294967295':'tail'},0,4294967295)[0]",
+            "tail",
+        ),
+    ]);
+}
+
+/// `toSpliced` is an ordinary non-constructor with the pinned shape.
+#[test]
+fn to_spliced_has_the_pinned_shape() {
+    assert_all(&[
+        ("Array.prototype.toSpliced.name", "toSpliced"),
+        ("Array.prototype.toSpliced.length", "2"),
+        (
+            "(function(){const d=Object.getOwnPropertyDescriptor(Array.prototype,'toSpliced');return d.writable+','+d.enumerable+','+d.configurable;})()",
+            "true,false,true",
+        ),
+        (
+            "(function(){try{new Array.prototype.toSpliced();}catch(error){return error instanceof TypeError;}})()",
+            "true",
+        ),
+    ]);
+    for receiver in ["null", "undefined"] {
+        assert_throws(
+            &format!("return Array.prototype.toSpliced.call({receiver});"),
+            ExceptionKind::TypeError,
+            "cannot convert to object",
+        );
+    }
 }

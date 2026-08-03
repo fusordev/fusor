@@ -448,6 +448,7 @@ pub(crate) enum ArrayCopier {
     Concat,
     At,
     ToReversed,
+    ToSpliced,
     With,
 }
 
@@ -455,7 +456,7 @@ impl ArrayCopier {
     /// Returns the reported `length` of the installed function.
     pub(crate) const fn arity(self) -> i32 {
         match self {
-            Self::Slice | Self::With => 2,
+            Self::Slice | Self::ToSpliced | Self::With => 2,
             // `concat` is variadic and `at` takes one index; both report 1.
             Self::Concat | Self::At => 1,
             Self::ToReversed => 0,
@@ -469,6 +470,7 @@ impl ArrayCopier {
             Self::Concat => "concat",
             Self::At => "at",
             Self::ToReversed => "toReversed",
+            Self::ToSpliced => "toSpliced",
             Self::With => "with",
         }
     }

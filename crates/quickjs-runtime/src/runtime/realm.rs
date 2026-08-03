@@ -41,8 +41,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 22;
-const REALM_FUNCTION_COUNT: usize = 161;
-const REALM_PROPERTY_COUNT: u64 = 533;
+const REALM_FUNCTION_COUNT: usize = 162;
+const REALM_PROPERTY_COUNT: u64 = 536;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -309,8 +309,12 @@ const ARRAY_CALLBACK_ATOM_START: usize = NUMBER_FORMAT_ATOM_START + NUMBER_FORMA
 /// `concat` and `with` are excluded because they already have predefined atoms.
 /// Interning a duplicate breaks the atom table's rollback invariant, which is
 /// exactly how this was caught.
-const ARRAY_COPIER_METHODS: [ArrayCopier; 3] =
-    [ArrayCopier::Slice, ArrayCopier::At, ArrayCopier::ToReversed];
+const ARRAY_COPIER_METHODS: [ArrayCopier; 4] = [
+    ArrayCopier::Slice,
+    ArrayCopier::At,
+    ArrayCopier::ToReversed,
+    ArrayCopier::ToSpliced,
+];
 
 /// The `Array.prototype` copying methods that reuse predefined atoms.
 const ARRAY_PREDEFINED_COPIERS: [(PredefinedAtom, ArrayCopier); 2] = [
