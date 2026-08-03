@@ -1,14 +1,15 @@
 use super::super::{
     AssignmentExpression, AssignmentOperator, AssignmentTarget, BindingId, BindingIdentifier,
-    BindingPattern, BranchKind, CompilationContext, CompiledConstantPool,
-    DestructuringBindingInitialization, ExecutableId, Expression, FinalOpcode, ForStatementLeft,
-    FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError,
-    LocalSlot, Operands, PlannedControlFlow, PlannedInstruction, RealmGlobalId, ReferenceAccess,
-    Span, StoragePlacement, UnsupportedLeafFeature, VariableDeclaration, VariableDeclarationKind,
-    VariableDeclarator, WritePolicy, anonymous_named_evaluation_span, binary_opcode,
-    compact_get_argument, compact_get_capture, compact_get_local, compact_put_argument,
-    compact_put_capture, compact_put_local, compact_set_argument, compact_set_capture,
-    compact_set_local, plan_put_slot, unsupported,
+    BindingPattern, BranchKind, CompilationContext, CompilationGoal, CompiledConstantPool,
+    DestructuringBindingInitialization, DynamicFunctionKind, ExecutableId, Expression, FinalOpcode,
+    ForStatementLeft, FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan, IdentifierReference,
+    LeafCompilationError, LocalSlot, NativeReferenceId, Operands, PlannedControlFlow,
+    PlannedInstruction, RealmGlobalId, ReferenceAccess, ReferenceId, Span, StoragePlacement,
+    SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature, VariableDeclaration,
+    VariableDeclarationKind, VariableDeclarator, WritePolicy, anonymous_named_evaluation_span,
+    binary_opcode, compact_get_argument, compact_get_capture, compact_get_local,
+    compact_put_argument, compact_put_capture, compact_put_local, compact_set_argument,
+    compact_set_capture, compact_set_local, plan_put_slot, unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -905,5 +906,210 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             }
             Ok(())
         }
+    }
+}
+
+impl CompilationContext<'_, '_, '_> {
+    pub(in crate::lowering) fn binding_for_identifier(
+        &self,
+        symbol_id: Option<SymbolId>,
+        span: Span,
+    ) -> Result<BindingId, LeafCompilationError> {
+        let symbol_id = symbol_id.ok_or(LeafCompilationError::SemanticInvariant {
+            invariant: "binding identifier has Oxc symbol identity",
+            span: Some(span),
+        })?;
+        if let Some(binding) = self
+            .planned
+            .identities
+            .binding_by_declaration
+            .get(&(symbol_id, span.start, span.end))
+            .copied()
+        {
+            return Ok(binding);
+        }
+        self.planned
+            .identities
+            .binding_by_symbol
+            .get(symbol_id.index())
+            .copied()
+            .flatten()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc symbol has compiler binding identity",
+                span: Some(span),
+            })
+    }
+
+    pub(in crate::lowering) fn lowered_reference(
+        &self,
+        reference_id: Option<ReferenceId>,
+        span: Span,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<LoweredReference, LeafCompilationError> {
+        let reference_id = reference_id.ok_or(LeafCompilationError::SemanticInvariant {
+            invariant: "identifier reference has Oxc reference identity",
+            span: Some(span),
+        })?;
+        let native = self
+            .planned
+            .identities
+            .reference_by_id
+            .get(reference_id.index())
+            .copied()
+            .flatten()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc reference has compiler identity",
+                span: Some(span),
+            })?;
+        match native {
+            NativeReferenceId::Resolved(resolved_id) => {
+                let reference = self.planned.plan.resolved_reference(resolved_id).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "resolved compiler reference exists",
+                        span: Some(span),
+                    },
+                )?;
+                if reference.span() != span {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "resolved compiler reference retains its Oxc span",
+                        span: Some(span),
+                    });
+                }
+                let binding = self.planned.plan.binding(reference.binding()).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "resolved compiler binding exists",
+                        span: Some(span),
+                    },
+                )?;
+                match binding.placement() {
+                    StoragePlacement::Argument { .. } | StoragePlacement::Local => {
+                        let slot =
+                            layout
+                                .slot(binding.id())
+                                .ok_or(LeafCompilationError::Unsupported {
+                                    feature: UnsupportedLeafFeature::UnsupportedBinding,
+                                    span,
+                                })?;
+                        Ok(LoweredReference::Frame {
+                            binding: binding.id(),
+                            slot,
+                            access: reference.access(),
+                        })
+                    }
+                    StoragePlacement::GlobalObject => self.lowered_realm_global_binding_reference(
+                        binding.id(),
+                        reference.access(),
+                        span,
+                        layout,
+                        tree_layout,
+                    ),
+                    StoragePlacement::GlobalLexical => {
+                        unsupported(UnsupportedLeafFeature::GlobalEnvironment, span)
+                    }
+                    StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport => {
+                        unsupported(UnsupportedLeafFeature::UnsupportedBinding, span)
+                    }
+                }
+            }
+            NativeReferenceId::Unresolved(unresolved_id) => {
+                self.lowered_unresolved_reference(unresolved_id, span, layout, tree_layout)
+            }
+        }
+    }
+
+    fn lowered_unresolved_reference(
+        &self,
+        unresolved: UnresolvedGlobalId,
+        span: Span,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<LoweredReference, LeafCompilationError> {
+        let reference = self
+            .planned
+            .plan
+            .unresolved_globals()
+            .get(unresolved.index())
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "unresolved compiler reference exists",
+                span: Some(span),
+            })?;
+        if reference.span() != span {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "unresolved compiler reference retains its Oxc span",
+                span: Some(span),
+            });
+        }
+        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) {
+            return unsupported(UnsupportedLeafFeature::UnresolvedReference, span);
+        }
+        let global = tree_layout.realm_globals.for_unresolved(unresolved).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "dynamic unresolved reference has a constructor-realm global identity",
+                span: Some(span),
+            },
+        )?;
+        let slot = tree_layout.realm_globals.closure_slot(
+            &self.planned.plan,
+            layout.executable,
+            global,
+        )?;
+        Ok(LoweredReference::RealmGlobal {
+            global,
+            slot,
+            access: reference.access(),
+        })
+    }
+
+    fn lowered_realm_global_binding_reference(
+        &self,
+        binding: BindingId,
+        access: ReferenceAccess,
+        span: Span,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<LoweredReference, LeafCompilationError> {
+        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) {
+            return unsupported(UnsupportedLeafFeature::GlobalEnvironment, span);
+        }
+        let global = tree_layout.realm_globals.for_binding(binding).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "dynamic Program global binding has a realm-global identity",
+                span: Some(span),
+            },
+        )?;
+        let slot = tree_layout.realm_globals.closure_slot(
+            &self.planned.plan,
+            layout.executable,
+            global,
+        )?;
+        Ok(LoweredReference::RealmGlobal {
+            global,
+            slot,
+            access,
+        })
+    }
+
+    pub(in crate::lowering) fn validate_lowered_mutation_reference(
+        &self,
+        reference: LoweredReference,
+        needs_read: bool,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        if !reference.access().writes() || reference.access().reads() != needs_read {
+            return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
+        }
+        if let LoweredReference::Frame { binding, .. } = reference {
+            let storage = self.planned.plan.binding(binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "written compiler binding exists",
+                    span: Some(span),
+                },
+            )?;
+            if storage.policy().writes() != WritePolicy::Mutable {
+                return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
+            }
+        }
+        Ok(())
     }
 }

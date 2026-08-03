@@ -13,9 +13,502 @@ use super::atoms::{
     CompiledPropertyAtomKey, freeze_atom_candidates, freeze_metadata_atom_candidates,
 };
 use super::{
-    CompiledConstant, CompiledFunctionConstant, LeafCompilationError, PlannedInstruction,
-    checked_function_entry_count,
+    ArrayExpression, ArrayExpressionElement, AssignmentTargetProperty, AstKind, BindingPattern,
+    CompilationContext, CompilationGoal, CompiledConstant, CompiledFunctionConstant,
+    DynamicFunctionKind, Executable, ExpressionPlanner, FunctionTreeLayoutSeed, GetSpan,
+    LeafCompilationError, NodeId, OxcPropertyKey, ParsedUnit, PlannedInstruction, StoragePlacement,
+    UnaryOperator, checked_function_entry_count, compiled_static_property_key,
+    compiler_identifier_string, decode_compiler_string, exact_i32, exact_negated_i32,
+    record_property_candidate, record_property_candidate_for, record_string_candidate,
 };
+
+impl<'arena> CompilationContext<'_, 'arena, '_> {
+    pub(in crate::lowering) fn compiled_constant_pools(
+        &self,
+        tree_layout: &FunctionTreeLayoutSeed,
+    ) -> Result<Box<[CompiledConstantPool]>, LeafCompilationError> {
+        let executables = self.planned.plan.executables();
+        let mut candidates = (0..executables.len())
+            .map(|_| Vec::new())
+            .collect::<Vec<_>>();
+        let mut atom_candidates = (0..executables.len())
+            .map(|_| Vec::new())
+            .collect::<Vec<_>>();
+        let mut metadata_atom_candidates = (0..executables.len())
+            .map(|_| Vec::new())
+            .collect::<Vec<_>>();
+        for child in executables {
+            let Some(parent) = child.parent() else {
+                continue;
+            };
+            let owner = candidates
+                .get_mut(parent.index())
+                .ok_or(LeafCompilationError::InvalidExecutable { executable: parent })?;
+            owner.push(CompiledConstantCandidate::Function {
+                executable: child.id(),
+                span: child.span(),
+            });
+        }
+        self.record_literal_candidates(&mut candidates, &mut atom_candidates)?;
+        self.record_metadata_atom_candidates(tree_layout, &mut metadata_atom_candidates)?;
+
+        let mut pools = Vec::with_capacity(executables.len());
+        for (index, ((candidates, atoms), metadata_atoms)) in candidates
+            .into_iter()
+            .zip(atom_candidates)
+            .zip(metadata_atom_candidates)
+            .enumerate()
+        {
+            let executable =
+                executables
+                    .get(index)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "constant-pool owner indexes dense executable metadata",
+                        span: None,
+                    })?;
+            pools.push(CompiledConstantPool::new(CompiledConstantPoolInput {
+                children: tree_layout.children(executable.id())?,
+                constant_candidates: candidates,
+                atom_candidates: atoms,
+                metadata_atom_candidates: metadata_atoms,
+            })?);
+        }
+        Ok(pools.into_boxed_slice())
+    }
+
+    fn record_metadata_atom_candidates(
+        &self,
+        tree_layout: &FunctionTreeLayoutSeed,
+        candidates: &mut [Vec<CompiledMetadataAtomCandidate>],
+    ) -> Result<(), LeafCompilationError> {
+        for executable in self.planned.plan.executables() {
+            let owner = candidates.get_mut(executable.id().index()).ok_or(
+                LeafCompilationError::InvalidExecutable {
+                    executable: executable.id(),
+                },
+            )?;
+            if let Some(name) = executable.name() {
+                let span =
+                    executable
+                        .name_span()
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "named executable retains its name span",
+                            span: Some(executable.span()),
+                        })?;
+                owner.push(CompiledMetadataAtomCandidate {
+                    key: CompiledMetadataAtomKey::FunctionName,
+                    value: compiler_identifier_string(name, span)?,
+                    span,
+                });
+            } else if executable.name_span().is_some() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "anonymous executable has no name span",
+                    span: Some(executable.span()),
+                });
+            }
+            if executable.id().index() == 0
+                && self.unit.goal()
+                    == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
+            {
+                owner.push(CompiledMetadataAtomCandidate {
+                    key: CompiledMetadataAtomKey::ScriptCompletion,
+                    value: compiler_identifier_string("_ret_", executable.span())?,
+                    span: executable.span(),
+                });
+            }
+            self.record_raw_parameter_metadata_candidates(executable, owner)?;
+            for binding in self.planned.plan.bindings_for(executable.id()).ok_or(
+                LeafCompilationError::InvalidExecutable {
+                    executable: executable.id(),
+                },
+            )? {
+                if !matches!(
+                    binding.placement(),
+                    StoragePlacement::Argument { .. } | StoragePlacement::Local
+                ) {
+                    continue;
+                }
+                let span = binding.declaration_spans().first().copied().ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "frame binding retains a declaration span",
+                        span: Some(executable.span()),
+                    },
+                )?;
+                owner.push(CompiledMetadataAtomCandidate {
+                    key: CompiledMetadataAtomKey::Binding(binding.id()),
+                    value: compiler_identifier_string(binding.name(), span)?,
+                    span,
+                });
+            }
+            for capture in self
+                .planned
+                .plan
+                .frame_captures_for(executable.id())
+                .ok_or(LeafCompilationError::InvalidExecutable {
+                    executable: executable.id(),
+                })?
+            {
+                let binding = self.planned.plan.binding(capture.binding()).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "captured metadata binding exists",
+                        span: Some(executable.span()),
+                    },
+                )?;
+                let span = binding.declaration_spans().first().copied().ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "captured binding retains a declaration span",
+                        span: Some(executable.span()),
+                    },
+                )?;
+                owner.push(CompiledMetadataAtomCandidate {
+                    key: CompiledMetadataAtomKey::Binding(binding.id()),
+                    value: compiler_identifier_string(binding.name(), span)?,
+                    span,
+                });
+            }
+            for &global in tree_layout.realm_globals.imports_for(executable.id())? {
+                let binding = tree_layout.realm_globals.binding(global).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "constructor-realm global import has a binding descriptor",
+                        span: Some(executable.span()),
+                    },
+                )?;
+                owner.push(CompiledMetadataAtomCandidate {
+                    key: CompiledMetadataAtomKey::RealmGlobal(global),
+                    value: compiler_identifier_string(&binding.name, binding.first_span)?,
+                    span: binding.first_span,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn record_raw_parameter_metadata_candidates(
+        &self,
+        executable: &Executable,
+        owner: &mut Vec<CompiledMetadataAtomCandidate>,
+    ) -> Result<(), LeafCompilationError> {
+        if executable.has_simple_parameter_list() {
+            return Ok(());
+        }
+        let node = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(executable.id().index())
+            .copied()
+            .ok_or(LeafCompilationError::InvalidExecutable {
+                executable: executable.id(),
+            })?;
+        let parameters = match self.unit.semantic().nodes().kind(node) {
+            AstKind::Function(function) => Some(function.params.as_ref()),
+            AstKind::ArrowFunctionExpression(arrow) => Some(arrow.params.as_ref()),
+            AstKind::Program(_) => None,
+            _ => {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "non-simple parameter metadata belongs to a function",
+                    span: Some(executable.span()),
+                });
+            }
+        };
+        let Some(parameters) = parameters else {
+            return Ok(());
+        };
+        for (index, parameter) in parameters.items.iter().enumerate() {
+            if !executable.has_parameter_expressions()
+                && matches!(parameter.pattern, BindingPattern::BindingIdentifier(_))
+            {
+                continue;
+            }
+            let index =
+                u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "raw parameter metadata",
+                })?;
+            let name = format!("_arg_{index}_");
+            owner.push(CompiledMetadataAtomCandidate {
+                key: CompiledMetadataAtomKey::RawParameter(index),
+                value: compiler_identifier_string(&name, parameter.span)?,
+                span: parameter.span,
+            });
+        }
+        Ok(())
+    }
+
+    fn record_literal_candidates(
+        &self,
+        candidates: &mut [Vec<CompiledConstantCandidate>],
+        atom_candidates: &mut [Vec<CompiledAtomCandidate>],
+    ) -> Result<(), LeafCompilationError> {
+        let nodes = self.unit.semantic().nodes();
+        let mut owners = vec![None; nodes.len()];
+        for (node_id, node) in nodes.iter_enumerated() {
+            let owner = match node.kind() {
+                AstKind::Program(_)
+                | AstKind::Function(_)
+                | AstKind::ArrowFunctionExpression(_) => self
+                    .planned
+                    .identities
+                    .executable_by_node
+                    .get(node_id.index())
+                    .copied()
+                    .flatten(),
+                _ => {
+                    let parent = nodes.parent_id(node_id);
+                    if parent.index() >= node_id.index() {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "semantic parents precede children in node order",
+                            span: Some(node.kind().span()),
+                        });
+                    }
+                    owners.get(parent.index()).copied().flatten()
+                }
+            };
+            let owner_slot =
+                owners
+                    .get_mut(node_id.index())
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "semantic node identity indexes constant-pool ownership",
+                        span: Some(node.kind().span()),
+                    })?;
+            *owner_slot = owner;
+            if let Some(owner) = owner {
+                self.record_node_literal_candidate(node_id, owner, candidates, atom_candidates)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the literal/property candidate walk stays one exhaustive per-node audit"
+    )]
+    fn record_node_literal_candidate(
+        &self,
+        node_id: NodeId,
+        owner: ExecutableId,
+        candidates: &mut [Vec<CompiledConstantCandidate>],
+        atom_candidates: &mut [Vec<CompiledAtomCandidate>],
+    ) -> Result<(), LeafCompilationError> {
+        let nodes = self.unit.semantic().nodes();
+        match nodes.kind(node_id) {
+            AstKind::NumericLiteral(literal)
+                if !is_noncomputed_static_property_key_node(self.unit, node_id)
+                    && exact_i32(literal.value).is_none() =>
+            {
+                let parent = nodes.parent_id(node_id);
+                let folded_negative_i32 = matches!(
+                    nodes.kind(parent),
+                    AstKind::UnaryExpression(unary)
+                        if unary.operator == UnaryOperator::UnaryNegation
+                            && literal.value != 0.0
+                            && exact_negated_i32(literal.value).is_some()
+                );
+                if !folded_negative_i32 {
+                    candidates
+                        .get_mut(owner.index())
+                        .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
+                        .push(CompiledConstantCandidate::Number {
+                            value: Binary64Constant::from_f64(literal.value),
+                            span: literal.span,
+                        });
+                }
+            }
+            AstKind::StringLiteral(literal)
+                if !matches!(nodes.parent_kind(node_id), AstKind::Directive(_))
+                    && !is_noncomputed_static_property_key_node(self.unit, node_id) =>
+            {
+                let value = decode_compiler_string(
+                    literal.value.as_str(),
+                    literal.lone_surrogates,
+                    literal.span,
+                )?;
+                record_string_candidate(owner, value, literal.span, candidates, atom_candidates)?;
+            }
+            AstKind::TemplateLiteral(template)
+                if !matches!(
+                    nodes.parent_kind(node_id),
+                    AstKind::TaggedTemplateExpression(_)
+                ) && template.expressions.is_empty()
+                    && template.quasis.len() == 1 =>
+            {
+                let quasi = &template.quasis[0];
+                if !quasi.tail {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "no-substitution template has one tail quasi",
+                        span: Some(template.span),
+                    });
+                }
+                let cooked =
+                    quasi
+                        .value
+                        .cooked
+                        .as_ref()
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "untagged no-substitution template has a cooked value",
+                            span: Some(template.span),
+                        })?;
+                let value =
+                    decode_compiler_string(cooked.as_str(), quasi.lone_surrogates, template.span)?;
+                record_string_candidate(owner, value, template.span, candidates, atom_candidates)?;
+            }
+            AstKind::ObjectProperty(property) => {
+                if !property.computed
+                    && !property.shorthand
+                    && let Some(key) = compiled_static_property_key(&property.key)?
+                {
+                    record_property_candidate(owner, key.value, key.span, atom_candidates)?;
+                }
+            }
+            AstKind::ObjectPattern(pattern) => {
+                for property in &pattern.properties {
+                    if !property.computed
+                        && let Some(key) = compiled_static_property_key(&property.key)?
+                    {
+                        record_property_candidate(owner, key.value, key.span, atom_candidates)?;
+                    }
+                }
+            }
+            AstKind::ObjectAssignmentTarget(target) => {
+                for property in &target.properties {
+                    match property {
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(
+                            identifier,
+                        ) => {
+                            let key = compiler_identifier_string(
+                                identifier.binding.name.as_str(),
+                                identifier.binding.span,
+                            )?;
+                            record_property_candidate(
+                                owner,
+                                key,
+                                identifier.binding.span,
+                                atom_candidates,
+                            )?;
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+                            if !property.computed
+                                && let Some(key) = compiled_static_property_key(&property.name)?
+                            {
+                                record_property_candidate(
+                                    owner,
+                                    key.value,
+                                    key.span,
+                                    atom_candidates,
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+            AstKind::StaticMemberExpression(member) => {
+                record_property_candidate(
+                    owner,
+                    compiler_identifier_string(
+                        member.property.name.as_str(),
+                        member.property.span,
+                    )?,
+                    member.property.span,
+                    atom_candidates,
+                )?;
+            }
+            AstKind::ArrayExpression(array) => {
+                Self::record_array_property_candidates(owner, array, atom_candidates)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn record_array_property_candidates(
+        owner: ExecutableId,
+        array: &ArrayExpression<'arena>,
+        atom_candidates: &mut [Vec<CompiledAtomCandidate>],
+    ) -> Result<(), LeafCompilationError> {
+        let first_spread = array
+            .elements
+            .iter()
+            .position(ArrayExpressionElement::is_spread);
+        let first_static_index = if first_spread.is_some() {
+            ExpressionPlanner::spread_array_dense_prefix_len(array)
+        } else {
+            let Some(first_elision) = array
+                .elements
+                .iter()
+                .position(ArrayExpressionElement::is_elision)
+            else {
+                return Ok(());
+            };
+            first_elision
+        };
+        let static_end = first_spread.unwrap_or(array.elements.len());
+        for (index, element) in array
+            .elements
+            .iter()
+            .enumerate()
+            .skip(first_static_index)
+            .take(static_end - first_static_index)
+        {
+            if element.is_elision() {
+                continue;
+            }
+            let expression =
+                element
+                    .as_expression()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "non-spread array element is an expression or elision",
+                        span: Some(element.span()),
+                    })?;
+            let index =
+                u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "array literal element indices",
+                })?;
+            let span = expression.span();
+            record_property_candidate_for(
+                owner,
+                compiler_identifier_string(&index.to_string(), span)?,
+                span,
+                CompiledPropertyAtomKey::ArrayIndex {
+                    array: array.span,
+                    index,
+                },
+                atom_candidates,
+            )?;
+        }
+        let final_length_span = match first_spread {
+            Some(_) => ExpressionPlanner::spread_array_final_length_span(array),
+            None => array
+                .elements
+                .last()
+                .filter(|element| element.is_elision())
+                .map(GetSpan::span),
+        };
+        if let Some(final_length_span) = final_length_span {
+            record_property_candidate_for(
+                owner,
+                compiler_identifier_string("length", final_length_span)?,
+                final_length_span,
+                CompiledPropertyAtomKey::ArrayLength { array: array.span },
+                atom_candidates,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn is_noncomputed_static_property_key_node(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> bool {
+    let AstKind::ObjectProperty(property) = unit.semantic().nodes().parent_kind(node_id) else {
+        return false;
+    };
+    if property.computed {
+        return false;
+    }
+    match &property.key {
+        OxcPropertyKey::StringLiteral(literal) => literal.node_id.get() == node_id,
+        OxcPropertyKey::NumericLiteral(literal) => literal.node_id.get() == node_id,
+        OxcPropertyKey::BigIntLiteral(literal) => literal.node_id.get() == node_id,
+        _ => false,
+    }
+}
 
 pub(in crate::lowering) struct CompiledConstantPool {
     atoms: Arc<[CompilerAtom]>,
