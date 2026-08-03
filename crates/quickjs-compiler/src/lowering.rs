@@ -29,20 +29,17 @@ use quickjs_bytecode::{
     ClosureVariableDefinition as VerifiedClosureVariableDefinition, CompilerAtom,
     CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
     CompilerCapturedBinding, CompilerClosureSource as CompilerGraphClosureSource,
-    CompilerConstant as CompilerGraphConstant, CompilerConstantLayout, CompilerConstantValue,
-    CompilerExecutableKind, CompilerInitializationPolicy as VerifiedInitializationPolicy,
-    CompilerSource, CompilerString, CompilerWritePolicy as VerifiedWritePolicy, FinalOpcode,
-    FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId,
-    MAX_FUNCTION_INDEX_ENTRIES, Operands, PcSourceSpan, ScopeLink, SourceByteSpan,
-    UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody,
-    UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader, UnverifiedFunctionMetadata,
-    VariableDefinition, VerificationErrorKind, VerificationLimits, VerifiedCompilerFunctionGraph,
-    VerifiedControlFlow, verify_compiler_bytecode_graph, verify_compiler_control_flow,
-    verify_compiler_function_graph,
+    CompilerConstant as CompilerGraphConstant, CompilerConstantLayout, CompilerExecutableKind,
+    CompilerInitializationPolicy as VerifiedInitializationPolicy, CompilerSource,
+    CompilerWritePolicy as VerifiedWritePolicy, FinalOpcode, FunctionGraphVerificationLimits,
+    FunctionIndexDomains, FunctionTemplateId, MAX_FUNCTION_INDEX_ENTRIES, Operands, PcSourceSpan,
+    ScopeLink, SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction,
+    UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader,
+    UnverifiedFunctionMetadata, VariableDefinition, VerificationErrorKind, VerificationLimits,
+    VerifiedCompilerFunctionGraph, VerifiedControlFlow, verify_compiler_bytecode_graph,
+    verify_compiler_control_flow, verify_compiler_function_graph,
 };
-use quickjs_frontend::{
-    CompilationGoal, DynamicFunctionKind, ParsedUnit, Span, decode_oxc_cooked_string,
-};
+use quickjs_frontend::{CompilationGoal, DynamicFunctionKind, ParsedUnit, Span};
 
 use crate::storage::{
     BindingId, CaptureSource, CompilationUnitKind, DeclarationKind, DeclarationPolicy, Executable,
@@ -51,6 +48,8 @@ use crate::storage::{
 };
 
 mod artifacts;
+mod atoms;
+mod constants;
 mod context;
 mod error;
 mod layouts;
@@ -60,6 +59,13 @@ pub use artifacts::{
     CompiledFunctionConstant, CompiledFunctionTree, CompiledLeafFunction, CompiledRealmGlobal,
     CompiledRealmGlobalSource, LocalSlot, LoweredLocal, RealmGlobalId, SourceInstruction,
 };
+use atoms::{
+    CompiledAtomCandidate, CompiledMetadataAtomCandidate, CompiledMetadataAtomKey,
+    CompiledPropertyAtomKey, compiled_static_property_key, compiler_identifier_string,
+    decode_compiler_string, record_property_candidate, record_property_candidate_for,
+    record_string_candidate,
+};
+use constants::{CompiledConstantCandidate, CompiledConstantPool, CompiledConstantPoolInput};
 pub use context::{CompilationContext, CompilationExecutable};
 pub use error::{LeafCompilationError, UnsupportedLeafFeature};
 use layouts::{
@@ -427,8 +433,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     slot: local.slot,
                 })
                 .collect(),
-            constants: Arc::clone(&constants.entries),
-            atoms: Arc::clone(&constants.atoms),
+            constants: Arc::clone(constants.entries()),
+            atoms: Arc::clone(constants.atoms()),
             closure_variables,
             realm_globals,
             function_name,
@@ -501,8 +507,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     slot: local.slot,
                 })
                 .collect(),
-            constants: Arc::clone(&constants.entries),
-            atoms: Arc::clone(&constants.atoms),
+            constants: Arc::clone(constants.entries()),
+            atoms: Arc::clone(constants.atoms()),
             closure_variables,
             realm_globals,
             function_name: None,
@@ -544,7 +550,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         self.record_metadata_atom_candidates(tree_layout, &mut metadata_atom_candidates)?;
 
         let mut pools = Vec::with_capacity(executables.len());
-        for (index, ((mut candidates, mut atoms), mut metadata_atoms)) in candidates
+        for (index, ((candidates, atoms), metadata_atoms)) in candidates
             .into_iter()
             .zip(atom_candidates)
             .zip(metadata_atom_candidates)
@@ -557,15 +563,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         invariant: "constant-pool owner indexes dense executable metadata",
                         span: None,
                     })?;
-            candidates.sort_unstable_by_key(CompiledConstantCandidate::order_key);
-            atoms.sort_unstable_by_key(CompiledAtomCandidate::order_key);
-            metadata_atoms.sort_unstable_by_key(CompiledMetadataAtomCandidate::order_key);
-            pools.push(CompiledConstantPool::from_candidates(
-                tree_layout.children(executable.id())?,
-                candidates,
-                atoms,
-                metadata_atoms,
-            )?);
+            pools.push(CompiledConstantPool::new(CompiledConstantPoolInput {
+                children: tree_layout.children(executable.id())?,
+                constant_candidates: candidates,
+                atom_candidates: atoms,
+                metadata_atom_candidates: metadata_atoms,
+            })?);
         }
         Ok(pools.into_boxed_slice())
     }
@@ -9808,644 +9811,6 @@ struct FunctionPlanningContext<'layout> {
     constants: &'layout CompiledConstantPool,
 }
 
-struct CompiledConstantPool {
-    atoms: Arc<[CompilerAtom]>,
-    entries: Arc<[CompiledConstant]>,
-    function_indices: Box<[(ExecutableId, u32)]>,
-    number_indices: Box<[(Span, u32)]>,
-    string_indices: Box<[(Span, CompiledStringLocation)]>,
-    property_atom_indices: Box<[(CompiledPropertyAtomKey, u32)]>,
-    metadata_atom_indices: Box<[(CompiledMetadataAtomKey, u32)]>,
-}
-
-enum CompiledConstantCandidate {
-    Number {
-        value: Binary64Constant,
-        span: Span,
-    },
-    String {
-        value: CompilerString,
-        span: Span,
-    },
-    Function {
-        executable: ExecutableId,
-        span: Span,
-    },
-}
-
-impl CompiledConstantCandidate {
-    const fn order_key(&self) -> (u32, u32, u8) {
-        match self {
-            Self::Number { span, .. } => (span.start, span.end, 0),
-            Self::String { span, .. } => (span.start, span.end, 1),
-            Self::Function { span, .. } => (span.start, span.end, 2),
-        }
-    }
-}
-
-struct CompiledAtomCandidate {
-    value: CompilerString,
-    span: Span,
-    purpose: CompiledAtomPurpose,
-    property_key: Option<CompiledPropertyAtomKey>,
-}
-
-struct CompiledStaticPropertyKey {
-    value: CompilerString,
-    span: Span,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct CompiledAtomCandidateOrderKey {
-    start: u32,
-    end: u32,
-    purpose: CompiledAtomPurpose,
-    property: Option<CompiledPropertyAtomOrderKey>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct CompiledPropertyAtomOrderKey {
-    kind: u8,
-    array_start: u32,
-    array_end: u32,
-    index: u32,
-}
-
-impl CompiledAtomCandidate {
-    const fn order_key(&self) -> CompiledAtomCandidateOrderKey {
-        CompiledAtomCandidateOrderKey {
-            start: self.span.start,
-            end: self.span.end,
-            purpose: self.purpose,
-            property: match self.property_key {
-                Some(key) => Some(key.order_key()),
-                None => None,
-            },
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum CompiledAtomPurpose {
-    RuntimeString,
-    Property,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CompiledPropertyAtomKey {
-    Source(Span),
-    ArrayIndex { array: Span, index: u32 },
-    ArrayLength { array: Span },
-}
-
-impl CompiledPropertyAtomKey {
-    const fn order_key(self) -> CompiledPropertyAtomOrderKey {
-        match self {
-            Self::Source(span) => CompiledPropertyAtomOrderKey {
-                kind: 0,
-                array_start: span.start,
-                array_end: span.end,
-                index: 0,
-            },
-            Self::ArrayIndex { array, index } => CompiledPropertyAtomOrderKey {
-                kind: 1,
-                array_start: array.start,
-                array_end: array.end,
-                index,
-            },
-            Self::ArrayLength { array } => CompiledPropertyAtomOrderKey {
-                kind: 2,
-                array_start: array.start,
-                array_end: array.end,
-                index: 0,
-            },
-        }
-    }
-
-    const fn span(self) -> Span {
-        match self {
-            Self::Source(span) => span,
-            Self::ArrayIndex { array, .. } | Self::ArrayLength { array } => array,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum CompiledMetadataAtomKey {
-    FunctionName,
-    ScriptCompletion,
-    RawParameter(u32),
-    Binding(BindingId),
-    RealmGlobal(RealmGlobalId),
-}
-
-struct CompiledMetadataAtomCandidate {
-    key: CompiledMetadataAtomKey,
-    value: CompilerString,
-    span: Span,
-}
-
-impl CompiledMetadataAtomCandidate {
-    const fn order_key(&self) -> (CompiledMetadataAtomKey, u32, u32) {
-        (self.key, self.span.start, self.span.end)
-    }
-}
-
-#[derive(Clone, Copy)]
-enum CompiledStringLocation {
-    Constant(u32),
-    Atom(u32),
-}
-
-struct FrozenConstantCandidates {
-    entries: Vec<CompiledConstant>,
-    function_indices: Vec<(ExecutableId, u32)>,
-    number_indices: Vec<(Span, u32)>,
-    string_indices: Vec<(Span, CompiledStringLocation)>,
-    property_atom_indices: Vec<(CompiledPropertyAtomKey, u32)>,
-}
-
-fn freeze_constant_candidates(
-    children: &[ExecutableId],
-    candidates: Vec<CompiledConstantCandidate>,
-    string_capacity: usize,
-) -> Result<FrozenConstantCandidates, LeafCompilationError> {
-    let mut frozen = FrozenConstantCandidates {
-        entries: Vec::with_capacity(candidates.len()),
-        function_indices: Vec::with_capacity(children.len()),
-        number_indices: Vec::with_capacity(candidates.len().checked_sub(children.len()).ok_or(
-            LeafCompilationError::SemanticInvariant {
-                invariant: "constant candidates include every direct child",
-                span: None,
-            },
-        )?),
-        string_indices: Vec::with_capacity(string_capacity),
-        property_atom_indices: Vec::with_capacity(string_capacity),
-    };
-    for (index, candidate) in candidates.into_iter().enumerate() {
-        let index = u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
-            domain: "constant pool entries",
-        })?;
-        match candidate {
-            CompiledConstantCandidate::Number { value, span } => {
-                frozen
-                    .entries
-                    .push(CompiledConstant::Value(CompilerConstantValue::Number(
-                        value,
-                    )));
-                frozen.number_indices.push((span, index));
-            }
-            CompiledConstantCandidate::String { value, span } => {
-                if value.is_empty() || !value.is_tagged_integer_atom() {
-                    return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "string value constants are nonempty tagged-integer spellings",
-                        span: Some(span),
-                    });
-                }
-                frozen
-                    .entries
-                    .push(CompiledConstant::Value(CompilerConstantValue::String(
-                        value,
-                    )));
-                frozen
-                    .string_indices
-                    .push((span, CompiledStringLocation::Constant(index)));
-            }
-            CompiledConstantCandidate::Function { executable, span } => {
-                if children.binary_search(&executable).is_err() {
-                    return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "constant-pool function is a direct child",
-                        span: Some(span),
-                    });
-                }
-                frozen.function_indices.push((executable, index));
-                frozen
-                    .entries
-                    .push(CompiledConstant::Function(CompiledFunctionConstant {
-                        executable,
-                    }));
-            }
-        }
-    }
-    Ok(frozen)
-}
-
-fn freeze_atom_candidates(
-    candidates: Vec<CompiledAtomCandidate>,
-    string_indices: &mut Vec<(Span, CompiledStringLocation)>,
-    property_atom_indices: &mut Vec<(CompiledPropertyAtomKey, u32)>,
-) -> Result<(Vec<CompilerAtom>, HashMap<CompilerString, u32>), LeafCompilationError> {
-    let mut atoms = Vec::with_capacity(candidates.len());
-    let mut interner = HashMap::with_capacity(candidates.len());
-    for candidate in candidates {
-        let static_property_only = candidate.purpose == CompiledAtomPurpose::Property
-            && (candidate.value.is_empty() || candidate.value.is_tagged_integer_atom());
-        if candidate.purpose == CompiledAtomPurpose::RuntimeString
-            && (candidate.value.is_empty() || candidate.value.is_tagged_integer_atom())
-        {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "runtime string atoms are nonempty non-tagged-integer spellings",
-                span: Some(candidate.span),
-            });
-        }
-        let atom_index = if let Some(&index) = interner.get(&candidate.value) {
-            index
-        } else {
-            let next_count =
-                atoms
-                    .len()
-                    .checked_add(1)
-                    .ok_or(LeafCompilationError::CapacityExceeded {
-                        domain: "atom pool entries",
-                    })?;
-            checked_function_entry_count(next_count, "atom pool entries")?;
-            let index =
-                u32::try_from(atoms.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
-                    domain: "atom pool entries",
-                })?;
-            atoms.push(if static_property_only {
-                CompilerAtom::new_static_property_only(candidate.value.clone())
-            } else {
-                CompilerAtom::new(candidate.value.clone())
-            });
-            interner.insert(candidate.value, index);
-            index
-        };
-        match candidate.purpose {
-            CompiledAtomPurpose::RuntimeString => {
-                if candidate.property_key.is_some() {
-                    return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "runtime string atom has no property lookup key",
-                        span: Some(candidate.span),
-                    });
-                }
-                string_indices.push((candidate.span, CompiledStringLocation::Atom(atom_index)));
-            }
-            CompiledAtomPurpose::Property => {
-                let property_key =
-                    candidate
-                        .property_key
-                        .ok_or(LeafCompilationError::SemanticInvariant {
-                            invariant: "property atom has one typed lookup key",
-                            span: Some(candidate.span),
-                        })?;
-                property_atom_indices.push((property_key, atom_index));
-            }
-        }
-    }
-    Ok((atoms, interner))
-}
-
-fn freeze_metadata_atom_candidates(
-    candidates: Vec<CompiledMetadataAtomCandidate>,
-    atoms: &mut Vec<CompilerAtom>,
-    interner: &mut HashMap<CompilerString, u32>,
-) -> Result<Vec<(CompiledMetadataAtomKey, u32)>, LeafCompilationError> {
-    let mut indices = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        if candidate.value.is_empty() || candidate.value.is_tagged_integer_atom() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "metadata atom names are nonempty identifiers",
-                span: Some(candidate.span),
-            });
-        }
-        let atom_index = if let Some(&index) = interner.get(&candidate.value) {
-            index
-        } else {
-            let next_count =
-                atoms
-                    .len()
-                    .checked_add(1)
-                    .ok_or(LeafCompilationError::CapacityExceeded {
-                        domain: "atom pool entries",
-                    })?;
-            checked_function_entry_count(next_count, "atom pool entries")?;
-            let index =
-                u32::try_from(atoms.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
-                    domain: "atom pool entries",
-                })?;
-            atoms.push(CompilerAtom::new(candidate.value.clone()));
-            interner.insert(candidate.value, index);
-            index
-        };
-        indices.push((candidate.key, atom_index));
-    }
-    indices.sort_unstable_by_key(|(key, _)| *key);
-    if indices.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-        return Err(LeafCompilationError::SemanticInvariant {
-            invariant: "one metadata atom index per function field",
-            span: None,
-        });
-    }
-    Ok(indices)
-}
-
-fn validate_frozen_constant_candidates(
-    children: &[ExecutableId],
-    expected_count: u32,
-    frozen: &mut FrozenConstantCandidates,
-) -> Result<(), LeafCompilationError> {
-    if u32::try_from(frozen.entries.len()) != Ok(expected_count) {
-        return Err(LeafCompilationError::SemanticInvariant {
-            invariant: "constant-pool candidate count remains stable",
-            span: None,
-        });
-    }
-    frozen
-        .function_indices
-        .sort_unstable_by_key(|(executable, _)| *executable);
-    if frozen.function_indices.len() != children.len()
-        || !frozen
-            .function_indices
-            .iter()
-            .map(|(executable, _)| *executable)
-            .eq(children.iter().copied())
-    {
-        return Err(LeafCompilationError::SemanticInvariant {
-            invariant: "constant pool owns every direct child exactly once",
-            span: None,
-        });
-    }
-    frozen
-        .string_indices
-        .sort_unstable_by_key(|(span, _)| (span.start, span.end));
-    if let Some(span) = frozen
-        .string_indices
-        .windows(2)
-        .find_map(|pair| (pair[0].0 == pair[1].0).then_some(pair[0].0))
-    {
-        return Err(LeafCompilationError::SemanticInvariant {
-            invariant: "runtime string literal spans are unique within a function",
-            span: Some(span),
-        });
-    }
-    frozen
-        .property_atom_indices
-        .sort_unstable_by_key(|(key, _)| key.order_key());
-    if let Some(key) = frozen
-        .property_atom_indices
-        .windows(2)
-        .find_map(|pair| (pair[0].0 == pair[1].0).then_some(pair[0].0))
-    {
-        return Err(LeafCompilationError::SemanticInvariant {
-            invariant: "static property lookup keys are unique within a function",
-            span: Some(key.span()),
-        });
-    }
-    Ok(())
-}
-
-impl CompiledConstantPool {
-    fn from_candidates(
-        children: &[ExecutableId],
-        candidates: Vec<CompiledConstantCandidate>,
-        atom_candidates: Vec<CompiledAtomCandidate>,
-        metadata_atom_candidates: Vec<CompiledMetadataAtomCandidate>,
-    ) -> Result<Self, LeafCompilationError> {
-        let count = checked_function_entry_count(candidates.len(), "constant pool entries")?;
-        if children.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "direct child executables are strictly ordered",
-                span: None,
-            });
-        }
-        let string_capacity = candidates.len().checked_add(atom_candidates.len()).ok_or(
-            LeafCompilationError::CapacityExceeded {
-                domain: "string literal occurrences",
-            },
-        )?;
-        let mut frozen = freeze_constant_candidates(children, candidates, string_capacity)?;
-        let (mut atoms, mut atom_interner) = freeze_atom_candidates(
-            atom_candidates,
-            &mut frozen.string_indices,
-            &mut frozen.property_atom_indices,
-        )?;
-        let metadata_atom_indices = freeze_metadata_atom_candidates(
-            metadata_atom_candidates,
-            &mut atoms,
-            &mut atom_interner,
-        )?;
-        validate_frozen_constant_candidates(children, count, &mut frozen)?;
-        Ok(Self {
-            atoms: atoms.into(),
-            entries: frozen.entries.into(),
-            function_indices: frozen.function_indices.into_boxed_slice(),
-            number_indices: frozen.number_indices.into_boxed_slice(),
-            string_indices: frozen.string_indices.into_boxed_slice(),
-            property_atom_indices: frozen.property_atom_indices.into_boxed_slice(),
-            metadata_atom_indices: metadata_atom_indices.into_boxed_slice(),
-        })
-    }
-
-    fn metadata_atom_index(
-        &self,
-        key: CompiledMetadataAtomKey,
-    ) -> Result<AtomPoolIndex, LeafCompilationError> {
-        let position = self
-            .metadata_atom_indices
-            .binary_search_by_key(&key, |(candidate, _)| *candidate)
-            .map_err(|_| LeafCompilationError::SemanticInvariant {
-                invariant: "compiled metadata field has a function-local atom",
-                span: None,
-            })?;
-        Ok(AtomPoolIndex::new(self.metadata_atom_indices[position].1))
-    }
-
-    fn plan_number(
-        &self,
-        value: f64,
-        span: Span,
-    ) -> Result<PlannedInstruction, LeafCompilationError> {
-        let position = self
-            .number_indices
-            .binary_search_by_key(&(span.start, span.end), |(candidate, _)| {
-                (candidate.start, candidate.end)
-            })
-            .map_err(|_| LeafCompilationError::SemanticInvariant {
-                invariant: "non-integer numeric literal has one constant-pool entry",
-                span: Some(span),
-            })?;
-        let index = self.number_indices[position].1;
-        let Some(CompiledConstant::Value(CompilerConstantValue::Number(actual))) =
-            usize::try_from(index)
-                .ok()
-                .and_then(|index| self.entries.get(index))
-        else {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "numeric constant index resolves to its binary64 payload",
-                span: Some(span),
-            });
-        };
-        if *actual != Binary64Constant::from_f64(value) {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "numeric constant retains its parsed binary64 payload",
-                span: Some(span),
-            });
-        }
-        let (opcode, operands) = match u8::try_from(index) {
-            Ok(index) => (FinalOpcode::PushConst8, Operands::Const8(index)),
-            Err(_) => (FinalOpcode::PushConst, Operands::Const(index)),
-        };
-        Ok(PlannedInstruction::new(opcode, operands, span))
-    }
-
-    fn plan_string(&self, span: Span) -> Result<PlannedInstruction, LeafCompilationError> {
-        let position = self
-            .string_indices
-            .binary_search_by_key(&(span.start, span.end), |(candidate, _)| {
-                (candidate.start, candidate.end)
-            })
-            .map_err(|_| LeafCompilationError::SemanticInvariant {
-                invariant: "nonempty runtime string has one pool location",
-                span: Some(span),
-            })?;
-        let instruction = match self.string_indices[position].1 {
-            CompiledStringLocation::Constant(index) => {
-                let Some(CompiledConstant::Value(CompilerConstantValue::String(value))) =
-                    usize::try_from(index)
-                        .ok()
-                        .and_then(|index| self.entries.get(index))
-                else {
-                    return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "string constant index resolves to an exact string payload",
-                        span: Some(span),
-                    });
-                };
-                if !value.is_tagged_integer_atom() {
-                    return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "string constant retains its tagged-integer spelling",
-                        span: Some(span),
-                    });
-                }
-                match u8::try_from(index) {
-                    Ok(index) => (FinalOpcode::PushConst8, Operands::Const8(index)),
-                    Err(_) => (FinalOpcode::PushConst, Operands::Const(index)),
-                }
-            }
-            CompiledStringLocation::Atom(index) => {
-                let Some(atom) = usize::try_from(index)
-                    .ok()
-                    .and_then(|index| self.atoms.get(index))
-                else {
-                    return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "string atom index resolves to an exact atom payload",
-                        span: Some(span),
-                    });
-                };
-                if atom.string().is_empty() || atom.string().is_tagged_integer_atom() {
-                    return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "string atom retains its non-tagged spelling",
-                        span: Some(span),
-                    });
-                }
-                (
-                    FinalOpcode::PushAtomValue,
-                    Operands::Atom(AtomPoolIndex::new(index)),
-                )
-            }
-        };
-        Ok(PlannedInstruction::new(instruction.0, instruction.1, span))
-    }
-
-    fn property_atom_index(&self, span: Span) -> Result<AtomPoolIndex, LeafCompilationError> {
-        self.property_atom_index_for(CompiledPropertyAtomKey::Source(span), span)
-    }
-
-    fn array_index_atom_index(
-        &self,
-        array: Span,
-        index: u32,
-        span: Span,
-    ) -> Result<AtomPoolIndex, LeafCompilationError> {
-        self.property_atom_index_for(CompiledPropertyAtomKey::ArrayIndex { array, index }, span)
-    }
-
-    fn array_length_atom_index(
-        &self,
-        array: Span,
-        span: Span,
-    ) -> Result<AtomPoolIndex, LeafCompilationError> {
-        self.property_atom_index_for(CompiledPropertyAtomKey::ArrayLength { array }, span)
-    }
-
-    fn property_atom_index_for(
-        &self,
-        key: CompiledPropertyAtomKey,
-        span: Span,
-    ) -> Result<AtomPoolIndex, LeafCompilationError> {
-        let position = self
-            .property_atom_indices
-            .binary_search_by_key(&key.order_key(), |(candidate, _)| candidate.order_key())
-            .map_err(|_| LeafCompilationError::SemanticInvariant {
-                invariant: "static property has one function-local atom",
-                span: Some(span),
-            })?;
-        Ok(AtomPoolIndex::new(self.property_atom_indices[position].1))
-    }
-
-    fn function_index(&self, executable: ExecutableId) -> Result<u32, LeafCompilationError> {
-        self.function_indices
-            .binary_search_by_key(&executable, |(candidate, _)| *candidate)
-            .ok()
-            .map(|position| self.function_indices[position].1)
-            .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "direct child executable has a constant-pool index",
-                span: None,
-            })
-    }
-}
-
-fn decode_compiler_string(
-    value: &str,
-    lone_surrogates: bool,
-    span: Span,
-) -> Result<CompilerString, LeafCompilationError> {
-    let code_units = decode_oxc_cooked_string(value, lone_surrogates)
-        .map_err(|source| LeafCompilationError::CookedStringDecoding { span, source })?;
-    CompilerString::try_from_code_units(code_units)
-        .map_err(|source| LeafCompilationError::CompilerString { span, source })
-}
-
-fn compiler_identifier_string(
-    value: &str,
-    span: Span,
-) -> Result<CompilerString, LeafCompilationError> {
-    CompilerString::try_from_code_units(value.encode_utf16().collect::<Vec<_>>().into())
-        .map_err(|source| LeafCompilationError::CompilerString { span, source })
-}
-
-fn compiled_static_property_key(
-    key: &OxcPropertyKey<'_>,
-) -> Result<Option<CompiledStaticPropertyKey>, LeafCompilationError> {
-    let (value, span) = match key {
-        OxcPropertyKey::StaticIdentifier(identifier) => (
-            compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
-            identifier.span,
-        ),
-        OxcPropertyKey::StringLiteral(literal) => (
-            decode_compiler_string(
-                literal.value.as_str(),
-                literal.lone_surrogates,
-                literal.span,
-            )?,
-            literal.span,
-        ),
-        OxcPropertyKey::NumericLiteral(literal) => {
-            let value = Binary64Constant::from_f64(literal.value).to_javascript_string();
-            (
-                compiler_identifier_string(&value, literal.span)?,
-                literal.span,
-            )
-        }
-        OxcPropertyKey::BigIntLiteral(literal) => (
-            compiler_identifier_string(literal.value.as_str(), literal.span)?,
-            literal.span,
-        ),
-        _ => return Ok(None),
-    };
-    Ok(Some(CompiledStaticPropertyKey { value, span }))
-}
-
 fn is_noncomputed_static_property_key_node(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> bool {
     let AstKind::ObjectProperty(property) = unit.semantic().nodes().parent_kind(node_id) else {
         return false;
@@ -10459,69 +9824,6 @@ fn is_noncomputed_static_property_key_node(unit: &ParsedUnit<'_, '_>, node_id: N
         OxcPropertyKey::BigIntLiteral(literal) => literal.node_id.get() == node_id,
         _ => false,
     }
-}
-
-fn record_string_candidate(
-    owner: ExecutableId,
-    value: CompilerString,
-    span: Span,
-    constants: &mut [Vec<CompiledConstantCandidate>],
-    atoms: &mut [Vec<CompiledAtomCandidate>],
-) -> Result<(), LeafCompilationError> {
-    if value.is_empty() {
-        return Ok(());
-    }
-    if value.is_tagged_integer_atom() {
-        constants
-            .get_mut(owner.index())
-            .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
-            .push(CompiledConstantCandidate::String { value, span });
-    } else {
-        atoms
-            .get_mut(owner.index())
-            .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
-            .push(CompiledAtomCandidate {
-                value,
-                span,
-                purpose: CompiledAtomPurpose::RuntimeString,
-                property_key: None,
-            });
-    }
-    Ok(())
-}
-
-fn record_property_candidate(
-    owner: ExecutableId,
-    value: CompilerString,
-    span: Span,
-    atoms: &mut [Vec<CompiledAtomCandidate>],
-) -> Result<(), LeafCompilationError> {
-    record_property_candidate_for(
-        owner,
-        value,
-        span,
-        CompiledPropertyAtomKey::Source(span),
-        atoms,
-    )
-}
-
-fn record_property_candidate_for(
-    owner: ExecutableId,
-    value: CompilerString,
-    span: Span,
-    property_key: CompiledPropertyAtomKey,
-    atoms: &mut [Vec<CompiledAtomCandidate>],
-) -> Result<(), LeafCompilationError> {
-    atoms
-        .get_mut(owner.index())
-        .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
-        .push(CompiledAtomCandidate {
-            value,
-            span,
-            purpose: CompiledAtomPurpose::Property,
-            property_key: Some(property_key),
-        });
-    Ok(())
 }
 
 #[derive(Clone, Copy)]

@@ -1,4 +1,5 @@
 use super::*;
+use quickjs_bytecode::CompilerConstantValue;
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
 fn test_frame_layout(
@@ -56,7 +57,7 @@ fn constant_pool_ownership_includes_the_program_and_nearest_function() {
 
             let root_pool = layout.constant_pool(root).expect("program constant pool");
             assert_eq!(
-                root_pool.entries.as_ref(),
+                root_pool.entries().as_ref(),
                 [
                     CompiledConstant::Value(CompilerConstantValue::Number(
                         Binary64Constant::from_f64(1.5),
@@ -66,7 +67,7 @@ fn constant_pool_ownership_includes_the_program_and_nearest_function() {
             );
             let child_pool = layout.constant_pool(child).expect("child constant pool");
             assert_eq!(
-                child_pool.entries.as_ref(),
+                child_pool.entries().as_ref(),
                 [CompiledConstant::Value(CompilerConstantValue::Number(
                     Binary64Constant::from_f64(2.5),
                 ))]
