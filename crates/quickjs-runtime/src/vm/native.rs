@@ -441,6 +441,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::LocaleString(state) => advance_locale_string(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
@@ -1731,6 +1738,15 @@ pub(super) fn dispatch_native_call_with_frames(
             native.realm,
             inputs.receiver,
             inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::LocaleString(method) => begin_locale_string(
+            runtime,
+            method,
+            native.realm,
+            inputs.receiver,
             return_to,
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,

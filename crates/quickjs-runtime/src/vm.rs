@@ -57,10 +57,11 @@ use crate::{
         ArrayMutator, ArrayReduction, ArraySearch, ArraySort, BindingCell, BoundFunction,
         BytecodeFunction, CollectionRoot, EnvironmentBinding, ForInAdvance, FrameBindingAddress,
         FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
-        InstalledConstant, InstalledRoot, InstalledTemplate, NativeFunction, NativeFunctionKind,
-        NumberFormat, NumberPredicate, PreparedIteratorResultPlan, RealmGlobalBindingState,
-        ReflectMethod, SetPrototypeOutcome, StringArgument, StringMethod, UriFunction,
-        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
+        InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod, NativeFunction,
+        NativeFunctionKind, NumberFormat, NumberPredicate, PreparedIteratorResultPlan,
+        RealmGlobalBindingState, ReflectMethod, SetPrototypeOutcome, StringArgument, StringMethod,
+        UriFunction, array_length_from_number, check_execution_limit, global_declaration_error,
+        usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -88,6 +89,7 @@ mod instanceof;
 mod iterators;
 mod json_parse;
 mod json_stringify;
+mod locale_string;
 mod native;
 mod object_intrinsics;
 mod properties;
@@ -105,8 +107,8 @@ use {
     array_mutators::*, array_search::*, array_sort::*, bigint_intrinsics::*, bindings::*,
     conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*,
     exceptions::*, execution::*, from_entries::*, group_by::*, iterators::*, json_parse::*,
-    json_stringify::*, native::*, object_intrinsics::*, properties::*, reflect::*, stack::*,
-    string_methods::*, uri::*,
+    json_stringify::*, locale_string::*, native::*, object_intrinsics::*, properties::*,
+    reflect::*, stack::*, string_methods::*, uri::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -315,6 +317,7 @@ enum NativeContinuation {
     ArraySplice(Box<ArraySpliceContinuation>),
     ArraySort(Box<ArraySortContinuation>),
     ArrayFlatten(Box<ArrayFlattenContinuation>),
+    LocaleString(Box<LocaleStringContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
     InstanceOf(InstanceOfContinuation),
@@ -359,6 +362,7 @@ impl NativeContinuation {
             Self::ArraySplice(state) => state.retained_values(),
             Self::ArraySort(state) => state.retained_values(),
             Self::ArrayFlatten(state) => state.retained_values(),
+            Self::LocaleString(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
@@ -983,6 +987,8 @@ enum OperatorPrimitiveTarget {
     ArraySortValue(Box<ArraySortContinuation>),
     /// A flattening method's depth or nested array length, awaiting `ToNumber`.
     ArrayFlattenValue(Box<ArrayFlattenContinuation>),
+    /// A locale-string length or invocation result awaiting primitive conversion.
+    LocaleStringValue(Box<LocaleStringContinuation>),
     ArrayLengthWrite(ArrayLengthWriteState),
     /// A `String.prototype` method's receiver, awaiting `ToString`.
     StringMethodSubject(Box<StringMethodContinuation>),
@@ -1046,6 +1052,7 @@ impl OperatorPrimitiveTarget {
             Self::ArraySpliceArgument(state) => state.retained_values(),
             Self::ArraySortValue(state) => state.retained_values(),
             Self::ArrayFlattenValue(state) => state.retained_values(),
+            Self::LocaleStringValue(state) => state.retained_values(),
         }
     }
 }
@@ -1254,6 +1261,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArraySpliceArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArraySortValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFlattenValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::LocaleStringValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayJoinSeparator(state)
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
             trace_stored_value_root(state.target(), mark);
@@ -1333,6 +1341,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ArraySplice(state) => state.trace_roots(mark),
         NativeContinuation::ArraySort(state) => state.trace_roots(mark),
         NativeContinuation::ArrayFlatten(state) => state.trace_roots(mark),
+        NativeContinuation::LocaleString(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {
             trace_function_bind_roots(state, mark);

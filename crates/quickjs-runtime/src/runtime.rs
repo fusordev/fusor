@@ -543,6 +543,15 @@ pub(crate) enum ArrayFlatten {
     FlatMap,
 }
 
+/// Which no-`Intl` locale-string built-in is being invoked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocaleStringMethod {
+    Object,
+    Number,
+    BigInt,
+    Array,
+}
+
 impl ArrayFlatten {
     /// Returns the property name this method is installed under.
     pub(crate) const fn name(self) -> &'static str {
@@ -860,6 +869,8 @@ pub(crate) enum NativeFunctionKind {
     IteratorPrototypeIterator,
     ArrayPrototypeJoin,
     ArrayPrototypeToString,
+    /// One no-`Intl` `toLocaleString` implementation.
+    LocaleString(LocaleStringMethod),
     ArrayPrototypeValues,
     ArrayPrototypeKeys,
     ArrayPrototypeEntries,

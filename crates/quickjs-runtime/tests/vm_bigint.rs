@@ -499,9 +499,8 @@ fn the_constructor_is_not_constructable() {
 
 /// Oracle: `BigInt.length => [1]`, `BigInt.name => [BigInt]`,
 /// `BigInt own names => [length,name,asUintN,asIntN,prototype]`,
-/// `BigInt.prototype own => [toString,valueOf,constructor]`.
-///
-/// The prototype deliberately has no `toLocaleString`.
+/// `BigInt.prototype` additionally has the ECMA-262 no-`Intl`
+/// `toLocaleString` method.
 #[test]
 fn the_constructor_has_the_pinned_shape() {
     assert_eq!(text("return String(BigInt.length);"), "1");
@@ -513,7 +512,11 @@ fn the_constructor_has_the_pinned_shape() {
     assert_eq!(text("return String(BigInt.asUintN.length);"), "2");
     assert_eq!(
         text("return typeof BigInt.prototype.toLocaleString;"),
-        "undefined"
+        "function"
+    );
+    assert_eq!(
+        text("return String(BigInt.prototype.toLocaleString.length);"),
+        "0"
     );
 }
 

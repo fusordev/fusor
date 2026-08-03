@@ -173,7 +173,8 @@ Known intentional runtime differences:
   strict equality, `ToString`/`ToPropertyKey`, executable literals, an
   `Object(bigint)` wrapper with `[object BigInt]` tagging, and a realm-owned
   non-constructable `BigInt` with `toString`, `valueOf`,
-  `[Symbol.toStringTag]`, `asIntN`, and `asUintN`.
+  deterministic no-`Intl` `toLocaleString`, `[Symbol.toStringTag]`, `asIntN`,
+  and `asUintN`.
 - [x] Complete numeric conversions: the modular narrow conversions (`ToInt8`,
   `ToUint8`, `ToInt16`, `ToUint16`) share `ToUint32` and a truncation, while
   `ToUint8Clamp` saturates and rounds half to even because upstream uses `lrint`
@@ -280,6 +281,18 @@ Known intentional runtime differences:
   non-Array receivers. `%Array%[Symbol.species]` is installed as the specified
   non-enumerable configurable accessor, and each mapper, getter, conversion,
   property creation, and constructor call is a suspension or fuel boundary.
+- [x] Deterministic ECMA-262 locale-string behavior for the no-`Intl` profile.
+  `Object.prototype.toLocaleString` performs the specified dynamic `Invoke` of
+  `toString` and returns its result without coercion. Number and BigInt use
+  their ordinary decimal rendering, which ECMA-262 explicitly permits when
+  ECMA-402 is absent. `Array.prototype.toLocaleString` selects `","` as its
+  implementation-defined separator, reads every index with `Get`, emits an
+  empty field for nullish elements and holes, then dynamically invokes each
+  element's `toLocaleString` and converts the result to String. The Array path
+  is resumable across length conversion, getters, calls, and result conversion,
+  retains its live heap edges for tracing, and charges every scan to shared
+  instruction fuel; reserved locale/options arguments are deliberately ignored
+  and are not forwarded under the ECMA-262 fallback algorithm.
 - [x] `Number.prototype.toFixed`, `toExponential`, and `toPrecision`, rendered
   from the *exact* value the binary64 holds rather than from its shortest decimal
   spelling. That distinction is observable and is why these use `JsBigInt`
@@ -351,9 +364,8 @@ Known intentional runtime differences:
   definitions run their two observable numeric conversions, preserve partial
   shrink results at non-configurable indices, and install a requested
   non-writable final state even when that shrink returns `false`.
-- [ ] Remaining String/Number/Array method surface (the locale-dependent
-  renderings), shape
-  sharing/transition
+- [ ] Remaining String Unicode/collation/case/normalization and RegExp-dependent
+  method surface, shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
 
@@ -440,6 +452,13 @@ Known intentional runtime differences:
   escapes for complete URIs and rejects truncated, overlong, surrogate, and
   out-of-range UTF-8 as realm-owned `URIError`; all four perform resumable
   `ToString` first and charge their bounded scans to shared execution fuel.
+- [x] Install `Object`, `Number`, `BigInt`, and `Array` `toLocaleString` with
+  exact realm-owned method identities and ECMA-262 fallback semantics in the
+  no-`Intl` profile. Object delegates through an observable `toString` lookup;
+  Number and BigInt use deterministic ordinary decimal output; Array performs
+  the specified generic length/index walk, nullish empty fields, dynamic
+  element invocation, and result coercion with explicit suspension, tracing,
+  and fuel boundaries.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,

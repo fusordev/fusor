@@ -33,17 +33,17 @@ use super::{
     BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic,
     ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation, GlobalNumericFunction,
     HandleError, HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
-    IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind, NumberFormat,
-    NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey,
-    PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, ReflectMethod,
-    ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource,
-    StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction, check_limit,
-    predefined_string, usize_to_u64,
+    IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, NativeFunction, NativeFunctionKind,
+    NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom,
+    PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState,
+    ReflectMethod, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
+    RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction,
+    check_limit, predefined_string, usize_to_u64,
 };
 
 const REALM_OBJECT_COUNT: usize = 22;
-const REALM_FUNCTION_COUNT: usize = 168;
-const REALM_PROPERTY_COUNT: u64 = 554;
+const REALM_FUNCTION_COUNT: usize = 172;
+const REALM_PROPERTY_COUNT: u64 = 566;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -272,6 +272,14 @@ const ARRAY_FLATTEN_ATOM_START: usize = ARRAY_SORT_ATOM_START + ARRAY_SORT_METHO
 
 /// The methods sharing the resumable `FlattenIntoArray` implementation.
 const ARRAY_FLATTEN_METHODS: [ArrayFlatten; 2] = [ArrayFlatten::Flat, ArrayFlatten::FlatMap];
+
+/// Locale-string methods installed for the deterministic no-`Intl` profile.
+const LOCALE_STRING_METHODS: [LocaleStringMethod; 4] = [
+    LocaleStringMethod::Object,
+    LocaleStringMethod::Number,
+    LocaleStringMethod::BigInt,
+    LocaleStringMethod::Array,
+];
 
 /// Exact number of non-predefined atoms interned by one realm transaction.
 const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
@@ -795,12 +803,12 @@ struct BigIntIntrinsicRecords {
 impl BigIntIntrinsicRecords {
     /// Reserves the `BigInt` records in the realm transaction's order.
     ///
-    /// `BigInt.prototype` holds `constructor`, `toString`, `valueOf`, and
-    /// `[Symbol.toStringTag]`; the constructor holds `prototype`, `length`,
-    /// `name`, `asIntN`, and `asUintN`.
+    /// `BigInt.prototype` holds `constructor`, `toString`, `toLocaleString`,
+    /// `valueOf`, and `[Symbol.toStringTag]`; the constructor holds `prototype`,
+    /// `length`, `name`, `asIntN`, and `asUintN`.
     fn try_new() -> Result<Self, RuntimeError> {
         Ok(Self {
-            prototype: reserved_record(4)?,
+            prototype: reserved_record(5)?,
             constructor: reserved_record(5)?,
             to_string: reserved_record(2)?,
             value_of: reserved_record(2)?,
@@ -882,6 +890,7 @@ struct RealmRecords {
     array_copiers: [ObjectRecord; ARRAY_COPIER_TOTAL],
     array_sorts: [ObjectRecord; ARRAY_SORT_METHODS.len()],
     array_flattens: [ObjectRecord; ARRAY_FLATTEN_METHODS.len()],
+    locale_strings: [ObjectRecord; LOCALE_STRING_METHODS.len()],
     number_formats: [ObjectRecord; NUMBER_FORMAT_METHODS.len()],
     array_callbacks: [ObjectRecord; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [ObjectRecord; ARRAY_REDUCTION_METHODS.len()],
@@ -904,7 +913,7 @@ impl RealmRecords {
         // recoverable allocation failure reports the same `additional` value.
         let base = RealmBaseRecords {
             global: reserved_record(29)?,
-            object_prototype: reserved_record(3 + OBJECT_PROTOTYPE_REFLECTION.len())?,
+            object_prototype: reserved_record(4 + OBJECT_PROTOTYPE_REFLECTION.len())?,
             function_prototype: reserved_record(10)?,
             throw_type_error: reserved_record(2)?,
             function_constructor: reserved_record(3)?,
@@ -944,7 +953,7 @@ impl RealmRecords {
         // The `Number` constructor additionally carries its value and predicate
         // statics plus the two parser aliases.
         let number = PrimitiveIntrinsicRecords::try_new_with_constructor(
-            3 + NUMBER_FORMAT_METHODS.len(),
+            4 + NUMBER_FORMAT_METHODS.len(),
             3 + NUMBER_VALUE_STATICS.len()
                 + NUMBER_PREDEFINED_VALUE_STATICS.len()
                 + NUMBER_PREDICATE_STATICS.len()
@@ -969,6 +978,7 @@ impl RealmRecords {
                     + ARRAY_COPIER_TOTAL
                     + ARRAY_SORT_METHODS.len()
                     + ARRAY_FLATTEN_METHODS.len()
+                    + 1
                     + NUMBER_FORMAT_METHODS.len()
                     + ARRAY_CALLBACK_METHODS.len()
                     + ARRAY_REDUCTION_METHODS.len()
@@ -1039,6 +1049,7 @@ impl RealmRecords {
             array_copiers: array_copier_records()?,
             array_sorts: array_sort_records()?,
             array_flattens: array_flatten_records()?,
+            locale_strings: locale_string_records()?,
             number_formats: number_format_records()?,
             array_callbacks: array_callback_records()?,
             array_reductions: array_reduction_records()?,
@@ -1196,6 +1207,7 @@ struct RealmGraph {
     array_copiers: [FunctionId; ARRAY_COPIER_TOTAL],
     array_sorts: [FunctionId; ARRAY_SORT_METHODS.len()],
     array_flattens: [FunctionId; ARRAY_FLATTEN_METHODS.len()],
+    locale_strings: [FunctionId; LOCALE_STRING_METHODS.len()],
     number_formats: [FunctionId; NUMBER_FORMAT_METHODS.len()],
     array_callbacks: [FunctionId; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [FunctionId; ARRAY_REDUCTION_METHODS.len()],
@@ -1236,6 +1248,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for function in self.number_formats.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
+        for function in self.locale_strings.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for function in self.array_flattens.into_iter().rev() {
@@ -1521,6 +1536,7 @@ impl Runtime {
         let array_copiers = self.insert_array_copiers(&base, records.array_copiers);
         let array_sorts = self.insert_array_sorts(&base, records.array_sorts);
         let array_flattens = self.insert_array_flattens(&base, records.array_flattens);
+        let locale_strings = self.insert_locale_strings(&base, records.locale_strings);
         let number_formats = self.insert_number_formats(&base, records.number_formats);
         let array_callbacks = self.insert_array_callbacks(&base, records.array_callbacks);
         let array_reductions = self.insert_array_reductions(&base, records.array_reductions);
@@ -1555,6 +1571,7 @@ impl Runtime {
             array_copiers,
             array_sorts,
             array_flattens,
+            locale_strings,
             number_formats,
             array_callbacks,
             array_reductions,
@@ -2117,6 +2134,25 @@ impl Runtime {
         inserted.map(|slot| slot.expect("every Array flatten function was inserted"))
     }
 
+    /// Inserts the no-`Intl` locale-string methods.
+    fn insert_locale_strings(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; LOCALE_STRING_METHODS.len()],
+    ) -> [FunctionId; LOCALE_STRING_METHODS.len()] {
+        let mut inserted = [None; LOCALE_STRING_METHODS.len()];
+        for ((slot, method), record) in inserted.iter_mut().zip(LOCALE_STRING_METHODS).zip(records)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::LocaleString(method),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every locale-string function was inserted"))
+    }
+
     /// Inserts one native function per `Array.prototype` search.
     fn insert_array_searches(
         &mut self,
@@ -2634,6 +2670,7 @@ impl Runtime {
         self.publish_number_statics(graph, keys)?;
         self.publish_bigint_intrinsic_properties(&graph.bigint, &graph.dynamic_atoms, keys, names)?;
         self.publish_array_intrinsic_properties(&graph.array, keys, names)?;
+        self.publish_locale_string_methods(graph, keys)?;
         self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
         self.publish_global_value_properties(graph)?;
         self.publish_global_numeric_functions(graph, keys)?;
@@ -2654,6 +2691,35 @@ impl Runtime {
                 (&keys.symbol, graph.symbol.constructor),
             ],
         )
+    }
+
+    /// Publishes deterministic no-`Intl` `toLocaleString` methods.
+    fn publish_locale_string_methods(
+        &mut self,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+    ) -> Result<(), TryReserveError> {
+        let key = self.predefined_property_key(PredefinedAtom::ToLocaleString);
+        let name = predefined_string(&self.atoms, PredefinedAtom::ToLocaleString);
+        let targets = [
+            graph.base.object_prototype,
+            graph.number.prototype,
+            graph.bigint.prototype,
+            graph.array.prototype,
+        ];
+        for (target, function) in targets.into_iter().zip(graph.locale_strings) {
+            self.objects
+                .get_mut(target)
+                .expect("locale-string prototype remains live")
+                .record
+                .append_data(
+                    key.clone(),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            self.append_function_identity(function, &name, 0, keys)?;
+        }
+        Ok(())
     }
 
     /// Publishes the specification-defined ordinary `%Reflect%` shape.
@@ -3531,10 +3597,11 @@ impl Runtime {
 
     /// Publishes the `BigInt` prototype members and constructor statics.
     ///
-    /// The pinned prototype carries exactly `toString`, `valueOf`, and
-    /// `[Symbol.toStringTag]` plus `constructor` (`quickjs.c:56128-56132`);
-    /// notably there is no `toLocaleString`. The constructor carries `asIntN`
-    /// and `asUintN`, each with arity 2.
+    /// The base `BigInt` graph carries `toString`, `valueOf`,
+    /// `[Symbol.toStringTag]`, and `constructor`. The no-`Intl`
+    /// `toLocaleString` method is published with the other shared locale
+    /// methods. The constructor carries `asIntN` and `asUintN`, each with
+    /// arity 2.
     fn publish_bigint_intrinsic_properties(
         &mut self,
         graph: &BigIntIntrinsicGraph,
@@ -4024,6 +4091,16 @@ fn array_flatten_records() -> Result<[ObjectRecord; ARRAY_FLATTEN_METHODS.len()]
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Array flatten record was reserved")))
+}
+
+/// Reserves one record per deterministic locale-string method.
+fn locale_string_records() -> Result<[ObjectRecord; LOCALE_STRING_METHODS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; LOCALE_STRING_METHODS.len()] =
+        [const { None }; LOCALE_STRING_METHODS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every locale-string record was reserved")))
 }
 
 /// Reserves one record per `Array.prototype` mutator.
