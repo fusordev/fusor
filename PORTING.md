@@ -503,6 +503,17 @@ Known intentional runtime differences:
   to the function, and participate in aggregate heap/property preflight,
   rollback, tracing, and reclamation without changing internal dynamic-Script
   roots.
+- [x] Install the ordinary, non-callable `%Math%` object and its first
+  specification-order method tranche: `min`, `max`, `abs`, `floor`, `ceil`,
+  `round`, `sqrt`, `acos`, `asin`, and `atan`. Every argument crosses the
+  resumable `ToNumber` boundary; variadic extrema convert the complete list
+  left-to-right even after `NaN`, preserve the required signed-zero winner,
+  and process primitive lists iteratively so large calls neither recurse on
+  the Rust stack nor escape shared instruction fuel. Unary algorithms preserve
+  the specified NaN, infinity, and signed-zero cases, including `round` ties
+  toward positive infinity. The realm graph publishes exact property order,
+  descriptors, names, arities, `@@toStringTag`, resource accounting, and
+  failure-atomic rollback; remaining `%Math%` methods and constants stay open.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,

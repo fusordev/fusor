@@ -774,6 +774,72 @@ impl StringMethod {
     }
 }
 
+/// The first specification-order slice of methods installed on `%Math%`.
+///
+/// Keeping one ordered enum makes the ordinary object's observable own-key
+/// order explicit while later tranches append the remaining methods.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MathMethod {
+    Min,
+    Max,
+    Abs,
+    Floor,
+    Ceil,
+    Round,
+    Sqrt,
+    Acos,
+    Asin,
+    Atan,
+}
+
+impl MathMethod {
+    pub(crate) const ALL: [Self; 10] = [
+        Self::Min,
+        Self::Max,
+        Self::Abs,
+        Self::Floor,
+        Self::Ceil,
+        Self::Round,
+        Self::Sqrt,
+        Self::Acos,
+        Self::Asin,
+        Self::Atan,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Min => "min",
+            Self::Max => "max",
+            Self::Abs => "abs",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::Round => "round",
+            Self::Sqrt => "sqrt",
+            Self::Acos => "acos",
+            Self::Asin => "asin",
+            Self::Atan => "atan",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Min | Self::Max => 2,
+            Self::Abs
+            | Self::Floor
+            | Self::Ceil
+            | Self::Round
+            | Self::Sqrt
+            | Self::Acos
+            | Self::Asin
+            | Self::Atan => 1,
+        }
+    }
+
+    pub(crate) const fn is_extrema(self) -> bool {
+        matches!(self, Self::Min | Self::Max)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeFunctionKind {
     FunctionPrototype,
@@ -822,6 +888,8 @@ pub(crate) enum NativeFunctionKind {
     JsonRawJson,
     /// `JSON.stringify`.
     JsonStringify,
+    /// One method on the ordinary `%Math%` object.
+    Math(MathMethod),
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,

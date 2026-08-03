@@ -1562,6 +1562,14 @@ fn finish_operator_primitive_target(
             }
             .into()),
         },
+        OperatorPrimitiveTarget::MathUnary(method) => {
+            let number = operator_to_number(value, realm, origin)?;
+            finish_math_unary(method, number)
+        }
+        OperatorPrimitiveTarget::MathExtrema(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_math_extrema(runtime, *state, Some(number), return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::GlobalUri(function) => {
             let text = operator_primitive_to_string(value, realm, origin)?;
             finish_uri_function(function, &text, realm, origin, execution_budget)

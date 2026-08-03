@@ -58,7 +58,7 @@ use crate::{
         BoundFunction, BytecodeFunction, CollectionRoot, EnvironmentBinding, ForInAdvance,
         FrameBindingAddress, FunctionImplementation, GlobalNumericFunction, HeapFunction,
         InstalledCode, InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod,
-        NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
+        MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
         PreparedIteratorResultPlan, RealmGlobalBindingState, ReflectMethod, SetPrototypeOutcome,
         StringArgument, StringMethod, UriFunction, array_length_from_number, check_execution_limit,
         global_declaration_error, usize_to_u64,
@@ -91,6 +91,7 @@ mod iterators;
 mod json_parse;
 mod json_stringify;
 mod locale_string;
+mod math;
 mod native;
 mod object_intrinsics;
 mod properties;
@@ -109,7 +110,7 @@ use {
     array_mutators::*, array_search::*, array_sort::*, array_statics::*, bigint_intrinsics::*,
     bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*,
     errors::*, exceptions::*, execution::*, from_entries::*, group_by::*, iterators::*,
-    json_parse::*, json_stringify::*, locale_string::*, native::*, object_intrinsics::*,
+    json_parse::*, json_stringify::*, locale_string::*, math::*, native::*, object_intrinsics::*,
     properties::*, reflect::*, stack::*, string_methods::*, string_raw::*, uri::*,
 };
 
@@ -934,6 +935,10 @@ enum OperatorPrimitiveTarget {
     /// One coercing global numeric function's first argument, awaiting the
     /// conversion selected by that function.
     GlobalNumeric(GlobalNumericFunction),
+    /// One unary `%Math%` argument, awaiting `ToNumber`.
+    MathUnary(MathMethod),
+    /// One variadic `%Math.min%` or `%Math.max%` conversion.
+    MathExtrema(Box<MathExtremaContinuation>),
     /// One URI function's argument, awaiting `ToString`.
     GlobalUri(UriFunction),
     /// `parseInt`'s input, awaiting `ToString` while retaining its radix.
@@ -1018,6 +1023,7 @@ impl OperatorPrimitiveTarget {
             | Self::StringIteratorIntrinsic
             | Self::JsonRawJsonText
             | Self::GlobalNumeric(_)
+            | Self::MathUnary(_)
             | Self::GlobalUri(_)
             | Self::BigIntToString { .. }
             | Self::BigIntTruncationBits { .. }
@@ -1065,6 +1071,7 @@ impl OperatorPrimitiveTarget {
             Self::ArrayStaticLength(state) => state.retained_values(),
             Self::StringRawValue(state) => state.retained_values(),
             Self::LocaleStringValue(state) => state.retained_values(),
+            Self::MathExtrema(state) => state.retained_values(),
         }
     }
 }
@@ -1224,6 +1231,7 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::NumberToString { .. }
         | OperatorPrimitiveTarget::NumberFormatDigits { .. }
         | OperatorPrimitiveTarget::GlobalNumeric(_)
+        | OperatorPrimitiveTarget::MathUnary(_)
         | OperatorPrimitiveTarget::GlobalUri(_)
         | OperatorPrimitiveTarget::GlobalParseIntRadix { .. }
         | OperatorPrimitiveTarget::SymbolIntrinsic { .. }
@@ -1276,6 +1284,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArrayStaticLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::StringRawValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::LocaleStringValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::MathExtrema(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayJoinSeparator(state)
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
             trace_stored_value_root(state.target(), mark);

@@ -33,17 +33,17 @@ use super::{
     BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic,
     ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation, GlobalNumericFunction,
     HandleError, HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
-    IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, NativeFunction, NativeFunctionKind,
-    NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom,
-    PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState,
-    ReflectMethod, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
-    RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction,
-    check_limit, predefined_string, usize_to_u64,
+    IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, MathMethod, NativeFunction,
+    NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord,
+    PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics,
+    RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity,
+    RuntimeLimits, RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics,
+    UriFunction, check_limit, predefined_string, usize_to_u64,
 };
 
-const REALM_OBJECT_COUNT: usize = 22;
-const REALM_FUNCTION_COUNT: usize = 181;
-const REALM_PROPERTY_COUNT: u64 = 593;
+const REALM_OBJECT_COUNT: usize = 23;
+const REALM_FUNCTION_COUNT: usize = 191;
+const REALM_PROPERTY_COUNT: u64 = 625;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -275,6 +275,9 @@ const ARRAY_FLATTEN_ATOM_START: usize = ARRAY_SORT_ATOM_START + ARRAY_SORT_METHO
 /// The methods sharing the resumable `FlattenIntoArray` implementation.
 const ARRAY_FLATTEN_METHODS: [ArrayFlatten; 2] = [ArrayFlatten::Flat, ArrayFlatten::FlatMap];
 
+/// Index of the first `%Math%` method name in the realm's dynamic atoms.
+const MATH_METHOD_ATOM_START: usize = ARRAY_FLATTEN_ATOM_START + ARRAY_FLATTEN_METHODS.len();
+
 /// Locale-string methods installed for the deterministic no-`Intl` profile.
 const LOCALE_STRING_METHODS: [LocaleStringMethod; 4] = [
     LocaleStringMethod::Object,
@@ -302,6 +305,7 @@ const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
     + ARRAY_REDUCTION_METHODS.len()
     + ARRAY_SORT_METHODS.len()
     + ARRAY_FLATTEN_METHODS.len()
+    + MathMethod::ALL.len()
     + 11;
 
 /// The `Array.prototype` reductions this profile installs.
@@ -690,6 +694,7 @@ struct RealmNames {
     parse: JsString,
     raw_json: JsString,
     stringify: JsString,
+    math: JsString,
 }
 
 impl RealmNames {
@@ -737,6 +742,7 @@ impl RealmNames {
             parse: JsString::from_utf8("parse").map_err(AtomError::from)?,
             raw_json: predefined_string(atoms, PredefinedAtom::RawJson),
             stringify: JsString::from_utf8("stringify").map_err(AtomError::from)?,
+            math: predefined_string(atoms, PredefinedAtom::Math),
         })
     }
 }
@@ -754,6 +760,12 @@ struct JsonRecords {
     parse: ObjectRecord,
     raw_json: ObjectRecord,
     stringify: ObjectRecord,
+}
+
+/// Reserved records for the ordinary `%Math%` object and installed prefix.
+struct MathRecords {
+    object: ObjectRecord,
+    methods: [ObjectRecord; MathMethod::ALL.len()],
 }
 
 struct RealmBaseRecords {
@@ -905,6 +917,7 @@ struct RealmRecords {
     symbol: SymbolIntrinsicRecords,
     reflect: ReflectRecords,
     json: JsonRecords,
+    math: MathRecords,
 }
 
 impl RealmRecords {
@@ -916,7 +929,7 @@ impl RealmRecords {
         // Keep these reservations in the original transaction order so a
         // recoverable allocation failure reports the same `additional` value.
         let base = RealmBaseRecords {
-            global: reserved_record(29)?,
+            global: reserved_record(30)?,
             object_prototype: reserved_record(4 + OBJECT_PROTOTYPE_REFLECTION.len())?,
             function_prototype: reserved_record(10)?,
             throw_type_error: reserved_record(2)?,
@@ -1038,6 +1051,11 @@ impl RealmRecords {
             raw_json: reserved_record(2)?,
             stringify: reserved_record(2)?,
         };
+        let math = MathRecords {
+            // Ten methods plus @@toStringTag.
+            object: reserved_record(MathMethod::ALL.len() + 1)?,
+            methods: math_method_records()?,
+        };
         Ok(Self {
             base,
             errors,
@@ -1068,6 +1086,7 @@ impl RealmRecords {
             symbol,
             reflect,
             json,
+            math,
         })
     }
 }
@@ -1170,6 +1189,12 @@ struct JsonGraph {
     stringify: FunctionId,
 }
 
+/// Inserted identities for the ordinary `%Math%` object and method prefix.
+struct MathGraph {
+    object: ObjectId,
+    methods: [FunctionId; MathMethod::ALL.len()],
+}
+
 impl RealmBase {
     fn rollback(self, runtime: &mut Runtime) {
         for function in self.object_statics.into_iter().rev() {
@@ -1229,6 +1254,7 @@ struct RealmGraph {
     symbol: SymbolIntrinsicGraph,
     reflect: ReflectGraph,
     json: JsonGraph,
+    math: MathGraph,
 }
 
 impl RealmGraph {
@@ -1237,6 +1263,9 @@ impl RealmGraph {
         reason = "failure rollback mirrors the complete realm graph's insertion order in one auditable reverse sequence"
     )]
     fn rollback(self, runtime: &mut Runtime) {
+        for function in self.math.methods.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
         debug_assert!(runtime.functions.remove(self.json.stringify).is_some());
         debug_assert!(runtime.functions.remove(self.json.raw_json).is_some());
         debug_assert!(runtime.functions.remove(self.json.is_raw_json).is_some());
@@ -1333,6 +1362,7 @@ impl RealmGraph {
             debug_assert!(runtime.objects.remove(intrinsic.prototype).is_some());
         }
         for object in [
+            self.math.object,
             self.json.object,
             self.reflect.object,
             self.symbol.prototype,
@@ -1543,6 +1573,7 @@ impl Runtime {
         let symbol = self.insert_symbol_intrinsics(&base, records.symbol);
         let reflect = self.insert_reflect_intrinsics(&base, records.reflect);
         let json = self.insert_json_intrinsics(&base, records.json);
+        let math = self.insert_math_intrinsics(&base, records.math);
         let string_methods = self.insert_string_prototype_methods(&base, records.string_methods);
         let number_predicates = self.insert_number_predicates(&base, records.number_predicates);
         let global_numeric_functions =
@@ -1605,6 +1636,7 @@ impl Runtime {
             symbol,
             reflect,
             json,
+            math,
         })
     }
 
@@ -1730,6 +1762,9 @@ impl Runtime {
                 interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
             }
             for method in ARRAY_FLATTEN_METHODS {
+                interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
+            }
+            for method in MathMethod::ALL {
                 interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
             }
             Ok(())
@@ -2628,6 +2663,28 @@ impl Runtime {
         }
     }
 
+    /// Inserts the ordinary `%Math%` object and its specification-order prefix.
+    fn insert_math_intrinsics(&mut self, base: &RealmBase, mut records: MathRecords) -> MathGraph {
+        records
+            .object
+            .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
+        let object = self.insert_reserved_object(HeapObject::ordinary(records.object));
+        let mut methods = [None; MathMethod::ALL.len()];
+        for ((slot, method), record) in methods.iter_mut().zip(MathMethod::ALL).zip(records.methods)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::Math(method),
+                record,
+            ));
+        }
+        MathGraph {
+            object,
+            methods: methods.map(|slot| slot.expect("every Math method was inserted")),
+        }
+    }
+
     fn insert_reserved_native(
         &mut self,
         realm: RealmId,
@@ -2733,6 +2790,7 @@ impl Runtime {
         self.publish_symbol_intrinsic_properties(&graph.symbol, graph, keys, names)?;
         self.publish_reflect_intrinsic_properties(graph, keys, names)?;
         self.publish_json_intrinsic_properties(graph, keys, names)?;
+        self.publish_math_intrinsic_properties(graph, keys, names)?;
         self.append_object_methods(
             graph.base.global_object,
             [
@@ -2876,6 +2934,57 @@ impl Runtime {
                 json_key,
                 METHOD_PROPERTY,
                 StoredValue::Object(graph.json.object),
+            )
+    }
+
+    /// Publishes the ordinary `%Math%` shape and the installed method prefix.
+    fn publish_math_intrinsic_properties(
+        &mut self,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        let method_atoms = &graph.dynamic_atoms
+            [MATH_METHOD_ATOM_START..MATH_METHOD_ATOM_START + MathMethod::ALL.len()];
+        {
+            let record = &mut self
+                .objects
+                .get_mut(graph.math.object)
+                .expect("new Math object remains live")
+                .record;
+            for (atom, function) in method_atoms.iter().cloned().zip(graph.math.methods) {
+                record.append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            }
+            record.append_data(
+                keys.symbol_to_string_tag.clone(),
+                IDENTITY_PROPERTY,
+                StoredValue::String(names.math.clone()),
+            )?;
+        }
+        for ((method, function), atom) in MathMethod::ALL
+            .into_iter()
+            .zip(graph.math.methods)
+            .zip(method_atoms)
+        {
+            let name = atom
+                .description()
+                .expect("interned Math method name has a description")
+                .clone();
+            self.append_function_identity(function, &name, method.length(), keys)?;
+        }
+        let math_key = self.predefined_property_key(PredefinedAtom::Math);
+        self.objects
+            .get_mut(graph.base.global_object)
+            .expect("new realm global object remains live")
+            .record
+            .append_data(
+                math_key,
+                METHOD_PROPERTY,
+                StoredValue::Object(graph.math.object),
             )
     }
 
@@ -4158,6 +4267,16 @@ fn reflect_method_records() -> Result<[ObjectRecord; ReflectMethod::ALL.len()], 
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Reflect method record was reserved")))
+}
+
+/// Reserves one native function record per installed `%Math%` method.
+fn math_method_records() -> Result<[ObjectRecord; MathMethod::ALL.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; MathMethod::ALL.len()] =
+        [const { None }; MathMethod::ALL.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Math method record was reserved")))
 }
 
 /// Reserves one record per `Array.prototype` reduction.
