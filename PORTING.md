@@ -428,11 +428,9 @@ match the pinned format string.
 
 Current corpus status: parser 196/196, Number radix 991/991, control flow 63/63,
 iterators 40/40, function apply 15/15, function bind 21/21, call spread 15/15.
-The Error corpus stands at 31/35. Three remaining mismatches need `Reflect`,
-which belongs to the built-ins milestone; the fourth needs the harness to
-normalize a script-thrown Error object, which it currently reports as an
-arbitrary value. Each fails closed as a missing property rather than producing a
-wrong answer.
+The Error corpus stands at 32/35. The three remaining mismatches need
+`Reflect`, which belongs to the built-ins milestone; each fails closed as a
+missing property rather than producing a wrong answer.
 
 ## Engineering rules
 

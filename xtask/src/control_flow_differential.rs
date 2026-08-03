@@ -1498,30 +1498,97 @@ fn observe_candidate_body(body: &str) -> Result<Observation, String> {
     match call_with_dynamic_function_support(&mut context, &function, &[], limits) {
         Ok(value) => normalize_candidate_value(&value),
         Err(ExecutionError::Exception(exception)) => {
-            let Some(kind) = exception.kind() else {
+            if let Some(kind) = exception.kind() {
+                let name = exception_name(kind);
+                validate_runtime_ascii(
+                    name,
+                    "candidate exception name",
+                    MAX_EXPECTED_ERROR_NAME_BYTES,
+                )?;
+                let message = exception
+                    .message()
+                    .ok_or_else(|| "candidate engine exception has no message".to_owned())?;
+                let message = decode_bounded_candidate_ascii(
+                    message,
+                    "candidate exception message",
+                    MAX_EXPECTED_ERROR_MESSAGE_BYTES,
+                )?;
+                return Ok(Observation::Throw {
+                    name: name.to_owned(),
+                    message,
+                });
+            }
+            // A script-thrown value is normalized exactly the way the oracle
+            // harness normalizes it: `String(error && error.name)` and
+            // `String(error && error.message)`. Anything that cannot be
+            // normalized is reported as a failure rather than a mismatch.
+            let Some(thrown) = exception.thrown_value() else {
                 return Err("candidate threw an arbitrary JavaScript value".to_owned());
             };
-            let name = exception_name(kind);
-            validate_runtime_ascii(
-                name,
-                "candidate exception name",
-                MAX_EXPECTED_ERROR_NAME_BYTES,
-            )?;
-            let message = exception
-                .message()
-                .ok_or_else(|| "candidate engine exception has no message".to_owned())?;
-            let message = decode_bounded_candidate_ascii(
-                message,
-                "candidate exception message",
-                MAX_EXPECTED_ERROR_MESSAGE_BYTES,
-            )?;
-            Ok(Observation::Throw {
-                name: name.to_owned(),
-                message,
-            })
+            let name = normalize_thrown_error_property(&mut context, thrown, "name")?;
+            let message = normalize_thrown_error_property(&mut context, thrown, "message")?;
+            Ok(Observation::Throw { name, message })
         }
         Err(error) => Err(format!("candidate execution failed: {error}")),
     }
+}
+
+/// Normalizes one property of a script-thrown value the way the oracle
+/// harness does: `String(error && error.<property>)`.
+///
+/// The property read is ordinary JavaScript, so an accessor-backed `name` or
+/// `message` runs through the same interpreter path the oracle's
+/// normalization uses.
+fn normalize_thrown_error_property(
+    context: &mut quickjs_runtime::Context<'_>,
+    thrown: &JsValue,
+    property: &str,
+) -> Result<String, String> {
+    let (role, maximum) = match property {
+        "name" => ("candidate thrown name", MAX_EXPECTED_ERROR_NAME_BYTES),
+        _ => ("candidate thrown message", MAX_EXPECTED_ERROR_MESSAGE_BYTES),
+    };
+    let body = format!("return String(error && error.{property});");
+    let parameters = [SourceFragment::new("error")];
+    // The normalizer carries one parameter fragment and one body fragment, so
+    // it gets its own two-fragment limits; the case body's limits are
+    // unchanged.
+    let execution = ExecutionLimits::default()
+        .with_instruction_fuel(CANDIDATE_INSTRUCTION_FUEL)
+        .with_dynamic_compilations(8)
+        .with_dynamic_source_code_units(CANDIDATE_SOURCE_BYTES as u64);
+    let limits = DynamicFunctionLimits::default()
+        .with_frontend(
+            FrontendLimits::new(CANDIDATE_SOURCE_BYTES)
+                .with_max_dynamic_function_fragments(2)
+                .with_max_dynamic_function_origin_bytes(128),
+        )
+        .with_execution(execution);
+    let completion = construct_dynamic_function(
+        context,
+        DynamicFunctionSource::new(
+            DynamicFunctionKind::Function,
+            &parameters,
+            SourceFragment::new(&body),
+        ),
+        limits,
+    )
+    .map_err(|error| format!("thrown-error normalizer construction failed: {error}"))?;
+    let function = completion.into_value().into_function().map_err(|error| {
+        format!("thrown-error normalizer facade returned a non-function: {error}")
+    })?;
+    let result = call_with_dynamic_function_support(
+        context,
+        &function,
+        std::slice::from_ref(thrown),
+        limits,
+    )
+    .map_err(|error| format!("thrown-error normalization failed: {error}"))?;
+    let string = result
+        .as_string()
+        .map_err(|error| format!("cannot inspect {role}: {error}"))?
+        .ok_or_else(|| format!("{role} did not normalize to a String"))?;
+    decode_bounded_candidate_ascii(string, role, maximum)
 }
 
 fn normalize_candidate_value(value: &JsValue) -> Result<Observation, String> {
