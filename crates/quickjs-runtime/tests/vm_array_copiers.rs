@@ -1,4 +1,4 @@
-//! `Array.prototype.slice`, `concat`, and `at`.
+//! `Array.prototype.slice`, `concat`, `at`, `toReversed`, and `with`.
 //!
 //! Every expectation below was produced by the pinned oracle:
 //!
@@ -325,4 +325,165 @@ fn the_copiers_have_the_pinned_shape() {
             "true",
         ),
     ]);
+}
+
+/// `toReversed` reads from the end into a fresh ordinary Array.
+#[test]
+fn to_reversed_copies_in_descending_source_order() {
+    assert_all(&[
+        ("[1,2,3].toReversed().join()", "3,2,1"),
+        ("[].toReversed().length", "0"),
+        ("Array.isArray([1].toReversed())", "true"),
+        ("Array.prototype.toReversed.call('abc').join('')", "cba"),
+        (
+            "Array.prototype.toReversed.call({length:3,0:'a',2:'c'}).join()",
+            "c,,a",
+        ),
+        // The source remains untouched.
+        (
+            "(function(){const a=[1,2];const r=a.toReversed();return a.join()+'|'+r.join();})()",
+            "1,2|2,1",
+        ),
+    ]);
+}
+
+/// Change-by-copy methods use `Get`, so holes become own `undefined` values.
+#[test]
+fn change_by_copy_methods_read_through_holes() {
+    assert_all(&[
+        (
+            "(function(){const r=[1,,3].toReversed();const own=Object.prototype.hasOwnProperty;return r.length+'|'+own.call(r,0)+'|'+own.call(r,1)+'|'+own.call(r,2)+'|'+r.join();})()",
+            "3|true|true|true|3,,1",
+        ),
+        (
+            "(function(){const r=[,,].with(0,7);const own=Object.prototype.hasOwnProperty;return r.length+'|'+own.call(r,0)+'|'+own.call(r,1)+'|'+r.join();})()",
+            "2|true|true|7,",
+        ),
+        // Inherited indexed values are observed by ordinary `Get`.
+        (
+            "(function(){const p={1:'p'};const o=Object.create(p);o.length=3;o[0]='a';o[2]='c';return Array.prototype.toReversed.call(o).join();})()",
+            "c,p,a",
+        ),
+    ]);
+}
+
+/// `with` validates one relative index and replaces only that output slot.
+#[test]
+fn with_replaces_one_relative_index_without_mutating_the_source() {
+    assert_all(&[
+        ("[1,2,3].with(1,9).join()", "1,9,3"),
+        ("[1,2,3].with(-1,9).join()", "1,2,9"),
+        ("[1,2,3].with(1.9,9).join()", "1,9,3"),
+        ("[1,2,3].with(undefined,9).join()", "9,2,3"),
+        (
+            "Array.prototype.with.call({length:3,0:'a',2:'c'},-2,'b').join()",
+            "a,b,c",
+        ),
+        (
+            "(function(){const a=[1,2];const r=a.with(0,9);return a.join()+'|'+r.join();})()",
+            "1,2|9,2",
+        ),
+        // The replacement value is stored without coercion.
+        (
+            "(function(){const v={};return [1].with(0,v)[0]===v;})()",
+            "true",
+        ),
+    ]);
+}
+
+/// Observable conversions and element reads follow the algorithm's order.
+#[test]
+fn change_by_copy_conversion_and_getter_order_is_exact() {
+    assert_all(&[
+        (
+            "(function(){let log='';const o={get length(){log+='l';return {valueOf(){log+='v';return 3;}}},get 2(){log+='2';return 'c'},get 1(){log+='1';return 'b'},get 0(){log+='0';return 'a'}};const r=Array.prototype.toReversed.call(o);return log+'|'+r.join('');})()",
+            "lv210|cba",
+        ),
+        (
+            "(function(){let log='';const o={get length(){log+='l';return 2},get 0(){log+='0';return 'a'},get 1(){log+='1';return 'b'}};const i={valueOf(){log+='i';return 1}};const r=Array.prototype.with.call(o,i,'x');return log+'|'+r.join('');})()",
+            "li0|ax",
+        ),
+        // An out-of-range index throws before any element is read.
+        (
+            "(function(){let read=false;const o={length:1,get 0(){read=true;return 1}};try{Array.prototype.with.call(o,1,9);}catch(error){return (error instanceof RangeError)+'|'+read;}})()",
+            "true|false",
+        ),
+        // Getter abrupt completions propagate without touching later indices.
+        (
+            "(function(){let later=false;const o={length:2,get 1(){throw 41},get 0(){later=true;return 0}};try{Array.prototype.toReversed.call(o);}catch(error){return (error===41)+'|'+later;}})()",
+            "true|false",
+        ),
+    ]);
+}
+
+/// Invalid indices and `ArrayCreate` lengths produce realm-owned range errors.
+#[test]
+fn change_by_copy_preconditions_throw_range_error() {
+    for body in [
+        "return [1,2].with(2,9);",
+        "return [1,2].with(-3,9);",
+        "return [1,2].with(Infinity,9);",
+        "return [].with(0,9);",
+    ] {
+        assert_throws(body, ExceptionKind::RangeError, "invalid array index");
+    }
+    for body in [
+        "return Array.prototype.toReversed.call({length:4294967296});",
+        "return Array.prototype.with.call({length:4294967296},0,1);",
+    ] {
+        assert_throws(body, ExceptionKind::RangeError, "invalid array length");
+    }
+}
+
+/// The new methods are ordinary non-constructors with the pinned identities.
+#[test]
+fn change_by_copy_methods_have_the_pinned_shape() {
+    assert_all(&[
+        ("Array.prototype.toReversed.name", "toReversed"),
+        ("Array.prototype.toReversed.length", "0"),
+        ("Array.prototype.with.name", "with"),
+        ("Array.prototype.with.length", "2"),
+        (
+            "(function(){const d=Object.getOwnPropertyDescriptor(Array.prototype,'toReversed');return d.writable+','+d.enumerable+','+d.configurable;})()",
+            "true,false,true",
+        ),
+        (
+            "(function(){try{new Array.prototype.toReversed();}catch(error){return error instanceof TypeError;}})()",
+            "true",
+        ),
+        (
+            "(function(){try{new Array.prototype.with(0,1);}catch(error){return error instanceof TypeError;}})()",
+            "true",
+        ),
+    ]);
+    for method in ["toReversed", "with"] {
+        for receiver in ["null", "undefined"] {
+            assert_throws(
+                &format!("return Array.prototype.{method}.call({receiver});"),
+                ExceptionKind::TypeError,
+                "cannot convert to object",
+            );
+        }
+    }
+}
+
+/// A long change-by-copy scan consumes shared instruction fuel.
+#[test]
+fn change_by_copy_scans_consume_shared_instruction_fuel() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        "return Array.prototype.toReversed.call({length:1000});",
+    );
+    let result = context.call(
+        &run,
+        &[],
+        ExecutionLimits::default().with_instruction_fuel(100),
+    );
+    assert!(matches!(
+        result,
+        Err(ExecutionError::InstructionLimitExceeded { limit: 100, .. })
+    ));
 }

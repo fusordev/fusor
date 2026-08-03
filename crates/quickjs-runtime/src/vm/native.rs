@@ -1689,8 +1689,8 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
-        // `slice`, `concat`, and `at` read without mutating; the first two build
-        // a fresh Array while `at` answers one element.
+        // These five copying methods read without mutating. All except `at`
+        // build a fresh Array; the change-by-copy pair reads through holes.
         NativeFunctionKind::ArrayPrototypeCopier(copier) => begin_array_copier(
             runtime,
             copier,

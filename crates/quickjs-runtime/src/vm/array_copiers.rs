@@ -23,11 +23,13 @@
  * THE SOFTWARE.
  */
 
-//! `Array.prototype.slice`, `concat`, and `at`.
+//! `Array.prototype.slice`, `concat`, `at`, `toReversed`, and `with`.
 //!
-//! These read without mutating. `slice` and `concat` build a fresh Array, and
-//! `at` answers a single element, but all three share the same resumable element
-//! read because every read can enter a getter.
+//! These read without mutating. All except `at` build a fresh Array, but every
+//! method shares the same resumable element read because each read can enter a
+//! getter. The two change-by-copy methods deliberately read through holes and
+//! create an own `undefined` property, unlike `slice` and `concat`, which
+//! preserve holes.
 //!
 //! `concat` spreads only a real Array. A plain array-like becomes a single
 //! element, which the pinned oracle confirms: `[1].concat({length:2,0:"a"})` has
@@ -51,7 +53,7 @@ enum ArrayCopierStage {
     AwaitLength,
     /// Awaiting `ToLength` of the length value.
     AwaitLengthConversion,
-    /// Awaiting `ToIntegerOrInfinity` of `slice`'s or `at`'s start argument.
+    /// Awaiting `ToIntegerOrInfinity` of `slice`'s, `at`'s, or `with`'s index.
     AwaitStart,
     /// Awaiting `ToIntegerOrInfinity` of `slice`'s end argument.
     AwaitEnd,
@@ -84,12 +86,15 @@ pub(crate) struct ArrayCopierContinuation {
     next: u64,
     /// The exclusive end of the current source's range.
     end: u64,
-    /// The destination array, absent for `at`.
+    /// The destination array, absent for `at` and until change-by-copy methods
+    /// know their validated result length/index.
     destination: Option<ObjectId>,
     /// The next index to write in the destination.
     written: u64,
     /// `at`'s answer.
     result: StoredValue,
+    /// The validated replacement index for `with`.
+    selected: Option<u64>,
     realm: RealmId,
     stage: ArrayCopierStage,
     origin: JsStackFrame,
@@ -150,20 +155,25 @@ pub(super) fn begin_array_copier(
             })?;
         collected.push(value);
     }
-    // `slice` and `concat` produce a fresh Array; `at` produces one element.
+    // `slice` and `concat` allocate their result before this shared driver.
+    // `toReversed` must read `length` first, and `with` must additionally
+    // convert and validate its index before ArrayCreate, so they allocate in
+    // their later specification stages.
     let destination = match copier {
         ArrayCopier::Slice | ArrayCopier::Concat => {
             Some(runtime.allocate_array(realm, Vec::new())?)
         }
-        ArrayCopier::At => None,
+        ArrayCopier::At | ArrayCopier::ToReversed | ArrayCopier::With => None,
     };
     // `concat` applies the same spread test to its receiver as to every later
     // source: only a real Array is spread. An array-like receiver therefore
     // becomes a single element, which the oracle confirms with
     // `Array.prototype.concat.call({length:2,0:"a"},9)` reporting length 2.
-    // `slice` and `at` always read their receiver's elements.
+    // Every other copier always reads its receiver's elements.
     let spreading = match (copier, &receiver) {
-        (ArrayCopier::Slice | ArrayCopier::At, _) => true,
+        (ArrayCopier::Slice | ArrayCopier::At | ArrayCopier::ToReversed | ArrayCopier::With, _) => {
+            true
+        }
         (ArrayCopier::Concat, StoredValue::Object(object)) => runtime.is_array_object(*object)?,
         (ArrayCopier::Concat, _) => false,
     };
@@ -180,6 +190,7 @@ pub(super) fn begin_array_copier(
         destination,
         written: 0,
         result: StoredValue::Undefined,
+        selected: None,
         realm,
         stage: ArrayCopierStage::AwaitLength,
         origin,
@@ -190,7 +201,7 @@ pub(super) fn begin_array_copier(
 /// Resumes a copying method after an awaited read or conversion.
 #[allow(
     clippy::too_many_lines,
-    reason = "the length, range, element, and source-advance stages form one traced continuation shared by slice, concat, and at"
+    reason = "the length, range, element, and source-advance stages form one traced continuation shared by all five copying methods"
 )]
 pub(super) fn advance_array_copier(
     runtime: &mut Runtime,
@@ -229,6 +240,20 @@ pub(super) fn advance_array_copier(
             }
             ArrayCopierStage::AwaitLengthConversion => {
                 let value = take_completion(&mut completion)?;
+                if needs_conversion(&value) {
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::Number,
+                        OperatorPrimitiveTarget::ArrayCopierArgument(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
                 let number = operator_to_number(value, state.realm, &state.origin)?;
                 state.length = number_to_length(number);
                 match state.copier {
@@ -238,8 +263,14 @@ pub(super) fn advance_array_copier(
                         state.end = state.length;
                         state.stage = ArrayCopierStage::NextElement;
                     }
-                    ArrayCopier::Slice | ArrayCopier::At => {
+                    ArrayCopier::Slice | ArrayCopier::At | ArrayCopier::With => {
                         state.stage = ArrayCopierStage::AwaitStart;
+                    }
+                    ArrayCopier::ToReversed => {
+                        allocate_change_by_copy_destination(runtime, &mut state)?;
+                        state.next = 0;
+                        state.end = state.length;
+                        state.stage = ArrayCopierStage::NextElement;
                     }
                 }
             }
@@ -247,7 +278,7 @@ pub(super) fn advance_array_copier(
                 if let Some(value) = completion.take() {
                     let number = operator_to_number(value, state.realm, &state.origin)?;
                     let integer = number_to_integer_or_infinity(number);
-                    apply_start(&mut state, integer);
+                    apply_start(runtime, &mut state, integer)?;
                     continue;
                 }
                 match state.arguments.first() {
@@ -268,7 +299,7 @@ pub(super) fn advance_array_copier(
                     }
                     Some(value) => completion = Some(value.duplicate()),
                     // An absent start begins at zero.
-                    None => apply_start(&mut state, 0.0),
+                    None => apply_start(runtime, &mut state, 0.0)?,
                 }
             }
             ArrayCopierStage::AwaitEnd => {
@@ -311,11 +342,27 @@ pub(super) fn advance_array_copier(
                 execution_budget.charge_instructions(1)?;
                 let index = state.next;
                 state.next = state.next.saturating_add(1);
-                let key = element_key(index)?;
+                if matches!(state.copier, ArrayCopier::With) && state.selected == Some(index) {
+                    let replacement = state
+                        .arguments
+                        .get(1)
+                        .map_or(StoredValue::Undefined, StoredValue::duplicate);
+                    append_element(runtime, &mut state, replacement)?;
+                    continue;
+                }
+                let source_index = if matches!(state.copier, ArrayCopier::ToReversed) {
+                    state.length.saturating_sub(index).saturating_sub(1)
+                } else {
+                    index
+                };
+                let key = element_key(source_index)?;
                 charge_copier_lookup(runtime, &state.source, execution_budget)?;
-                // An absent source index is skipped, so the destination keeps a
-                // hole rather than gaining an `undefined`.
-                if !has_property(runtime, state.realm, &state.source, &key)? {
+                // The older copying methods preserve holes. The change-by-copy
+                // methods use Get directly and therefore materialize a missing
+                // source index as an own `undefined` property.
+                if !matches!(state.copier, ArrayCopier::ToReversed | ArrayCopier::With)
+                    && !has_property(runtime, state.realm, &state.source, &key)?
+                {
                     if matches!(state.copier, ArrayCopier::At) {
                         state.stage = ArrayCopierStage::Done;
                         continue;
@@ -383,8 +430,12 @@ pub(super) fn advance_array_copier(
     }
 }
 
-/// Applies `slice`'s or `at`'s start argument.
-fn apply_start(state: &mut ArrayCopierContinuation, integer: f64) {
+/// Applies `slice`'s start, `at`'s index, or `with`'s replacement index.
+fn apply_start(
+    runtime: &mut Runtime,
+    state: &mut ArrayCopierContinuation,
+    integer: f64,
+) -> Result<(), NativeFailure> {
     match state.copier {
         ArrayCopier::At => {
             // `at` accepts a negative index counting from the end and answers
@@ -397,7 +448,7 @@ fn apply_start(state: &mut ArrayCopierContinuation, integer: f64) {
             };
             if resolved < 0.0 || resolved >= length_as_f64 {
                 state.stage = ArrayCopierStage::Done;
-                return;
+                return Ok(());
             }
             let index = relative_bound(resolved, state.length);
             state.next = index;
@@ -408,7 +459,57 @@ fn apply_start(state: &mut ArrayCopierContinuation, integer: f64) {
             state.next = relative_bound(integer, state.length);
             state.stage = ArrayCopierStage::AwaitEnd;
         }
+        ArrayCopier::ToReversed => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "toReversed entered an argument-conversion stage",
+            }
+            .into());
+        }
+        ArrayCopier::With => {
+            let length = length_as_f64(state.length);
+            let actual = if integer >= 0.0 {
+                integer
+            } else {
+                length + integer
+            };
+            if actual < 0.0 || actual >= length {
+                return Err(NativeFailure::Abrupt(copier_range_error(
+                    state,
+                    "invalid array index",
+                )?));
+            }
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the specification range check bounds the integral index by ToLength"
+            )]
+            let selected = actual as u64;
+            state.selected = Some(selected);
+            allocate_change_by_copy_destination(runtime, state)?;
+            state.next = 0;
+            state.end = state.length;
+            state.stage = ArrayCopierStage::NextElement;
+        }
     }
+    Ok(())
+}
+
+/// Performs the `ArrayCreate(length)` used by change-by-copy methods.
+fn allocate_change_by_copy_destination(
+    runtime: &mut Runtime,
+    state: &mut ArrayCopierContinuation,
+) -> Result<(), NativeFailure> {
+    let Ok(length) = u32::try_from(state.length) else {
+        return Err(NativeFailure::Abrupt(copier_range_error(
+            state,
+            "invalid array length",
+        )?));
+    };
+    let prototype = runtime.realm_array_prototype(state.realm)?;
+    let destination =
+        runtime.allocate_sparse_array_with_prototype(HeapReference::Object(prototype), length)?;
+    state.destination = Some(destination);
+    Ok(())
 }
 
 /// Appends one element to the destination array.
@@ -498,6 +599,21 @@ fn copier_failure(state: &ArrayCopierContinuation, failure: PropertyFailure) -> 
         Ok(exception) => NativeFailure::Abrupt(exception),
         Err(error) => error.into(),
     }
+}
+
+/// Builds one realm-owned range exception for a change-by-copy precondition.
+fn copier_range_error(
+    state: &ArrayCopierContinuation,
+    message: &str,
+) -> Result<PendingException, NativeFailure> {
+    Ok(PendingException {
+        realm: state.realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::RangeError,
+            message: JsString::from_utf8(message)?,
+        },
+        origin: state.origin.clone(),
+    })
 }
 
 /// Charges one property lookup, tolerating a primitive source.

@@ -235,6 +235,14 @@ Known intentional runtime differences:
   array-like itself at index `0`; nesting is never flattened. Holes survive into
   the result because an absent source index is skipped rather than written, and
   the destination length is set once at the end so a trailing hole still counts.
+- [x] `Array.prototype.toReversed` and `with` as the first change-by-copy
+  methods. Both use a fresh realm Array rather than species construction and
+  read through holes with ordinary `Get`, so every output index is present even
+  when its value is `undefined`. `toReversed` observes source getters from the
+  last index to the first; `with` performs resumable index coercion before any
+  element read, rejects an out-of-range relative index, and skips the replaced
+  source getter. Their shared copier now also applies resumable `ToLength` when
+  an array-like `length` getter returns an object instead of assuming a primitive.
 - [x] `Number.prototype.toFixed`, `toExponential`, and `toPrecision`, rendered
   from the *exact* value the binary64 holds rather than from its shortest decimal
   spelling. That distinction is observable and is why these use `JsBigInt`
@@ -307,8 +315,8 @@ Known intentional runtime differences:
   shrink results at non-configurable indices, and install a requested
   non-writable final state even when that shrink returns `false`.
 - [ ] Remaining String/Number/Array method surface (`sort`, `flat`, `flatMap`,
-  `copyWithin`, `with`, `toSorted`, `toReversed`, `toSpliced`, and the
-  locale-dependent renderings), shape sharing/transition
+  `copyWithin`, `toSorted`, `toSpliced`, and the locale-dependent renderings),
+  shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
 
