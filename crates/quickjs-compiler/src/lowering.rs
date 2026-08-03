@@ -8,14 +8,13 @@ use oxc_ast::{
         AssignmentTargetProperty, AssignmentTargetRest, BindingIdentifier, BindingPattern,
         BindingRestElement, BlockStatement, CallExpression, CatchClause, ComputedMemberExpression,
         ConditionalExpression, DoWhileStatement, Expression, ExpressionStatement, ForInStatement,
-        ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft, Function, FunctionBody,
-        FunctionType, IdentifierReference, IfStatement, LabelIdentifier, LabeledStatement,
-        LogicalExpression, NewExpression, ObjectAssignmentTarget, ObjectExpression, ObjectPattern,
-        ObjectProperty, ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind,
-        ReturnStatement, SequenceExpression, SimpleAssignmentTarget, Statement,
-        StaticMemberExpression, SwitchStatement, ThrowStatement, TryStatement, UnaryExpression,
-        UpdateExpression, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
-        WhileStatement,
+        ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft, Function, FunctionType,
+        IdentifierReference, IfStatement, LabelIdentifier, LabeledStatement, LogicalExpression,
+        NewExpression, ObjectAssignmentTarget, ObjectExpression, ObjectPattern, ObjectProperty,
+        ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement,
+        SequenceExpression, SimpleAssignmentTarget, Statement, StaticMemberExpression,
+        SwitchStatement, ThrowStatement, TryStatement, UnaryExpression, UpdateExpression,
+        VariableDeclaration, VariableDeclarationKind, VariableDeclarator, WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
@@ -51,6 +50,7 @@ mod constants;
 mod context;
 mod control_flow;
 mod error;
+mod function;
 mod layouts;
 
 pub use artifacts::{
@@ -70,6 +70,7 @@ pub use context::{CompilationContext, CompilationExecutable};
 use control_flow::exact_source_span;
 use control_flow::{CompilerLabel, PlannedControlFlow, PlannedInstruction};
 pub use error::{LeafCompilationError, UnsupportedLeafFeature};
+use function::{FunctionLoweringSession, FunctionPlanningContext};
 use layouts::{
     ArgumentSlot, FrameLayout, FrameLayoutInput, FrameSlot, FunctionTreeLayout,
     FunctionTreeLayoutInput, FunctionTreeLayoutSeed, FunctionTreeLayoutSeedInput,
@@ -363,7 +364,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 feature: UnsupportedLeafFeature::UnsupportedBody,
                 span: function.span,
             })?;
-        let mut flow = PlannedControlFlow::new(limits);
         let constants = tree_layout.constant_pool(executable_id)?;
         let planning = FunctionPlanningContext {
             executable: executable_id,
@@ -371,7 +371,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             tree_layout,
             constants,
         };
-        self.validate_body(function, body, &planning, &mut flow)?;
+        let flow = FunctionLoweringSession::for_function(self, function, body, planning, limits)?
+            .lower()?;
         let function_scope = self.created_scope(
             function.scope_id.get(),
             function.node_id.get(),
@@ -459,7 +460,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             FrameLayoutInput::new(&self.planned.plan, executable_id).with_internal_locals(1),
         )?;
         let completion = layout.internal_local(0)?;
-        let mut flow = PlannedControlFlow::new(limits);
         let constants = tree_layout.constant_pool(executable_id)?;
         let planning = FunctionPlanningContext {
             executable: executable_id,
@@ -467,7 +467,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             tree_layout,
             constants,
         };
-        self.validate_program(program, completion, &planning, &mut flow)?;
+        let flow =
+            FunctionLoweringSession::for_program(self, program, completion, planning, limits)?
+                .lower()?;
         let program_scope =
             self.created_scope(program.scope_id.get(), program.node_id.get(), program.span)?;
         let capture_layout =
@@ -991,96 +993,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             )?;
         }
         Ok(())
-    }
-
-    fn validate_body<'statement>(
-        &self,
-        function: &'statement Function<'arena>,
-        body: &'statement FunctionBody<'arena>,
-        planning: &FunctionPlanningContext<'_>,
-        flow: &mut PlannedControlFlow,
-    ) -> Result<(), LeafCompilationError> {
-        let function_scope = self.created_scope(
-            function.scope_id.get(),
-            function.node_id.get(),
-            function.span,
-        )?;
-        let mut state = StatementPlanningState {
-            work: vec![
-                StatementWork::PopScope(function_scope),
-                StatementWork::VisitList {
-                    statements: &body.statements,
-                    next: 0,
-                },
-                StatementWork::PushScope {
-                    scope: function_scope,
-                    creator: function.node_id.get(),
-                    span: function.span,
-                },
-            ],
-            active_scopes: Vec::new(),
-            controls: StatementControlStack::default(),
-            abrupt_markers: Vec::new(),
-            completion: StatementCompletion::Discard,
-        };
-
-        while let Some(task) = state.work.pop() {
-            self.process_statement_work(task, body.span, planning, flow, &mut state)?;
-        }
-        if !state.active_scopes.is_empty()
-            || !state.controls.is_empty()
-            || !state.abrupt_markers.is_empty()
-        {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "statement planning closes every scope and control region",
-                span: Some(body.span),
-            });
-        }
-        flow.ensure_terminal(body.span)?;
-        Ok(())
-    }
-
-    fn validate_program<'statement>(
-        &self,
-        program: &'statement Program<'arena>,
-        completion: LocalSlot,
-        planning: &FunctionPlanningContext<'_>,
-        flow: &mut PlannedControlFlow,
-    ) -> Result<(), LeafCompilationError> {
-        let program_scope =
-            self.created_scope(program.scope_id.get(), program.node_id.get(), program.span)?;
-        let mut state = StatementPlanningState {
-            work: vec![
-                StatementWork::PopScope(program_scope),
-                StatementWork::VisitList {
-                    statements: &program.body,
-                    next: 0,
-                },
-                StatementWork::PushScope {
-                    scope: program_scope,
-                    creator: program.node_id.get(),
-                    span: program.span,
-                },
-            ],
-            active_scopes: Vec::new(),
-            controls: StatementControlStack::default(),
-            abrupt_markers: Vec::new(),
-            completion: StatementCompletion::Script(completion),
-        };
-
-        while let Some(task) = state.work.pop() {
-            self.process_statement_work(task, program.span, planning, flow, &mut state)?;
-        }
-        if !state.active_scopes.is_empty()
-            || !state.controls.is_empty()
-            || !state.abrupt_markers.is_empty()
-        {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "Program planning closes every scope and control region",
-                span: Some(program.span),
-            });
-        }
-        flow.ensure_script_terminal(completion, program.span)
     }
 
     #[allow(
@@ -9779,14 +9691,6 @@ struct ValidatedFunction {
     function_span: SourceByteSpan,
     function_name_span: Option<SourceByteSpan>,
     flow: PlannedControlFlow,
-}
-
-#[derive(Clone, Copy)]
-struct FunctionPlanningContext<'layout> {
-    executable: ExecutableId,
-    layout: &'layout FrameLayout,
-    tree_layout: &'layout FunctionTreeLayout,
-    constants: &'layout CompiledConstantPool,
 }
 
 fn is_noncomputed_static_property_key_node(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> bool {
