@@ -452,6 +452,67 @@ impl ArraySort {
     }
 }
 
+/// Which `Reflect` method a native function implements.
+///
+/// Each of these takes an object target and reports
+/// `TypeError: not an object` for anything else, including a primitive that the
+/// matching `Object` static would accept — the `reflect` magic flag in
+/// `js_object_isExtensible`, `js_object_preventExtensions`,
+/// `js_object_getPrototypeOf`, `js_object_defineProperty`, and
+/// `js_object_getOwnPropertyDescriptor` (`quickjs.c:40026-40400`,
+/// `quickjs.c:50215-50329`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReflectMethod {
+    Get,
+    Set,
+    Has,
+    DeleteProperty,
+    OwnKeys,
+    GetPrototypeOf,
+    SetPrototypeOf,
+    IsExtensible,
+    PreventExtensions,
+    DefineProperty,
+    GetOwnPropertyDescriptor,
+}
+
+impl ReflectMethod {
+    /// Returns the reported `length` of the installed function.
+    pub(crate) const fn arity(self) -> i32 {
+        match self {
+            Self::OwnKeys | Self::GetPrototypeOf | Self::IsExtensible | Self::PreventExtensions => {
+                1
+            }
+            Self::Get
+            | Self::Has
+            | Self::DeleteProperty
+            | Self::SetPrototypeOf
+            | Self::GetOwnPropertyDescriptor => 2,
+            Self::Set | Self::DefineProperty => 3,
+        }
+    }
+
+    /// Returns the predefined atom this method is installed under.
+    ///
+    /// Every `Reflect` name is predefined, so none is interned per realm; a
+    /// duplicate interning would break the atom table's rollback invariant.
+    pub(crate) const fn predefined_atom(self) -> PredefinedAtom {
+        match self {
+            Self::Get => PredefinedAtom::Get,
+            Self::Set => PredefinedAtom::SetProperty,
+            Self::Has => PredefinedAtom::Has,
+            Self::DeleteProperty => PredefinedAtom::DeleteProperty,
+            Self::OwnKeys => PredefinedAtom::OwnKeys,
+            Self::GetPrototypeOf => PredefinedAtom::GetPrototypeOf,
+            Self::SetPrototypeOf => PredefinedAtom::SetPrototypeOf,
+            Self::IsExtensible => PredefinedAtom::IsExtensible,
+            Self::PreventExtensions => PredefinedAtom::PreventExtensions,
+            Self::DefineProperty => PredefinedAtom::DefineProperty,
+            Self::GetOwnPropertyDescriptor => PredefinedAtom::GetOwnPropertyDescriptor,
+        }
+    }
+}
+
 /// Which reduction a continuation is performing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArrayReduction {
@@ -829,6 +890,9 @@ pub(crate) enum NativeFunctionKind {
     /// `Reflect.construct`, which validates `newTarget` before the argument
     /// list and its target after it.
     ReflectConstruct,
+    /// One `Reflect` method whose target must already be an object and whose
+    /// key, when it takes one, converts with a resumable `ToPropertyKey`.
+    ReflectMethod(ReflectMethod),
     ArrayPrototypeJoin,
     ArrayPrototypeToString,
     ArrayPrototypeValues,

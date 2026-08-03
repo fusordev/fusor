@@ -73,7 +73,22 @@ impl DescriptorField {
     }
 }
 
-/// One in-progress `Object.defineProperty`.
+/// Whether a definition throws on rejection or answers `false`.
+///
+/// `Object.defineProperty` passes `JS_PROP_THROW` and answers with the target;
+/// `Reflect.defineProperty` omits it and answers with the boolean completion
+/// (`quickjs.c:40069-40080`). Everything before the definition itself — the
+/// descriptor read and its validation — is identical, so both share one
+/// continuation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DefinitionReport {
+    /// `Object.defineProperty`: throw on rejection, answer with the target.
+    ThrowingTarget,
+    /// `Reflect.defineProperty`: answer `true` or `false`.
+    Boolean,
+}
+
+/// One in-progress `Object.defineProperty` or `Reflect.defineProperty`.
 pub(super) struct DefinePropertyContinuation {
     /// The object receiving the definition.
     target: StoredValue,
@@ -87,6 +102,8 @@ pub(super) struct DefinePropertyContinuation {
     fields: CollectedFields,
     /// The index into [`DescriptorField::ORDER`] of the field being awaited.
     next: usize,
+    /// How a rejected definition is reported.
+    report: DefinitionReport,
     realm: RealmId,
     origin: JsStackFrame,
 }
@@ -147,6 +164,7 @@ pub(super) fn begin_define_property(
     key: PropertyKey,
     name: JsString,
     descriptor: StoredValue,
+    report: DefinitionReport,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
@@ -175,6 +193,7 @@ pub(super) fn begin_define_property(
         name,
         fields: CollectedFields::default(),
         next: 0,
+        report,
         realm,
         origin,
     };
@@ -296,6 +315,7 @@ fn apply_collected_descriptor(
         key,
         name,
         fields,
+        report,
         realm,
         origin,
         ..
@@ -334,11 +354,19 @@ fn apply_collected_descriptor(
         .with_configurable(requested_flag(fields.configurable));
 
     let outcome = define_own_property(runtime, &target, key, &definition, execution_budget)?;
-    match outcome {
-        PropertyDefinitionOutcome::Complete => Ok(NativeDispatch::Immediate(target)),
-        PropertyDefinitionOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
-            property_exception_at(realm, origin, Some(&name), failure)?,
-        )),
+    match (outcome, report) {
+        (PropertyDefinitionOutcome::Complete, DefinitionReport::ThrowingTarget) => {
+            Ok(NativeDispatch::Immediate(target))
+        }
+        (PropertyDefinitionOutcome::Complete, DefinitionReport::Boolean) => {
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
+        }
+        (PropertyDefinitionOutcome::Failed(_), DefinitionReport::Boolean) => {
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+        }
+        (PropertyDefinitionOutcome::Failed(failure), DefinitionReport::ThrowingTarget) => Err(
+            NativeFailure::Abrupt(property_exception_at(realm, origin, Some(&name), failure)?),
+        ),
     }
 }
 

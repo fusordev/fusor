@@ -34,9 +34,9 @@ use quickjs_bytecode::{
 };
 
 use crate::{
-    ArrayIndex, BigIntError, Context, DynamicFunctionCompileFailure, EngineFault, ExceptionKind,
-    ExecutionError, Function, HandleError, HandleKind, JsBigInt, JsException, JsNumber,
-    JsStackFrame, JsString, JsStringError, JsValue, OrdinaryDynamicFunctionCompiler,
+    ArrayIndex, AtomKind, BigIntError, Context, DynamicFunctionCompileFailure, EngineFault,
+    ExceptionKind, ExecutionError, Function, HandleError, HandleKind, JsBigInt, JsException,
+    JsNumber, JsStackFrame, JsString, JsStringError, JsValue, OrdinaryDynamicFunctionCompiler,
     OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey, PropertyLayout, Runtime,
     RuntimeError, RuntimeResource,
     conversion::{
@@ -58,7 +58,7 @@ use crate::{
         FrameBindingAddress, FunctionImplementation, HeapFunction, InstalledCode,
         InstalledConstant, InstalledRoot, InstalledTemplate, NativeFunction, NativeFunctionKind,
         NumberFormat, NumberPredicate, PreparedIteratorResultPlan, RealmGlobalBindingState,
-        SetPrototypeOutcome, StringArgument, StringMethod, array_length_from_number,
+        ReflectMethod, SetPrototypeOutcome, StringArgument, StringMethod, array_length_from_number,
         check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
@@ -87,6 +87,7 @@ mod iterators;
 mod native;
 mod object_intrinsics;
 mod properties;
+mod reflect;
 mod stack;
 mod string_methods;
 
@@ -99,7 +100,7 @@ use {
     array_join::*, array_mutators::*, array_search::*, array_sort::*, bigint_intrinsics::*,
     bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*,
     errors::*, exceptions::*, execution::*, iterators::*, native::*, object_intrinsics::*,
-    properties::*, stack::*, string_methods::*,
+    properties::*, reflect::*, stack::*, string_methods::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -306,6 +307,9 @@ enum NativeContinuation {
     ArraySort(Box<ArraySortContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     InstanceOf(InstanceOfContinuation),
+    /// A `Reflect.set` setter call whose completion is discarded in favor of
+    /// the operation's own `true` answer.
+    ReflectTrue,
     FunctionCall,
 }
 
@@ -342,7 +346,7 @@ impl NativeContinuation {
             Self::ArraySort(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
-            Self::FunctionCall => 0,
+            Self::ReflectTrue | Self::FunctionCall => 0,
         }
     }
 }
@@ -696,6 +700,15 @@ enum PropertyKeyTarget {
         strict: bool,
         realm: RealmId,
     },
+    /// One keyed `Reflect` method's key, awaiting `ToPropertyKey`.
+    ///
+    /// The target has already been validated as an object, which is why the
+    /// conversion runs at all: a primitive target reports `not an object`
+    /// before any user `toString` can observe the call.
+    Reflect {
+        target: Box<ReflectKeyedTarget>,
+        realm: RealmId,
+    },
 }
 
 impl PropertyKeyTarget {
@@ -708,6 +721,7 @@ impl PropertyKeyTarget {
             | Self::HasOwnProperty { .. }
             | Self::PropertyIsEnumerable { .. } => 1,
             Self::Write { .. } | Self::DefineMethod { .. } | Self::DefineProperty { .. } => 2,
+            Self::Reflect { target, .. } => target.retained_values(),
         }
     }
 }
@@ -830,9 +844,23 @@ struct InstanceOfContinuation {
 struct ArrayLengthWriteState {
     base: StoredValue,
     name: JsString,
-    strict: bool,
+    report: LengthWriteReport,
     original: Option<StoredValue>,
     first_length: Option<u32>,
+}
+
+/// How an array `length` write reports a refusal.
+///
+/// The `RangeError` for a length outside the array-length domain is
+/// unconditional; only the read-only and non-configurable refusals differ.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LengthWriteReport {
+    /// Sloppy assignment: a refusal is silently discarded.
+    Silent,
+    /// Strict assignment: a refusal throws.
+    Throwing,
+    /// `Reflect.set`: a refusal becomes a `false` answer.
+    Boolean,
 }
 
 impl FunctionApplyContinuation {
@@ -1115,6 +1143,7 @@ fn trace_property_key_target_roots(
             trace_stored_value_root(base, mark);
             trace_stored_value_root(function, mark);
         }
+        PropertyKeyTarget::Reflect { target, .. } => target.trace_roots(mark),
     }
 }
 
@@ -1353,7 +1382,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::InstanceOf(state) => {
             trace_instance_of_roots(state, mark);
         }
-        NativeContinuation::FunctionCall => {}
+        NativeContinuation::ReflectTrue | NativeContinuation::FunctionCall => {}
     }
 }
 

@@ -685,10 +685,19 @@ pub(super) fn is_array_length_target(
     Ok(runtime.array_length(*object)?.is_some())
 }
 
+/// Maps an assignment's strictness onto its `length`-refusal report.
+pub(super) const fn length_report(strict: bool) -> LengthWriteReport {
+    if strict {
+        LengthWriteReport::Throwing
+    } else {
+        LengthWriteReport::Silent
+    }
+}
+
 pub(super) fn array_length_write_target(
     base: StoredValue,
     name: JsString,
-    strict: bool,
+    report: LengthWriteReport,
     value: &StoredValue,
 ) -> OperatorPrimitiveTarget {
     let original = (!matches!(
@@ -699,7 +708,7 @@ pub(super) fn array_length_write_target(
     OperatorPrimitiveTarget::ArrayLengthWrite(ArrayLengthWriteState {
         base,
         name,
-        strict,
+        report,
         original,
         first_length: None,
     })

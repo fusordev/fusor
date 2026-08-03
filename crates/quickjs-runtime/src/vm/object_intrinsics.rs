@@ -326,7 +326,7 @@ fn primitive_prototype(
     Ok(heap_reference_value(Some(prototype)))
 }
 
-fn heap_reference_value(reference: Option<HeapReference>) -> StoredValue {
+pub(super) fn heap_reference_value(reference: Option<HeapReference>) -> StoredValue {
     match reference {
         None => StoredValue::Null,
         Some(HeapReference::Function(function)) => StoredValue::Function(function),

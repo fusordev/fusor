@@ -35,14 +35,15 @@ use super::{
     HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
     IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind, NumberFormat,
     NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey,
-    PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, ReleaseMailbox,
-    Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue,
-    StringIntrinsics, StringMethod, SymbolIntrinsics, check_limit, predefined_string, usize_to_u64,
+    PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, ReflectMethod,
+    ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource,
+    StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics, check_limit, predefined_string,
+    usize_to_u64,
 };
 
 const REALM_OBJECT_COUNT: usize = 21;
-const REALM_FUNCTION_COUNT: usize = 133;
-const REALM_PROPERTY_COUNT: u64 = 445;
+const REALM_FUNCTION_COUNT: usize = 144;
+const REALM_PROPERTY_COUNT: u64 = 478;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -252,6 +253,25 @@ const ARRAY_SORT_METHODS: [ArraySort; 2] = [ArraySort::Sort, ArraySort::ToSorted
 
 /// Index of the `Reflect` name in the dynamic atoms.
 const REFLECT_ATOM_START: usize = ARRAY_SORT_ATOM_START + ARRAY_SORT_METHODS.len();
+
+/// The `Reflect` methods this profile installs beyond `apply` and `construct`.
+///
+/// The order is the pinned oracle's `js_reflect_funcs` order minus the two
+/// entries the realm graph installs separately, which is the order
+/// `Reflect.ownKeys(Reflect)` reports (`quickjs.c:50330-50345`).
+const REFLECT_METHODS: [ReflectMethod; 11] = [
+    ReflectMethod::DefineProperty,
+    ReflectMethod::DeleteProperty,
+    ReflectMethod::Get,
+    ReflectMethod::GetOwnPropertyDescriptor,
+    ReflectMethod::GetPrototypeOf,
+    ReflectMethod::Has,
+    ReflectMethod::IsExtensible,
+    ReflectMethod::OwnKeys,
+    ReflectMethod::PreventExtensions,
+    ReflectMethod::Set,
+    ReflectMethod::SetPrototypeOf,
+];
 
 /// The `Array.prototype` reductions this profile installs.
 const ARRAY_REDUCTION_METHODS: [ArrayReduction; 2] =
@@ -772,6 +792,7 @@ struct RealmRecords {
     reflect: ObjectRecord,
     reflect_apply: ObjectRecord,
     reflect_construct: ObjectRecord,
+    reflect_methods: [ObjectRecord; REFLECT_METHODS.len()],
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
     symbol: SymbolIntrinsicRecords,
@@ -782,6 +803,21 @@ struct ReflectRecords {
     namespace: ObjectRecord,
     apply: ObjectRecord,
     construct: ObjectRecord,
+    methods: [ObjectRecord; REFLECT_METHODS.len()],
+}
+
+/// The reserved records behind the three primitive-wrapper intrinsic graphs.
+struct PrimitiveWrapperRecords {
+    boolean: PrimitiveIntrinsicRecords,
+    number: PrimitiveIntrinsicRecords,
+    string: PrimitiveIntrinsicRecords,
+}
+
+/// The three inserted primitive-wrapper intrinsic graphs.
+struct PrimitiveWrapperGraphs {
+    boolean: PrimitiveIntrinsicGraph,
+    number: PrimitiveIntrinsicGraph,
+    string: PrimitiveIntrinsicGraph,
 }
 
 impl RealmRecords {
@@ -916,9 +952,10 @@ impl RealmRecords {
             array_flattens: array_flatten_records()?,
             array_sorts: array_sort_records()?,
             array_is_array: reserved_record(2)?,
-            reflect: reserved_record(3)?,
+            reflect: reserved_record(3 + REFLECT_METHODS.len())?,
             reflect_apply: reserved_record(2)?,
             reflect_construct: reserved_record(2)?,
+            reflect_methods: reflect_method_records()?,
             array,
             iterators,
             symbol,
@@ -1059,6 +1096,7 @@ struct RealmGraph {
     reflect: ObjectId,
     reflect_apply: FunctionId,
     reflect_construct: FunctionId,
+    reflect_methods: [FunctionId; REFLECT_METHODS.len()],
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
     symbol: SymbolIntrinsicGraph,
@@ -1070,6 +1108,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(intrinsic.constructor).is_some());
         }
         for function in [self.errors.is_error, self.errors.to_string] {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
+        for function in self.reflect_methods.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         debug_assert!(runtime.functions.remove(self.reflect_construct).is_some());
@@ -1312,34 +1353,16 @@ impl Runtime {
         let base = self.insert_realm_base(records.base);
 
         let errors = self.insert_error_intrinsics(&base, records.errors);
-        let boolean = self.insert_primitive_intrinsics(
+        let PrimitiveWrapperGraphs {
+            boolean,
+            number,
+            string,
+        } = self.insert_primitive_wrapper_intrinsics(
             &base,
-            records.boolean,
-            BoxedPrimitive::Boolean(false),
-            PrimitiveIntrinsicKinds {
-                constructor: NativeFunctionKind::BooleanConstructor,
-                to_string: NativeFunctionKind::BooleanPrototypeToString,
-                value_of: NativeFunctionKind::BooleanPrototypeValueOf,
-            },
-        );
-        let number = self.insert_primitive_intrinsics(
-            &base,
-            records.number,
-            BoxedPrimitive::Number(JsNumber::from_i32(0)),
-            PrimitiveIntrinsicKinds {
-                constructor: NativeFunctionKind::NumberConstructor,
-                to_string: NativeFunctionKind::NumberPrototypeToString,
-                value_of: NativeFunctionKind::NumberPrototypeValueOf,
-            },
-        );
-        let string = self.insert_primitive_intrinsics(
-            &base,
-            records.string,
-            BoxedPrimitive::String(JsString::empty()),
-            PrimitiveIntrinsicKinds {
-                constructor: NativeFunctionKind::StringConstructor,
-                to_string: NativeFunctionKind::StringPrototypeToString,
-                value_of: NativeFunctionKind::StringPrototypeValueOf,
+            PrimitiveWrapperRecords {
+                boolean: records.boolean,
+                number: records.number,
+                string: records.string,
             },
         );
         let bigint = self.insert_bigint_intrinsics(&base, records.bigint);
@@ -1371,14 +1394,16 @@ impl Runtime {
             NativeFunctionKind::ArrayIsArray,
             records.array_is_array,
         );
-        let (reflect, reflect_apply, reflect_construct) = self.insert_reflect_intrinsics(
-            &base,
-            ReflectRecords {
-                namespace: records.reflect,
-                apply: records.reflect_apply,
-                construct: records.reflect_construct,
-            },
-        );
+        let (reflect, reflect_apply, reflect_construct, reflect_methods) = self
+            .insert_reflect_intrinsics(
+                &base,
+                ReflectRecords {
+                    namespace: records.reflect,
+                    apply: records.reflect_apply,
+                    construct: records.reflect_construct,
+                    methods: records.reflect_methods,
+                },
+            );
 
         Ok(RealmGraph {
             base,
@@ -1405,6 +1430,7 @@ impl Runtime {
             reflect,
             reflect_apply,
             reflect_construct,
+            reflect_methods,
             array,
             iterators,
             symbol,
@@ -1779,6 +1805,54 @@ impl Runtime {
         }
     }
 
+    /// Inserts the three primitive-wrapper intrinsic graphs.
+    ///
+    /// `Boolean`, `Number`, and `String` share one shape — a boxed prototype,
+    /// a constructor, `toString`, and `valueOf` — differing only in the boxed
+    /// payload and the native kinds, so they are inserted together in the
+    /// transaction's fixed order.
+    fn insert_primitive_wrapper_intrinsics(
+        &mut self,
+        base: &RealmBase,
+        records: PrimitiveWrapperRecords,
+    ) -> PrimitiveWrapperGraphs {
+        let boolean = self.insert_primitive_intrinsics(
+            base,
+            records.boolean,
+            BoxedPrimitive::Boolean(false),
+            PrimitiveIntrinsicKinds {
+                constructor: NativeFunctionKind::BooleanConstructor,
+                to_string: NativeFunctionKind::BooleanPrototypeToString,
+                value_of: NativeFunctionKind::BooleanPrototypeValueOf,
+            },
+        );
+        let number = self.insert_primitive_intrinsics(
+            base,
+            records.number,
+            BoxedPrimitive::Number(JsNumber::from_i32(0)),
+            PrimitiveIntrinsicKinds {
+                constructor: NativeFunctionKind::NumberConstructor,
+                to_string: NativeFunctionKind::NumberPrototypeToString,
+                value_of: NativeFunctionKind::NumberPrototypeValueOf,
+            },
+        );
+        let string = self.insert_primitive_intrinsics(
+            base,
+            records.string,
+            BoxedPrimitive::String(JsString::empty()),
+            PrimitiveIntrinsicKinds {
+                constructor: NativeFunctionKind::StringConstructor,
+                to_string: NativeFunctionKind::StringPrototypeToString,
+                value_of: NativeFunctionKind::StringPrototypeValueOf,
+            },
+        );
+        PrimitiveWrapperGraphs {
+            boolean,
+            number,
+            string,
+        }
+    }
+
     fn insert_primitive_intrinsics(
         &mut self,
         base: &RealmBase,
@@ -1844,7 +1918,12 @@ impl Runtime {
         &mut self,
         base: &RealmBase,
         records: ReflectRecords,
-    ) -> (ObjectId, FunctionId, FunctionId) {
+    ) -> (
+        ObjectId,
+        FunctionId,
+        FunctionId,
+        [FunctionId; REFLECT_METHODS.len()],
+    ) {
         let mut namespace = records.namespace;
         namespace.replace_prototype(Some(HeapReference::Object(base.object_prototype)));
         let namespace = self.insert_reserved_object(HeapObject::ordinary(namespace));
@@ -1860,7 +1939,18 @@ impl Runtime {
             NativeFunctionKind::ReflectConstruct,
             records.construct,
         );
-        (namespace, apply, construct)
+        let mut methods = [None; REFLECT_METHODS.len()];
+        for ((slot, method), record) in methods.iter_mut().zip(REFLECT_METHODS).zip(records.methods)
+        {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::ReflectMethod(method),
+                record,
+            ));
+        }
+        let methods = methods.map(|slot| slot.expect("every Reflect method was inserted"));
+        (namespace, apply, construct, methods)
     }
 
     /// Inserts one native function per `Array.prototype` flattening method.
@@ -2432,9 +2522,14 @@ impl Runtime {
         )
     }
 
-    /// Installs the `Reflect` namespace object with its `apply` and
-    /// `construct` methods, its pinned `Symbol.toStringTag`, and the writable,
+    /// Installs the `Reflect` namespace object with every method this profile
+    /// implements, its pinned `Symbol.toStringTag`, and the writable,
     /// non-enumerable, configurable global property (`quickjs.c:50330-50348`).
+    ///
+    /// The string-keyed methods are appended in the pinned `js_reflect_funcs`
+    /// order, which is the order `Reflect.ownKeys(Reflect)` reports; the symbol
+    /// tag follows in the snapshot's symbol phase regardless of when it was
+    /// appended.
     fn publish_reflect_properties(
         &mut self,
         graph: &RealmGraph,
@@ -2467,6 +2562,17 @@ impl Runtime {
         }
         self.append_function_identity(graph.reflect_apply, &names.apply, 3, keys)?;
         self.append_function_identity(graph.reflect_construct, &names.construct, 2, keys)?;
+        for (method, function) in REFLECT_METHODS.into_iter().zip(graph.reflect_methods) {
+            let atom = method.predefined_atom();
+            let key = self.predefined_property_key(atom);
+            let name = predefined_string(&self.atoms, atom);
+            self.objects
+                .get_mut(graph.reflect)
+                .expect("new Reflect object remains live")
+                .record
+                .append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
+            self.append_function_identity(function, &name, method.arity(), keys)?;
+        }
         let reflect_key =
             PropertyKey::from_validated_atom(graph.dynamic_atoms[REFLECT_ATOM_START].clone());
         let record = &mut self
@@ -3631,6 +3737,18 @@ fn array_sort_records() -> Result<[ObjectRecord; ARRAY_SORT_METHODS.len()], Runt
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Array sort record was reserved")))
+}
+
+/// Reserves one record per `Reflect` method beyond `apply` and `construct`.
+///
+/// Every one carries exactly `length` and `name`.
+fn reflect_method_records() -> Result<[ObjectRecord; REFLECT_METHODS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; REFLECT_METHODS.len()] =
+        [const { None }; REFLECT_METHODS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Reflect method record was reserved")))
 }
 
 /// Reserves one record per `Array.prototype` flattening method.

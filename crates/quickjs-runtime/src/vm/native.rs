@@ -411,6 +411,10 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
+            // `Reflect.set` discards a setter's completion and answers `true`.
+            NativeContinuation::ReflectTrue => {
+                NativeDispatch::Immediate(StoredValue::Boolean(true))
+            }
             NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
         };
         match dispatch {
@@ -928,6 +932,15 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             active_frames,
             active_frame_values,
+            execution_budget,
+        ),
+        NativeFunctionKind::ReflectMethod(method) => dispatch_reflect_method(
+            runtime,
+            native.realm,
+            method,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
         NativeFunctionKind::FunctionPrototypeCall => {
@@ -1717,7 +1730,7 @@ pub(super) fn dispatch_native_call_with_frames(
                 }));
             };
             Ok(NativeDispatch::Immediate(
-                if symbol.kind() == crate::AtomKind::GlobalSymbol {
+                if symbol.kind() == AtomKind::GlobalSymbol {
                     symbol
                         .description()
                         .map_or(StoredValue::Undefined, |description| {

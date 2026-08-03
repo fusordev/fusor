@@ -78,6 +78,14 @@ impl KeyPhases {
         strings: true,
         symbols: false,
     };
+
+    /// Every phase, which is what `Reflect.ownKeys` observes
+    /// (`JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK`, `quickjs.c:50325-50326`).
+    pub(crate) const ALL: Self = Self {
+        indices: true,
+        strings: true,
+        symbols: true,
+    };
 }
 
 /// Which atom-keyed phase `push_atom_keys` appends.

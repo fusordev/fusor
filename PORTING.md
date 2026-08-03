@@ -389,16 +389,48 @@ Known intentional write-path differences:
   `Runtime::function_is_constructor` answers `[[Construct]]` presence by walking
   bytecode/native/bound implementations iteratively, so a bind chain cannot
   recurse.
+- [x] The remaining eleven `Reflect` methods, which completes the namespace:
+  `get`, `set`, `has`, `deleteProperty`, `ownKeys`, `getPrototypeOf`,
+  `setPrototypeOf`, `isExtensible`, `preventExtensions`, `defineProperty`, and
+  `getOwnPropertyDescriptor`. Two properties separate every one from the
+  matching `Object` static. First, the target must already be an object:
+  ECMAScript 2015 relaxed the `Object` statics to accept primitives, but the
+  mirrors keep `TypeError: not an object`, which the pinned oracle implements as
+  the `reflect` magic flag (`quickjs.c:40026-40400`) and as an explicit tag test
+  in the dedicated entry points (`quickjs.c:50215-50329`); the check precedes
+  `ToPropertyKey`, so a key whose `toString` throws never runs for a primitive
+  target. Second, a refusal is a `false` answer rather than a `TypeError`, so
+  `Reflect.set(Object.freeze({a:1}),'a',2)` is `false` where the assignment
+  operator would throw or silently succeed, and `preventExtensions` answers
+  `true` rather than the target. `defineProperty` shares
+  `Object.defineProperty`'s resumable descriptor read and differs only in
+  dropping `JS_PROP_THROW` (`quickjs.c:40069-40080`), so a malformed descriptor
+  is still a `TypeError` while a rejected definition is `false`. `ownKeys` is
+  the only listing in the profile that emits the symbol phase, reporting a
+  symbol key as the Symbol itself. `Reflect.set` implements `OrdinarySet` with a
+  distinct receiver (`quickjs.c:9663-9930`): the target supplies the lookup that
+  finds a setter, a read-only refusal, or an exotic `String` index, while the
+  receiver stores the result and re-validates its own property, so an accessor
+  or non-writable property there refuses and a non-extensible receiver refuses
+  to gain a new one. A created receiver property is fully mutable while an
+  existing one is updated by value alone, keeping its attributes. An array
+  `length` on either side keeps its resumable `ToNumber` conversion, whose
+  `RangeError: invalid array length` outranks the boolean answer, which the
+  shared write path now reports through three modes — silent, throwing, and
+  boolean — rather than one strict flag.
 - [ ] Remaining String/Number/Array method surface (`String.prototype` case
   conversions and `localeCompare`, the RegExp-dependent `match`, `matchAll`,
   `replace`, `search`, and `split`, `normalize`, `String.raw`, and the
   locale-dependent renderings), shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
-- [ ] Complete the `Object`/`Function`/`Reflect` surface beyond `apply` and
-  `construct`, then Proxy, remaining built-ins, RegExp/Date/JSON, collections,
-  binary data, Atomics, Unicode tables, promises, async functions/generators,
-  weak references, and finalization registries.
+- [ ] Complete the `Object` surface (`is`, `assign`, `hasOwn`, `values`,
+  `entries`, `fromEntries`, `getOwnPropertyDescriptors`, `defineProperties`,
+  `getOwnPropertySymbols`, `groupBy`, `Object.create`'s descriptors argument,
+  `Object.prototype.toLocaleString`, and the `__proto__` accessor pair), then
+  Proxy, remaining built-ins, RegExp/Date/JSON, collections, binary data,
+  Atomics, Unicode tables, promises, async functions/generators, weak
+  references, and finalization registries.
 - [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide
   host I/O, timers, cancellation, and wakeups, but never Promise-job ordering.
 

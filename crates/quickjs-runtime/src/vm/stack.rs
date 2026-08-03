@@ -668,7 +668,7 @@ pub(super) fn for_in_key_value(key: &PropertyKey) -> Result<StoredValue, Executi
     let atom = key.as_atom().ok_or(EngineFault::RuntimeInvariant {
         message: "for-in candidate is neither an array index nor an atom",
     })?;
-    if atom.kind() != crate::AtomKind::String {
+    if atom.kind() != AtomKind::String {
         return Err(EngineFault::RuntimeInvariant {
             message: "for-in candidate exposed a non-string atom",
         }

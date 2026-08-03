@@ -1719,22 +1719,35 @@ pub(super) fn finish_array_length_write(
     };
     let work = runtime.preview_array_length_write_work(object, length)?;
     execution_budget.charge_instructions(work)?;
-    match runtime.set_array_length(object, length)? {
-        ArrayLengthWriteOutcome::Complete
-        | ArrayLengthWriteOutcome::ReadOnly
-        | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. }
-            if !state.strict =>
-        {
+    let outcome = runtime.set_array_length(object, length)?;
+    match (outcome, state.report) {
+        (ArrayLengthWriteOutcome::Complete, LengthWriteReport::Boolean) => {
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
+        }
+        (ArrayLengthWriteOutcome::Complete, _) => {
             Ok(NativeDispatch::Immediate(StoredValue::Undefined))
         }
-        ArrayLengthWriteOutcome::Complete => Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
-        ArrayLengthWriteOutcome::ReadOnly => Err(NativeFailure::Abrupt(property_exception_at(
-            realm,
-            origin.clone(),
-            Some(&state.name),
-            PropertyFailure::ReadOnly,
-        )?)),
-        ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. } => {
+        // A refused length is silently discarded by a sloppy assignment, throws
+        // in strict code, and answers `false` through `Reflect.set`.
+        (
+            ArrayLengthWriteOutcome::ReadOnly
+            | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. },
+            LengthWriteReport::Silent,
+        ) => Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
+        (
+            ArrayLengthWriteOutcome::ReadOnly
+            | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. },
+            LengthWriteReport::Boolean,
+        ) => Ok(NativeDispatch::Immediate(StoredValue::Boolean(false))),
+        (ArrayLengthWriteOutcome::ReadOnly, LengthWriteReport::Throwing) => {
+            Err(NativeFailure::Abrupt(property_exception_at(
+                realm,
+                origin.clone(),
+                Some(&state.name),
+                PropertyFailure::ReadOnly,
+            )?))
+        }
+        (ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. }, LengthWriteReport::Throwing) => {
             Err(NativeFailure::Abrupt(property_exception_at(
                 realm,
                 origin.clone(),
@@ -2339,7 +2352,8 @@ fn finish_property_key_target(
             realm,
         } => {
             if is_array_length_target(runtime, &base, &property.key)? {
-                let target = array_length_write_target(base, property.name, strict, &value);
+                let target =
+                    array_length_write_target(base, property.name, length_report(strict), &value);
                 return begin_operator_primitive_conversion(
                     runtime,
                     value,
@@ -2404,6 +2418,7 @@ fn finish_property_key_target(
             property.key,
             property.name,
             descriptor,
+            DefinitionReport::ThrowingTarget,
             return_to,
             origin.clone(),
             execution_budget,
@@ -2457,6 +2472,15 @@ fn finish_property_key_target(
                 property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
             )),
         },
+        PropertyKeyTarget::Reflect { target, realm } => finish_reflect_keyed_target(
+            runtime,
+            realm,
+            *target,
+            property,
+            return_to,
+            origin,
+            execution_budget,
+        ),
         PropertyKeyTarget::DefineMethod {
             base,
             function,
