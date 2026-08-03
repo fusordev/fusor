@@ -127,6 +127,42 @@ fn computed_data_definition_coerces_before_evaluating_its_value() {
 }
 
 #[test]
+fn computed_data_definitions_infer_string_and_symbol_function_names() {
+    let authority = compile(
+        "function run(stringKey,symbolKey,emptyKey){\
+            let object={\
+                [stringKey]:function(){},\
+                [symbolKey]:(function(){}),\
+                [emptyKey]:function(){},\
+                [\"__proto__\"]:function(){}\
+            };\
+            return object[stringKey].name===\"text\"&&\
+                object[symbolKey].name===\"[token]\"&&\
+                object[emptyKey].name===\"\"&&\
+                object[\"__proto__\"].name===\"__proto__\";\
+        }",
+        "run",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+    let string_key = context.string(JsString::from_utf8("text").expect("string key"));
+    let description = JsString::from_utf8("token").expect("description");
+    let symbol_key = context.symbol(Some(&description)).expect("symbol");
+    let empty_key = context.symbol(None).expect("description-less symbol");
+
+    let completion = context
+        .call(
+            &run,
+            &[string_key, symbol_key, empty_key],
+            ExecutionLimits::default(),
+        )
+        .expect("computed inferred names");
+    assert_boolean(&completion, true);
+}
+
+#[test]
 fn nullish_computed_read_never_coerces_the_key_object() {
     let source = "function run(){\
         let key={toString(){throw 9;}};\

@@ -2812,7 +2812,7 @@ fn finish_property_key_target(
                     origin: origin.clone(),
                 }));
             };
-            let name = computed_method_name(&value)?;
+            let name = computed_function_name(&value)?;
             match define_static_method(
                 runtime,
                 &base,
@@ -2879,7 +2879,7 @@ pub(super) fn computed_property_operand(
     }
 }
 
-fn computed_method_name(value: &StoredValue) -> Result<JsString, NativeFailure> {
+pub(super) fn computed_function_name(value: &StoredValue) -> Result<JsString, ExecutionError> {
     match value {
         StoredValue::String(name) => Ok(name.clone()),
         StoredValue::Symbol(atom) => atom.description().map_or_else(

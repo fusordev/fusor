@@ -1053,6 +1053,46 @@ pub(super) fn execute_one(
             };
             set_inferred_function_name(runtime, function, name)?;
         }
+        FinalOpcode::SetNameComputed => {
+            let function_index =
+                frame
+                    .stack
+                    .len()
+                    .checked_sub(1)
+                    .ok_or(EngineFault::StackDepthMismatch {
+                        function: frame.template,
+                        pc: source_pc,
+                        expected: 2,
+                        actual: frame.stack.len(),
+                    })?;
+            let key_index =
+                function_index
+                    .checked_sub(1)
+                    .ok_or(EngineFault::StackDepthMismatch {
+                        function: frame.template,
+                        pc: source_pc,
+                        expected: 2,
+                        actual: frame.stack.len(),
+                    })?;
+            let function = match stack_value_at(frame, function_index)? {
+                StoredValue::Function(function) => *function,
+                StoredValue::Undefined
+                | StoredValue::Null
+                | StoredValue::Boolean(_)
+                | StoredValue::Number(_)
+                | StoredValue::BigInt(_)
+                | StoredValue::String(_)
+                | StoredValue::Symbol(_)
+                | StoredValue::Object(_) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "verified set_name_computed operand is not a function",
+                    }
+                    .into());
+                }
+            };
+            let name = computed_function_name(stack_value_at(frame, key_index)?)?;
+            set_inferred_function_name(runtime, function, name)?;
+        }
         FinalOpcode::GetArrayEl | FinalOpcode::GetArrayEl2 => {
             let realm = code(runtime, frame.code)?.realm;
             let key = pop(frame)?;

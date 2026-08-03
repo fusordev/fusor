@@ -43,6 +43,9 @@ fn array_from_is_admitted_by_whole_graph_runtime_preflight() {
 #[test]
 fn inferred_function_name_opcode_is_admitted_by_whole_graph_runtime_preflight() {
     assert!(is_supported_opcode(quickjs_bytecode::FinalOpcode::SetName));
+    assert!(is_supported_opcode(
+        quickjs_bytecode::FinalOpcode::SetNameComputed
+    ));
 }
 
 #[test]

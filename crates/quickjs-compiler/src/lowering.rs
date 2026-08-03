@@ -7619,9 +7619,18 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             work.push(ExpressionWork::Visit(key));
             return Ok(());
         }
-        if let Some(span) = anonymous_named_evaluation_span(&property.value) {
-            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
-        }
+        let inferred_name = if let Some(span) = anonymous_named_evaluation_span(&property.value) {
+            if anonymous_ordinary_function_span(&property.value).is_none() {
+                return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+            }
+            Some(PlannedInstruction::new(
+                FinalOpcode::SetNameComputed,
+                Operands::None,
+                span,
+            ))
+        } else {
+            None
+        };
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::Drop,
             Operands::None,
@@ -7632,6 +7641,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Operands::None,
             property.span,
         )));
+        if let Some(set_name) = inferred_name {
+            work.push(ExpressionWork::Emit(set_name));
+        }
         work.push(ExpressionWork::Visit(&property.value));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::ToPropKey,

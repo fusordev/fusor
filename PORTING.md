@@ -512,9 +512,9 @@ Known intentional runtime differences:
   initializer follows the distinct specification production and remains
   unnamed. Parenthesized initializers, exact `name` descriptor flags, source
   functions, and generated `Function` bodies match the pinned oracle.
-  Computed object-property inferred names remain fail closed until their
-  distinct key evaluation-order certificate lands; anonymous class and arrow
-  initializers remain part of their unsupported lowering families.
+  Object-property inferred names use their distinct static/computed
+  key-evaluation certificates below; anonymous class and arrow initializers
+  remain part of their unsupported lowering families.
 - [x] Extend assignment-expression `NamedEvaluation` across the exact
   identifier-reference operator set: plain `=`, `&&=`, `||=`, and `??=`.
   Local, captured, and constructor-realm global targets all select their
@@ -541,8 +541,19 @@ Known intentional runtime differences:
   evaluates its initializer normally and does not infer a name. Compiler
   adjacency/count checks, source and generated `Function` execution, exact
   descriptor flags, and the pinned QuickJS/Node oracle cover the boundary.
-  Computed data properties remain fail closed pending certified
-  `set_name_computed` lowering and runtime semantics.
+- [x] Extend object-literal `NamedEvaluation` to computed data properties while
+  preserving the specification's key-before-value order. The key is converted
+  once before closure creation, then the exact
+  `fclosure; set_name_computed; define_array_el` sequence derives string names
+  directly and symbol names as `[description]`, with description-less symbols
+  producing the empty name. Whole-graph authority requires one fresh anonymous
+  ordinary closure, one incoming edge, the adjacent computed definition, and
+  the existing converted-key provenance anchor; arbitrary functions, methods,
+  joins, and detached definitions remain rejected. Runtime execution preserves
+  the key and closure stack slots, validates the intrinsic `name` descriptor,
+  and leaves computed `__proto__` as an ordinary own property. Compiler shape
+  tests, source and generated `Function` execution, exact descriptor flags, and
+  the pinned QuickJS/Node oracle cover string and symbol keys.
 - [x] Implement formal rest parameters through the pinned `rest firstArgument`
   entry operation. The fixed argument domain and observable function `length`
   stop before the rest binding; exactly one non-simple rest site snapshots the

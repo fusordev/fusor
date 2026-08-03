@@ -1654,6 +1654,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushConst
             | FinalOpcode::FClosure
             | FinalOpcode::SetName
+            | FinalOpcode::SetNameComputed
             | FinalOpcode::PushAtomValue
             | FinalOpcode::PushBigIntI32
             | FinalOpcode::Undefined

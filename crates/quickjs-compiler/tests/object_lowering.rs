@@ -934,6 +934,39 @@ fn static_anonymous_function_data_properties_emit_canonical_inferred_names() {
 }
 
 #[test]
+fn computed_anonymous_function_data_properties_use_the_exact_name_definition_sequence() {
+    let tree = compile_tree(
+        "function make(first,second){return {\
+            [first]:function(){},\
+            [second]:(function(){})\
+        };}",
+        "make",
+    );
+    let root = tree.root();
+
+    assert_eq!(
+        tree_instructions(root),
+        [
+            (FinalOpcode::Object, Operands::None),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::ToPropKey, Operands::None),
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (FinalOpcode::SetNameComputed, Operands::None),
+            (FinalOpcode::DefineArrayEl, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::GetArg1, Operands::NoneArg),
+            (FinalOpcode::ToPropKey, Operands::None),
+            (FinalOpcode::FClosure8, Operands::Const8(1)),
+            (FinalOpcode::SetNameComputed, Operands::None),
+            (FinalOpcode::DefineArrayEl, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(root.control_flow().computed_stack_size(), 3);
+}
+
+#[test]
 fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
     let cases = [
         (
@@ -960,11 +993,6 @@ fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
             "function make(object,key){return object[key]++;}",
             UnsupportedLeafFeature::UnsupportedExpression,
             "key",
-        ),
-        (
-            "function make(key){return {[key]:function(){}};}",
-            UnsupportedLeafFeature::InferredFunctionName,
-            "function(){}",
         ),
         (
             "function make(){return {async \"method\"(){return 1;}};}",

@@ -1883,6 +1883,39 @@ fn final_authority_admits_named_evaluation_for_one_fresh_anonymous_closure() {
 }
 
 #[test]
+fn final_authority_admits_computed_named_evaluation_only_for_its_data_definition() {
+    let instructions = [
+        (FinalOpcode::Object, Operands::None),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(1)),
+        ),
+        (FinalOpcode::ToPropKey, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::SetNameComputed, Operands::None),
+        (FinalOpcode::DefineArrayEl, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let verified = verify_compiler_bytecode_graph(
+        define_method_input(&instructions, CompilerExecutableKind::OrdinaryFunction, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("one computed data property gains exact named-evaluation authority");
+
+    assert_eq!(
+        verified.requirements(),
+        [
+            ExecutionRequirement::CoreValues,
+            ExecutionRequirement::Strings,
+            ExecutionRequirement::Closures,
+            ExecutionRequirement::OrdinaryObjects,
+            ExecutionRequirement::DynamicPropertyKeys,
+        ]
+    );
+}
+
+#[test]
 fn final_authority_rejects_unpaired_or_method_set_name_operands() {
     let nonadjacent = [
         (FinalOpcode::FClosure8, Operands::Const8(0)),
@@ -1930,6 +1963,90 @@ fn final_authority_rejects_unpaired_or_method_set_name_operands() {
         BytecodeGraphVerificationLimits::default(),
     )
     .expect_err("set_name cannot stand in for define_method");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::SetNameTemplateMismatch { .. }
+    ));
+}
+
+#[test]
+fn final_authority_rejects_invalid_computed_set_name_shapes() {
+    let nonadjacent_computed = [
+        (FinalOpcode::Object, Operands::None),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(1)),
+        ),
+        (FinalOpcode::ToPropKey, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::Dup, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::SetNameComputed, Operands::None),
+        (FinalOpcode::DefineArrayEl, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(
+            &nonadjacent_computed,
+            CompilerExecutableKind::OrdinaryFunction,
+            0,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("set_name_computed cannot target an older stack function");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::SetNameTemplateMismatch { .. }
+    ));
+
+    let detached_computed = [
+        (FinalOpcode::Object, Operands::None),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(1)),
+        ),
+        (FinalOpcode::ToPropKey, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::SetNameComputed, Operands::None),
+        (FinalOpcode::Swap, Operands::None),
+        (FinalOpcode::Swap, Operands::None),
+        (FinalOpcode::DefineArrayEl, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(
+            &detached_computed,
+            CompilerExecutableKind::OrdinaryFunction,
+            0,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("set_name_computed cannot detach from its data-property definition");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::SetNameTemplateMismatch { .. }
+    ));
+
+    let computed_method = [
+        (FinalOpcode::Object, Operands::None),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(1)),
+        ),
+        (FinalOpcode::ToPropKey, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::SetNameComputed, Operands::None),
+        (FinalOpcode::DefineArrayEl, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(&computed_method, CompilerExecutableKind::OrdinaryMethod, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("set_name_computed cannot rename a method template");
     assert!(matches!(
         error.kind(),
         BytecodeVerificationErrorKind::SetNameTemplateMismatch { .. }

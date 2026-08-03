@@ -1536,10 +1536,11 @@ pub enum BytecodeVerificationErrorKind {
         /// Final bytecode position of `define_method`.
         pc: BytecodePc,
     },
-    /// `set_name` is not paired with one immediately preceding anonymous
-    /// ordinary-function closure on its unique incoming edge.
+    /// An inferred-name opcode is not paired with one immediately preceding
+    /// anonymous ordinary-function closure on its unique incoming edge, or a
+    /// computed name is detached from its data-property definition.
     SetNameTemplateMismatch {
-        /// Final bytecode position of `set_name`.
+        /// Final bytecode position of the inferred-name opcode.
         pc: BytecodePc,
     },
     /// `define_method` does not target one fresh object-literal value on every
@@ -1882,7 +1883,7 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             ),
             Self::SetNameTemplateMismatch { pc } => write!(
                 formatter,
-                "set_name at PC {pc} is not paired with one anonymous ordinary-function closure"
+                "inferred-name opcode at PC {pc} is not paired with one anonymous ordinary-function closure and its required definition"
             ),
             Self::DefineMethodTargetMismatch { pc } => write!(
                 formatter,
@@ -3873,11 +3874,13 @@ fn verify_method_definitions(
     Ok(())
 }
 
-/// Certifies the compiler-owned named-evaluation primitive. `set_name` may
-/// only rename the fresh anonymous ordinary closure produced immediately
-/// before it, and the instruction must have exactly one effective incoming
-/// edge. This prevents arbitrary function objects, methods, named templates,
-/// or control-flow joins from acquiring the intrinsic mutation authority.
+/// Certifies the compiler-owned named-evaluation primitives. `set_name` and
+/// `set_name_computed` may only rename the fresh anonymous ordinary closure
+/// produced immediately before them, and the instruction must have exactly
+/// one effective incoming edge. The computed form must also flow directly
+/// into the matching computed data-property definition. This prevents
+/// arbitrary function objects, methods, named templates, or control-flow
+/// joins from acquiring the intrinsic mutation authority.
 fn verify_inferred_function_names(
     graph: &VerifiedCompilerFunctionGraph,
     metadata: &[VerifiedFunctionMetadata],
@@ -3902,7 +3905,10 @@ fn verify_inferred_function_names(
 
         for (index, verified) in instructions.iter().enumerate() {
             let decoded = verified.decoded();
-            if decoded.instruction().opcode() != FinalOpcode::SetName {
+            if !matches!(
+                decoded.instruction().opcode(),
+                FinalOpcode::SetName | FinalOpcode::SetNameComputed
+            ) {
                 continue;
             }
             if inferred_function_name_pair(
@@ -3934,15 +3940,33 @@ fn inferred_function_name_pair(
     set_name_index: usize,
 ) -> Option<FunctionTemplateId> {
     let set_name = instructions.get(set_name_index)?;
+    let set_name_instruction = set_name.decoded().instruction();
     if !matches!(
         (
-            set_name.decoded().instruction().opcode(),
-            set_name.decoded().instruction().operands(),
+            set_name_instruction.opcode(),
+            set_name_instruction.operands(),
         ),
-        (FinalOpcode::SetName, Operands::Atom(_))
+        (FinalOpcode::SetName, Operands::Atom(_)) | (FinalOpcode::SetNameComputed, Operands::None)
     ) || predecessor_counts.get(set_name_index) != Some(&1)
     {
         return None;
+    }
+    if set_name_instruction.opcode() == FinalOpcode::SetNameComputed {
+        let definition_index = set_name_index.checked_add(1)?;
+        if instructions
+            .get(definition_index)?
+            .decoded()
+            .instruction()
+            .opcode()
+            != FinalOpcode::DefineArrayEl
+            || !internal_stack.has_effective_successor(
+                instructions,
+                set_name_index,
+                usize_to_u32(definition_index),
+            )
+        {
+            return None;
+        }
     }
     let closure_index = set_name_index.checked_sub(1)?;
     if !internal_stack.has_effective_successor(
@@ -4381,6 +4405,7 @@ fn transfer_object_definition_provenance(
             state.push(ObjectDefinitionProvenance::Unknown);
         }
         FinalOpcode::ToPropKey => convert_property_key_provenance(state),
+        FinalOpcode::SetNameComputed => {}
         FinalOpcode::DefineField => {
             let base = state[state.len() - 2];
             let base = match base {
@@ -5166,6 +5191,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushConst
             | FinalOpcode::FClosure
             | FinalOpcode::SetName
+            | FinalOpcode::SetNameComputed
             | FinalOpcode::PushAtomValue
             | FinalOpcode::Undefined
             | FinalOpcode::Null
@@ -8510,7 +8536,8 @@ fn collect_requirements(
             | FinalOpcode::PutArrayEl
             | FinalOpcode::ToPropKey
             | FinalOpcode::DefineArrayEl
-            | FinalOpcode::DefineMethodComputed => {
+            | FinalOpcode::DefineMethodComputed
+            | FinalOpcode::SetNameComputed => {
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
                 push_requirement(requirements, ExecutionRequirement::DynamicPropertyKeys);
             }
