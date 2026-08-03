@@ -522,9 +522,16 @@ Known intentional runtime differences:
   evaluated RHS path. Member targets, whole destructuring RHS values, and
   non-logical compound assignments retain ordinary unnamed evaluation. Source
   and generated `Function` bodies cover parenthesized RHS forms, short-circuit
-  behavior, descriptor flags, and the pinned-oracle result. Inferred names in
-  destructuring-assignment defaults remain fail closed pending their separate
-  target-before-iterator/property evaluation certificate.
+  behavior, descriptor flags, and the pinned-oracle result.
+- [x] Extend `NamedEvaluation` to anonymous ordinary-function defaults in
+  array and object destructuring assignments when the assignment target is an
+  identifier reference. Shorthand and renamed object properties, nested array
+  patterns, local and captured cells, and constructor-realm globals all select
+  the target name after preserving the existing target-before-iterator-step or
+  property-read order. Supplied non-`undefined` values bypass the default;
+  member and nested-pattern targets keep ordinary unnamed evaluation. Source
+  and generated `Function` bodies cover exact descriptor flags and match the
+  pinned oracle.
 - [x] Implement formal rest parameters through the pinned `rest firstArgument`
   entry operation. The fixed argument domain and observable function `length`
   stop before the rest binding; exactly one non-simple rest site snapshots the

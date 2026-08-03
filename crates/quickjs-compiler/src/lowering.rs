@@ -5791,6 +5791,14 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         // destructured value is `undefined`, evaluate the
                         // default expression and store it instead.
                         let skip = flow.new_label(default.span)?;
+                        let inferred_name = self
+                            .plan_inferred_assignment_target_name_for_initializer(
+                                &default.binding,
+                                &default.init,
+                                layout,
+                                tree_layout,
+                                constants,
+                            )?;
                         self.plan_assignment_target_value(
                             &default.binding,
                             work,
@@ -5800,8 +5808,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                             constants,
                         )?;
                         work.push(ExpressionWork::Bind(skip.clone()));
-                        if let Some(span) = anonymous_named_evaluation_span(&default.init) {
-                            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+                        if let Some(set_name) = inferred_name {
+                            work.push(ExpressionWork::Emit(set_name));
                         }
                         work.push(ExpressionWork::Visit(&default.init));
                         work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -5970,14 +5978,15 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     /// property read and before the store.
     fn push_object_property_default<'expression>(
         init: &'expression Expression<'arena>,
+        inferred_name: Option<PlannedInstruction>,
         span: Span,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         let skip = flow.new_label(span)?;
         work.push(ExpressionWork::Bind(skip.clone()));
-        if let Some(span) = anonymous_named_evaluation_span(init) {
-            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+        if let Some(set_name) = inferred_name {
+            work.push(ExpressionWork::Emit(set_name));
         }
         work.push(ExpressionWork::Visit(init));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -6076,6 +6085,20 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             match property {
                 AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(identifier) => {
                     // `{a}` or `{a = default}`: the key is the binding name.
+                    let inferred_name = identifier
+                        .init
+                        .as_ref()
+                        .map(|init| {
+                            self.plan_inferred_identifier_reference_name_for_initializer(
+                                &identifier.binding,
+                                init,
+                                layout,
+                                tree_layout,
+                                constants,
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
                     self.plan_assignment_identifier_store(
                         &identifier.binding,
                         work,
@@ -6083,7 +6106,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         tree_layout,
                     )?;
                     if let Some(init) = &identifier.init {
-                        Self::push_object_property_default(init, identifier.span, flow, work)?;
+                        Self::push_object_property_default(
+                            init,
+                            inferred_name,
+                            identifier.span,
+                            flow,
+                            work,
+                        )?;
                     }
                     work.push(ExpressionWork::Emit(PlannedInstruction::new(
                         FinalOpcode::GetField2,
@@ -6151,8 +6180,17 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     if let AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(default) =
                         &property.binding
                     {
+                        let inferred_name = self
+                            .plan_inferred_assignment_target_name_for_initializer(
+                                &default.binding,
+                                &default.init,
+                                layout,
+                                tree_layout,
+                                constants,
+                            )?;
                         Self::push_object_property_default(
                             &default.init,
+                            inferred_name,
                             default.span,
                             flow,
                             work,
@@ -7885,6 +7923,49 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             Operands::Atom(constants.metadata_atom_index(key)?),
             span,
         )))
+    }
+
+    fn plan_inferred_identifier_reference_name_for_initializer(
+        &self,
+        identifier: &IdentifierReference<'arena>,
+        initializer: &Expression<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+    ) -> Result<Option<PlannedInstruction>, LeafCompilationError> {
+        let reference = self.lowered_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            layout,
+            tree_layout,
+        )?;
+        if !reference.access().writes() {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedReference,
+                identifier.span,
+            );
+        }
+        Self::plan_inferred_reference_name_for_initializer(reference, initializer, constants)
+    }
+
+    fn plan_inferred_assignment_target_name_for_initializer(
+        &self,
+        target: &AssignmentTarget<'arena>,
+        initializer: &Expression<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+    ) -> Result<Option<PlannedInstruction>, LeafCompilationError> {
+        let AssignmentTarget::AssignmentTargetIdentifier(identifier) = target else {
+            return Ok(None);
+        };
+        self.plan_inferred_identifier_reference_name_for_initializer(
+            identifier,
+            initializer,
+            layout,
+            tree_layout,
+            constants,
+        )
     }
 
     fn plan_realm_global_assignment<'expression>(

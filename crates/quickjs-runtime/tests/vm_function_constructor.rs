@@ -263,6 +263,31 @@ fn generated_function_infers_anonymous_assignment_names() {
 }
 
 #[test]
+fn generated_function_infers_destructuring_assignment_default_names() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let f=Function('let arrayElement,objectElement;\
+            [arrayElement=function(){}]=[];\
+            ({objectElement=function(){}}={});\
+            [generatedDefault=function(){}]=[];\
+            return arrayElement.name===\"arrayElement\"&&\
+                objectElement.name===\"objectElement\"&&\
+                generatedDefault.name===\"generatedDefault\";');\
+            return f();",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function destructuring assignment default names");
+
+    assert_eq!(result.as_boolean().expect("live Boolean"), Some(true));
+}
+
+#[test]
 fn generated_function_splits_parameter_and_body_environments() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

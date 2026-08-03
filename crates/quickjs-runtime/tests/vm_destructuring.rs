@@ -95,6 +95,35 @@ fn run_text(body: &str) -> String {
 }
 
 #[test]
+fn destructuring_assignment_defaults_infer_only_identifier_target_names() {
+    assert_eq!(
+        run_text(
+            "let arrayElement,objectShorthand,objectRenamed,nestedArray,captured,bypass;\
+             function supplied(){}\
+             [arrayElement=function(){}]=[];\
+             ({objectShorthand=function(){}}={});\
+             ({key:objectRenamed=(function(){})}={});\
+             [[nestedArray=function(){}]=[]]=[];\
+             [captured=function(){}]=[];\
+             [bypass=function(){}]=[supplied];\
+             [assignmentGlobal=function(){}]=[];\
+             const holder={};\
+             [holder.array=function(){}]=[];\
+             ({key:holder.object=function(){}}={});\
+             const closure=function(){return captured;};\
+             const descriptor=Object.getOwnPropertyDescriptor(arrayElement,'name');\
+             return arrayElement.name+':'+objectShorthand.name+':'+objectRenamed.name+':'+\
+                nestedArray.name+':'+closure().name+':'+assignmentGlobal.name+':'+\
+                bypass.name+':'+\
+                (holder.array.name==='')+(holder.object.name==='')+':'+\
+                descriptor.writable+descriptor.enumerable+descriptor.configurable;",
+        ),
+        "arrayElement:objectShorthand:objectRenamed:nestedArray:captured:assignmentGlobal:\
+         supplied:truetrue:falsefalsetrue"
+    );
+}
+
+#[test]
 fn array_declaration_destructures_an_iterator_in_order() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

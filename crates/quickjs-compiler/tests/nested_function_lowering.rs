@@ -309,6 +309,46 @@ fn anonymous_identifier_assignments_emit_adjacent_inferred_name_pairs() {
 }
 
 #[test]
+fn anonymous_destructuring_assignment_defaults_emit_only_identifier_names() {
+    let tree = compile_tree(
+        "function outer(){\
+             let arrayElement, objectShorthand, objectRenamed, nestedArray, captured;\
+             [arrayElement=function(){}]=[];\
+             ({objectShorthand=function(){}}={});\
+             ({key:objectRenamed=(function(){})}={});\
+             [[nestedArray=function(){}]=[]]=[];\
+             [captured=function(){}]=[];\
+             const holder={};\
+             [holder.array=function(){}]=[];\
+             ({key:holder.object=function(){}}={});\
+             ([{}=function(){}]=[]);\
+             return function(){return captured;};\
+         }",
+        "outer",
+    );
+    let outer = tree.root();
+    assert_eq!(
+        inferred_names(outer),
+        [
+            "arrayElement",
+            "objectShorthand",
+            "objectRenamed",
+            "nestedArray",
+            "captured"
+        ]
+    );
+    assert_eq!(
+        outer
+            .constants()
+            .iter()
+            .filter(|constant| constant.function().is_some())
+            .count(),
+        9,
+        "member and nested-pattern defaults plus return remain unnamed"
+    );
+}
+
+#[test]
 fn anonymous_parameter_defaults_emit_adjacent_inferred_name_pairs() {
     let tree = compile_tree(
         "function outer(\
