@@ -799,10 +799,21 @@ pub(crate) enum MathMethod {
     Tan,
     Trunc,
     Sign,
+    Cosh,
+    Sinh,
+    Tanh,
+    Acosh,
+    Asinh,
+    Atanh,
+    Expm1,
+    Log1p,
+    Log2,
+    Log10,
+    Cbrt,
 }
 
 impl MathMethod {
-    pub(crate) const ALL: [Self; 19] = [
+    pub(crate) const ALL: [Self; 30] = [
         Self::Min,
         Self::Max,
         Self::Abs,
@@ -822,6 +833,17 @@ impl MathMethod {
         Self::Tan,
         Self::Trunc,
         Self::Sign,
+        Self::Cosh,
+        Self::Sinh,
+        Self::Tanh,
+        Self::Acosh,
+        Self::Asinh,
+        Self::Atanh,
+        Self::Expm1,
+        Self::Log1p,
+        Self::Log2,
+        Self::Log10,
+        Self::Cbrt,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -845,6 +867,17 @@ impl MathMethod {
             Self::Tan => "tan",
             Self::Trunc => "trunc",
             Self::Sign => "sign",
+            Self::Cosh => "cosh",
+            Self::Sinh => "sinh",
+            Self::Tanh => "tanh",
+            Self::Acosh => "acosh",
+            Self::Asinh => "asinh",
+            Self::Atanh => "atanh",
+            Self::Expm1 => "expm1",
+            Self::Log1p => "log1p",
+            Self::Log2 => "log2",
+            Self::Log10 => "log10",
+            Self::Cbrt => "cbrt",
         }
     }
 
@@ -865,7 +898,18 @@ impl MathMethod {
             | Self::Sin
             | Self::Tan
             | Self::Trunc
-            | Self::Sign => 1,
+            | Self::Sign
+            | Self::Cosh
+            | Self::Sinh
+            | Self::Tanh
+            | Self::Acosh
+            | Self::Asinh
+            | Self::Atanh
+            | Self::Expm1
+            | Self::Log1p
+            | Self::Log2
+            | Self::Log10
+            | Self::Cbrt => 1,
         }
     }
 

@@ -42,8 +42,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 23;
-const REALM_FUNCTION_COUNT: usize = 200;
-const REALM_PROPERTY_COUNT: u64 = 652;
+const REALM_FUNCTION_COUNT: usize = 211;
+const REALM_PROPERTY_COUNT: u64 = 685;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;

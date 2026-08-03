@@ -524,6 +524,15 @@ Known intentional runtime differences:
   cases. Realm publication keeps the pinned own-key order, exact descriptors,
   resource ceilings, tracing, and failure-atomic rollback; the remaining
   `%Math%` methods and constants stay open.
+- [x] Extend `%Math%` through the contiguous hyperbolic, precision-logarithm,
+  and cube-root tranche: `cosh`, `sinh`, `tanh`, `acosh`, `asinh`, `atanh`,
+  `expm1`, `log1p`, `log2`, `log10`, and `cbrt`. Each method uses the shared
+  resumable `ToNumber` path and preserves the specification's NaN, infinity,
+  domain, and signed-zero branches before returning its binary64
+  implementation approximation. Publication and regression coverage retain
+  the pinned own-key order, exact function metadata, atom/property ceilings,
+  and failure-atomic realm construction; the remaining `%Math%` surface starts
+  at `hypot`.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,

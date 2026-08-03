@@ -243,6 +243,17 @@ pub(super) fn finish_math_unary(
                 1.0
             }
         }
+        MathMethod::Cosh => value.cosh(),
+        MathMethod::Sinh => value.sinh(),
+        MathMethod::Tanh => value.tanh(),
+        MathMethod::Acosh => value.acosh(),
+        MathMethod::Asinh => value.asinh(),
+        MathMethod::Atanh => value.atanh(),
+        MathMethod::Expm1 => value.exp_m1(),
+        MathMethod::Log1p => value.ln_1p(),
+        MathMethod::Log2 => value.log2(),
+        MathMethod::Log10 => value.log10(),
+        MathMethod::Cbrt => value.cbrt(),
         MathMethod::Min | MathMethod::Max | MathMethod::Atan2 | MathMethod::Pow => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "a non-unary Math method entered the unary continuation",
