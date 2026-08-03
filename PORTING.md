@@ -378,8 +378,8 @@ Known intentional runtime differences:
   shrink results at non-configurable indices, and install a requested
   non-writable final state even when that shrink returns `false`.
 - [ ] Remaining RegExp-dependent String method surface, shape sharing/transition
-  interning, non-simple parameter instantiation and Proxy exotics, dense indexed
-  storage, deterministic finalization, and diagnostics.
+  interning, parameter-expression and formal-rest instantiation and Proxy
+  exotics, dense indexed storage, deterministic finalization, and diagnostics.
 
 ### Built-ins and asynchronous semantics
 
@@ -456,8 +456,19 @@ Known intentional runtime differences:
   function, and parameter bindings, but explicit arrow parameters, arrow vars,
   block lexicals, and catch bindings remain nearer. Parameters, top-level
   lexicals, and body function declarations named `arguments` suppress object
-  creation exactly as FunctionDeclarationInstantiation requires. Non-simple
-  parameter environments remain the next arguments/compiler tranche.
+  creation exactly as FunctionDeclarationInstantiation requires.
+- [x] Implement expression-free destructured formal parameters. Fixed raw
+  argument positions now carry deterministic internal metadata while object and
+  array bound names use function-local parameter storage. A verified entry
+  prologue runs `IteratorBindingInitialization` after arguments-object creation
+  and before body declaration instantiation, reusing the complete nested
+  array/object/rest destructuring machinery. The QuickJS simple-parameter
+  header bit is cleared, sloppy functions and object methods receive an
+  unmapped arguments object, and a destructured binding named `arguments`
+  suppresses that object. Default initializers, computed parameter keys, formal
+  rest, and destructured
+  parameter/body-function binding merges still fail closed until the separate
+  parameter-environment and post-parameter-instantiation certificates land.
 - [x] Implement `JSON.parse` on a realm-owned `%JSON%` object: an iterative
   UTF-16 parser accepts exactly the ECMA-404 JSON grammar, preserves escapes,
   lone surrogates, duplicate-member evaluation, and `__proto__` as data, then

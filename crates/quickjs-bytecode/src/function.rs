@@ -305,6 +305,20 @@ impl UnverifiedFunctionHeader {
     pub const fn variable_reference_count(self) -> u32 {
         self.variable_reference_count
     }
+
+    /// Selects whether the serialized parameter-list flag denotes the simple
+    /// identifier-only grammar. Ordinary-function compiler constructors
+    /// default to `true`.
+    #[must_use]
+    pub const fn with_simple_parameter_list(mut self, simple: bool) -> Self {
+        const SIMPLE_PARAMETER_LIST: u16 = 1 << 1;
+        if simple {
+            self.serialized_flags |= SIMPLE_PARAMETER_LIST;
+        } else {
+            self.serialized_flags &= !SIMPLE_PARAMETER_LIST;
+        }
+        self
+    }
 }
 
 /// Validated packed function flags.

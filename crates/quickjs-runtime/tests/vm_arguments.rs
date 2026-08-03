@@ -277,6 +277,59 @@ fn parameter_lexical_and_function_declarations_suppress_arguments_instantiation(
 }
 
 #[test]
+fn expression_free_destructured_formals_initialize_left_to_right() {
+    let result = string_result(
+        "function inspect(keep,{value,...objectRest},[head,,...tail]){\
+            return keep+'|'+value+'|'+objectRest.extra+'|'+head+'|'+tail.length+'|'+\
+                tail[0]+'|'+tail[1]+'|'+arguments.length;}\
+            return inspect(2,{value:3,extra:4},[5,6,7,8]);",
+    );
+    assert_eq!(result, "2|3|4|5|2|7|8|3");
+
+    let result = string_result(
+        "function capture({value}){return function(){return value;};}\
+            return ''+capture({value:9})();",
+    );
+    assert_eq!(result, "9");
+
+    let result = string_result(
+        "function assigned({value}){var value=7;return ''+value;}\
+            return assigned({value:1});",
+    );
+    assert_eq!(result, "7");
+
+    let result = string_result(
+        "const holder={inspect({value}){arguments[0]={value:8};\
+            return value+'|'+arguments[0].value;}};\
+            return holder.inspect({value:3});",
+    );
+    assert_eq!(result, "3|8");
+
+    let result = string_result(
+        "const holder={inspect(value){arguments[0]=8;return ''+value;}};\
+            return holder.inspect(3);",
+    );
+    assert_eq!(result, "8");
+}
+
+#[test]
+fn destructured_formals_use_unmapped_arguments_and_can_suppress_the_binding() {
+    let result = string_result(
+        "function inspect({value}){let before=value;arguments[0]={value:9};value=7;\
+            let restricted=false;try{arguments.callee;}catch(error){restricted=error instanceof TypeError;}\
+            return before+'|'+value+'|'+arguments[0].value+'|'+restricted;}\
+            return inspect({value:1});",
+    );
+    assert_eq!(result, "1|7|9|true");
+
+    let result = string_result(
+        "function inspect({arguments}){return ''+arguments;}\
+            return inspect({arguments:4});",
+    );
+    assert_eq!(result, "4");
+}
+
+#[test]
 fn mapped_definitions_update_or_sever_parameter_aliases_exactly() {
     let result = string_result(
         "function inspect(a,b,c,d){a=10;const own=Object.getOwnPropertyDescriptor(arguments,'0').value;\

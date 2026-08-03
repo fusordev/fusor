@@ -848,6 +848,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         let header = executable_header(
             executable_kind,
             strict,
+            self.planned
+                .plan
+                .executable(executable)
+                .ok_or(LeafCompilationError::InvalidExecutable { executable })?
+                .has_simple_parameter_list(),
             argument_count,
             variable_reference_count,
         );
@@ -1254,6 +1259,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     span: executable.span(),
                 });
             }
+            self.record_raw_parameter_metadata_candidates(executable, owner)?;
             for binding in self.planned.plan.bindings_for(executable.id()).ok_or(
                 LeafCompilationError::InvalidExecutable {
                     executable: executable.id(),
@@ -1316,6 +1322,55 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     span: binding.first_span,
                 });
             }
+        }
+        Ok(())
+    }
+
+    fn record_raw_parameter_metadata_candidates(
+        &self,
+        executable: &Executable,
+        owner: &mut Vec<CompiledMetadataAtomCandidate>,
+    ) -> Result<(), LeafCompilationError> {
+        if executable.has_simple_parameter_list() {
+            return Ok(());
+        }
+        let node = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(executable.id().index())
+            .copied()
+            .ok_or(LeafCompilationError::InvalidExecutable {
+                executable: executable.id(),
+            })?;
+        let parameters = match self.unit.semantic().nodes().kind(node) {
+            AstKind::Function(function) => Some(function.params.as_ref()),
+            AstKind::ArrowFunctionExpression(arrow) => Some(arrow.params.as_ref()),
+            AstKind::Program(_) => None,
+            _ => {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "non-simple parameter metadata belongs to a function",
+                    span: Some(executable.span()),
+                });
+            }
+        };
+        let Some(parameters) = parameters else {
+            return Ok(());
+        };
+        for (index, parameter) in parameters.items.iter().enumerate() {
+            if matches!(parameter.pattern, BindingPattern::BindingIdentifier(_)) {
+                continue;
+            }
+            let index =
+                u32::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "raw parameter metadata",
+                })?;
+            let name = format!("_arg_{index}_");
+            owner.push(CompiledMetadataAtomCandidate {
+                key: CompiledMetadataAtomKey::RawParameter(index),
+                value: compiler_identifier_string(&name, parameter.span)?,
+                span: parameter.span,
+            });
         }
         Ok(())
     }
@@ -3686,6 +3741,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         entries.sort_unstable_by_key(ScopeEntryInitialization::order_key);
         if function_scope {
             self.emit_arguments_object_initializer(executable, planning.layout, flow)?;
+            self.emit_parameter_pattern_initializers(executable, planning, flow)?;
             self.emit_realm_global_function_initializers(
                 executable,
                 planning.tree_layout,
@@ -3813,20 +3869,75 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 span: Some(span),
             });
         }
-        let arguments_kind = u8::from(
-            !self
-                .planned
-                .plan
-                .executable(executable)
-                .ok_or(LeafCompilationError::InvalidExecutable { executable })?
-                .is_strict(),
-        );
+        let executable = self
+            .planned
+            .plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let arguments_kind =
+            u8::from(!executable.is_strict() && executable.has_simple_parameter_list());
         flow.emit(PlannedInstruction::new(
             FinalOpcode::SpecialObject,
             Operands::U8(arguments_kind),
             span,
         ))?;
         flow.emit(plan_put_slot(slot, span))
+    }
+
+    fn emit_parameter_pattern_initializers(
+        &self,
+        executable: ExecutableId,
+        planning: &FunctionPlanningContext<'_>,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let metadata = self
+            .planned
+            .plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        if metadata.has_simple_parameter_list() {
+            return Ok(());
+        }
+        let node = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(executable.index())
+            .copied()
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let function = match self.unit.semantic().nodes().kind(node) {
+            AstKind::Function(function) => function,
+            AstKind::Program(_) => return Ok(()),
+            _ => {
+                return unsupported(UnsupportedLeafFeature::NonOrdinaryFunction, metadata.span());
+            }
+        };
+        if let Some(rest) = &function.params.rest {
+            return unsupported(UnsupportedLeafFeature::UnsupportedBinding, rest.span);
+        }
+        for (index, parameter) in function.params.items.iter().enumerate() {
+            if parameter.initializer.is_some() {
+                return unsupported(UnsupportedLeafFeature::UnsupportedBinding, parameter.span);
+            }
+            if matches!(parameter.pattern, BindingPattern::BindingIdentifier(_)) {
+                continue;
+            }
+            let slot = ArgumentSlot(checked_function_index(
+                index,
+                "function parameter initialization slots",
+            )?);
+            let (opcode, operands) = compact_get_argument(slot);
+            flow.emit(PlannedInstruction::new(opcode, operands, parameter.span))?;
+            self.plan_destructuring_pattern_value(
+                &parameter.pattern,
+                DestructuringBindingInitialization::Parameter,
+                planning.layout,
+                planning.tree_layout,
+                planning.constants,
+                flow,
+            )?;
+        }
+        Ok(())
     }
 
     fn scope_entry_initializations(
@@ -4467,7 +4578,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
             return self.plan_destructuring_pattern_value(
                 pattern,
-                declaration.kind,
+                DestructuringBindingInitialization::Declaration(declaration.kind),
                 layout,
                 tree_layout,
                 constants,
@@ -4821,7 +4932,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
         self.plan_array_destructuring_value(
             pattern,
-            declaration_kind,
+            DestructuringBindingInitialization::Declaration(declaration_kind),
             layout,
             tree_layout,
             constants,
@@ -4840,7 +4951,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     fn plan_array_destructuring_value<'pattern>(
         &self,
         pattern: &'pattern ArrayPattern<'arena>,
-        declaration_kind: VariableDeclarationKind,
+        binding_initialization: DestructuringBindingInitialization,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
@@ -4849,7 +4960,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         self.plan_array_destructuring_elements(
             pattern.elements.iter(),
             pattern.rest.as_deref(),
-            declaration_kind,
+            binding_initialization,
             layout,
             tree_layout,
             constants,
@@ -4875,7 +4986,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
         self.plan_object_destructuring_value(
             pattern,
-            declaration_kind,
+            DestructuringBindingInitialization::Declaration(declaration_kind),
             layout,
             tree_layout,
             constants,
@@ -4906,7 +5017,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     fn plan_object_destructuring_value<'pattern>(
         &self,
         pattern: &'pattern ObjectPattern<'arena>,
-        declaration_kind: VariableDeclarationKind,
+        binding_initialization: DestructuringBindingInitialization,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
@@ -5018,7 +5129,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
             self.plan_destructuring_pattern_value(
                 &property.value,
-                declaration_kind,
+                binding_initialization,
                 layout,
                 tree_layout,
                 constants,
@@ -5039,7 +5150,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             ))?;
             self.plan_destructuring_pattern_value(
                 &rest.argument,
-                declaration_kind,
+                binding_initialization,
                 layout,
                 tree_layout,
                 constants,
@@ -5073,7 +5184,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         &self,
         elements: impl ExactSizeIterator<Item = &'pattern Option<BindingPattern<'arena>>>,
         rest: Option<&'pattern BindingRestElement<'arena>>,
-        declaration_kind: VariableDeclarationKind,
+        binding_initialization: DestructuringBindingInitialization,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
@@ -5120,7 +5231,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     ))?;
                     self.plan_destructuring_pattern_value(
                         pattern,
-                        declaration_kind,
+                        binding_initialization,
                         layout,
                         tree_layout,
                         constants,
@@ -5132,7 +5243,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         if let Some(rest) = rest {
             self.plan_destructuring_rest(
                 rest,
-                declaration_kind,
+                binding_initialization,
                 layout,
                 tree_layout,
                 constants,
@@ -5149,7 +5260,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     fn plan_destructuring_rest<'pattern>(
         &self,
         rest: &'pattern BindingRestElement<'arena>,
-        declaration_kind: VariableDeclarationKind,
+        binding_initialization: DestructuringBindingInitialization,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
@@ -5213,7 +5324,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         ))?;
         self.plan_destructuring_pattern_value(
             &rest.argument,
-            declaration_kind,
+            binding_initialization,
             layout,
             tree_layout,
             constants,
@@ -5228,42 +5339,20 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     fn plan_destructuring_pattern_value<'pattern>(
         &self,
         pattern: &'pattern BindingPattern<'arena>,
-        declaration_kind: VariableDeclarationKind,
+        binding_initialization: DestructuringBindingInitialization,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         match pattern {
-            BindingPattern::BindingIdentifier(identifier) => {
-                let binding =
-                    self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
-                let storage = self.planned.plan.binding(binding).ok_or(
-                    LeafCompilationError::SemanticInvariant {
-                        invariant: "destructured compiler binding exists",
-                        span: Some(identifier.span),
-                    },
-                )?;
-                if storage.placement() == StoragePlacement::GlobalObject {
-                    return unsupported(
-                        UnsupportedLeafFeature::UnsupportedDeclaration,
-                        identifier.span,
-                    );
-                }
-                let frame_slot = layout
-                    .slot(binding)
-                    .ok_or(LeafCompilationError::Unsupported {
-                        feature: UnsupportedLeafFeature::UnsupportedBinding,
-                        span: identifier.span,
-                    })?;
-                self.validate_declaration_storage(
-                    declaration_kind,
-                    binding,
-                    frame_slot,
-                    identifier.span,
-                )?;
-                flow.emit(plan_put_slot(frame_slot, identifier.span))
-            }
+            BindingPattern::BindingIdentifier(identifier) => self
+                .plan_destructuring_binding_identifier(
+                    identifier,
+                    binding_initialization,
+                    layout,
+                    flow,
+                ),
             BindingPattern::AssignmentPattern(assignment) => {
                 // `[a = default]`: when the destructured value is `undefined`,
                 // evaluate the default expression and store it instead.
@@ -5296,7 +5385,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 flow.bind(&skip)?;
                 self.plan_destructuring_pattern_value(
                     &assignment.left,
-                    declaration_kind,
+                    binding_initialization,
                     layout,
                     tree_layout,
                     constants,
@@ -5305,7 +5394,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
             BindingPattern::ArrayPattern(pattern) => self.plan_array_destructuring_value(
                 pattern,
-                declaration_kind,
+                binding_initialization,
                 layout,
                 tree_layout,
                 constants,
@@ -5313,12 +5402,67 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             ),
             BindingPattern::ObjectPattern(pattern) => self.plan_object_destructuring_value(
                 pattern,
-                declaration_kind,
+                binding_initialization,
                 layout,
                 tree_layout,
                 constants,
                 flow,
             ),
+        }
+    }
+
+    fn plan_destructuring_binding_identifier(
+        &self,
+        identifier: &BindingIdentifier<'arena>,
+        binding_initialization: DestructuringBindingInitialization,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let binding = self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "destructured compiler binding exists",
+                    span: Some(identifier.span),
+                })?;
+        if storage.placement() == StoragePlacement::GlobalObject {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedDeclaration,
+                identifier.span,
+            );
+        }
+        let frame_slot = layout
+            .slot(binding)
+            .ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedBinding,
+                span: identifier.span,
+            })?;
+        match binding_initialization {
+            DestructuringBindingInitialization::Declaration(declaration_kind) => {
+                self.validate_declaration_storage(
+                    declaration_kind,
+                    binding,
+                    frame_slot,
+                    identifier.span,
+                )?;
+                flow.emit(plan_put_slot(frame_slot, identifier.span))
+            }
+            DestructuringBindingInitialization::Parameter => {
+                if storage.placement() != StoragePlacement::Local
+                    || storage.policy().kind() != DeclarationKind::Parameter
+                    || storage.policy().initialization() != InitializationPolicy::Argument
+                    || storage.policy().writes() != WritePolicy::Mutable
+                    || storage.policy().has_temporal_dead_zone()
+                {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedBinding,
+                        identifier.span,
+                    );
+                }
+                flow.emit(plan_put_slot(frame_slot, identifier.span))
+            }
         }
     }
 
@@ -8128,6 +8272,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             .executable(executable)
             .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
         if !executable_metadata.is_strict()
+            && executable_metadata.has_simple_parameter_list()
             && bindings
                 .iter()
                 .any(crate::storage::BindingStorage::is_arguments_object)
@@ -8193,11 +8338,24 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 constants,
             )?);
         }
-        Self::complete_duplicate_parameter_definitions(
-            executable_metadata,
-            argument_count,
-            &mut arguments,
-        )?;
+        if executable_metadata.has_simple_parameter_list() {
+            Self::complete_duplicate_parameter_definitions(
+                executable_metadata,
+                argument_count,
+                &mut arguments,
+            )?;
+        } else {
+            for (index, argument) in arguments.iter_mut().enumerate() {
+                if argument.is_none() {
+                    let index = u32::try_from(index).map_err(|_| {
+                        LeafCompilationError::CapacityExceeded {
+                            domain: "raw parameter definitions",
+                        }
+                    })?;
+                    *argument = Some(raw_parameter_definition(constants, index)?);
+                }
+            }
+        }
 
         let scope_links = self.compiled_local_scope_links(function_scope, layout)?;
         let capacity = argument_count.checked_add(layout.locals.len()).ok_or(
@@ -9164,6 +9322,12 @@ enum OrdinaryFunctionForm {
     ObjectMethod { property_span: Span },
 }
 
+#[derive(Clone, Copy)]
+enum DestructuringBindingInitialization {
+    Declaration(VariableDeclarationKind),
+    Parameter,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ObjectMethodKind {
     Method,
@@ -9712,10 +9876,11 @@ impl LoopJump {
 const fn executable_header(
     kind: CompilerExecutableKind,
     strict: bool,
+    simple_parameter_list: bool,
     argument_count: u32,
     variable_reference_count: u32,
 ) -> UnverifiedFunctionHeader {
-    match kind {
+    let header = match kind {
         CompilerExecutableKind::OrdinaryFunction => {
             UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
                 strict,
@@ -9733,7 +9898,8 @@ const fn executable_header(
         CompilerExecutableKind::DynamicFunctionScript => {
             UnverifiedFunctionHeader::dynamic_function_script(variable_reference_count)
         }
-    }
+    };
+    header.with_simple_parameter_list(simple_parameter_list)
 }
 
 fn checked_function_entry_count<T>(
@@ -10730,6 +10896,7 @@ impl CompiledPropertyAtomKey {
 enum CompiledMetadataAtomKey {
     FunctionName,
     ScriptCompletion,
+    RawParameter(u32),
     Binding(BindingId),
     RealmGlobal(RealmGlobalId),
 }
@@ -12121,6 +12288,24 @@ fn script_completion_variable_definition(
         CompilerBindingPolicy::new(
             VerifiedBindingKind::Var,
             VerifiedInitializationPolicy::UndefinedAtInstantiation,
+            VerifiedWritePolicy::Mutable,
+            false,
+        ),
+        false,
+        None,
+    ))
+}
+
+fn raw_parameter_definition(
+    constants: &CompiledConstantPool,
+    index: u32,
+) -> Result<VariableDefinition, LeafCompilationError> {
+    Ok(VariableDefinition::new(
+        Some(constants.metadata_atom_index(CompiledMetadataAtomKey::RawParameter(index))?),
+        ScopeLink::End,
+        CompilerBindingPolicy::new(
+            VerifiedBindingKind::Parameter,
+            VerifiedInitializationPolicy::Argument,
             VerifiedWritePolicy::Mutable,
             false,
         ),

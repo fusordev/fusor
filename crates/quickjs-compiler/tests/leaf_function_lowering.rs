@@ -139,6 +139,42 @@ fn sloppy_duplicate_parameters_authorize_only_the_last_formal_positions() {
 }
 
 #[test]
+fn expression_free_parameter_patterns_have_an_unmapped_entry_prologue() {
+    let compiled = compile(
+        "function f(keep,{value},[head,...tail]){\
+            return keep+value+head+tail.length+arguments.length;}",
+        "f",
+    );
+    let flow = compiled.control_flow();
+    assert_eq!(flow.domains().argument_count(), 3);
+    assert!(!flow.function_header().flags().has_simple_parameter_list());
+    assert_eq!(
+        flow.compiler_capture_layout()
+            .expect("compiler arguments certificate")
+            .mapped_arguments(),
+        None
+    );
+
+    let instructions = flow
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+    assert!(instructions.contains(&(FinalOpcode::SpecialObject, Operands::U8(0))));
+    assert!(!instructions.contains(&(FinalOpcode::SpecialObject, Operands::U8(1))));
+    assert!(instructions.contains(&(FinalOpcode::GetArg1, Operands::NoneArg)));
+    assert!(instructions.contains(&(FinalOpcode::GetArg2, Operands::NoneArg)));
+    assert!(
+        instructions
+            .iter()
+            .any(|(opcode, _)| *opcode == FinalOpcode::ForOfStart)
+    );
+}
+
+#[test]
 fn deepest_leaf_reads_forwarded_parent_cells_through_capture_slots() {
     let compiled = compile(
         "function outer(arg){ let local=1; function middle(){ function inner(){ return arg+local; } } }",

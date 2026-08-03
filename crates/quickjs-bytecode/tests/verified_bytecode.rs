@@ -4469,7 +4469,38 @@ fn shaped_input_with_strict(
     source: CompilerSource,
     strict: bool,
 ) -> UnverifiedCompilerBytecodeGraph {
-    let flow = flow_with_strict(
+    shaped_input_with_parameter_profile(
+        instructions,
+        atoms,
+        variables,
+        arguments,
+        locals,
+        captures,
+        source,
+        strict,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shaped_input_with_parameter_profile(
+    instructions: &[(FinalOpcode, Operands)],
+    atoms: &[CompilerAtom],
+    variables: &[VariableDefinition],
+    arguments: u32,
+    locals: u32,
+    captures: &[CompilerCapturedBinding],
+    source: CompilerSource,
+    strict: bool,
+    simple_parameter_list: bool,
+) -> UnverifiedCompilerBytecodeGraph {
+    let header = UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
+        strict,
+        arguments,
+        u32::try_from(captures.len()).expect("capture count"),
+    )
+    .with_simple_parameter_list(simple_parameter_list);
+    let flow = flow_with_header(
         instructions,
         u32::try_from(atoms.len()).expect("atom count"),
         arguments,
@@ -4477,7 +4508,7 @@ fn shaped_input_with_strict(
         captures,
         0,
         &[],
-        strict,
+        header,
     );
     let graph = verify_compiler_function_graph(
         UnverifiedCompilerFunctionGraph::new(
@@ -5491,6 +5522,58 @@ fn arguments_object_authority_is_single_site_mode_and_kind_exact() {
             pc,
             opcode: FinalOpcode::SpecialObject,
         } if *pc == BytecodePc::new(3)
+    ));
+}
+
+#[test]
+fn sloppy_arguments_kind_matches_the_simple_parameter_header_bit() {
+    let text = "function f(){return arguments}";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let source_for = || {
+        source(
+            text,
+            function_span,
+            Some(SourceByteSpan::new(9, 10)),
+            &[(0, function_span), (2, function_span)],
+        )
+    };
+    let instructions = [
+        (FinalOpcode::SpecialObject, Operands::U8(0)),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let non_simple = shaped_input_with_parameter_profile(
+        &instructions,
+        &[atom("f")],
+        &[],
+        0,
+        0,
+        &[],
+        source_for(),
+        false,
+        false,
+    );
+    verify_compiler_bytecode_graph(non_simple, BytecodeGraphVerificationLimits::default())
+        .expect("one sloppy non-simple unmapped arguments object is admitted");
+
+    let simple_unmapped = shaped_input_with_strict(
+        &instructions,
+        &[atom("f")],
+        &[],
+        0,
+        0,
+        &[],
+        source_for(),
+        false,
+    );
+    let error =
+        verify_compiler_bytecode_graph(simple_unmapped, BytecodeGraphVerificationLimits::default())
+            .expect_err("sloppy simple parameters cannot claim an unmapped arguments object");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::ZERO
     ));
 }
 

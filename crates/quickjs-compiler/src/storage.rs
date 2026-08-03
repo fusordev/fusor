@@ -13,6 +13,7 @@ use oxc_ast::{
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolFlags, SymbolId};
+use oxc_span::GetSpan;
 use quickjs_frontend::{
     CompilationGoal, DynamicFunctionKind, ModuleExportLocalName, ParsedUnit, Span,
 };
@@ -123,6 +124,7 @@ pub struct Executable {
     name_span: Option<Span>,
     strict: bool,
     parameter_count: u32,
+    simple_parameter_list: bool,
     parameter_binding_indices: Arc<[u32]>,
     mapped_parameter_indices: Arc<[u32]>,
     binding_start: u32,
@@ -184,8 +186,15 @@ impl Executable {
         self.parameter_count
     }
 
-    /// Returns, for each formal position, the last position that owns the
-    /// source binding for that parameter name.
+    /// Returns whether every formal parameter is a plain binding identifier.
+    #[must_use]
+    pub const fn has_simple_parameter_list(&self) -> bool {
+        self.simple_parameter_list
+    }
+
+    /// Returns, for each simple formal position, the last position that owns
+    /// the source binding for that parameter name. Non-simple lists return an
+    /// empty slice because their raw argument positions are not all bindings.
     #[must_use]
     pub fn parameter_binding_indices(&self) -> &[u32] {
         &self.parameter_binding_indices
@@ -679,10 +688,12 @@ pub enum UnsupportedFeature {
     DirectEval,
     /// A `with` statement.
     WithStatement,
-    /// A parameter initializer or destructuring default.
+    /// A parameter initializer, destructuring default, or computed pattern key.
     ParameterExpressions,
-    /// A rest or destructured parameter.
+    /// A formal rest parameter.
     NonSimpleParameters,
+    /// A non-simple parameter binding merged with a body function declaration.
+    ParameterFunctionRedeclaration,
     /// Annex B's paired block-lexical and var-like function binding.
     AnnexBBlockFunction,
     /// Class-created functions, private names, and synthetic slots.
@@ -765,6 +776,7 @@ struct ParameterStorage {
 #[derive(Default)]
 struct ParameterLayout {
     count: u32,
+    simple: bool,
     binding_indices: Arc<[u32]>,
     mapped_indices: Arc<[u32]>,
 }
@@ -1196,6 +1208,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 name_span,
                 strict,
                 parameter_count: parameters.count,
+                simple_parameter_list: parameters.simple,
                 parameter_binding_indices: parameters.binding_indices,
                 mapped_parameter_indices: parameters.mapped_indices,
                 binding_start: 0,
@@ -1247,15 +1260,19 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             return unsupported(UnsupportedFeature::NonSimpleParameters, rest.span);
         }
         let executable = executable_id(self.executable_drafts.len())?;
+        let simple = parameters.items.iter().all(|parameter| {
+            parameter.initializer.is_none()
+                && matches!(parameter.pattern, BindingPattern::BindingIdentifier(_))
+        });
         for (index, parameter) in parameters.items.iter().enumerate() {
             if parameter.initializer.is_some() {
                 return unsupported(UnsupportedFeature::ParameterExpressions, parameter.span);
             }
-            if let Some(span) = binding_pattern_default_span(&parameter.pattern) {
+            if let Some(span) = binding_pattern_expression_span(&parameter.pattern) {
                 return unsupported(UnsupportedFeature::ParameterExpressions, span);
             }
             let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
-                return unsupported(UnsupportedFeature::NonSimpleParameters, parameter.span);
+                continue;
             };
             let parameter_index =
                 u32::try_from(index).map_err(|_| CompilerError::CapacityExceeded {
@@ -1279,6 +1296,14 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             u32::try_from(parameters.items.len()).map_err(|_| CompilerError::CapacityExceeded {
                 domain: "function parameters",
             })?;
+        if !simple {
+            return Ok(ParameterLayout {
+                count,
+                simple,
+                binding_indices: Arc::from([]),
+                mapped_indices: Arc::from([]),
+            });
+        }
         let mut binding_index_by_name = HashMap::with_capacity(parameters.items.len());
         let mut mapped_indices = Vec::new();
         mapped_indices
@@ -1324,6 +1349,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         }
         Ok(ParameterLayout {
             count,
+            simple,
             binding_indices: binding_indices.into(),
             mapped_indices: mapped_indices.into(),
         })
@@ -1382,6 +1408,23 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 scoping.symbol_scope_id(symbol_id),
                 Some(scoping.symbol_span(symbol_id)),
             )?;
+            if facts.contains(DeclarationFacts::PARAMETER)
+                && facts.contains(DeclarationFacts::FUNCTION)
+                && !self
+                    .executable_drafts
+                    .get(owner.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "parameter binding owner exists",
+                        span: Some(scoping.symbol_span(symbol_id)),
+                    })?
+                    .executable
+                    .has_simple_parameter_list()
+            {
+                return unsupported(
+                    UnsupportedFeature::ParameterFunctionRedeclaration,
+                    scoping.symbol_span(symbol_id),
+                );
+            }
             let name = scoping.symbol_name(symbol_id);
             let placement = self.placement(symbol_id, owner, kind)?;
             let policy = self.declaration_policy(owner, kind, facts.function_scope_entry);
@@ -2054,30 +2097,35 @@ fn executable_id(index: usize) -> Result<ExecutableId, CompilerError> {
         })
 }
 
-fn binding_pattern_default_span(pattern: &BindingPattern<'_>) -> Option<Span> {
+fn binding_pattern_expression_span(pattern: &BindingPattern<'_>) -> Option<Span> {
     match pattern {
         BindingPattern::BindingIdentifier(_) => None,
         BindingPattern::AssignmentPattern(pattern) => Some(pattern.span),
         BindingPattern::ObjectPattern(pattern) => pattern
             .properties
             .iter()
-            .find_map(|property| binding_pattern_default_span(&property.value))
+            .find_map(|property| {
+                property
+                    .computed
+                    .then(|| property.key.span())
+                    .or_else(|| binding_pattern_expression_span(&property.value))
+            })
             .or_else(|| {
                 pattern
                     .rest
                     .as_ref()
-                    .and_then(|rest| binding_pattern_default_span(&rest.argument))
+                    .and_then(|rest| binding_pattern_expression_span(&rest.argument))
             }),
         BindingPattern::ArrayPattern(pattern) => pattern
             .elements
             .iter()
             .flatten()
-            .find_map(binding_pattern_default_span)
+            .find_map(binding_pattern_expression_span)
             .or_else(|| {
                 pattern
                     .rest
                     .as_ref()
-                    .and_then(|rest| binding_pattern_default_span(&rest.argument))
+                    .and_then(|rest| binding_pattern_expression_span(&rest.argument))
             }),
     }
 }

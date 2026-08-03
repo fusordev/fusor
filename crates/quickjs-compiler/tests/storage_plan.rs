@@ -889,6 +889,47 @@ fn explicit_arguments_bindings_with_ordinary_semantics_remain_supported() {
 }
 
 #[test]
+fn expression_free_destructured_parameters_use_raw_positions_and_local_bindings() {
+    let plan = script(
+        "function f(keep,{value,...objectRest},[head,,...tail]){\
+            return keep+value+objectRest+head+tail+arguments.length;}",
+    );
+    let function = plan.executables()[1].id();
+    let executable = &plan.executables()[1];
+    assert_eq!(executable.parameter_count(), 3);
+    assert!(!executable.has_simple_parameter_list());
+    assert!(executable.parameter_binding_indices().is_empty());
+    assert!(executable.mapped_parameter_indices().is_empty());
+
+    let bindings = plan.bindings_for(function).unwrap();
+    let keep = bindings
+        .iter()
+        .find(|binding| binding.name() == "keep")
+        .expect("identifier formal binding");
+    assert_eq!(
+        keep.placement(),
+        StoragePlacement::Argument { parameter_index: 0 }
+    );
+    for name in ["value", "objectRest", "head", "tail"] {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.name() == name)
+            .unwrap_or_else(|| panic!("missing destructured parameter {name}"));
+        assert_eq!(binding.placement(), StoragePlacement::Local, "{name}");
+        assert_eq!(
+            binding.policy().kind(),
+            DeclarationKind::Parameter,
+            "{name}"
+        );
+    }
+    assert!(
+        bindings
+            .iter()
+            .any(quickjs_compiler::BindingStorage::is_arguments_object)
+    );
+}
+
+#[test]
 fn duplicate_parameters_share_the_last_formal_argument_slot() {
     let plan = script("function f(a, a) { return a + arguments[0] + arguments[1]; }");
     let function = plan.executables()[1].id();
@@ -951,12 +992,20 @@ fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
             UnsupportedFeature::ParameterExpressions,
         ),
         (
-            "function f({ value }) {}",
-            UnsupportedFeature::NonSimpleParameters,
+            "function f({ value = 1 }) {}",
+            UnsupportedFeature::ParameterExpressions,
+        ),
+        (
+            "function f({ [key]: value }) {}",
+            UnsupportedFeature::ParameterExpressions,
         ),
         (
             "function f(...rest) {}",
             UnsupportedFeature::NonSimpleParameters,
+        ),
+        (
+            "function f({ value }) { function value() {} }",
+            UnsupportedFeature::ParameterFunctionRedeclaration,
         ),
         ("with (object) value;", UnsupportedFeature::WithStatement),
         ("class Box {}", UnsupportedFeature::ClassSyntheticSlots),

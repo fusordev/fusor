@@ -2371,7 +2371,7 @@ fn verify_header(
     match executable_kind {
         CompilerExecutableKind::OrdinaryFunction => {
             if header.kind() != FunctionKind::Normal
-                || header.flags().bits() != 0x0643
+                || !matches!(header.flags().bits(), 0x0641 | 0x0643)
                 || header.mode().bits() & !1 != 0
             {
                 return Err(BytecodeVerificationError::function(
@@ -2391,7 +2391,7 @@ fn verify_header(
         }
         CompilerExecutableKind::OrdinaryMethod => {
             if header.kind() != FunctionKind::Normal
-                || header.flags().bits() != 0x0742
+                || !matches!(header.flags().bits(), 0x0740 | 0x0742)
                 || header.mode().bits() & !1 != 0
             {
                 return Err(BytecodeVerificationError::function(
@@ -4971,6 +4971,7 @@ fn verify_supported_opcodes(
         .compiler_capture_layout()
         .and_then(CompilerCaptureLayout::mapped_arguments)
         .is_some();
+    let simple_parameter_list = flow.function_header().flags().has_simple_parameter_list();
     for instruction in flow.instructions() {
         let decoded = instruction.decoded();
         let instruction = decoded.instruction();
@@ -4987,9 +4988,19 @@ fn verify_supported_opcodes(
                 (opcode, instruction.operands()),
                 (FinalOpcode::SpecialObject, operands)
                     if !matches!(
-                        (operands, flow.function_header().mode().is_strict()),
-                        (Operands::U8(0), true) | (Operands::U8(1), false)
-                    ) || executable_kind != CompilerExecutableKind::OrdinaryFunction
+                        (
+                            operands,
+                            flow.function_header().mode().is_strict(),
+                            simple_parameter_list,
+                        ),
+                        (Operands::U8(0), true, _)
+                            | (Operands::U8(0), false, false)
+                            | (Operands::U8(1), false, true)
+                    ) || !matches!(
+                        executable_kind,
+                        CompilerExecutableKind::OrdinaryFunction
+                            | CompilerExecutableKind::OrdinaryMethod
+                    )
                         || arguments_object_count != 1
                         || matches!(operands, Operands::U8(kind) if (kind == 1) != mapped_arguments_authority)
             )
