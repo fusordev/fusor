@@ -340,6 +340,35 @@ fn graph_rejects_hostile_static_property_only_atom_uses() {
 }
 
 #[test]
+fn graph_allows_a_static_property_only_atom_for_inferred_function_names() {
+    let parent = graph_function(
+        1,
+        &[
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (FinalOpcode::SetName, Operands::Atom(AtomPoolIndex::new(0))),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        Arc::from([CompilerAtom::new_static_property_only(string(
+            &['0' as u16],
+        ))]),
+        Arc::from([CompilerConstant::Function(FunctionTemplateId::new(1))]),
+    );
+    let child = graph_function(
+        0,
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        Arc::from([]),
+        Arc::from([]),
+    );
+
+    let verified = function_graph(
+        vec![parent, child],
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("set_name consumes a static property spelling without exposing it");
+    assert!(verified.root().atoms()[0].is_static_property_only());
+}
+
+#[test]
 fn graph_rejects_static_property_only_atoms_as_realm_globals() {
     let mut builder = BytecodeBuilder::new();
     builder

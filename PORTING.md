@@ -512,9 +512,9 @@ Known intentional runtime differences:
   initializer follows the distinct specification production and remains
   unnamed. Parenthesized initializers, exact `name` descriptor flags, source
   functions, and generated `Function` bodies match the pinned oracle.
-  Object-property inferred names remain fail closed until their distinct key
-  evaluation-order certificate lands; anonymous class and arrow initializers
-  remain part of their unsupported lowering families.
+  Computed object-property inferred names remain fail closed until their
+  distinct key evaluation-order certificate lands; anonymous class and arrow
+  initializers remain part of their unsupported lowering families.
 - [x] Extend assignment-expression `NamedEvaluation` across the exact
   identifier-reference operator set: plain `=`, `&&=`, `||=`, and `??=`.
   Local, captured, and constructor-realm global targets all select their
@@ -532,6 +532,17 @@ Known intentional runtime differences:
   member and nested-pattern targets keep ordinary unnamed evaluation. Source
   and generated `Function` bodies cover exact descriptor flags and match the
   pinned oracle.
+- [x] Extend object-literal `NamedEvaluation` to anonymous ordinary functions
+  in non-computed data properties. Identifier, string, numeric, and BigInt keys
+  select their canonical property-key spelling through the certified
+  `fclosure; set_name; define_field` sequence. The graph verifier permits a
+  static-property-only tagged atom at that exact `set_name` certificate without
+  exposing it as a JavaScript value. The special `__proto__:` production still
+  evaluates its initializer normally and does not infer a name. Compiler
+  adjacency/count checks, source and generated `Function` execution, exact
+  descriptor flags, and the pinned QuickJS/Node oracle cover the boundary.
+  Computed data properties remain fail closed pending certified
+  `set_name_computed` lowering and runtime semantics.
 - [x] Implement formal rest parameters through the pinned `rest firstArgument`
   entry operation. The fixed argument domain and observable function `length`
   stop before the rest binding; exactly one non-simple rest site snapshots the

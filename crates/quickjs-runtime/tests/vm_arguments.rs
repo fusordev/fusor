@@ -425,6 +425,26 @@ fn anonymous_identifier_assignments_receive_spec_inferred_names() {
 }
 
 #[test]
+fn static_anonymous_function_data_properties_receive_canonical_names() {
+    let result = string_result(
+        "function inspect(){\
+            const object={\
+                identifier:function(){},\
+                'quoted':(function(){}),\
+                1:function(){},\
+                1n:function(){},\
+                '__proto__':function(){}\
+            };\
+            const descriptor=Object.getOwnPropertyDescriptor(object.identifier,'name');\
+            return object.identifier.name+':'+object.quoted.name+':'+object[1].name+':'+\
+                (Object.getPrototypeOf(object).name==='')+':'+\
+                descriptor.writable+descriptor.enumerable+descriptor.configurable;}\
+         return inspect();",
+    );
+    assert_eq!(result, "identifier:quoted:1:true:falsefalsetrue");
+}
+
+#[test]
 fn parameter_expression_body_environments_copy_and_then_diverge() {
     let result = string_result(
         "function copied(a=1){var a;return ''+a;}\

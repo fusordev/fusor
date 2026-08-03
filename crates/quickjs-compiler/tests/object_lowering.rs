@@ -83,6 +83,33 @@ fn tree_instructions(compiled: &CompiledFunction) -> Vec<(FinalOpcode, Operands)
         .collect()
 }
 
+fn inferred_names(function: &CompiledFunction) -> Vec<String> {
+    let instructions = tree_instructions(function);
+    instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (opcode, operands))| {
+            (*opcode == FinalOpcode::SetName).then_some((index, *operands))
+        })
+        .map(|(index, operands)| {
+            assert!(matches!(
+                instructions[index - 1],
+                (FinalOpcode::FClosure | FinalOpcode::FClosure8, _)
+            ));
+            let Operands::Atom(atom) = operands else {
+                panic!("set_name must carry one atom operand");
+            };
+            String::from_utf16(
+                &function.atoms()[atom.get() as usize]
+                    .string()
+                    .code_units()
+                    .collect::<Vec<_>>(),
+            )
+            .expect("static property atom is valid UTF-16")
+        })
+        .collect()
+}
+
 fn source_slice_at<'source>(
     compiled: &CompiledLeafFunction,
     source: &'source str,
@@ -875,6 +902,38 @@ fn computed_methods_getters_and_setters_use_typed_computed_definitions() {
 }
 
 #[test]
+fn static_anonymous_function_data_properties_emit_canonical_inferred_names() {
+    let tree = compile_tree(
+        r#"function make(){return {
+            identifier:function(){},
+            "quoted":(function(){}),
+            1:function(){},
+            1n:function(){},
+            "__proto__":function(){}
+        };}"#,
+        "make",
+    );
+    let root = tree.root();
+
+    assert_eq!(inferred_names(root), ["identifier", "quoted", "1", "1"]);
+    assert_eq!(
+        root.constants()
+            .iter()
+            .filter(|constant| constant.function().is_some())
+            .count(),
+        5,
+        "the __proto__ setter evaluates its function without NamedEvaluation"
+    );
+    assert_eq!(
+        tree_instructions(root)
+            .iter()
+            .filter(|(opcode, _)| *opcode == FinalOpcode::SetProto)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
     let cases = [
         (
@@ -916,31 +975,6 @@ fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
             "function make(){return {*1(){yield 1;}};}",
             UnsupportedLeafFeature::NonOrdinaryFunction,
             "yield 1",
-        ),
-        (
-            r#"function make(){return {"__proto__":function(){}};}"#,
-            UnsupportedLeafFeature::InferredFunctionName,
-            "function(){}",
-        ),
-        (
-            "function make(){return {handler:function(){}};}",
-            UnsupportedLeafFeature::InferredFunctionName,
-            "function(){}",
-        ),
-        (
-            r#"function make(){return {"handler":function(){}};}"#,
-            UnsupportedLeafFeature::InferredFunctionName,
-            "function(){}",
-        ),
-        (
-            "function make(){return {1:function(){}};}",
-            UnsupportedLeafFeature::InferredFunctionName,
-            "function(){}",
-        ),
-        (
-            "function make(){return {1n:function(){}};}",
-            UnsupportedLeafFeature::InferredFunctionName,
-            "function(){}",
         ),
         (
             "function make(){return this;}",

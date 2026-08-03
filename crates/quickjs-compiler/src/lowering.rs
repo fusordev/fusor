@@ -7535,9 +7535,6 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 && !property.shorthand
                 && property.kind == PropertyKind::Init
             {
-                if let Some(span) = anonymous_named_evaluation_span(&property.value) {
-                    return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
-                }
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
                     FinalOpcode::SetProto,
                     Operands::None,
@@ -7546,14 +7543,18 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 work.push(ExpressionWork::Visit(&property.value));
                 continue;
             }
-            if let Some(span) = anonymous_named_evaluation_span(&property.value) {
-                return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
-            }
+            let inferred_name = Self::plan_inferred_static_property_name_for_initializer(
+                &property.value,
+                constants.property_atom_index(key.span)?,
+            )?;
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
                 FinalOpcode::DefineField,
                 Operands::Atom(constants.property_atom_index(key.span)?),
                 property.span,
             )));
+            if let Some(set_name) = inferred_name {
+                work.push(ExpressionWork::Emit(set_name));
+            }
             work.push(ExpressionWork::Visit(&property.value));
         }
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -7562,6 +7563,23 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             object.span,
         )));
         Ok(())
+    }
+
+    fn plan_inferred_static_property_name_for_initializer(
+        initializer: &Expression<'arena>,
+        atom: AtomPoolIndex,
+    ) -> Result<Option<PlannedInstruction>, LeafCompilationError> {
+        let Some(span) = anonymous_named_evaluation_span(initializer) else {
+            return Ok(None);
+        };
+        if anonymous_ordinary_function_span(initializer).is_none() {
+            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+        }
+        Ok(Some(PlannedInstruction::new(
+            FinalOpcode::SetName,
+            Operands::Atom(atom),
+            span,
+        )))
     }
 
     fn plan_computed_object_property<'expression>(

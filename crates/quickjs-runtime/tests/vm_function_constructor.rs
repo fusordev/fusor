@@ -288,6 +288,28 @@ fn generated_function_infers_destructuring_assignment_default_names() {
 }
 
 #[test]
+fn generated_function_infers_static_data_property_names() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let f=Function('const object={handler:function(){},1:function(){},\
+            \"__proto__\":function(){}};\
+            return object.handler.name===\"handler\"&&object[1].name===\"1\"&&\
+                Object.getPrototypeOf(object).name===\"\";');\
+            return f();",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function static data-property names");
+
+    assert_eq!(result.as_boolean().expect("live Boolean"), Some(true));
+}
+
+#[test]
 fn generated_function_splits_parameter_and_body_environments() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
