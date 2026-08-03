@@ -852,6 +852,8 @@ pub(crate) enum NativeFunctionKind {
     GlobalUri(UriFunction),
     /// `Array.isArray`.
     ArrayIsArray,
+    /// One generic factory method on the `Array` constructor.
+    ArrayStatic(ArrayStatic),
     /// One `Array.prototype` search sharing the resumable element loop.
     ArrayPrototypeSearch(ArraySearch),
     /// One `Array.prototype` mutator sharing the resumable element driver.
@@ -889,6 +891,31 @@ pub(crate) enum NativeFunctionKind {
     ArrayIteratorNext,
     StringPrototypeIterator,
     StringIteratorNext,
+}
+
+/// The synchronous generic factories installed on the `Array` constructor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayStatic {
+    From,
+    Of,
+}
+
+impl ArrayStatic {
+    pub(crate) const ALL: [Self; 2] = [Self::From, Self::Of];
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::From => 1,
+            Self::Of => 0,
+        }
+    }
+
+    pub(crate) const fn predefined_atom(self) -> PredefinedAtom {
+        match self {
+            Self::From => PredefinedAtom::From,
+            Self::Of => PredefinedAtom::Of,
+        }
+    }
 }
 
 /// The ECMAScript 2025 `%Reflect%` method set, in specification property order.

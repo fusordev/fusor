@@ -29,7 +29,7 @@ use std::collections::TryReserveError;
 
 use super::{
     Arc, Arena, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics, ArrayMutator,
-    ArrayReduction, ArraySearch, ArraySort, ArrayState, Atom, AtomError, AtomTable,
+    ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic, Atom, AtomError, AtomTable,
     BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic,
     ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation, GlobalNumericFunction,
     HandleError, HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
@@ -42,8 +42,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 22;
-const REALM_FUNCTION_COUNT: usize = 178;
-const REALM_PROPERTY_COUNT: u64 = 584;
+const REALM_FUNCTION_COUNT: usize = 180;
+const REALM_PROPERTY_COUNT: u64 = 590;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -156,8 +156,6 @@ impl StringPrototypeMethod {
 const NUMBER_STATIC_ATOM_START: usize = STRING_METHOD_ATOM_START + STRING_INTERNED_METHOD_COUNT;
 
 /// Index of the first `String` factory name in the realm's dynamic atom list.
-///
-/// The factories are interned after the `Number` statics and `Array.isArray`.
 const STRING_FROM_ATOM_START: usize =
     NUMBER_STATIC_ATOM_START + NUMBER_VALUE_STATICS.len() + NUMBER_PREDICATE_STATICS.len() + 1;
 
@@ -900,6 +898,7 @@ struct RealmRecords {
     array_reductions: [ObjectRecord; ARRAY_REDUCTION_METHODS.len()],
     array_splice: ObjectRecord,
     array_is_array: ObjectRecord,
+    array_statics: [ObjectRecord; ArrayStatic::ALL.len()],
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
     symbol: SymbolIntrinsicRecords,
@@ -988,7 +987,9 @@ impl RealmRecords {
                     + ARRAY_REDUCTION_METHODS.len()
                     + 1,
             )?,
-            constructor: reserved_record(4)?,
+            // `length`, `name`, `isArray`, both generic factories,
+            // `prototype`, and @@species.
+            constructor: reserved_record(5 + ArrayStatic::ALL.len())?,
             species: reserved_record(2)?,
             join: reserved_record(2)?,
             to_string: reserved_record(2)?,
@@ -1059,6 +1060,7 @@ impl RealmRecords {
             array_reductions: array_reduction_records()?,
             array_splice: reserved_record(2)?,
             array_is_array: reserved_record(2)?,
+            array_statics: array_static_records()?,
             array,
             iterators,
             symbol,
@@ -1217,6 +1219,7 @@ struct RealmGraph {
     array_reductions: [FunctionId; ARRAY_REDUCTION_METHODS.len()],
     array_splice: FunctionId,
     array_is_array: FunctionId,
+    array_statics: [FunctionId; ArrayStatic::ALL.len()],
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
     symbol: SymbolIntrinsicGraph,
@@ -1241,6 +1244,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(intrinsic.constructor).is_some());
         }
         for function in [self.errors.is_error, self.errors.to_string] {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
+        for function in self.array_statics.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         debug_assert!(runtime.functions.remove(self.array_is_array).is_some());
@@ -1556,6 +1562,7 @@ impl Runtime {
             NativeFunctionKind::ArrayIsArray,
             records.array_is_array,
         );
+        let array_statics = self.insert_array_statics(&base, records.array_statics);
 
         Ok(RealmGraph {
             base,
@@ -1581,6 +1588,7 @@ impl Runtime {
             array_reductions,
             array_splice,
             array_is_array,
+            array_statics,
             array,
             iterators,
             symbol,
@@ -1746,6 +1754,24 @@ impl Runtime {
             ));
         }
         inserted.map(|slot| slot.expect("every Object static was inserted"))
+    }
+
+    /// Inserts `Array.from` and `Array.of` in specification property order.
+    fn insert_array_statics(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; ArrayStatic::ALL.len()],
+    ) -> [FunctionId; ArrayStatic::ALL.len()] {
+        let mut inserted = [None; ArrayStatic::ALL.len()];
+        for ((slot, method), record) in inserted.iter_mut().zip(ArrayStatic::ALL).zip(records) {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::ArrayStatic(method),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every Array static was inserted"))
     }
 
     #[expect(
@@ -2670,6 +2696,7 @@ impl Runtime {
             keys,
             names,
         )?;
+        self.publish_array_constructor_identity(&graph.array, keys, names)?;
         self.publish_string_prototype_methods(graph, keys)?;
         self.publish_number_statics(graph, keys)?;
         self.publish_bigint_intrinsic_properties(&graph.bigint, &graph.dynamic_atoms, keys, names)?;
@@ -3392,6 +3419,24 @@ impl Runtime {
             )?;
         self.append_function_identity(graph.array_is_array, &name, 1, keys)?;
 
+        for (method, function) in ArrayStatic::ALL.into_iter().zip(graph.array_statics) {
+            let atom = self.atoms.predefined(method.predefined_atom());
+            let name = atom
+                .description()
+                .expect("predefined Array static name has a description")
+                .clone();
+            self.functions
+                .get_mut(graph.array.constructor)
+                .expect("new Array constructor remains live")
+                .object
+                .append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            self.append_function_identity(function, &name, method.length(), keys)?;
+        }
+
         for ((_, function), atom) in STRING_FROM_STATICS
             .into_iter()
             .zip(graph.string_from_statics)
@@ -3690,12 +3735,15 @@ impl Runtime {
                 (&keys.to_string, graph.to_string),
             ],
         )?;
-        self.append_constructor_identity(
-            graph.constructor,
-            StoredValue::Object(graph.prototype),
-            &names.array,
-            keys,
-        )?;
+        self.functions
+            .get_mut(graph.constructor)
+            .expect("new Array constructor remains live")
+            .object
+            .append_data(
+                keys.prototype.clone(),
+                CONSTRUCTOR_PROTOTYPE_PROPERTY,
+                StoredValue::Object(graph.prototype),
+            )?;
         self.functions
             .get_mut(graph.constructor)
             .expect("new Array constructor remains live")
@@ -3711,6 +3759,15 @@ impl Runtime {
         // length 0 (`quickjs.c:44557-44558`).
         self.append_function_identity(graph.join, &names.join, 1, keys)?;
         self.append_function_identity(graph.to_string, &names.to_string, 0, keys)
+    }
+
+    fn publish_array_constructor_identity(
+        &mut self,
+        graph: &ArrayIntrinsicGraph,
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        self.append_function_identity(graph.constructor, &names.array, 1, keys)
     }
 
     fn publish_iterator_intrinsic_properties(
@@ -4013,6 +4070,15 @@ fn object_static_records() -> Result<[ObjectRecord; OBJECT_STATIC_METHODS.len()]
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Object static record was reserved")))
+}
+
+fn array_static_records() -> Result<[ObjectRecord; ArrayStatic::ALL.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; ArrayStatic::ALL.len()] =
+        [const { None }; ArrayStatic::ALL.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Array static record was reserved")))
 }
 
 /// Reserves one record per `Object.prototype` reflection method.

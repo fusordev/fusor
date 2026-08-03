@@ -149,6 +149,7 @@ pub(super) fn take_iterator_abrupt_handler(
             NativeContinuation::AggregateError(_)
                 | NativeContinuation::FromEntries(_)
                 | NativeContinuation::GroupBy(_)
+                | NativeContinuation::ArrayStatic(_)
                 | NativeContinuation::IteratorAppend(_)
                 | NativeContinuation::IteratorClose(_)
         )
@@ -178,6 +179,9 @@ pub(super) fn resume_iterator_abrupt_continuations(
             }
             NativeContinuation::GroupBy(state) => {
                 resume_group_by_abrupt(runtime, *state, pending, return_to, execution_budget)
+            }
+            NativeContinuation::ArrayStatic(state) => {
+                resume_array_static_abrupt(runtime, *state, pending, return_to, execution_budget)
             }
             handler => {
                 resume_iterator_abrupt(runtime, handler, pending, return_to, execution_budget)
@@ -435,6 +439,13 @@ pub(super) fn resume_native_continuations(
                 execution_budget,
             )?,
             NativeContinuation::ArrayFlatten(state) => advance_array_flatten(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::ArrayStatic(state) => advance_array_static(
                 runtime,
                 *state,
                 Some(value.duplicate()),
@@ -1795,6 +1806,16 @@ pub(super) fn dispatch_native_call_with_frames(
             };
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(answer)))
         }
+        NativeFunctionKind::ArrayStatic(method) => begin_array_static(
+            runtime,
+            method,
+            native.realm,
+            inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         // Every `String.prototype` method shares one resumable coercion machine,
         // because they all convert the receiver with `ToString` and then each
         // declared argument in order, and every one of those steps can re-enter

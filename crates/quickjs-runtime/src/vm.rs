@@ -54,14 +54,14 @@ use crate::{
     object::{ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty, PropertyDeletion},
     runtime::{
         ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayFlatten, ArrayLengthWriteOutcome,
-        ArrayMutator, ArrayReduction, ArraySearch, ArraySort, BindingCell, BoundFunction,
-        BytecodeFunction, CollectionRoot, EnvironmentBinding, ForInAdvance, FrameBindingAddress,
-        FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
-        InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod, NativeFunction,
-        NativeFunctionKind, NumberFormat, NumberPredicate, PreparedIteratorResultPlan,
-        RealmGlobalBindingState, ReflectMethod, SetPrototypeOutcome, StringArgument, StringMethod,
-        UriFunction, array_length_from_number, check_execution_limit, global_declaration_error,
-        usize_to_u64,
+        ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayStatic, BindingCell,
+        BoundFunction, BytecodeFunction, CollectionRoot, EnvironmentBinding, ForInAdvance,
+        FrameBindingAddress, FunctionImplementation, GlobalNumericFunction, HeapFunction,
+        InstalledCode, InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod,
+        NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
+        PreparedIteratorResultPlan, RealmGlobalBindingState, ReflectMethod, SetPrototypeOutcome,
+        StringArgument, StringMethod, UriFunction, array_length_from_number, check_execution_limit,
+        global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -74,6 +74,7 @@ mod array_join;
 mod array_mutators;
 mod array_search;
 mod array_sort;
+mod array_statics;
 mod bigint_intrinsics;
 mod bindings;
 mod conversions;
@@ -104,11 +105,11 @@ mod uri;
 )]
 use {
     aggregate_error::*, array_callbacks::*, array_copiers::*, array_flatten::*, array_join::*,
-    array_mutators::*, array_search::*, array_sort::*, bigint_intrinsics::*, bindings::*,
-    conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*,
-    exceptions::*, execution::*, from_entries::*, group_by::*, iterators::*, json_parse::*,
-    json_stringify::*, locale_string::*, native::*, object_intrinsics::*, properties::*,
-    reflect::*, stack::*, string_methods::*, uri::*,
+    array_mutators::*, array_search::*, array_sort::*, array_statics::*, bigint_intrinsics::*,
+    bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*,
+    errors::*, exceptions::*, execution::*, from_entries::*, group_by::*, iterators::*,
+    json_parse::*, json_stringify::*, locale_string::*, native::*, object_intrinsics::*,
+    properties::*, reflect::*, stack::*, string_methods::*, uri::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -317,6 +318,7 @@ enum NativeContinuation {
     ArraySplice(Box<ArraySpliceContinuation>),
     ArraySort(Box<ArraySortContinuation>),
     ArrayFlatten(Box<ArrayFlattenContinuation>),
+    ArrayStatic(Box<ArrayStaticContinuation>),
     LocaleString(Box<LocaleStringContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
@@ -362,6 +364,7 @@ impl NativeContinuation {
             Self::ArraySplice(state) => state.retained_values(),
             Self::ArraySort(state) => state.retained_values(),
             Self::ArrayFlatten(state) => state.retained_values(),
+            Self::ArrayStatic(state) => state.retained_values(),
             Self::LocaleString(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
@@ -987,6 +990,8 @@ enum OperatorPrimitiveTarget {
     ArraySortValue(Box<ArraySortContinuation>),
     /// A flattening method's depth or nested array length, awaiting `ToNumber`.
     ArrayFlattenValue(Box<ArrayFlattenContinuation>),
+    /// An array-like `Array.from` length awaiting `ToNumber`.
+    ArrayStaticLength(Box<ArrayStaticContinuation>),
     /// A locale-string length or invocation result awaiting primitive conversion.
     LocaleStringValue(Box<LocaleStringContinuation>),
     ArrayLengthWrite(ArrayLengthWriteState),
@@ -1052,6 +1057,7 @@ impl OperatorPrimitiveTarget {
             Self::ArraySpliceArgument(state) => state.retained_values(),
             Self::ArraySortValue(state) => state.retained_values(),
             Self::ArrayFlattenValue(state) => state.retained_values(),
+            Self::ArrayStaticLength(state) => state.retained_values(),
             Self::LocaleStringValue(state) => state.retained_values(),
         }
     }
@@ -1261,6 +1267,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArraySpliceArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArraySortValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFlattenValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::ArrayStaticLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::LocaleStringValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayJoinSeparator(state)
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
@@ -1341,6 +1348,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ArraySplice(state) => state.trace_roots(mark),
         NativeContinuation::ArraySort(state) => state.trace_roots(mark),
         NativeContinuation::ArrayFlatten(state) => state.trace_roots(mark),
+        NativeContinuation::ArrayStatic(state) => state.trace_roots(mark),
         NativeContinuation::LocaleString(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {

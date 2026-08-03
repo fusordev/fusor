@@ -477,6 +477,15 @@ Known intentional runtime differences:
   that compares NFC representatives and therefore honours canonical
   equivalence. Lone UTF-16 surrogates remain unchanged, ECMA-402-reserved
   arguments remain unused, and every observable coercion stays resumable.
+- [x] Implement synchronous `Array.from` and `Array.of` as generic factories.
+  Constructor selection is species-independent; iterable `Array.from`
+  allocates before calling the iterator method, maps before defining each own
+  data property, and performs exceptional `IteratorClose` only for mapper and
+  definition failures. Its array-like fallback preserves `GetMethod`,
+  `ToObject`, `LengthOfArrayLike`, constructor, indexed `Get`, mapper, and final
+  strict `length`-set order. `Array.of` constructs with the item count, defines
+  every indexed item, and performs the same final strict set. All getter,
+  constructor, iterator, mapper, and setter boundaries remain resumable.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,
