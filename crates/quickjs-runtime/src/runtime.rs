@@ -844,6 +844,8 @@ pub(crate) enum NativeFunctionKind {
     StringPrototypeValueOf,
     /// One `String.prototype` method sharing the resumable coercion machine.
     StringPrototypeMethod(StringMethod),
+    /// `String.raw`.
+    StringRaw,
     /// One `Number` predicate static.
     NumberPredicateStatic(NumberPredicate),
     /// One coercing numeric function on the realm's global object.

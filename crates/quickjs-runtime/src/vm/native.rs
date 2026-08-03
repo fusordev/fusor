@@ -452,6 +452,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::StringRaw(state) => advance_string_raw(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::LocaleString(state) => advance_locale_string(
                 runtime,
                 *state,
@@ -1825,6 +1832,14 @@ pub(super) fn dispatch_native_call_with_frames(
             method,
             native.realm,
             inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::StringRaw => begin_string_raw(
+            runtime,
+            native.realm,
             inputs.arguments,
             return_to,
             origin.unwrap_or_else(native_function_host_origin),

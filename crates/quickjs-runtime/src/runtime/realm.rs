@@ -42,8 +42,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 22;
-const REALM_FUNCTION_COUNT: usize = 180;
-const REALM_PROPERTY_COUNT: u64 = 590;
+const REALM_FUNCTION_COUNT: usize = 181;
+const REALM_PROPERTY_COUNT: u64 = 593;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -887,6 +887,7 @@ struct RealmRecords {
     global_numeric_functions: [ObjectRecord; GLOBAL_NUMERIC_FUNCTIONS.len()],
     uri_functions: [ObjectRecord; URI_FUNCTIONS.len()],
     string_from_statics: [ObjectRecord; STRING_FROM_STATICS.len()],
+    string_raw: ObjectRecord,
     array_searches: [ObjectRecord; ARRAY_SEARCH_METHODS.len()],
     array_mutators: [ObjectRecord; ARRAY_MUTATOR_METHODS.len()],
     array_copiers: [ObjectRecord; ARRAY_COPIER_TOTAL],
@@ -970,7 +971,7 @@ impl RealmRecords {
         // every installed method.
         let string = PrimitiveIntrinsicRecords::try_new_with_constructor(
             5 + STRING_PROTOTYPE_METHODS.len(),
-            3 + STRING_FROM_STATICS.len(),
+            3 + STRING_FROM_STATICS.len() + 1,
         )?;
         let string_methods = string_method_records()?;
         let string_from_statics = string_from_records()?;
@@ -1049,6 +1050,7 @@ impl RealmRecords {
             global_numeric_functions,
             uri_functions,
             string_from_statics,
+            string_raw: reserved_record(2)?,
             array_searches: array_search_records()?,
             array_mutators: array_mutator_records()?,
             array_copiers: array_copier_records()?,
@@ -1108,6 +1110,7 @@ struct PrimitivePropertySpec<'a> {
     constructor_name: &'a JsString,
     to_string_length: i32,
     prototype_length: Option<i32>,
+    defer_constructor_prototype: bool,
 }
 
 /// The inserted `BigInt` intrinsic identities.
@@ -1208,6 +1211,7 @@ struct RealmGraph {
     global_numeric_functions: [FunctionId; GLOBAL_NUMERIC_FUNCTIONS.len()],
     uri_functions: [FunctionId; URI_FUNCTIONS.len()],
     string_from_statics: [FunctionId; STRING_FROM_STATICS.len()],
+    string_raw: FunctionId,
     array_searches: [FunctionId; ARRAY_SEARCH_METHODS.len()],
     array_mutators: [FunctionId; ARRAY_MUTATOR_METHODS.len()],
     array_copiers: [FunctionId; ARRAY_COPIER_TOTAL],
@@ -1278,6 +1282,7 @@ impl RealmGraph {
         for function in self.array_searches.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
+        debug_assert!(runtime.functions.remove(self.string_raw).is_some());
         for function in self.string_from_statics.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
@@ -1489,6 +1494,10 @@ impl Runtime {
             .map_err(|_| allocation_failed(RuntimeResource::HeapFunctions, REALM_FUNCTION_COUNT))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat insertion transaction keeps the exact intrinsic order auditable"
+    )]
     fn build_realm_graph(
         &mut self,
         records: RealmRecords,
@@ -1541,6 +1550,7 @@ impl Runtime {
         let uri_functions = self.insert_uri_functions(&base, records.uri_functions);
         let string_from_statics =
             self.insert_string_from_statics(&base, records.string_from_statics);
+        let string_raw = self.insert_string_raw(&base, records.string_raw);
         let array_searches = self.insert_array_searches(&base, records.array_searches);
         let array_mutators = self.insert_array_mutators(&base, records.array_mutators);
         let array_copiers = self.insert_array_copiers(&base, records.array_copiers);
@@ -1577,6 +1587,7 @@ impl Runtime {
             global_numeric_functions,
             uri_functions,
             string_from_statics,
+            string_raw,
             array_searches,
             array_mutators,
             array_copiers,
@@ -2222,6 +2233,15 @@ impl Runtime {
         inserted.map(|slot| slot.expect("every String factory function was inserted"))
     }
 
+    fn insert_string_raw(&mut self, base: &RealmBase, record: ObjectRecord) -> FunctionId {
+        self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::StringRaw,
+            record,
+        )
+    }
+
     /// Inserts one native function per `Number` predicate static.
     fn insert_number_predicates(
         &mut self,
@@ -2672,6 +2692,7 @@ impl Runtime {
                 constructor_name: &names.boolean,
                 to_string_length: 0,
                 prototype_length: None,
+                defer_constructor_prototype: false,
             },
             keys,
             names,
@@ -2682,6 +2703,7 @@ impl Runtime {
                 constructor_name: &names.number,
                 to_string_length: 1,
                 prototype_length: None,
+                defer_constructor_prototype: false,
             },
             keys,
             names,
@@ -2692,6 +2714,7 @@ impl Runtime {
                 constructor_name: &names.string,
                 to_string_length: 0,
                 prototype_length: Some(0),
+                defer_constructor_prototype: true,
             },
             keys,
             names,
@@ -2699,6 +2722,7 @@ impl Runtime {
         self.publish_array_constructor_identity(&graph.array, keys, names)?;
         self.publish_string_prototype_methods(graph, keys)?;
         self.publish_number_statics(graph, keys)?;
+        self.publish_string_raw_and_constructor_prototype(graph, keys)?;
         self.publish_bigint_intrinsic_properties(&graph.bigint, &graph.dynamic_atoms, keys, names)?;
         self.publish_array_intrinsic_properties(&graph.array, keys, names)?;
         self.publish_locale_string_methods(graph, keys)?;
@@ -3257,12 +3281,16 @@ impl Runtime {
                 (&keys.value_of, graph.value_of),
             ],
         )?;
-        self.append_constructor_identity(
-            graph.constructor,
-            StoredValue::Object(graph.prototype),
-            spec.constructor_name,
-            keys,
-        )?;
+        if spec.defer_constructor_prototype {
+            self.append_function_identity(graph.constructor, spec.constructor_name, 1, keys)?;
+        } else {
+            self.append_constructor_identity(
+                graph.constructor,
+                StoredValue::Object(graph.prototype),
+                spec.constructor_name,
+                keys,
+            )?;
+        }
         self.append_function_identity(
             graph.to_string,
             &names.to_string,
@@ -3270,6 +3298,36 @@ impl Runtime {
             keys,
         )?;
         self.append_function_identity(graph.value_of, &names.value_of, 0, keys)
+    }
+
+    /// Publishes `String.raw` before the constructor's `prototype` property so
+    /// the observable own-key order matches the intrinsic creation algorithm.
+    fn publish_string_raw_and_constructor_prototype(
+        &mut self,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+    ) -> Result<(), TryReserveError> {
+        let name = predefined_string(&self.atoms, PredefinedAtom::Raw);
+        let key = self.predefined_property_key(PredefinedAtom::Raw);
+        self.functions
+            .get_mut(graph.string.constructor)
+            .expect("new String constructor remains live")
+            .object
+            .append_data(
+                key,
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.string_raw),
+            )?;
+        self.append_function_identity(graph.string_raw, &name, 1, keys)?;
+        self.functions
+            .get_mut(graph.string.constructor)
+            .expect("new String constructor remains live")
+            .object
+            .append_data(
+                keys.prototype.clone(),
+                CONSTRUCTOR_PROTOTYPE_PROPERTY,
+                StoredValue::Object(graph.string.prototype),
+            )
     }
 
     /// Publishes the `Object.prototype` reflection methods.

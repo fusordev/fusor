@@ -486,6 +486,15 @@ Known intentional runtime differences:
   strict `length`-set order. `Array.of` constructs with the item count, defines
   every indexed item, and performs the same final strict set. All getter,
   constructor, iterator, mapper, and setter boundaries remain resumable.
+- [x] Implement `String.raw` as the generic `Get(template, "raw")` and
+  `LengthOfArrayLike` algorithm. It performs both required `ToObject` steps,
+  snapshots only the substitution list supplied by the call, then alternates
+  indexed literal `Get` and observable `ToString` conversions while ignoring
+  missing or excess substitutions exactly as specified. Property getters and
+  primitive conversions suspend through the ordinary VM machinery, UTF-16
+  concatenation preserves lone surrogates, scans and output consume shared
+  instruction fuel, and the constructor exposes the pinned
+  `length,name,fromCharCode,fromCodePoint,raw,prototype` own-key order.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,

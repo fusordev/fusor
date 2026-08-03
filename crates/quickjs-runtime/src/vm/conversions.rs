@@ -1732,6 +1732,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::ArrayStaticLength(state) => {
             advance_array_static(runtime, *state, Some(value), return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::StringRawValue(state) => {
+            advance_string_raw(runtime, *state, Some(value), return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::LocaleStringValue(state) => {
             advance_locale_string(runtime, *state, Some(value), return_to, execution_budget)
         }
