@@ -513,6 +513,34 @@ impl ReflectMethod {
     }
 }
 
+/// Which `Object` own-key listing a native function implements.
+///
+/// Both walk the target's own enumerable string keys and read each one, so both
+/// share one resumable continuation; they differ only in whether an element is
+/// the value alone or a `[key, value]` pair
+/// (`JS_ITERATOR_KIND_VALUE` versus `KIND_KEY_AND_VALUE`,
+/// `quickjs.c:40206-40260`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ObjectListing {
+    Values,
+    Entries,
+}
+
+impl ObjectListing {
+    /// Returns the property name this static is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Values => "values",
+            Self::Entries => "entries",
+        }
+    }
+
+    /// Returns whether each element is a `[key, value]` pair.
+    pub(crate) const fn is_paired(self) -> bool {
+        matches!(self, Self::Entries)
+    }
+}
+
 /// Which reduction a continuation is performing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArrayReduction {
@@ -832,6 +860,11 @@ pub(crate) enum NativeFunctionKind {
     ObjectHasOwn,
     /// `Object.getOwnPropertySymbols`, the symbol-only own-key listing.
     ObjectGetOwnPropertySymbols,
+    /// One `Object` listing sharing the resumable own-key walk.
+    ObjectListing(ObjectListing),
+    /// `Object.getOwnPropertyDescriptors`, which reads no value and so never
+    /// suspends.
+    ObjectGetOwnPropertyDescriptors,
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
     ObjectPrototypeHasOwnProperty,

@@ -545,7 +545,7 @@ fn string_own_property(
 }
 
 /// Materializes a descriptor object from an own property.
-fn build_descriptor_object(
+pub(super) fn build_descriptor_object(
     runtime: &mut Runtime,
     realm: RealmId,
     own: OwnProperty,

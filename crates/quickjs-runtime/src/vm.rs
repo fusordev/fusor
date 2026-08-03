@@ -57,9 +57,9 @@ use crate::{
         BoundFunction, BytecodeFunction, CollectionRoot, EnvironmentBinding, ForInAdvance,
         FrameBindingAddress, FunctionImplementation, HeapFunction, InstalledCode,
         InstalledConstant, InstalledRoot, InstalledTemplate, NativeFunction, NativeFunctionKind,
-        NumberFormat, NumberPredicate, PreparedIteratorResultPlan, RealmGlobalBindingState,
-        ReflectMethod, SetPrototypeOutcome, StringArgument, StringMethod, array_length_from_number,
-        check_execution_limit, global_declaration_error, usize_to_u64,
+        NumberFormat, NumberPredicate, ObjectListing, PreparedIteratorResultPlan,
+        RealmGlobalBindingState, ReflectMethod, SetPrototypeOutcome, StringArgument, StringMethod,
+        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -86,6 +86,7 @@ mod instanceof;
 mod iterators;
 mod native;
 mod object_intrinsics;
+mod object_listings;
 mod properties;
 mod reflect;
 mod stack;
@@ -100,7 +101,7 @@ use {
     array_join::*, array_mutators::*, array_search::*, array_sort::*, bigint_intrinsics::*,
     bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*,
     errors::*, exceptions::*, execution::*, iterators::*, native::*, object_intrinsics::*,
-    properties::*, reflect::*, stack::*, string_methods::*,
+    object_listings::*, properties::*, reflect::*, stack::*, string_methods::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -306,6 +307,7 @@ enum NativeContinuation {
     ArrayFlatten(Box<ArrayFlattenContinuation>),
     ArraySort(Box<ArraySortContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
+    ObjectListing(Box<ObjectListingContinuation>),
     InstanceOf(InstanceOfContinuation),
     /// A `Reflect.set` setter call whose completion is discarded in favor of
     /// the operation's own `true` answer.
@@ -345,6 +347,7 @@ impl NativeContinuation {
             Self::ArrayFlatten(state) => state.retained_values(),
             Self::ArraySort(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
+            Self::ObjectListing(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
             Self::ReflectTrue | Self::FunctionCall => 0,
         }
@@ -1379,6 +1382,7 @@ fn trace_native_continuation_roots(
                 trace_stored_value_root(excluded, mark);
             }
         }
+        NativeContinuation::ObjectListing(state) => state.trace_roots(mark),
         NativeContinuation::InstanceOf(state) => {
             trace_instance_of_roots(state, mark);
         }

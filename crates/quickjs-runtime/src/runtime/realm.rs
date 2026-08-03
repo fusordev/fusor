@@ -34,16 +34,16 @@ use super::{
     ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation, HandleError,
     HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
     IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind, NumberFormat,
-    NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey,
-    PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, ReflectMethod,
-    ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource,
-    StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics, check_limit, predefined_string,
-    usize_to_u64,
+    NumberIntrinsics, NumberPredicate, ObjectId, ObjectListing, ObjectRecord, PredefinedAtom,
+    PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState,
+    ReflectMethod, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
+    RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics, check_limit,
+    predefined_string, usize_to_u64,
 };
 
 const REALM_OBJECT_COUNT: usize = 21;
-const REALM_FUNCTION_COUNT: usize = 147;
-const REALM_PROPERTY_COUNT: u64 = 487;
+const REALM_FUNCTION_COUNT: usize = 150;
+const REALM_PROPERTY_COUNT: u64 = 496;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -380,7 +380,7 @@ const ARRAY_SEARCH_ATOM_START: usize = STRING_FROM_ATOM_START + STRING_FROM_STAT
 /// operations the current profile can honor completely are installed, so an
 /// absent method fails closed as a missing property rather than behaving
 /// incorrectly.
-const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 16] = [
+const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 19] = [
     ObjectStaticMethod::predefined(
         PredefinedAtom::GetPrototypeOf,
         NativeFunctionKind::ObjectGetPrototypeOf,
@@ -431,6 +431,23 @@ const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 16] = [
         NativeFunctionKind::ObjectGetOwnPropertySymbols,
         1,
     ),
+    ObjectStaticMethod::predefined(
+        PredefinedAtom::Values,
+        NativeFunctionKind::ObjectListing(ObjectListing::Values),
+        1,
+    ),
+    // `Symbol.prototype`'s iterator helpers already interned `entries`, so this
+    // static reuses that atom rather than interning a duplicate.
+    ObjectStaticMethod::reused(
+        ENTRIES_ATOM_INDEX,
+        NativeFunctionKind::ObjectListing(ObjectListing::Entries),
+        1,
+    ),
+    ObjectStaticMethod::interned(
+        "getOwnPropertyDescriptors",
+        NativeFunctionKind::ObjectGetOwnPropertyDescriptors,
+        1,
+    ),
 ];
 
 /// The number of `Object` statics whose names must be interned at realm
@@ -454,6 +471,12 @@ struct ObjectStaticMethod {
     predefined_name: Option<PredefinedAtom>,
     /// The literal name to intern when no predefined atom exists.
     interned_name: Option<&'static str>,
+    /// The index of an already-interned dynamic atom carrying this name.
+    ///
+    /// A realm interns each name exactly once, so a static whose name another
+    /// intrinsic already interned points at that atom instead of interning a
+    /// duplicate, which the atom table's rollback invariant forbids.
+    reused_atom_index: Option<usize>,
     kind: NativeFunctionKind,
     length: i32,
 }
@@ -463,6 +486,7 @@ impl ObjectStaticMethod {
         Self {
             predefined_name: Some(name),
             interned_name: None,
+            reused_atom_index: None,
             kind,
             length,
         }
@@ -472,6 +496,18 @@ impl ObjectStaticMethod {
         Self {
             predefined_name: None,
             interned_name: Some(name),
+            reused_atom_index: None,
+            kind,
+            length,
+        }
+    }
+
+    /// Declares a static whose name is already interned at `index`.
+    const fn reused(index: usize, kind: NativeFunctionKind, length: i32) -> Self {
+        Self {
+            predefined_name: None,
+            interned_name: None,
+            reused_atom_index: Some(index),
             kind,
             length,
         }
@@ -2822,8 +2858,14 @@ impl Runtime {
                     predefined_string(&self.atoms, atom),
                 )
             } else {
-                let atom = graph.dynamic_atoms[interned].clone();
-                interned += 1;
+                let index = if let Some(index) = method.reused_atom_index {
+                    index
+                } else {
+                    let index = interned;
+                    interned += 1;
+                    index
+                };
+                let atom = graph.dynamic_atoms[index].clone();
                 let name = atom
                     .description()
                     .expect("interned Object static name has a description")

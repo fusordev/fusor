@@ -411,6 +411,13 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
+            NativeContinuation::ObjectListing(state) => advance_object_listing(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             // `Reflect.set` discards a setter's completion and answers `true`.
             NativeContinuation::ReflectTrue => {
                 NativeDispatch::Immediate(StoredValue::Boolean(true))
@@ -1107,6 +1114,28 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::ObjectGetOwnPropertySymbols => {
             let mut arguments = inputs.arguments;
             own_property_symbols(
+                runtime,
+                native.realm,
+                arguments.take_first(),
+                origin.as_ref(),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectListing(listing) => {
+            let mut arguments = inputs.arguments;
+            begin_object_listing(
+                runtime,
+                native.realm,
+                listing,
+                arguments.take_first(),
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectGetOwnPropertyDescriptors => {
+            let mut arguments = inputs.arguments;
+            own_property_descriptors(
                 runtime,
                 native.realm,
                 arguments.take_first(),

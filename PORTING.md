@@ -433,18 +433,37 @@ Known intentional write-path differences:
   reports each Symbol itself in creation order, includes a non-enumerable
   symbol-keyed property, and answers empty for a non-nullish primitive because a
   boxed wrapper never carries one.
+- [x] `Object.values`, `Object.entries`, and
+  `Object.getOwnPropertyDescriptors`, which share `Object.keys`' own-key
+  snapshot so no two listings can disagree about which keys exist. `values` and
+  `entries` read each key, so each step can enter a getter and the walk is one
+  resumable continuation; the enumerable attribute is re-tested against the
+  *live* object at each step, so a getter that deletes or hides a later key
+  removes it from the result while a key it adds is never visited. `entries`
+  builds a fresh two-element base Array per key, with an index key reported as
+  its decimal string. Both skip non-enumerable and symbol keys, and both accept
+  a non-nullish primitive: a `String` contributes its characters but not its
+  non-enumerable `length`, while a Number contributes nothing.
+  `getOwnPropertyDescriptors` reads no value, so an accessor contributes its
+  getter and setter functions rather than the result of calling them and the
+  operation never suspends; it reports *every* own key, non-enumerable and
+  symbol included, in `[[OwnPropertyKeys]]` order, which is what makes its
+  result a valid `Object.defineProperties` argument. `Object.entries` reuses the
+  realm's already-interned `entries` atom rather than interning a duplicate,
+  which the atom table's rollback invariant forbids; the reuse is declared on the
+  static itself so the interning order stays auditable.
 - [ ] Remaining String/Number/Array method surface (`String.prototype` case
   conversions and `localeCompare`, the RegExp-dependent `match`, `matchAll`,
   `replace`, `search`, and `split`, `normalize`, `String.raw`, and the
   locale-dependent renderings), shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
-- [ ] Complete the `Object` surface (`assign`, `values`, `entries`,
-  `fromEntries`, `getOwnPropertyDescriptors`, `defineProperties`, `groupBy`,
-  `Object.create`'s descriptors argument, `Object.prototype.toLocaleString`, and
-  the `__proto__` accessor pair), then Proxy, remaining built-ins,
-  RegExp/Date/JSON, collections, binary data, Atomics, Unicode tables, promises,
-  async functions/generators, weak references, and finalization registries.
+- [ ] Complete the `Object` surface (`assign`, `fromEntries`,
+  `defineProperties`, `groupBy`, `Object.create`'s descriptors argument,
+  `Object.prototype.toLocaleString`, and the `__proto__` accessor pair), then
+  Proxy, remaining built-ins, RegExp/Date/JSON, collections, binary data,
+  Atomics, Unicode tables, promises, async functions/generators, weak
+  references, and finalization registries.
 - [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide
   host I/O, timers, cancellation, and wakeups, but never Promise-job ordering.
 
@@ -493,6 +512,19 @@ match the pinned format string.
 Current corpus status: parser 196/196, Number radix 991/991, control flow 63/63,
 iterators 40/40, function apply 15/15, function bind 21/21, call spread 15/15,
 and Errors 35/35.
+
+Installing a new realm intrinsic moves the realm's exact resource counts, which
+many tests pin directly and others derive per-test budgets from. Rebase them
+together rather than by hand:
+
+```console
+python3 scripts/rebase_realm_counts.py \
+  --functions +3 --properties +9 --atoms +1 --code-units +25
+```
+
+The atom deltas are the audit: a name that another intrinsic already interned
+must be reused rather than interned twice, so an unexpected atom delta means the
+new intrinsic broke the atom table's rollback invariant.
 
 ## Engineering rules
 
