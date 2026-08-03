@@ -31,18 +31,16 @@
 //! nested functions, handlers, iterator markers, finally return addresses,
 //! debug payloads, and source tables still require later verification.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 use crate::{
     BytecodePc, DecodeError, DecodedInstruction, FinalOpcode, OperandFormat, Operands,
-    function::{
-        FunctionBitField, FunctionHeaderFlag, FunctionHeaderFlags, FunctionKind,
-        FunctionKindRequirement, FunctionMode, JS_MODE_MASK, SERIALIZED_FUNCTION_FLAGS_MASK,
-        UnverifiedFunctionHeader, VerifiedFunctionHeader,
-    },
+    function::{FunctionKind, FunctionKindRequirement, UnverifiedFunctionHeader},
 };
 
 mod error;
+mod header;
+mod layouts;
 mod limits;
 mod model;
 mod predecode;
@@ -50,6 +48,11 @@ mod predecode;
 pub use error::{
     ControlFlowEdge, FunctionCountDomain, InvalidControlFlowTargetReason, OperandIndexDomain,
     SecondaryOperandField, UnsupportedVerifierFeature, VerificationError, VerificationErrorKind,
+};
+use header::{validate_function_header, validate_limits_and_counts};
+use layouts::{
+    ValidatedCompilerCaptureLayout, validate_compiler_capture_layout,
+    validate_compiler_constant_layout,
 };
 pub use limits::{
     MAX_FUNCTION_INDEX_ENTRIES, MAX_OPERAND_STACK_DEPTH, VerificationLimits, VerificationResource,
@@ -240,290 +243,6 @@ fn verify_control_flow_common(
         compiler_capture_layout: compiler_capture_layout.map(|validated| validated.layout),
         compiler_constant_layout,
     })
-}
-
-fn validate_compiler_constant_layout(
-    layout: CompilerConstantLayout,
-    domains: FunctionIndexDomains,
-) -> Result<CompilerConstantLayout, VerificationError> {
-    let entries = usize_to_u64(layout.kinds.len());
-    if entries != u64::from(domains.constant_pool_len) {
-        return Err(VerificationError::root(
-            VerificationErrorKind::CompilerConstantCountMismatch {
-                declared: domains.constant_pool_len,
-                entries,
-            },
-        ));
-    }
-    Ok(layout)
-}
-
-#[derive(Debug)]
-struct ValidatedCompilerCaptureLayout {
-    layout: CompilerCaptureLayout,
-    bindings_by_identity: HashMap<CompilerCapturedBindingIdentity, CompilerCapturedBinding>,
-}
-
-impl ValidatedCompilerCaptureLayout {
-    fn is_scoped_local(&self, local: u32) -> bool {
-        matches!(
-            self.bindings_by_identity
-                .get(&CompilerCapturedBindingIdentity::Local(local)),
-            Some(CompilerCapturedBinding::ScopedLocal(_))
-        )
-    }
-}
-
-fn validate_compiler_capture_layout(
-    layout: CompilerCaptureLayout,
-    domains: FunctionIndexDomains,
-    function_header: &VerifiedFunctionHeader,
-) -> Result<ValidatedCompilerCaptureLayout, VerificationError> {
-    let capture_count = usize_to_u64(layout.bindings.len());
-    if capture_count != u64::from(function_header.variable_reference_count()) {
-        return Err(VerificationError::root(
-            VerificationErrorKind::CompilerCaptureCountMismatch {
-                variable_references: function_header.variable_reference_count(),
-                captures: capture_count,
-            },
-        ));
-    }
-
-    for &binding in layout.bindings.iter() {
-        let (index, len) = match binding {
-            CompilerCapturedBinding::Argument(index) => (index, domains.argument_count),
-            CompilerCapturedBinding::FunctionLocal(index)
-            | CompilerCapturedBinding::ScopedLocal(index) => (index, domains.local_count),
-        };
-        if index >= len {
-            return Err(VerificationError::root(
-                VerificationErrorKind::CompilerCaptureIndexOutOfBounds { binding, len },
-            ));
-        }
-    }
-
-    if let Some(mapped_arguments) = &layout.mapped_arguments {
-        let mut previous = None;
-        for &index in mapped_arguments.iter() {
-            if index >= domains.argument_count {
-                return Err(VerificationError::root(
-                    VerificationErrorKind::CompilerMappedArgumentIndexOutOfBounds {
-                        index,
-                        len: domains.argument_count,
-                    },
-                ));
-            }
-            if let Some(previous) = previous
-                && index <= previous
-            {
-                return Err(VerificationError::root(
-                    VerificationErrorKind::CompilerMappedArgumentsNotAscending { previous, index },
-                ));
-            }
-            previous = Some(index);
-        }
-    }
-
-    let mut bindings_by_identity = HashMap::new();
-    bindings_by_identity
-        .try_reserve(layout.bindings.len())
-        .map_err(|_| {
-            VerificationError::root(VerificationErrorKind::AllocationFailed {
-                resource: VerificationResource::CompilerCaptures,
-                requested: capture_count,
-            })
-        })?;
-    for &binding in layout.bindings.iter() {
-        if bindings_by_identity
-            .insert(binding.identity(), binding)
-            .is_some()
-        {
-            return Err(VerificationError::root(
-                VerificationErrorKind::DuplicateCompilerCapture { binding },
-            ));
-        }
-    }
-
-    Ok(ValidatedCompilerCaptureLayout {
-        layout,
-        bindings_by_identity,
-    })
-}
-
-fn validate_limits_and_counts(
-    bytecode_len: usize,
-    domains: FunctionIndexDomains,
-    function_header: UnverifiedFunctionHeader,
-    expected_stack_size: Option<u32>,
-    limits: VerificationLimits,
-) -> Result<(), VerificationError> {
-    if limits.max_stack_depth > MAX_OPERAND_STACK_DEPTH {
-        return Err(VerificationError::root(
-            VerificationErrorKind::InvalidStackLimit {
-                value: limits.max_stack_depth,
-                maximum: MAX_OPERAND_STACK_DEPTH,
-            },
-        ));
-    }
-
-    check_limit(
-        VerificationResource::BytecodeBytes,
-        usize_to_u64(bytecode_len),
-        u64::from(limits.max_bytecode_bytes_per_function),
-    )?;
-    check_limit(
-        VerificationResource::Constants,
-        u64::from(domains.constant_pool_len),
-        u64::from(limits.max_constants_per_function),
-    )?;
-    check_limit(
-        VerificationResource::AtomPoolEntries,
-        u64::from(domains.atom_pool_len),
-        u64::from(limits.max_atom_pool_entries),
-    )?;
-
-    check_structural_count(FunctionCountDomain::Arguments, domains.argument_count)?;
-    check_structural_count(FunctionCountDomain::Locals, domains.local_count)?;
-    check_structural_count(
-        FunctionCountDomain::VariableReferences,
-        function_header.variable_reference_count(),
-    )?;
-    check_structural_count(
-        FunctionCountDomain::ClosureVariables,
-        domains.closure_var_count,
-    )?;
-    if let Some(expected_stack_size) = expected_stack_size {
-        check_structural_count(FunctionCountDomain::ExpectedStackSize, expected_stack_size)?;
-        check_limit(
-            VerificationResource::StackDepth,
-            u64::from(expected_stack_size),
-            u64::from(limits.max_stack_depth),
-        )?;
-    }
-    Ok(())
-}
-
-fn validate_function_header(
-    header: UnverifiedFunctionHeader,
-    domains: FunctionIndexDomains,
-) -> Result<VerifiedFunctionHeader, VerificationError> {
-    let serialized_flags = header.serialized_flags();
-    let unknown_flags = serialized_flags & !SERIALIZED_FUNCTION_FLAGS_MASK;
-    if unknown_flags != 0 {
-        return Err(VerificationError::root(
-            VerificationErrorKind::DisallowedFunctionBits {
-                field: FunctionBitField::SerializedFlags,
-                value: serialized_flags,
-                allowed_mask: SERIALIZED_FUNCTION_FLAGS_MASK,
-                disallowed_bits: unknown_flags,
-            },
-        ));
-    }
-
-    let js_mode = header.js_mode();
-    let unknown_mode = js_mode & !JS_MODE_MASK;
-    if unknown_mode != 0 {
-        return Err(VerificationError::root(
-            VerificationErrorKind::DisallowedFunctionBits {
-                field: FunctionBitField::JsMode,
-                value: u16::from(js_mode),
-                allowed_mask: u16::from(JS_MODE_MASK),
-                disallowed_bits: u16::from(unknown_mode),
-            },
-        ));
-    }
-
-    let defined_argument_count = header.defined_argument_count();
-    if defined_argument_count > domains.argument_count {
-        return Err(VerificationError::root(
-            VerificationErrorKind::DefinedArgumentCountOutOfRange {
-                defined: defined_argument_count,
-                argument_count: domains.argument_count,
-            },
-        ));
-    }
-
-    let variable_reference_count = header.variable_reference_count();
-    let available_bindings = u64::from(domains.argument_count) + u64::from(domains.local_count);
-    if u64::from(variable_reference_count) > available_bindings {
-        return Err(VerificationError::root(
-            VerificationErrorKind::VariableReferenceCountOutOfRange {
-                variable_references: variable_reference_count,
-                argument_count: domains.argument_count,
-                local_count: domains.local_count,
-            },
-        ));
-    }
-
-    let flags = FunctionHeaderFlags::from_validated_bits(serialized_flags);
-    let kind = FunctionKind::from_serialized_flags(serialized_flags);
-    if flags.has_prototype() && flags.is_derived_class_constructor() {
-        return Err(VerificationError::root(
-            VerificationErrorKind::ConflictingFunctionFlags {
-                first: FunctionHeaderFlag::HasPrototype,
-                second: FunctionHeaderFlag::DerivedClassConstructor,
-            },
-        ));
-    }
-    if !matches!(kind, FunctionKind::Normal) {
-        let invalid_flag = if flags.has_prototype() {
-            Some(FunctionHeaderFlag::HasPrototype)
-        } else if flags.is_derived_class_constructor() {
-            Some(FunctionHeaderFlag::DerivedClassConstructor)
-        } else {
-            None
-        };
-        if let Some(flag) = invalid_flag {
-            return Err(VerificationError::root(
-                VerificationErrorKind::FunctionFlagNotAllowedForKind {
-                    flag,
-                    kind,
-                    requirement: FunctionKindRequirement::Normal,
-                },
-            ));
-        }
-    }
-
-    Ok(VerifiedFunctionHeader::new(
-        flags,
-        FunctionMode::from_validated_bits(js_mode),
-        kind,
-        defined_argument_count,
-        variable_reference_count,
-    ))
-}
-
-fn check_structural_count(
-    domain: FunctionCountDomain,
-    value: u32,
-) -> Result<(), VerificationError> {
-    if value > MAX_FUNCTION_INDEX_ENTRIES {
-        return Err(VerificationError::root(
-            VerificationErrorKind::MetadataCountOutOfRange {
-                domain,
-                value,
-                maximum: MAX_FUNCTION_INDEX_ENTRIES,
-            },
-        ));
-    }
-    Ok(())
-}
-
-fn check_limit(
-    resource: VerificationResource,
-    observed: u64,
-    limit: u64,
-) -> Result<(), VerificationError> {
-    if observed > limit {
-        return Err(VerificationError::root(
-            VerificationErrorKind::LimitExceeded {
-                resource,
-                limit,
-                observed,
-            },
-        ));
-    }
-    Ok(())
 }
 
 #[allow(
