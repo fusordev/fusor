@@ -18,7 +18,7 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         ),
         (
             IntrinsicObjectId::BigIntPrototype,
-            IntrinsicObjectKind::BigIntPrototype,
+            IntrinsicObjectKind::Ordinary,
         ),
         (
             IntrinsicObjectId::StringPrototype,

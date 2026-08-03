@@ -50,6 +50,7 @@ use super::{
     UriFunction, check_limit, predefined_string, usize_to_u64,
 };
 
+use allocation::DeclarativeIntrinsicRecords;
 use atoms::{RealmAtomBindings, RealmAtomPlan};
 use families::RealmFunctionSchema;
 use publication::RealmPublicationError;
@@ -584,12 +585,9 @@ struct RealmNames {
     get_description: JsString,
     get_species: JsString,
     reflect: JsString,
-    json: JsString,
     is_raw_json: JsString,
     parse: JsString,
-    raw_json: JsString,
     stringify: JsString,
-    math: JsString,
 }
 
 impl RealmNames {
@@ -632,35 +630,11 @@ impl RealmNames {
             get_description: JsString::from_utf8("get description").map_err(AtomError::from)?,
             get_species: JsString::from_utf8("get [Symbol.species]").map_err(AtomError::from)?,
             reflect: JsString::from_utf8("Reflect").map_err(AtomError::from)?,
-            json: predefined_string(atoms, PredefinedAtom::Json),
             is_raw_json: JsString::from_utf8("isRawJSON").map_err(AtomError::from)?,
             parse: JsString::from_utf8("parse").map_err(AtomError::from)?,
-            raw_json: predefined_string(atoms, PredefinedAtom::RawJson),
             stringify: JsString::from_utf8("stringify").map_err(AtomError::from)?,
-            math: predefined_string(atoms, PredefinedAtom::Math),
         })
     }
-}
-
-/// Reserved records for the ordinary `%Reflect%` object and its method set.
-struct ReflectRecords {
-    object: ObjectRecord,
-    methods: [ObjectRecord; ReflectMethod::ALL.len()],
-}
-
-/// Reserved records for the currently installed `%JSON%` surface.
-struct JsonRecords {
-    object: ObjectRecord,
-    is_raw_json: ObjectRecord,
-    parse: ObjectRecord,
-    raw_json: ObjectRecord,
-    stringify: ObjectRecord,
-}
-
-/// Reserved records for the ordinary `%Math%` object and installed prefix.
-struct MathRecords {
-    object: ObjectRecord,
-    methods: [ObjectRecord; MathMethod::ALL.len()],
 }
 
 struct RealmBaseRecords {
@@ -810,9 +784,7 @@ struct RealmRecords {
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
     symbol: SymbolIntrinsicRecords,
-    reflect: ReflectRecords,
-    json: JsonRecords,
-    math: MathRecords,
+    declarative: DeclarativeIntrinsicRecords,
 }
 
 impl RealmRecords {
@@ -820,7 +792,10 @@ impl RealmRecords {
         clippy::too_many_lines,
         reason = "one flat reservation site keeps every realm intrinsic's exact property budget auditable in a single place"
     )]
-    fn try_new(length_key: &PropertyKey) -> Result<Self, RuntimeError> {
+    fn try_new(
+        length_key: &PropertyKey,
+        schema: &RealmFunctionSchema,
+    ) -> Result<Self, RuntimeError> {
         // Keep these reservations in the original transaction order so a
         // recoverable allocation failure reports the same `additional` value.
         let base = RealmBaseRecords {
@@ -933,24 +908,7 @@ impl RealmRecords {
             symbol_for: reserved_record(2)?,
             key_for: reserved_record(2)?,
         };
-        let reflect = ReflectRecords {
-            // Thirteen methods plus @@toStringTag.
-            object: reserved_record(ReflectMethod::ALL.len() + 1)?,
-            methods: reserved_function_records()?,
-        };
-        let json = JsonRecords {
-            // Four methods plus @@toStringTag.
-            object: reserved_record(5)?,
-            is_raw_json: reserved_record(2)?,
-            parse: reserved_record(2)?,
-            raw_json: reserved_record(2)?,
-            stringify: reserved_record(2)?,
-        };
-        let math = MathRecords {
-            // Every method and numeric constant plus @@toStringTag.
-            object: reserved_record(MathMethod::ALL.len() + MATH_CONSTANTS.len() + 1)?,
-            methods: reserved_function_records()?,
-        };
+        let declarative = DeclarativeIntrinsicRecords::try_new(schema)?;
         Ok(Self {
             base,
             errors,
@@ -979,9 +937,7 @@ impl RealmRecords {
             array,
             iterators,
             symbol,
-            reflect,
-            json,
-            math,
+            declarative,
         })
     }
 }
@@ -1070,27 +1026,6 @@ struct SymbolIntrinsicGraph {
     key_for: FunctionId,
 }
 
-/// Inserted identities for the ordinary `%Reflect%` surface.
-struct ReflectGraph {
-    object: ObjectId,
-    methods: [FunctionId; ReflectMethod::ALL.len()],
-}
-
-/// Inserted identities for the ordinary `%JSON%` object and its methods.
-struct JsonGraph {
-    object: ObjectId,
-    is_raw_json: FunctionId,
-    parse: FunctionId,
-    raw_json: FunctionId,
-    stringify: FunctionId,
-}
-
-/// Inserted identities for the ordinary `%Math%` object and method prefix.
-struct MathGraph {
-    object: ObjectId,
-    methods: [FunctionId; MathMethod::ALL.len()],
-}
-
 struct RealmGraph {
     base: RealmBase,
     dynamic_atoms: RealmAtomBindings,
@@ -1120,9 +1055,6 @@ struct RealmGraph {
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
     symbol: SymbolIntrinsicGraph,
-    reflect: ReflectGraph,
-    json: JsonGraph,
-    math: MathGraph,
 }
 
 impl Runtime {
@@ -1183,9 +1115,9 @@ impl Runtime {
             .expect("the immutable complete Realm schema is valid");
         let reservation = RealmReservationPlan::try_new(&atom_plan, &intrinsic_schema)?;
         reservation.preflight_and_reserve(self)?;
-        let records = RealmRecords::try_new(&keys.length)?;
+        let records = RealmRecords::try_new(&keys.length, &intrinsic_schema)?;
         let mut transaction = RealmBuildTransaction::try_new(self, reservation)?;
-        let graph = transaction.build_realm_graph(records, &atom_plan)?;
+        let graph = transaction.build_realm_graph(records, &atom_plan, &intrinsic_schema)?;
         transaction
             .allocated
             .assert_matches(intrinsic_schema.specs());
@@ -1288,6 +1220,7 @@ impl RealmBuildTransaction<'_> {
         &mut self,
         records: RealmRecords,
         atom_plan: &RealmAtomPlan<'_>,
+        intrinsic_schema: &RealmFunctionSchema,
     ) -> Result<RealmGraph, RuntimeError> {
         let dynamic_atoms = self.intern_realm_atom_plan(atom_plan)?;
         self.record_atoms(&dynamic_atoms);
@@ -1331,9 +1264,7 @@ impl RealmBuildTransaction<'_> {
         let array = self.insert_array_intrinsics(&base, records.array);
         let iterators = self.insert_iterator_intrinsics(&base, records.iterators);
         let symbol = self.insert_symbol_intrinsics(&base, records.symbol);
-        let reflect = self.insert_reflect_intrinsics(&base, records.reflect);
-        let json = self.insert_json_intrinsics(&base, records.json);
-        let math = self.insert_math_intrinsics(&base, records.math);
+        self.insert_declarative_intrinsics(base.realm, intrinsic_schema, records.declarative);
         let string_methods = self.insert_string_prototype_methods(&base, records.string_methods);
         let number_predicates = self.insert_number_predicates(&base, records.number_predicates);
         let global_numeric_functions =
@@ -1396,9 +1327,6 @@ impl RealmBuildTransaction<'_> {
             array,
             iterators,
             symbol,
-            reflect,
-            json,
-            math,
         })
     }
 
@@ -2242,105 +2170,6 @@ impl RealmBuildTransaction<'_> {
         }
     }
 
-    /// Inserts the ordinary `%Reflect%` object and its thirteen methods.
-    fn insert_reflect_intrinsics(
-        &mut self,
-        base: &RealmBase,
-        mut records: ReflectRecords,
-    ) -> ReflectGraph {
-        records
-            .object
-            .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
-        let object = self.insert_reserved_object(
-            IntrinsicObjectId::Reflect,
-            HeapObject::ordinary(records.object),
-        );
-        let mut methods = [None; ReflectMethod::ALL.len()];
-        for ((slot, method), record) in methods
-            .iter_mut()
-            .zip(ReflectMethod::ALL)
-            .zip(records.methods)
-        {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::Reflect(method),
-                record,
-            ));
-        }
-        ReflectGraph {
-            object,
-            methods: methods.map(|slot| slot.expect("every Reflect method was inserted")),
-        }
-    }
-
-    /// Inserts the ordinary `%JSON%` object and its currently complete methods.
-    fn insert_json_intrinsics(&mut self, base: &RealmBase, mut records: JsonRecords) -> JsonGraph {
-        records
-            .object
-            .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
-        let object = self.insert_reserved_object(
-            IntrinsicObjectId::Json,
-            HeapObject::ordinary(records.object),
-        );
-        let parse = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::JsonParse,
-            records.parse,
-        );
-        let is_raw_json = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::JsonIsRawJson,
-            records.is_raw_json,
-        );
-        let raw_json = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::JsonRawJson,
-            records.raw_json,
-        );
-        let stringify = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::JsonStringify,
-            records.stringify,
-        );
-        JsonGraph {
-            object,
-            is_raw_json,
-            parse,
-            raw_json,
-            stringify,
-        }
-    }
-
-    /// Inserts the ordinary `%Math%` object and its specification-order prefix.
-    fn insert_math_intrinsics(&mut self, base: &RealmBase, mut records: MathRecords) -> MathGraph {
-        records
-            .object
-            .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
-        let object = self.insert_reserved_object(
-            IntrinsicObjectId::Math,
-            HeapObject::ordinary(records.object),
-        );
-        let mut methods = [None; MathMethod::ALL.len()];
-        for ((slot, method), record) in methods.iter_mut().zip(MathMethod::ALL).zip(records.methods)
-        {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::Math(method),
-                record,
-            ));
-        }
-        MathGraph {
-            object,
-            methods: methods.map(|slot| slot.expect("every Math method was inserted")),
-        }
-    }
-
     fn insert_reserved_native(
         &mut self,
         realm: RealmId,
@@ -2455,9 +2284,7 @@ impl RealmBuildTransaction<'_> {
         self.publish_global_numeric_functions(graph, intrinsic_schema)?;
         self.publish_uri_functions(graph, intrinsic_schema)?;
         self.publish_symbol_intrinsic_properties(&graph.symbol, graph, keys, names)?;
-        self.publish_reflect_intrinsic_properties(graph, keys, names)?;
-        self.publish_json_intrinsic_properties(graph, keys, names)?;
-        self.publish_math_intrinsic_properties(graph, keys, names)?;
+        self.publish_intrinsic_schema(intrinsic_schema, &graph.dynamic_atoms)?;
         self.append_object_methods(
             graph.base.global_object,
             [
@@ -2501,173 +2328,6 @@ impl RealmBuildTransaction<'_> {
             self.append_function_identity(function, &name, 0, keys)?;
         }
         Ok(())
-    }
-
-    /// Publishes the specification-defined ordinary `%Reflect%` shape.
-    fn publish_reflect_intrinsic_properties(
-        &mut self,
-        graph: &RealmGraph,
-        keys: &RealmKeys,
-        names: &RealmNames,
-    ) -> Result<(), TryReserveError> {
-        let reflect_key = PropertyKey::from_validated_atom(
-            graph.dynamic_atoms.atom(RealmNameId::Reflect).clone(),
-        );
-        let method_keys =
-            ReflectMethod::ALL.map(|method| self.predefined_property_key(method.predefined_atom()));
-        {
-            let record = &mut self
-                .objects
-                .get_mut(graph.reflect.object)
-                .expect("new Reflect object remains live")
-                .record;
-            for (key, function) in method_keys.into_iter().zip(graph.reflect.methods) {
-                record.append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
-            }
-            record.append_data(
-                keys.symbol_to_string_tag.clone(),
-                IDENTITY_PROPERTY,
-                StoredValue::String(names.reflect.clone()),
-            )?;
-        }
-        for (method, function) in ReflectMethod::ALL.into_iter().zip(graph.reflect.methods) {
-            let name = predefined_string(&self.atoms, method.predefined_atom());
-            self.append_function_identity(function, &name, method.length(), keys)?;
-        }
-        self.objects
-            .get_mut(graph.base.global_object)
-            .expect("new realm global object remains live")
-            .record
-            .append_data(
-                reflect_key,
-                METHOD_PROPERTY,
-                StoredValue::Object(graph.reflect.object),
-            )
-    }
-
-    /// Publishes `%JSON%`, its currently complete methods, and its specification tag.
-    fn publish_json_intrinsic_properties(
-        &mut self,
-        graph: &RealmGraph,
-        keys: &RealmKeys,
-        names: &RealmNames,
-    ) -> Result<(), TryReserveError> {
-        let is_raw_json_key = PropertyKey::from_validated_atom(
-            graph.dynamic_atoms.atom(RealmNameId::JsonIsRawJson).clone(),
-        );
-        let parse_key = PropertyKey::from_validated_atom(
-            graph.dynamic_atoms.atom(RealmNameId::JsonParse).clone(),
-        );
-        let raw_json_key = self.predefined_property_key(PredefinedAtom::RawJson);
-        let stringify_key = PropertyKey::from_validated_atom(
-            graph.dynamic_atoms.atom(RealmNameId::JsonStringify).clone(),
-        );
-        let json = self
-            .objects
-            .get_mut(graph.json.object)
-            .expect("new JSON object remains live");
-        json.record.append_data(
-            is_raw_json_key,
-            METHOD_PROPERTY,
-            StoredValue::Function(graph.json.is_raw_json),
-        )?;
-        json.record.append_data(
-            parse_key,
-            METHOD_PROPERTY,
-            StoredValue::Function(graph.json.parse),
-        )?;
-        json.record.append_data(
-            raw_json_key,
-            METHOD_PROPERTY,
-            StoredValue::Function(graph.json.raw_json),
-        )?;
-        json.record.append_data(
-            stringify_key,
-            METHOD_PROPERTY,
-            StoredValue::Function(graph.json.stringify),
-        )?;
-        json.record.append_data(
-            keys.symbol_to_string_tag.clone(),
-            IDENTITY_PROPERTY,
-            StoredValue::String(names.json.clone()),
-        )?;
-        self.append_function_identity(graph.json.is_raw_json, &names.is_raw_json, 1, keys)?;
-        self.append_function_identity(graph.json.parse, &names.parse, 2, keys)?;
-        self.append_function_identity(graph.json.raw_json, &names.raw_json, 1, keys)?;
-        self.append_function_identity(graph.json.stringify, &names.stringify, 3, keys)?;
-        let json_key = self.predefined_property_key(PredefinedAtom::Json);
-        self.objects
-            .get_mut(graph.base.global_object)
-            .expect("new realm global object remains live")
-            .record
-            .append_data(
-                json_key,
-                METHOD_PROPERTY,
-                StoredValue::Object(graph.json.object),
-            )
-    }
-
-    /// Publishes the complete ordinary `%Math%` shape.
-    fn publish_math_intrinsic_properties(
-        &mut self,
-        graph: &RealmGraph,
-        keys: &RealmKeys,
-        names: &RealmNames,
-    ) -> Result<(), TryReserveError> {
-        {
-            let record = &mut self
-                .objects
-                .get_mut(graph.math.object)
-                .expect("new Math object remains live")
-                .record;
-            for (method, function) in MathMethod::ALL.into_iter().zip(graph.math.methods) {
-                record.append_data(
-                    PropertyKey::from_validated_atom(
-                        graph
-                            .dynamic_atoms
-                            .atom(RealmNameId::MathMethod(method))
-                            .clone(),
-                    ),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
-            }
-            for (name, bits) in MATH_CONSTANTS {
-                record.append_data(
-                    PropertyKey::from_validated_atom(
-                        graph
-                            .dynamic_atoms
-                            .atom(RealmNameId::MathConstant(name))
-                            .clone(),
-                    ),
-                    FROZEN_PROPERTY,
-                    StoredValue::Number(JsNumber::from_f64(f64::from_bits(bits))),
-                )?;
-            }
-            record.append_data(
-                keys.symbol_to_string_tag.clone(),
-                IDENTITY_PROPERTY,
-                StoredValue::String(names.math.clone()),
-            )?;
-        }
-        for (method, function) in MathMethod::ALL.into_iter().zip(graph.math.methods) {
-            let atom = graph.dynamic_atoms.atom(RealmNameId::MathMethod(method));
-            let name = atom
-                .description()
-                .expect("interned Math method name has a description")
-                .clone();
-            self.append_function_identity(function, &name, method.length(), keys)?;
-        }
-        let math_key = self.predefined_property_key(PredefinedAtom::Math);
-        self.objects
-            .get_mut(graph.base.global_object)
-            .expect("new realm global object remains live")
-            .record
-            .append_data(
-                math_key,
-                METHOD_PROPERTY,
-                StoredValue::Object(graph.math.object),
-            )
     }
 
     /// Installs the pinned global value properties and `globalThis`.

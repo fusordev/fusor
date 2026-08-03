@@ -13,20 +13,22 @@ mod string;
 mod symbol;
 
 use super::schema::{
-    FamilyCardinality, IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicIdentity,
-    IntrinsicNameSpec, IntrinsicObjectId, IntrinsicObjectKind, IntrinsicObjectSpec,
-    IntrinsicSchema, PrototypeSpec,
+    FamilyCardinality, IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicFunctionSpec,
+    IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicObjectId, IntrinsicObjectKind,
+    IntrinsicObjectSpec, IntrinsicPropertySpec, IntrinsicSchema, IntrinsicValueSpec, PrototypeSpec,
 };
 use super::validation::{SchemaValidationError, validate_intrinsic_schema};
 use super::{NativeFunctionKind, RuntimeError, RuntimeResource, allocation_failed};
 
 type ObjectSink<'a> = &'a mut dyn FnMut(IntrinsicObjectSpec);
 type FunctionSink<'a> = &'a mut dyn FnMut(IntrinsicFunctionSpec);
+type PropertySink<'a> = &'a mut dyn FnMut(IntrinsicPropertySpec);
 
 /// Owned complete declaration table used before Runtime mutation.
 pub(super) struct RealmFunctionSchema {
     objects: Vec<IntrinsicObjectSpec>,
     specs: Vec<IntrinsicFunctionSpec>,
+    properties: Vec<IntrinsicPropertySpec>,
     mandatory_functions: Vec<IntrinsicFunctionId>,
 }
 
@@ -34,6 +36,7 @@ impl RealmFunctionSchema {
     pub(super) fn try_new() -> Result<Self, RuntimeError> {
         let object_count = count_specs(visit_object_specs, RuntimeResource::HeapObjects)?;
         let function_count = count_specs(visit_function_specs, RuntimeResource::HeapFunctions)?;
+        let property_count = count_specs(visit_property_specs, RuntimeResource::ObjectProperties)?;
         let mut objects = Vec::new();
         objects
             .try_reserve_exact(object_count)
@@ -44,6 +47,11 @@ impl RealmFunctionSchema {
             .try_reserve_exact(function_count)
             .map_err(|_| allocation_failed(RuntimeResource::HeapFunctions, function_count))?;
         visit_function_specs(&mut |spec| specs.push(spec));
+        let mut properties = Vec::new();
+        properties
+            .try_reserve_exact(property_count)
+            .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, property_count))?;
+        visit_property_specs(&mut |property| properties.push(property));
         let mut mandatory_functions = Vec::new();
         mandatory_functions
             .try_reserve_exact(function_count)
@@ -52,6 +60,7 @@ impl RealmFunctionSchema {
         Ok(Self {
             objects,
             specs,
+            properties,
             mandatory_functions,
         })
     }
@@ -60,11 +69,19 @@ impl RealmFunctionSchema {
         &self.specs
     }
 
+    pub(super) fn objects(&self) -> &[IntrinsicObjectSpec] {
+        &self.objects
+    }
+
     pub(super) fn spec(&self, id: IntrinsicFunctionId) -> &IntrinsicFunctionSpec {
         self.specs
             .iter()
             .find(|spec| spec.id == id)
             .expect("the complete intrinsic function schema contains every allocated ID")
+    }
+
+    pub(super) fn properties(&self) -> &[IntrinsicPropertySpec] {
+        &self.properties
     }
 
     pub(super) fn object_count(&self) -> usize {
@@ -91,7 +108,7 @@ impl RealmFunctionSchema {
         validate_intrinsic_schema(IntrinsicSchema {
             objects: &self.objects,
             functions: &self.specs,
-            properties: &[],
+            properties: &self.properties,
             mandatory_objects: &IntrinsicObjectId::ALL,
             mandatory_functions: &self.mandatory_functions,
             constructor_prototypes: &[],
@@ -99,6 +116,25 @@ impl RealmFunctionSchema {
         })
         .map(|_| ())
     }
+}
+
+pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
+    matches!(
+        id,
+        IntrinsicObjectId::Reflect | IntrinsicObjectId::Json | IntrinsicObjectId::Math
+    )
+}
+
+pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
+    matches!(
+        id.0,
+        NativeFunctionKind::Reflect(_)
+            | NativeFunctionKind::JsonIsRawJson
+            | NativeFunctionKind::JsonParse
+            | NativeFunctionKind::JsonRawJson
+            | NativeFunctionKind::JsonStringify
+            | NativeFunctionKind::Math(_)
+    )
 }
 
 fn count_specs<T>(
@@ -137,6 +173,12 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
     math::visit_functions(visit);
     globals::visit_functions(visit);
     array::visit_method_functions(visit);
+}
+
+fn visit_property_specs(visit: PropertySink<'_>) {
+    reflect::visit_properties(visit);
+    json::visit_properties(visit);
+    math::visit_properties(visit);
 }
 
 const fn object(
@@ -188,6 +230,32 @@ const fn function(
         length,
         constructable: implementation.is_constructor(),
     }
+}
+
+const fn data(
+    holder: IntrinsicIdentity,
+    key: IntrinsicKeySpec,
+    layout: super::PropertyLayout,
+    value: IntrinsicValueSpec,
+) -> IntrinsicPropertySpec {
+    IntrinsicPropertySpec {
+        holder,
+        key,
+        descriptor: IntrinsicDescriptorSpec::Data { layout, value },
+    }
+}
+
+const fn method(
+    holder: IntrinsicIdentity,
+    key: IntrinsicKeySpec,
+    function: NativeFunctionKind,
+) -> IntrinsicPropertySpec {
+    data(
+        holder,
+        key,
+        super::METHOD_PROPERTY,
+        IntrinsicValueSpec::Function(IntrinsicFunctionId(function)),
+    )
 }
 
 #[cfg(test)]

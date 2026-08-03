@@ -6,7 +6,9 @@ use crate::ArrayIndex;
 
 use super::{
     AtomError, JsNumber, JsString, ObjectRecord, PredefinedAtom, PropertyKey,
-    RealmBuildTransaction, RuntimeError, StoredValue, property_allocation_failed,
+    RealmBuildTransaction, RuntimeError, StoredValue,
+    families::RealmFunctionSchema,
+    property_allocation_failed,
     schema::{
         IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicIdentity,
         IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicStringSpec, IntrinsicValueSpec, RealmNameId,
@@ -47,6 +49,27 @@ enum ResolvedDescriptor {
 }
 
 impl RealmBuildTransaction<'_> {
+    /// Publishes the function identities and descriptors owned by the
+    /// currently migrated declarative families.
+    pub(super) fn publish_intrinsic_schema(
+        &mut self,
+        schema: &RealmFunctionSchema,
+        atoms: &super::RealmAtomBindings,
+    ) -> Result<(), RealmPublicationError> {
+        for function in schema.specs().iter().filter(|function| {
+            schema
+                .properties()
+                .iter()
+                .any(|property| descriptor_references_function(property.descriptor, function.id))
+        }) {
+            self.publish_intrinsic_function_identity(function, atoms)?;
+        }
+        for property in schema.properties() {
+            self.publish_intrinsic_property(property, atoms)?;
+        }
+        Ok(())
+    }
+
     /// Resolves and appends one complete descriptor in declaration order.
     pub(super) fn publish_intrinsic_property(
         &mut self,
@@ -201,6 +224,22 @@ impl RealmBuildTransaction<'_> {
                 .map_err(RuntimeError::from)
                 .map_err(RealmPublicationError::Runtime),
         }
+    }
+}
+
+fn descriptor_references_function(
+    descriptor: IntrinsicDescriptorSpec,
+    id: IntrinsicFunctionId,
+) -> bool {
+    match descriptor {
+        IntrinsicDescriptorSpec::Data {
+            value: IntrinsicValueSpec::Function(candidate),
+            ..
+        } => candidate == id,
+        IntrinsicDescriptorSpec::Accessor { getter, setter, .. } => {
+            getter == Some(id) || setter == Some(id)
+        }
+        IntrinsicDescriptorSpec::Data { .. } => false,
     }
 }
 

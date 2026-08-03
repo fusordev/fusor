@@ -1,9 +1,131 @@
 //! Transaction-private materialization of typed intrinsic identities.
 
 use super::{
-    FunctionId, ObjectId, RuntimeError, RuntimeResource, allocation_failed,
-    schema::{IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicObjectId},
+    FunctionId, HeapObject, HeapReference, ObjectId, ObjectRecord, RealmBuildTransaction, RealmId,
+    RuntimeError, RuntimeResource, allocation_failed,
+    families::{RealmFunctionSchema, is_declarative_function, is_declarative_object},
+    reserved_record,
+    schema::{
+        IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicIdentity, IntrinsicObjectId,
+        IntrinsicObjectKind, PrototypeSpec,
+    },
 };
+
+/// Pre-reserved records whose capacities are derived from declarative holders.
+pub(super) struct DeclarativeIntrinsicRecords {
+    records: Vec<(IntrinsicIdentity, Option<ObjectRecord>)>,
+}
+
+impl DeclarativeIntrinsicRecords {
+    pub(super) fn try_new(schema: &RealmFunctionSchema) -> Result<Self, RuntimeError> {
+        let count = schema
+            .objects()
+            .iter()
+            .filter(|spec| is_declarative_object(spec.id))
+            .count()
+            .checked_add(
+                schema
+                    .specs()
+                    .iter()
+                    .filter(|spec| is_declarative_function(spec.id))
+                    .count(),
+            )
+            .ok_or_else(|| allocation_failed(RuntimeResource::ObjectProperties, usize::MAX))?;
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(count)
+            .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, count))?;
+        for object in schema
+            .objects()
+            .iter()
+            .filter(|spec| is_declarative_object(spec.id))
+        {
+            let identity = IntrinsicIdentity::Object(object.id);
+            records.push((
+                identity,
+                Some(reserved_record(property_count(schema, identity))?),
+            ));
+        }
+        for function in schema
+            .specs()
+            .iter()
+            .filter(|spec| is_declarative_function(spec.id))
+        {
+            let identity = IntrinsicIdentity::Function(function.id);
+            let capacity = property_count(schema, identity)
+                .checked_add(2)
+                .ok_or_else(|| allocation_failed(RuntimeResource::ObjectProperties, usize::MAX))?;
+            records.push((identity, Some(reserved_record(capacity)?)));
+        }
+        Ok(Self { records })
+    }
+
+    pub(super) fn take(&mut self, id: IntrinsicIdentity) -> ObjectRecord {
+        self.records
+            .iter_mut()
+            .find_map(|(candidate, record)| (*candidate == id).then_some(record))
+            .expect("every declarative intrinsic has one reserved record")
+            .take()
+            .expect("each declarative intrinsic record is consumed exactly once")
+    }
+}
+
+fn property_count(schema: &RealmFunctionSchema, holder: IntrinsicIdentity) -> usize {
+    schema
+        .properties()
+        .iter()
+        .filter(|property| property.holder == holder)
+        .count()
+}
+
+impl RealmBuildTransaction<'_> {
+    /// Materializes shell identities for the fully declarative ordinary-object
+    /// families without retaining a parallel family graph.
+    pub(super) fn insert_declarative_intrinsics(
+        &mut self,
+        realm: RealmId,
+        schema: &RealmFunctionSchema,
+        mut records: DeclarativeIntrinsicRecords,
+    ) {
+        for object in schema
+            .objects()
+            .iter()
+            .filter(|spec| is_declarative_object(spec.id))
+        {
+            assert_eq!(object.kind, IntrinsicObjectKind::Ordinary);
+            let mut record = records.take(IntrinsicIdentity::Object(object.id));
+            record.replace_prototype(self.resolve_intrinsic_prototype(object.prototype));
+            self.insert_reserved_object(object.id, HeapObject::ordinary(record));
+        }
+        for function in schema
+            .specs()
+            .iter()
+            .filter(|spec| is_declarative_function(spec.id))
+        {
+            let prototype = self
+                .resolve_intrinsic_prototype(function.prototype)
+                .expect("native intrinsic functions always have a prototype");
+            self.insert_reserved_native(
+                realm,
+                prototype,
+                function.implementation,
+                records.take(IntrinsicIdentity::Function(function.id)),
+            );
+        }
+    }
+
+    fn resolve_intrinsic_prototype(&self, prototype: PrototypeSpec) -> Option<HeapReference> {
+        match prototype {
+            PrototypeSpec::Null => None,
+            PrototypeSpec::Intrinsic(IntrinsicIdentity::Object(id)) => {
+                Some(HeapReference::Object(self.allocated.object(id)))
+            }
+            PrototypeSpec::Intrinsic(IntrinsicIdentity::Function(id)) => {
+                Some(HeapReference::Function(self.allocated.function(id)))
+            }
+        }
+    }
+}
 
 /// Fully typed identities allocated before the Realm becomes observable.
 pub(super) struct AllocatedIntrinsics {

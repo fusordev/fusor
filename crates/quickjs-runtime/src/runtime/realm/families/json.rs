@@ -1,9 +1,14 @@
 //! `%JSON%` object and method declarations.
 
-use super::{FunctionSink, ObjectSink, object, object_prototype, ordinary};
+use super::{
+    FunctionSink, ObjectSink, PropertySink, data, method, object, object_prototype, ordinary,
+};
 use crate::runtime::realm::{
-    NativeFunctionKind, PredefinedAtom,
-    schema::{IntrinsicNameSpec, IntrinsicObjectId, IntrinsicObjectKind, RealmNameId},
+    IDENTITY_PROPERTY, METHOD_PROPERTY, NativeFunctionKind, PredefinedAtom,
+    schema::{
+        IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicObjectId,
+        IntrinsicObjectKind, IntrinsicStringSpec, IntrinsicValueSpec, RealmNameId,
+    },
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -39,4 +44,40 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     ] {
         visit(ordinary(kind, name, length));
     }
+}
+
+pub(super) fn visit_properties(visit: PropertySink<'_>) {
+    let json = IntrinsicIdentity::Object(IntrinsicObjectId::Json);
+    for (key, kind) in [
+        (
+            IntrinsicKeySpec::InternedString(RealmNameId::JsonIsRawJson),
+            NativeFunctionKind::JsonIsRawJson,
+        ),
+        (
+            IntrinsicKeySpec::InternedString(RealmNameId::JsonParse),
+            NativeFunctionKind::JsonParse,
+        ),
+        (
+            IntrinsicKeySpec::PredefinedString(PredefinedAtom::RawJson),
+            NativeFunctionKind::JsonRawJson,
+        ),
+        (
+            IntrinsicKeySpec::InternedString(RealmNameId::JsonStringify),
+            NativeFunctionKind::JsonStringify,
+        ),
+    ] {
+        visit(method(json, key, kind));
+    }
+    visit(data(
+        json,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        IDENTITY_PROPERTY,
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Predefined(PredefinedAtom::Json)),
+    ));
+    visit(data(
+        IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Json),
+        METHOD_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::Json),
+    ));
 }
