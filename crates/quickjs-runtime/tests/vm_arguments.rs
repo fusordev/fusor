@@ -157,6 +157,112 @@ fn strict_arguments_use_the_generic_array_values_iterator() {
 }
 
 #[test]
+fn sloppy_arguments_alias_simple_parameters_and_expose_the_mapped_shape() {
+    let result = string_result(
+        "function inspect(a,b){const c=Object.getOwnPropertyDescriptor(arguments,'callee');\
+            a=5;const fromBinding=arguments[0];arguments[1]=6;arguments[2]=9;\
+            return Object.prototype.toString.call(arguments)+'|'+fromBinding+'|'+b+'|'+\
+                (c.value===inspect)+c.writable+c.enumerable+c.configurable+'|'+arguments[2];}\
+            return inspect(1,2,3);",
+    );
+    assert_eq!(result, "[object Arguments]|5|6|truetruefalsetrue|9");
+}
+
+#[test]
+fn mapped_definitions_update_or_sever_parameter_aliases_exactly() {
+    let result = string_result(
+        "function inspect(a,b,c,d){a=10;const own=Object.getOwnPropertyDescriptor(arguments,'0').value;\
+            Object.defineProperty(arguments,'0',{value:11});const valueWrite=a;a=12;const kept=arguments[0];\
+            Object.defineProperty(arguments,'1',{writable:false});b=20;const frozen=arguments[1];\
+            Object.defineProperty(arguments,'2',{get(){return 30},configurable:true});c=31;const accessor=arguments[2];\
+            delete arguments[3];d=40;arguments[3]=41;\
+            return own+'|'+valueWrite+'|'+kept+'|'+frozen+'|'+accessor+'|'+d+'|'+arguments[3];}\
+            return inspect(1,2,3,4);",
+    );
+    assert_eq!(result, "10|11|12|2|30|40|41");
+}
+
+#[test]
+fn mapped_set_honours_receiver_identity_and_survives_the_call_frame() {
+    let result = string_result(
+        "function inspect(a){const receiver={};const separate=Reflect.set(arguments,'0',7,receiver);\
+            const unchanged=a;const direct=Reflect.set(arguments,'0',8);\
+            return [arguments,function(){return a;},separate,direct,unchanged,receiver[0]];}\
+            const result=inspect(1);result[0][0]=9;\
+            return result[1]()+'|'+result[2]+'|'+result[3]+'|'+result[4]+'|'+result[5];",
+    );
+    assert_eq!(result, "9|true|true|1|7");
+}
+
+#[test]
+fn a_rooted_mapped_arguments_object_keeps_its_parameter_cell_through_collection() {
+    let producer = TestCompiler
+        .compile(OrdinaryDynamicFunctionSource::new(
+            Arc::from([]),
+            JsString::from_utf8(
+                "function inspect(a){return [arguments,function(){return a;}];}return inspect(1);",
+            )
+            .expect("producer body"),
+        ))
+        .expect("producer authority");
+    let consumer = TestCompiler
+        .compile(OrdinaryDynamicFunctionSource::new(
+            Arc::from([]),
+            JsString::from_utf8(
+                "'use strict';const pair=arguments[0];pair[0][0]=13;return pair[1]();",
+            )
+            .expect("consumer body"),
+        ))
+        .expect("consumer authority");
+
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let (pair, consumer) = {
+        let mut context = runtime.context(&realm).expect("context");
+        let producer = context
+            .execute_dynamic_function_script(producer, ExecutionLimits::default())
+            .expect("producer")
+            .into_function()
+            .expect("producer function");
+        let pair = context
+            .call(&producer, &[], ExecutionLimits::default())
+            .expect("mapped pair");
+        let consumer = context
+            .execute_dynamic_function_script(consumer, ExecutionLimits::default())
+            .expect("consumer")
+            .into_function()
+            .expect("consumer function");
+        (pair, consumer)
+    };
+    runtime
+        .collect_cycles()
+        .expect("rooted mapped arguments collection");
+
+    let mut context = runtime.context(&realm).expect("context after collection");
+    let result = context
+        .call(&consumer, &[pair], ExecutionLimits::default())
+        .expect("consumer completion");
+    assert!(
+        result
+            .as_number()
+            .expect("live result")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(13))
+    );
+}
+
+#[test]
+fn sealing_preserves_mapping_while_freezing_snapshots_and_detaches() {
+    let result = string_result(
+        "function sealed(a){Object.seal(arguments);a=2;return arguments[0];}\
+            function frozen(a){a=3;Object.freeze(arguments);a=4;\
+                return arguments[0]+'|'+Object.getOwnPropertyDescriptor(arguments,'0').writable;}\
+            return sealed(1)+'|'+frozen(1);",
+    );
+    assert_eq!(result, "2|3|false");
+}
+
+#[test]
 fn arguments_property_limit_failure_is_atomic() {
     let authority = TestCompiler
         .compile(OrdinaryDynamicFunctionSource::new(
@@ -198,5 +304,68 @@ fn arguments_property_limit_failure_is_atomic() {
             observed,
         }) if limit == property_limit && observed == property_limit + 3
     ));
+    assert_eq!(context.runtime_usage(), before);
+}
+
+#[test]
+fn mapped_arguments_binding_cell_limit_failure_is_atomic() {
+    let authority = TestCompiler
+        .compile(OrdinaryDynamicFunctionSource::new(
+            Arc::from([]),
+            JsString::from_utf8("function inspect(a){return arguments.length;}return inspect;")
+                .expect("body"),
+        ))
+        .expect("dynamic Function authority");
+
+    let binding_cell_limit = {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("probe runtime");
+        let realm = runtime.create_realm().expect("probe realm");
+        let mut context = runtime.context(&realm).expect("probe context");
+        let outer = context
+            .execute_dynamic_function_script(Arc::clone(&authority), ExecutionLimits::default())
+            .expect("probe dynamic Function")
+            .into_function()
+            .expect("probe outer function");
+        let function = context
+            .call(&outer, &[], ExecutionLimits::default())
+            .expect("probe inspect creation")
+            .into_function()
+            .expect("probe inspect function");
+        let limit = context.runtime_usage().binding_cells();
+        drop(function);
+        limit
+    };
+
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_binding_cells(binding_cell_limit))
+            .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let outer = context
+        .execute_dynamic_function_script(authority, ExecutionLimits::default())
+        .expect("dynamic Function")
+        .into_function()
+        .expect("outer function");
+    let function = context
+        .call(&outer, &[], ExecutionLimits::default())
+        .expect("inspect creation")
+        .into_function()
+        .expect("inspect function");
+    let before = context.runtime_usage();
+    let argument = context.number(JsNumber::from_i32(1));
+    let failure = context
+        .call(&function, &[argument], ExecutionLimits::default())
+        .expect_err("mapped arguments must exceed the binding-cell limit");
+    assert!(
+        matches!(
+            failure,
+            ExecutionError::LimitExceeded {
+                resource: RuntimeResource::BindingCells,
+                limit,
+                observed,
+            } if limit == binding_cell_limit && observed == binding_cell_limit + 1
+        ),
+        "unexpected failure: {failure:?}"
+    );
     assert_eq!(context.runtime_usage(), before);
 }

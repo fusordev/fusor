@@ -31,7 +31,7 @@ use std::{
 use crate::{
     ArrayIndex, Atom, AtomKind, JsBigInt, JsNumber, JsString, PropertyKey, PropertyLayout,
     PropertyLayoutKind,
-    ids::FunctionId,
+    ids::{BindingCellId, FunctionId},
     value::{HeapReference, StoredValue},
 };
 
@@ -1004,10 +1004,44 @@ impl ArrayState {
     }
 }
 
+pub(crate) struct ArgumentsState {
+    parameter_map: Vec<Option<BindingCellId>>,
+}
+
+impl ArgumentsState {
+    pub(crate) const fn unmapped() -> Self {
+        Self {
+            parameter_map: Vec::new(),
+        }
+    }
+
+    pub(crate) fn mapped(parameter_map: Vec<Option<BindingCellId>>) -> Self {
+        Self { parameter_map }
+    }
+
+    pub(crate) fn cell(&self, index: u32) -> Option<BindingCellId> {
+        self.parameter_map.get(index as usize).copied().flatten()
+    }
+
+    pub(crate) fn cells(&self) -> impl Iterator<Item = BindingCellId> + '_ {
+        self.parameter_map.iter().copied().flatten()
+    }
+
+    pub(crate) fn detach(&mut self, index: u32) -> Option<BindingCellId> {
+        self.parameter_map
+            .get_mut(index as usize)
+            .and_then(Option::take)
+    }
+
+    pub(crate) fn mapping_len(&self) -> usize {
+        self.parameter_map.len()
+    }
+}
+
 pub(crate) enum HeapObjectKind {
     Ordinary,
-    /// An unmapped arguments object with the `[[ParameterMap]]` brand.
-    Arguments,
+    /// An ordinary or exotic arguments object with `[[ParameterMap]]` state.
+    Arguments(ArgumentsState),
     /// An ordinary null-prototype object with the `[[IsRawJSON]]` slot.
     RawJson,
     Array(ArrayState),
@@ -1023,7 +1057,7 @@ impl HeapObjectKind {
     pub(crate) const fn boxed_primitive(&self) -> Option<&BoxedPrimitive> {
         match self {
             Self::Ordinary
-            | Self::Arguments
+            | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1038,7 +1072,7 @@ impl HeapObjectKind {
         match self {
             Self::Array(state) => Some(state),
             Self::Ordinary
-            | Self::Arguments
+            | Self::Arguments(_)
             | Self::RawJson
             | Self::Error
             | Self::BoxedPrimitive(_)
@@ -1052,7 +1086,7 @@ impl HeapObjectKind {
         match self {
             Self::Array(state) => Some(state),
             Self::Ordinary
-            | Self::Arguments
+            | Self::Arguments(_)
             | Self::RawJson
             | Self::Error
             | Self::BoxedPrimitive(_)
@@ -1066,7 +1100,7 @@ impl HeapObjectKind {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
             Self::Ordinary
-            | Self::Arguments
+            | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1080,7 +1114,7 @@ impl HeapObjectKind {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
             Self::Ordinary
-            | Self::Arguments
+            | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1094,7 +1128,7 @@ impl HeapObjectKind {
         match self {
             Self::ArrayIterator(iterator) => Some(iterator),
             Self::Ordinary
-            | Self::Arguments
+            | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1108,7 +1142,7 @@ impl HeapObjectKind {
         match self {
             Self::ArrayIterator(iterator) => Some(iterator),
             Self::Ordinary
-            | Self::Arguments
+            | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1122,7 +1156,7 @@ impl HeapObjectKind {
         match self {
             Self::StringIterator(iterator) => Some(iterator),
             Self::Ordinary
-            | Self::Arguments
+            | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1136,7 +1170,7 @@ impl HeapObjectKind {
         match self {
             Self::StringIterator(iterator) => Some(iterator),
             Self::Ordinary
-            | Self::Arguments
+            | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1166,7 +1200,19 @@ impl HeapObject {
     #[must_use]
     pub(crate) const fn arguments(record: ObjectRecord) -> Self {
         Self {
-            kind: HeapObjectKind::Arguments,
+            kind: HeapObjectKind::Arguments(ArgumentsState::unmapped()),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn mapped_arguments(
+        record: ObjectRecord,
+        parameter_map: Vec<Option<BindingCellId>>,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::Arguments(ArgumentsState::mapped(parameter_map)),
             record,
             public_roots: 0,
         }
@@ -1251,7 +1297,65 @@ impl HeapObject {
 
     #[must_use]
     pub(crate) const fn is_arguments(&self) -> bool {
-        matches!(self.kind, HeapObjectKind::Arguments)
+        matches!(self.kind, HeapObjectKind::Arguments(_))
+    }
+
+    pub(crate) fn arguments_cell(&self, index: u32) -> Option<BindingCellId> {
+        match &self.kind {
+            HeapObjectKind::Arguments(state) => state.cell(index),
+            HeapObjectKind::Ordinary
+            | HeapObjectKind::RawJson
+            | HeapObjectKind::Array(_)
+            | HeapObjectKind::Error
+            | HeapObjectKind::BoxedPrimitive(_)
+            | HeapObjectKind::ForInIterator(_)
+            | HeapObjectKind::ArrayIterator(_)
+            | HeapObjectKind::StringIterator(_) => None,
+        }
+    }
+
+    pub(crate) fn arguments_cells(&self) -> impl Iterator<Item = BindingCellId> + '_ {
+        match &self.kind {
+            HeapObjectKind::Arguments(state) => Some(state.cells()),
+            HeapObjectKind::Ordinary
+            | HeapObjectKind::RawJson
+            | HeapObjectKind::Array(_)
+            | HeapObjectKind::Error
+            | HeapObjectKind::BoxedPrimitive(_)
+            | HeapObjectKind::ForInIterator(_)
+            | HeapObjectKind::ArrayIterator(_)
+            | HeapObjectKind::StringIterator(_) => None,
+        }
+        .into_iter()
+        .flatten()
+    }
+
+    pub(crate) fn detach_arguments_cell(&mut self, index: u32) -> Option<BindingCellId> {
+        match &mut self.kind {
+            HeapObjectKind::Arguments(state) => state.detach(index),
+            HeapObjectKind::Ordinary
+            | HeapObjectKind::RawJson
+            | HeapObjectKind::Array(_)
+            | HeapObjectKind::Error
+            | HeapObjectKind::BoxedPrimitive(_)
+            | HeapObjectKind::ForInIterator(_)
+            | HeapObjectKind::ArrayIterator(_)
+            | HeapObjectKind::StringIterator(_) => None,
+        }
+    }
+
+    pub(crate) fn arguments_mapping_len(&self) -> usize {
+        match &self.kind {
+            HeapObjectKind::Arguments(state) => state.mapping_len(),
+            HeapObjectKind::Ordinary
+            | HeapObjectKind::RawJson
+            | HeapObjectKind::Array(_)
+            | HeapObjectKind::Error
+            | HeapObjectKind::BoxedPrimitive(_)
+            | HeapObjectKind::ForInIterator(_)
+            | HeapObjectKind::ArrayIterator(_)
+            | HeapObjectKind::StringIterator(_) => 0,
+        }
     }
 
     #[must_use]

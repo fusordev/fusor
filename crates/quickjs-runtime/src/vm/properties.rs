@@ -551,16 +551,41 @@ pub(super) fn lookup_heap_property(
             .into());
         }
         remaining -= 1;
-        if let Some(property) = string_exotic_index_property(runtime, reference, key)? {
+        if let Some(property) = heap_own_property(runtime, reference, key)? {
             return Ok(Some(property));
         }
-        let record = runtime.object_record(reference)?;
-        if let Some(property) = record.own_property(key) {
-            return Ok(Some(property));
-        }
-        current = record.prototype();
+        current = runtime.object_record(reference)?.prototype();
     }
     Ok(None)
+}
+
+pub(super) fn heap_own_property(
+    runtime: &Runtime,
+    reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<Option<OwnProperty>, ExecutionError> {
+    if let Some(property) = string_exotic_index_property(runtime, reference, key)? {
+        return Ok(Some(property));
+    }
+    let Some(mut property) = runtime.object_record(reference)?.own_property(key) else {
+        return Ok(None);
+    };
+    if let HeapReference::Object(object) = reference
+        && let Some(value) = runtime.mapped_arguments_value(object, key)?
+    {
+        let OwnProperty::Data {
+            layout: _,
+            value: stored,
+        } = &mut property
+        else {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "mapped arguments property remains a data property",
+            }
+            .into());
+        };
+        *stored = value;
+    }
+    Ok(Some(property))
 }
 
 pub(super) fn string_exotic_index_property(
@@ -859,6 +884,10 @@ pub(super) fn write_static_property(
         StoredValue::Function(function) => HeapReference::Function(*function),
         StoredValue::Object(object) => HeapReference::Object(*object),
     };
+    let mapped_cell = match reference {
+        HeapReference::Object(object) => runtime.mapped_arguments_cell(object, &key)?,
+        HeapReference::Function(_) => None,
+    };
     let array = match reference {
         HeapReference::Object(object) if runtime.is_array_object(object)? => Some(object),
         HeapReference::Function(_) | HeapReference::Object(_) => None,
@@ -886,7 +915,7 @@ pub(super) fn write_static_property(
     };
     let own = match array {
         Some(array) => runtime.array_own_property(array, &key)?,
-        None => runtime.object_record(reference)?.own_property(&key),
+        None => heap_own_property(runtime, reference, &key)?,
     };
     if let Some(own) = own {
         match own {
@@ -898,6 +927,9 @@ pub(super) fn write_static_property(
                         let outcome =
                             runtime.define_array_data_property(array, key, layout, value)?;
                         return Ok(array_define_write_outcome(outcome, strict));
+                    }
+                    if let Some(cell) = mapped_cell {
+                        runtime.replace_mapped_arguments_cell_value(cell, value.duplicate())?;
                     }
                     let replaced = runtime
                         .object_record_mut(reference)?
@@ -1000,6 +1032,10 @@ pub(super) fn define_static_property(
             return Ok(PropertyWriteOutcome::Failed(PropertyFailure::NotObject));
         }
     };
+    let mapped_cell = match reference {
+        HeapReference::Object(object) => runtime.mapped_arguments_cell(object, &key)?,
+        HeapReference::Function(_) => None,
+    };
     if let HeapReference::Object(object) = reference
         && runtime.is_array_object(object)?
     {
@@ -1028,8 +1064,10 @@ pub(super) fn define_static_property(
         );
     }
     let (exists, extensible) = {
-        let record = runtime.object_record(reference)?;
-        (record.own_property(&key), record.is_extensible())
+        (
+            heap_own_property(runtime, reference, &key)?,
+            runtime.object_record(reference)?.is_extensible(),
+        )
     };
     // An object-literal or class-field definition is
     // `CreateDataPropertyOrThrow`, whose descriptor is a fully writable,
@@ -1045,7 +1083,14 @@ pub(super) fn define_static_property(
         None => validate_and_apply_new(&definition, extensible),
     };
     match decision {
-        DefinitionDecision::Unchanged => Ok(PropertyWriteOutcome::Complete),
+        DefinitionDecision::Unchanged => {
+            if let Some(cell) = mapped_cell
+                && let Some(value) = definition.present_data_value()
+            {
+                runtime.replace_mapped_arguments_cell_value(cell, value.duplicate())?;
+            }
+            Ok(PropertyWriteOutcome::Complete)
+        }
         DefinitionDecision::Rejected if exists.is_some() => Ok(PropertyWriteOutcome::Failed(
             PropertyFailure::NotConfigurable,
         )),
@@ -1064,6 +1109,11 @@ pub(super) fn define_static_property(
                 .into());
             }
             runtime.collection_pending = true;
+            if let Some(cell) = mapped_cell
+                && let Some(value) = definition.present_data_value()
+            {
+                runtime.replace_mapped_arguments_cell_value(cell, value.duplicate())?;
+            }
             Ok(PropertyWriteOutcome::Complete)
         }
         DefinitionDecision::Create(property) => {
@@ -1524,6 +1574,10 @@ pub(super) fn advance_copy_data_properties(
 /// is made by `ValidateAndApplyPropertyDescriptor`, and only the mutation
 /// happens here. An array index routes through the exotic array define so the
 /// `length` invariant is maintained.
+#[allow(
+    clippy::too_many_lines,
+    reason = "ordinary descriptor authority and mapped-arguments post-commit semantics stay auditable together"
+)]
 pub(super) fn define_own_property(
     runtime: &mut Runtime,
     base: &StoredValue,
@@ -1546,6 +1600,12 @@ pub(super) fn define_own_property(
             ));
         }
     };
+    let mapped_object = match reference {
+        HeapReference::Object(object) => runtime
+            .mapped_arguments_cell(object, &key)?
+            .map(|cell| (object, cell)),
+        HeapReference::Function(_) => None,
+    };
 
     // A present Array `length` value must first pass the resumable two-conversion
     // ArraySetLength validation. Attribute-only and accessor definitions can be
@@ -1561,16 +1621,25 @@ pub(super) fn define_own_property(
         ));
     }
 
-    let (existing, extensible) = {
-        let record = runtime.object_record(reference)?;
-        (record.own_property(&key), record.is_extensible())
-    };
+    if let Some((object, _)) = mapped_object
+        && definition.requested_writable() == Some(false)
+        && definition.present_data_value().is_none()
+    {
+        runtime.synchronize_mapped_arguments_property(object, &key)?;
+    }
+    let (existing, extensible) = (
+        heap_own_property(runtime, reference, &key)?,
+        runtime.object_record(reference)?.is_extensible(),
+    );
     let decision = match &existing {
         Some(existing) => validate_and_apply_existing(definition, existing),
         None => validate_and_apply_new(definition, extensible),
     };
     match decision {
-        DefinitionDecision::Unchanged => Ok(PropertyDefinitionOutcome::Complete),
+        DefinitionDecision::Unchanged => {
+            apply_mapped_arguments_definition(runtime, mapped_object, &key, definition)?;
+            Ok(PropertyDefinitionOutcome::Complete)
+        }
         DefinitionDecision::Rejected if existing.is_some() => Ok(
             PropertyDefinitionOutcome::Failed(PropertyFailure::NotConfigurable),
         ),
@@ -1589,6 +1658,7 @@ pub(super) fn define_own_property(
                 .into());
             }
             runtime.collection_pending = true;
+            apply_mapped_arguments_definition(runtime, mapped_object, &key, definition)?;
             Ok(PropertyDefinitionOutcome::Complete)
         }
         DefinitionDecision::Create(property) => {
@@ -1622,8 +1692,33 @@ pub(super) fn define_own_property(
                     }
                 });
             }
-            runtime.append_own_property(reference, key, property)?;
+            runtime.append_own_property(reference, key.clone(), property)?;
+            apply_mapped_arguments_definition(runtime, mapped_object, &key, definition)?;
             Ok(PropertyDefinitionOutcome::Complete)
         }
     }
+}
+
+fn apply_mapped_arguments_definition(
+    runtime: &mut Runtime,
+    mapped: Option<(ObjectId, BindingCellId)>,
+    key: &PropertyKey,
+    definition: &PropertyDefinition,
+) -> Result<(), ExecutionError> {
+    let Some((object, cell)) = mapped else {
+        return Ok(());
+    };
+    if definition.is_accessor_descriptor() {
+        let detached = runtime.detach_mapped_arguments_property(object, key)?;
+        debug_assert_eq!(detached, Some(cell));
+        return Ok(());
+    }
+    if let Some(value) = definition.present_data_value() {
+        runtime.replace_mapped_arguments_cell_value(cell, value.duplicate())?;
+    }
+    if definition.requested_writable() == Some(false) {
+        let detached = runtime.detach_mapped_arguments_property(object, key)?;
+        debug_assert_eq!(detached, Some(cell));
+    }
+    Ok(())
 }

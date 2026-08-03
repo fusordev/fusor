@@ -169,6 +169,43 @@ impl PropertyDefinition {
             }
         )
     }
+
+    /// Returns the requested data value, when that field is present.
+    pub(crate) const fn present_data_value(&self) -> Option<&StoredValue> {
+        match &self.fields {
+            DefinitionFields::Data {
+                value: Requested::Present(value),
+                ..
+            } => Some(value),
+            DefinitionFields::Generic
+            | DefinitionFields::Data {
+                value: Requested::Absent,
+                ..
+            }
+            | DefinitionFields::Accessor { .. } => None,
+        }
+    }
+
+    /// Returns the requested writable attribute for a data descriptor.
+    pub(crate) const fn requested_writable(&self) -> Option<bool> {
+        match &self.fields {
+            DefinitionFields::Data {
+                writable: Requested::Present(writable),
+                ..
+            } => Some(*writable),
+            DefinitionFields::Generic
+            | DefinitionFields::Data {
+                writable: Requested::Absent,
+                ..
+            }
+            | DefinitionFields::Accessor { .. } => None,
+        }
+    }
+
+    /// Returns whether this is an accessor descriptor.
+    pub(crate) const fn is_accessor_descriptor(&self) -> bool {
+        self.is_accessor()
+    }
 }
 
 /// The result of validating a descriptor against an object's current state.

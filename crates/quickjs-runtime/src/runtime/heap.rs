@@ -26,13 +26,13 @@
 //! Realm-owned objects, prototypes, boxed primitives, and ordinary properties.
 
 use super::{
-    Arc, Atom, AtomError, BoxedPrimitive, ErrorIntrinsicKind, ExceptionKind, FunctionId,
-    FunctionImplementation, HandleError, HandleKind, HeapObject, HeapReference, IntegrityLevel,
-    JsBigInt, JsNumber, JsString, NativeFunction, NativeFunctionKind, ObjectId, ObjectRecord,
-    OwnProperty, PredefinedAtom, PropertyDeletion, PropertyKey, PropertyLayout, PropertyLayoutKind,
-    RealmId, RealmIntrinsics, ReleaseMailbox, Runtime, RuntimeResource, SetPrototypeOutcome,
-    StoredValue, array_length_from_number, check_execution_limit, stale_heap_reference,
-    usize_to_u64,
+    Arc, Atom, AtomError, BindingCell, BoxedPrimitive, ErrorIntrinsicKind, ExceptionKind,
+    FunctionId, FunctionImplementation, HandleError, HandleKind, HeapObject, HeapReference,
+    IntegrityLevel, JsBigInt, JsNumber, JsString, NativeFunction, NativeFunctionKind, ObjectId,
+    ObjectRecord, OwnProperty, PredefinedAtom, PropertyDeletion, PropertyKey, PropertyLayout,
+    PropertyLayoutKind, RealmId, RealmIntrinsics, ReleaseMailbox, Runtime, RuntimeResource,
+    SetPrototypeOutcome, SlotValue, StoredValue, array_length_from_number, check_execution_limit,
+    stale_heap_reference, usize_to_u64,
 };
 
 #[derive(Clone, Copy)]
@@ -723,6 +723,11 @@ impl Runtime {
         target: HeapReference,
         level: IntegrityLevel,
     ) -> Result<(), crate::EngineFault> {
+        if level == IntegrityLevel::Frozen
+            && let HeapReference::Object(object) = target
+        {
+            self.synchronize_and_detach_mapped_arguments(object)?;
+        }
         let record = self.object_record_mut(target)?;
         record.prevent_extensions();
         match level {
@@ -766,10 +771,48 @@ impl Runtime {
     ) -> Result<PropertyDeletion, crate::EngineFault> {
         let deletion = self.object_record_mut(target)?.delete_own_property(key);
         if deletion == PropertyDeletion::Deleted {
+            if let HeapReference::Object(object) = target {
+                self.detach_mapped_arguments_property(object, key)?;
+            }
             self.object_properties = self.object_properties.saturating_sub(1);
             self.collection_pending = true;
         }
         Ok(deletion)
+    }
+
+    fn synchronize_and_detach_mapped_arguments(
+        &mut self,
+        object: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        let mapping_len = self.mapped_arguments_mapping_len(object)?;
+        for index in 0..mapping_len {
+            let index = u32::try_from(index).map_err(|_| crate::EngineFault::RuntimeInvariant {
+                message: "mapped arguments index fits u32",
+            })?;
+            let key = PropertyKey::from_index(crate::ArrayIndex::new(index).ok_or(
+                crate::EngineFault::RuntimeInvariant {
+                    message: "mapped arguments index is an array index",
+                },
+            )?);
+            let _ = self.mapped_arguments_value(object, &key)?;
+        }
+        for index in 0..mapping_len {
+            let index = u32::try_from(index).map_err(|_| crate::EngineFault::RuntimeInvariant {
+                message: "mapped arguments index fits u32",
+            })?;
+            let key = PropertyKey::from_index(crate::ArrayIndex::new(index).ok_or(
+                crate::EngineFault::RuntimeInvariant {
+                    message: "mapped arguments index is an array index",
+                },
+            )?);
+            if self.mapped_arguments_cell(object, &key)?.is_none() {
+                continue;
+            }
+            self.synchronize_mapped_arguments_property(object, &key)?;
+            let detached = self.detach_mapped_arguments_property(object, &key)?;
+            debug_assert!(detached.is_some());
+        }
+        Ok(())
     }
 
     pub(crate) fn object_record(
@@ -1333,6 +1376,142 @@ impl Runtime {
         Ok(object)
     }
 
+    /// Creates the arguments exotic object used by a sloppy function with a
+    /// simple parameter list.
+    pub(crate) fn allocate_mapped_arguments_object(
+        &mut self,
+        realm: RealmId,
+        callee: FunctionId,
+        values: Vec<StoredValue>,
+        mapped_count: usize,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if mapped_count > values.len() {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "mapped arguments do not exceed supplied arguments",
+            }
+            .into());
+        }
+        let property_count =
+            values
+                .len()
+                .checked_add(3)
+                .ok_or(crate::ExecutionError::LimitExceeded {
+                    resource: RuntimeResource::ObjectProperties,
+                    limit: self.limits.max_object_properties,
+                    observed: u64::MAX,
+                })?;
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties
+                .saturating_add(usize_to_u64(property_count)),
+        )?;
+        check_execution_limit(
+            RuntimeResource::BindingCells,
+            self.limits.max_binding_cells,
+            usize_to_u64(self.cells.len()).saturating_add(usize_to_u64(mapped_count)),
+        )?;
+        let length =
+            u32::try_from(values.len()).map_err(|_| crate::ExecutionError::LimitExceeded {
+                resource: RuntimeResource::ObjectProperties,
+                limit: u64::from(u32::MAX - 1),
+                observed: usize_to_u64(values.len()),
+            })?;
+        let intrinsics = self.arguments_intrinsics(realm)?;
+        if !self.functions.contains(callee) {
+            return Err(stale_heap_reference(HeapReference::Function(callee)).into());
+        }
+
+        let mut mapped_values = Vec::new();
+        mapped_values.try_reserve_exact(mapped_count).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: mapped_count,
+            }
+        })?;
+        mapped_values.extend(values.iter().take(mapped_count).map(StoredValue::duplicate));
+        let record =
+            self.build_mapped_arguments_record(intrinsics, callee, values, length, property_count)?;
+
+        self.commit_mapped_arguments_object(record, mapped_values, property_count)
+    }
+
+    fn commit_mapped_arguments_object(
+        &mut self,
+        record: ObjectRecord,
+        mapped_values: Vec<StoredValue>,
+        property_count: usize,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let mapped_count = mapped_values.len();
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.cells.try_reserve(mapped_count).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: mapped_count,
+            }
+        })?;
+        let mut parameter_map = Vec::new();
+        parameter_map.try_reserve_exact(mapped_count).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: mapped_count,
+            }
+        })?;
+        let mut rollback_cells = Vec::new();
+        rollback_cells
+            .try_reserve_exact(mapped_count)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: mapped_count,
+            })?;
+
+        for value in mapped_values {
+            let Ok(cell) = self.cells.try_insert(BindingCell {
+                value: SlotValue::Value(value),
+            }) else {
+                for cell in rollback_cells {
+                    let removed = self.cells.remove(cell);
+                    debug_assert!(removed.is_some());
+                }
+                return Err(crate::ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::BindingCells,
+                    additional: 1,
+                });
+            };
+            parameter_map.push(Some(cell));
+            rollback_cells.push(cell);
+        }
+
+        let Ok(object) = self
+            .objects
+            .try_insert(HeapObject::mapped_arguments(record, parameter_map))
+        else {
+            for cell in rollback_cells {
+                let removed = self.cells.remove(cell);
+                debug_assert!(removed.is_some());
+            }
+            return Err(crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            });
+        };
+        self.object_properties = self
+            .object_properties
+            .saturating_add(usize_to_u64(property_count));
+        self.collection_pending = true;
+        Ok(object)
+    }
+
     fn arguments_intrinsics(
         &self,
         realm: RealmId,
@@ -1360,6 +1539,9 @@ impl Runtime {
             if !self.functions.contains(function) {
                 return Err(stale_heap_reference(HeapReference::Function(function)).into());
             }
+        }
+        if !self.objects.contains(state.object_prototype) {
+            return Err(stale_heap_reference(HeapReference::Object(state.object_prototype)).into());
         }
         Ok(ArgumentsIntrinsics {
             object_prototype: state.object_prototype,
@@ -1420,6 +1602,60 @@ impl Runtime {
                 PropertyLayout::accessor(false, false),
                 Some(intrinsics.throw_type_error),
                 Some(intrinsics.throw_type_error),
+            )
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        Ok(record)
+    }
+
+    fn build_mapped_arguments_record(
+        &self,
+        intrinsics: ArgumentsIntrinsics,
+        callee: FunctionId,
+        values: Vec<StoredValue>,
+        length: u32,
+        property_count: usize,
+    ) -> Result<ObjectRecord, crate::ExecutionError> {
+        let mut record =
+            ObjectRecord::empty(Some(HeapReference::Object(intrinsics.object_prototype)));
+        record
+            .try_reserve_data(property_count)
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        for (index, value) in values.into_iter().enumerate() {
+            let index = u32::try_from(index).map_err(|_| crate::EngineFault::RuntimeInvariant {
+                message: "preflighted arguments index fits u32",
+            })?;
+            let index =
+                crate::ArrayIndex::new(index).ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "arguments index does not use the array-length sentinel",
+                })?;
+            record
+                .append_data(
+                    PropertyKey::from_index(index),
+                    PropertyLayout::data(true, true, true),
+                    value,
+                )
+                .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        }
+        let ordinary = PropertyLayout::data(true, false, true);
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::Length),
+                ordinary,
+                StoredValue::Number(JsNumber::from_u32(length)),
+            )
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        record
+            .append_data(
+                self.predefined_symbol_property_key(PredefinedAtom::SymbolIterator),
+                ordinary,
+                StoredValue::Function(intrinsics.array_values),
+            )
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::Callee),
+                ordinary,
+                StoredValue::Function(callee),
             )
             .map_err(|_| arguments_property_allocation_failed(property_count))?;
         Ok(record)

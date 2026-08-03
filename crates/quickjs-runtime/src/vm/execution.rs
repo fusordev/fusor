@@ -145,7 +145,7 @@ pub(super) fn plan_frame(
                 instruction.decoded().instruction().opcode(),
                 instruction.decoded().instruction().operands()
             ),
-            (FinalOpcode::SpecialObject, Operands::U8(0))
+            (FinalOpcode::SpecialObject, Operands::U8(0 | 1))
         )
     });
     let frame_values = argument_count
@@ -575,7 +575,7 @@ pub(super) fn execute_one(
             }
         }
         FinalOpcode::SpecialObject => {
-            let Operands::U8(0) = operands else {
+            let Operands::U8(arguments_kind @ (0 | 1)) = operands else {
                 return unsupported_dispatch(opcode);
             };
             let arguments =
@@ -586,7 +586,20 @@ pub(super) fn execute_one(
                         message: "arguments object was initialized more than once",
                     })?;
             let realm = code(runtime, frame.code)?.realm;
-            let object = runtime.allocate_unmapped_arguments_object(realm, arguments)?;
+            let object = if arguments_kind == 0 {
+                runtime.allocate_unmapped_arguments_object(realm, arguments)?
+            } else {
+                let mapped_count = frame.arguments.len().min(arguments.len());
+                preflight_mapped_arguments_frame(frame, mapped_count)?;
+                let object = runtime.allocate_mapped_arguments_object(
+                    realm,
+                    frame.function,
+                    arguments,
+                    mapped_count,
+                )?;
+                install_mapped_arguments_cells(runtime, frame, object, mapped_count)?;
+                object
+            };
             push(frame, StoredValue::Object(object));
         }
         FinalOpcode::Object => {
@@ -2046,4 +2059,94 @@ pub(super) fn execute_one(
                 pc: source_pc,
             })?;
     Ok(Step::Continue)
+}
+
+fn preflight_mapped_arguments_frame(frame: &Frame, mapped_count: usize) -> Result<(), EngineFault> {
+    if frame
+        .arguments
+        .iter()
+        .take(mapped_count)
+        .any(|binding| !matches!(binding, FrameBinding::Direct(SlotValue::Value(_))))
+    {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "mapped arguments are promoted before executable body entry",
+        });
+    }
+    for (own_index, address) in frame.own_cell_bindings.iter().enumerate() {
+        if matches!(address, FrameBindingAddress::Argument(index) if (*index as usize) < mapped_count)
+            && frame.own_cells.get(own_index).copied().flatten().is_some()
+        {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "mapped parameter has not already been captured",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn install_mapped_arguments_cells(
+    runtime: &Runtime,
+    frame: &mut Frame,
+    object: ObjectId,
+    mapped_count: usize,
+) -> Result<(), EngineFault> {
+    for index in 0..mapped_count {
+        let index = u32::try_from(index).map_err(|_| EngineFault::RuntimeInvariant {
+            message: "mapped parameter index fits u32",
+        })?;
+        if runtime
+            .mapped_arguments_cell(
+                object,
+                &PropertyKey::from_index(ArrayIndex::new(index).ok_or(
+                    EngineFault::RuntimeInvariant {
+                        message: "mapped parameter index is an array index",
+                    },
+                )?),
+            )?
+            .is_none()
+        {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "mapped arguments object contains every mapped parameter",
+            });
+        }
+    }
+
+    for index in 0..mapped_count {
+        let index = u32::try_from(index).map_err(|_| EngineFault::RuntimeInvariant {
+            message: "mapped parameter index fits u32",
+        })?;
+        let key = PropertyKey::from_index(ArrayIndex::new(index).ok_or(
+            EngineFault::RuntimeInvariant {
+                message: "mapped parameter index is an array index",
+            },
+        )?);
+        let cell =
+            runtime
+                .mapped_arguments_cell(object, &key)?
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "mapped arguments object contains every mapped parameter",
+                })?;
+        frame.arguments[index as usize] = FrameBinding::Captured(cell);
+    }
+    for (own_index, address) in frame.own_cell_bindings.iter().enumerate() {
+        let FrameBindingAddress::Argument(index) = *address else {
+            continue;
+        };
+        if index as usize >= mapped_count {
+            continue;
+        }
+        let key = PropertyKey::from_index(ArrayIndex::new(index).ok_or(
+            EngineFault::RuntimeInvariant {
+                message: "mapped captured parameter index is an array index",
+            },
+        )?);
+        let cell =
+            runtime
+                .mapped_arguments_cell(object, &key)?
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "captured mapped parameter has a binding cell",
+                })?;
+        frame.own_cells[own_index] = Some(cell);
+    }
+    Ok(())
 }

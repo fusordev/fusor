@@ -434,9 +434,17 @@ Known intentional runtime differences:
   only the strict `special_object 0` form. Execution retains the complete
   supplied argument list under the frame-value ceiling and atomically creates
   the `[[ParameterMap]]`-branded ordinary object with exact indexed, `length`,
-  `@@iterator`, and restricted `callee` properties. Sloppy mapped arguments
-  and explicit collision cases remain fail-closed for the remaining arguments
-  exotic tranche.
+  `@@iterator`, and restricted `callee` properties.
+- [x] Implement sloppy mapped arguments objects for simple unique parameter
+  lists. The sloppy `special_object 1` authority promotes supplied parameter
+  slots into resource-bounded, GC-traced binding cells, installs the exact
+  indexed/`length`/`@@iterator`/`callee` surface, and applies all five arguments
+  exotic internal methods. Descriptor reads substitute live binding values;
+  writes alias only for the arguments object receiver; accessor conversion,
+  non-writable definition, deletion, and freezing sever the map at the exact
+  specification points. Duplicate parameter names and the remaining explicit
+  `arguments` declaration collision stay fail-closed for the next arguments
+  tranche.
 - [x] Implement `JSON.parse` on a realm-owned `%JSON%` object: an iterative
   UTF-16 parser accepts exactly the ECMA-404 JSON grammar, preserves escapes,
   lone surrogates, duplicate-member evaluation, and `__proto__` as data, then

@@ -4982,9 +4982,10 @@ fn verify_supported_opcodes(
             || matches!(
                 (opcode, instruction.operands()),
                 (FinalOpcode::SpecialObject, operands)
-                    if operands != Operands::U8(0)
-                        || executable_kind != CompilerExecutableKind::OrdinaryFunction
-                        || !flow.function_header().mode().is_strict()
+                    if !matches!(
+                        (operands, flow.function_header().mode().is_strict()),
+                        (Operands::U8(0), true) | (Operands::U8(1), false)
+                    ) || executable_kind != CompilerExecutableKind::OrdinaryFunction
                         || arguments_object_count != 1
             )
             || matches!(

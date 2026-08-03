@@ -696,12 +696,29 @@ fn top_level_arrow_arguments_remains_an_unresolved_global() {
 }
 
 #[test]
-fn arrow_nested_in_function_rejects_the_inherited_arguments_binding() {
-    let source = "function outer() { return () => arguments; }";
-    let (feature, span) = unsupported(source, ParseMode::Script);
+fn sloppy_arguments_is_synthesized_and_captured_by_an_arrow() {
+    let plan = script("function outer() { arguments; return () => arguments; }");
+    let outer = plan.executables()[1].id();
+    let arrow = plan.executables()[2].id();
+    let binding = plan
+        .bindings_for(outer)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.is_arguments_object())
+        .expect("arguments binding");
 
-    assert_eq!(feature, UnsupportedFeature::ArgumentsBinding);
-    assert_eq!(&source[span.start as usize..span.end as usize], "arguments");
+    assert!(binding.is_frame_captured());
+    assert!(plan.unresolved_globals_for(outer).unwrap().is_empty());
+    assert!(plan.unresolved_globals_for(arrow).unwrap().is_empty());
+    assert_eq!(plan.resolved_references_for(outer).unwrap().len(), 1);
+    assert_eq!(plan.resolved_references_for(arrow).unwrap().len(), 1);
+    let captures = plan.frame_captures_for(arrow).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].binding(), binding.id());
+    assert_eq!(
+        captures[0].source(),
+        CaptureSource::ParentBinding(binding.id())
+    );
 }
 
 #[test]
@@ -804,10 +821,6 @@ fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
             UnsupportedFeature::DuplicateParameters,
         ),
         ("with (object) value;", UnsupportedFeature::WithStatement),
-        (
-            "function f() { return arguments; }",
-            UnsupportedFeature::ArgumentsBinding,
-        ),
         ("class Box {}", UnsupportedFeature::ClassSyntheticSlots),
     ];
 

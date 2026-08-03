@@ -26,10 +26,10 @@
 //! Array exotic allocation, indexed property definition, and length mutation.
 
 use super::{
-    ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayState, Atom, HeapObject, HeapReference,
-    JsNumber, ObjectId, ObjectRecord, OwnProperty, PredefinedAtom, PropertyKey, PropertyLayout,
-    PropertyLayoutKind, RealmId, Runtime, RuntimeResource, StoredValue, check_execution_limit,
-    stale_heap_reference, usize_to_u64,
+    ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayState, Atom, BindingCellId, HeapObject,
+    HeapReference, JsNumber, ObjectId, ObjectRecord, OwnProperty, PredefinedAtom, PropertyKey,
+    PropertyLayout, PropertyLayoutKind, RealmId, Runtime, RuntimeResource, SlotValue, StoredValue,
+    check_execution_limit, stale_heap_reference, usize_to_u64,
 };
 
 impl Runtime {
@@ -189,6 +189,130 @@ impl Runtime {
         self.objects
             .get(object)
             .map(HeapObject::is_arguments)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+    }
+
+    pub(crate) fn mapped_arguments_cell(
+        &self,
+        object: ObjectId,
+        key: &PropertyKey,
+    ) -> Result<Option<BindingCellId>, crate::EngineFault> {
+        let Some(index) = key.as_index() else {
+            return Ok(None);
+        };
+        self.objects
+            .get(object)
+            .map(|object| object.arguments_cell(index.get()))
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+    }
+
+    pub(crate) fn mapped_arguments_value(
+        &self,
+        object: ObjectId,
+        key: &PropertyKey,
+    ) -> Result<Option<StoredValue>, crate::EngineFault> {
+        let Some(cell) = self.mapped_arguments_cell(object, key)? else {
+            return Ok(None);
+        };
+        match &self
+            .cells
+            .get(cell)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "mapped arguments binding cell",
+                index: cell.index(),
+                generation: cell.generation(),
+            })?
+            .value
+        {
+            SlotValue::Value(value) => Ok(Some(value.duplicate())),
+            SlotValue::Uninitialized => Err(crate::EngineFault::RuntimeInvariant {
+                message: "mapped arguments binding is initialized",
+            }),
+        }
+    }
+
+    pub(crate) fn replace_mapped_arguments_cell_value(
+        &mut self,
+        cell: BindingCellId,
+        value: StoredValue,
+    ) -> Result<(), crate::EngineFault> {
+        self.cells
+            .get_mut(cell)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "mapped arguments binding cell",
+                index: cell.index(),
+                generation: cell.generation(),
+            })?
+            .value = SlotValue::Value(value);
+        self.collection_pending = true;
+        Ok(())
+    }
+
+    pub(crate) fn detach_mapped_arguments_property(
+        &mut self,
+        object: ObjectId,
+        key: &PropertyKey,
+    ) -> Result<Option<BindingCellId>, crate::EngineFault> {
+        let Some(index) = key.as_index() else {
+            return Ok(None);
+        };
+        let detached = self
+            .objects
+            .get_mut(object)
+            .map(|object| object.detach_arguments_cell(index.get()))
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        if detached.is_some() {
+            self.collection_pending = true;
+        }
+        Ok(detached)
+    }
+
+    pub(crate) fn synchronize_mapped_arguments_property(
+        &mut self,
+        object: ObjectId,
+        key: &PropertyKey,
+    ) -> Result<(), crate::EngineFault> {
+        let Some(value) = self.mapped_arguments_value(object, key)? else {
+            return Ok(());
+        };
+        if !self
+            .objects
+            .get_mut(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?
+            .record
+            .replace_existing_data(key, value)
+        {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "mapped arguments property remains present data",
+            });
+        }
+        self.collection_pending = true;
+        Ok(())
+    }
+
+    pub(crate) fn mapped_arguments_mapping_len(
+        &self,
+        object: ObjectId,
+    ) -> Result<usize, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .map(HeapObject::arguments_mapping_len)
             .ok_or(crate::EngineFault::StaleHeapEdge {
                 edge: "object",
                 index: object.index(),

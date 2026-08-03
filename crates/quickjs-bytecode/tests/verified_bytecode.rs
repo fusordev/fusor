@@ -5322,7 +5322,7 @@ fn dynamic_function_script_profile_is_forbidden_on_child_templates() {
 }
 
 #[test]
-fn strict_arguments_object_authority_is_single_site_and_kind_exact() {
+fn arguments_object_authority_is_single_site_mode_and_kind_exact() {
     let text = "function f(){\"use strict\";return arguments}";
     let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
     let source_for = |mappings: &[(u32, SourceByteSpan)]| {
@@ -5354,6 +5354,46 @@ fn strict_arguments_object_authority_is_single_site_and_kind_exact() {
             .requirements()
             .contains(&ExecutionRequirement::OrdinaryObjects)
     );
+
+    let mapped = shaped_input_with_strict(
+        &[
+            (FinalOpcode::SpecialObject, Operands::U8(1)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("f")],
+        &[],
+        0,
+        0,
+        &[],
+        source_for(&[(0, function_span), (2, function_span)]),
+        false,
+    );
+    verify_compiler_bytecode_graph(mapped, BytecodeGraphVerificationLimits::default())
+        .expect("one sloppy mapped arguments object is admitted");
+
+    let mode_mismatch = shaped_input_with_strict(
+        &[
+            (FinalOpcode::SpecialObject, Operands::U8(1)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("f")],
+        &[],
+        0,
+        0,
+        &[],
+        source_for(&[(0, function_span), (2, function_span)]),
+        true,
+    );
+    let error =
+        verify_compiler_bytecode_graph(mode_mismatch, BytecodeGraphVerificationLimits::default())
+            .expect_err("mapped arguments authority is forbidden in strict code");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::ZERO
+    ));
 
     let duplicate = shaped_input_with_strict(
         &[

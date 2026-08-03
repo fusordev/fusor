@@ -3813,9 +3813,17 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 span: Some(span),
             });
         }
+        let arguments_kind = u8::from(
+            !self
+                .planned
+                .plan
+                .executable(executable)
+                .ok_or(LeafCompilationError::InvalidExecutable { executable })?
+                .is_strict(),
+        );
         flow.emit(PlannedInstruction::new(
             FinalOpcode::SpecialObject,
-            Operands::U8(0),
+            Operands::U8(arguments_kind),
             span,
         ))?;
         flow.emit(plan_put_slot(slot, span))

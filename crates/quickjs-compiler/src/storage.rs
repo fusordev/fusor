@@ -673,8 +673,9 @@ pub enum UnsupportedFeature {
     AnnexBBlockFunction,
     /// Class-created functions, private names, and synthetic slots.
     ClassSyntheticSlots,
-    /// An `arguments` binding that requires sloppy mapped aliasing or collides
-    /// with an explicit ordinary-function declaration.
+    /// An `arguments` binding that collides with an explicit
+    /// ordinary-function declaration whose instantiation semantics are not
+    /// represented yet.
     ArgumentsBinding,
     /// A synthesized `this`, `new.target`, or `super` binding.
     FunctionSyntheticBinding,
@@ -896,7 +897,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.reject_synthetic_binding_uses()?;
 
         let mut binding_drafts = self.binding_drafts()?;
-        self.add_strict_arguments_bindings(&mut binding_drafts)?;
+        self.add_arguments_bindings(&mut binding_drafts)?;
         self.add_synthetic_default_binding(&mut binding_drafts)?;
         binding_drafts.sort_by_key(|binding| {
             let first = binding
@@ -919,7 +920,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let mut resolved_drafts = self.resolved_drafts(&symbol_bindings)?;
         let unresolved_drafts = self.unresolved_drafts()?;
         let (arguments_references, mut unresolved_drafts) =
-            self.resolve_strict_arguments_references(unresolved_drafts, &bindings)?;
+            self.resolve_arguments_references(unresolved_drafts, &bindings)?;
         resolved_drafts.extend(arguments_references);
         resolved_drafts.sort_by_key(|reference| {
             (
@@ -1686,7 +1687,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(drafts)
     }
 
-    fn add_strict_arguments_bindings(
+    fn add_arguments_bindings(
         &self,
         bindings: &mut Vec<BindingDraft>,
     ) -> Result<(), CompilerError> {
@@ -1700,7 +1701,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
             let span = semantic.reference_span(reference);
             let executable = self.scope_owner(reference.scope_id(), Some(span))?;
-            let Some(owner) = self.strict_arguments_owner(executable, span)? else {
+            let Some(owner) = self.arguments_owner(executable, span)? else {
                 continue;
             };
             first_references
@@ -1730,7 +1731,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(())
     }
 
-    fn resolve_strict_arguments_references(
+    fn resolve_arguments_references(
         &self,
         unresolved: Vec<UnresolvedDraft>,
         bindings: &[BindingStorage],
@@ -1747,14 +1748,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 remaining.push(reference);
                 continue;
             }
-            let Some(owner) = self.strict_arguments_owner(reference.executable, reference.span)?
-            else {
+            let Some(owner) = self.arguments_owner(reference.executable, reference.span)? else {
                 remaining.push(reference);
                 continue;
             };
             let binding = arguments_bindings.get(&owner).copied().ok_or(
                 CompilerError::SemanticInvariant {
-                    invariant: "strict arguments reference has a synthesized binding",
+                    invariant: "arguments reference has a synthesized binding",
                     span: Some(reference.span),
                 },
             )?;
@@ -1769,7 +1769,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok((resolved, remaining))
     }
 
-    fn strict_arguments_owner(
+    fn arguments_owner(
         &self,
         mut executable: ExecutableId,
         span: Span,
@@ -1783,9 +1783,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             )?;
             match draft.executable.kind {
                 ExecutableKind::Function { .. } => {
-                    if !draft.executable.strict {
-                        return unsupported(UnsupportedFeature::ArgumentsBinding, span);
-                    }
                     return Ok(Some(executable));
                 }
                 ExecutableKind::Arrow { .. } => {

@@ -1099,10 +1099,7 @@ pub(super) fn own_property_of(
     reference: HeapReference,
     key: &PropertyKey,
 ) -> Result<Option<OwnProperty>, NativeFailure> {
-    if let Some(property) = string_exotic_index_property(runtime, reference, key)? {
-        return Ok(Some(property));
-    }
-    Ok(runtime.object_record(reference)?.own_property(key))
+    Ok(heap_own_property(runtime, reference, key)?)
 }
 
 /// Builds the own property a primitive string exposes for `key`.

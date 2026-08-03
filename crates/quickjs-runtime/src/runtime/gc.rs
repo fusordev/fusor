@@ -476,6 +476,11 @@ impl Runtime {
                 }
                 GraphNode::Object(id) => {
                     if let Some(object) = self.objects.get(id) {
+                        for cell in object.arguments_cells() {
+                            if marked_cells.insert(cell) {
+                                work.push(GraphNode::Cell(cell));
+                            }
+                        }
                         if let Some(current) = object.for_in_current() {
                             mark_heap_reference(
                                 current,
