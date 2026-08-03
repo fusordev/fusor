@@ -370,6 +370,28 @@ fn anonymous_parameter_defaults_receive_spec_inferred_names_only_when_evaluated(
 }
 
 #[test]
+fn anonymous_declaration_initializers_receive_spec_inferred_names() {
+    let result = string_result(
+        "function inspect(){\
+            let lexical=function(){};\
+            const constant=(function(){});\
+            var variable=function(){};\
+            let {nested=function(){}}={};\
+            let [element=function(){}]=[];\
+            let {}=function(){};\
+            const descriptor=Object.getOwnPropertyDescriptor(lexical,'name');\
+            return lexical.name+':'+constant.name+':'+variable.name+':'+nested.name+':'+\
+                element.name+':'+descriptor.writable+descriptor.enumerable+\
+                descriptor.configurable;}\
+            return inspect();",
+    );
+    assert_eq!(
+        result,
+        "lexical:constant:variable:nested:element:falsefalsetrue"
+    );
+}
+
+#[test]
 fn parameter_expression_body_environments_copy_and_then_diverge() {
     let result = string_result(
         "function copied(a=1){var a;return ''+a;}\

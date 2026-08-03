@@ -505,6 +505,17 @@ Known intentional runtime differences:
   and dynamic `Function` construction share the same behavior. Anonymous class
   and arrow defaults remain fail closed with their wider unsupported lowering
   boundaries.
+- [x] Extend `NamedEvaluation` to anonymous ordinary-function declaration
+  initializers. Direct `var`, `let`, and `const` bindings, plus single-name
+  defaults nested in object and array binding patterns, reuse the certified
+  `fclosure; set_name` pair before their binding write. A whole binding-pattern
+  initializer follows the distinct specification production and remains
+  unnamed. Parenthesized initializers, exact `name` descriptor flags, source
+  functions, and generated `Function` bodies match the pinned oracle.
+  Assignment-expression and object-property inferred names remain fail closed
+  until their distinct reference/key evaluation-order certificates land;
+  anonymous class and arrow initializers remain part of their unsupported
+  lowering families.
 - [x] Implement formal rest parameters through the pinned `rest firstArgument`
   entry operation. The fixed argument domain and observable function `length`
   stop before the rest binding; exactly one non-simple rest site snapshots the
