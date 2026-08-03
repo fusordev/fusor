@@ -1,4 +1,4 @@
-//! Strict-function unmapped arguments objects, pinned to ECMA-262.
+//! Strict and mapped arguments exotic objects, pinned to ECMA-262.
 
 use std::{error::Error, fmt, sync::Arc};
 
@@ -169,6 +169,47 @@ fn sloppy_arguments_alias_simple_parameters_and_expose_the_mapped_shape() {
 }
 
 #[test]
+fn duplicate_parameters_map_only_the_last_formal_position() {
+    let result = string_result(
+        "function inspect(a,a){const before=a;arguments[0]=7;const afterFirst=a;\
+            arguments[1]=8;const afterSecond=a;a=9;\
+            return before+'|'+afterFirst+'|'+afterSecond+'|'+arguments[0]+'|'+arguments[1];}\
+            return inspect(1,2);",
+    );
+    assert_eq!(result, "2|2|8|7|9");
+}
+
+#[test]
+fn an_unsupplied_last_duplicate_parameter_has_no_earlier_alias() {
+    let result = string_result(
+        "function inspect(a,a){arguments[0]=7;return a+'|'+arguments[0]+'|'+arguments[1];}\
+            return inspect(1);",
+    );
+    assert_eq!(result, "undefined|7|undefined");
+}
+
+#[test]
+fn each_duplicate_parameter_name_maps_its_own_last_formal_position() {
+    let result = string_result(
+        "function inspect(a,b,a,b){arguments[0]=10;arguments[1]=20;\
+            arguments[2]=30;arguments[3]=40;a=50;b=60;\
+            return a+'|'+b+'|'+arguments[0]+'|'+arguments[1]+'|'+\
+                arguments[2]+'|'+arguments[3];}return inspect(1,2,3,4);",
+    );
+    assert_eq!(result, "50|60|10|20|50|60");
+}
+
+#[test]
+fn a_captured_duplicate_parameter_uses_the_last_mapped_position() {
+    let result = string_result(
+        "function inspect(a,a){return [arguments,function(){return a;}];}\
+            const pair=inspect(1,2);pair[0][0]=7;const first=pair[1]();\
+            pair[0][1]=8;return first+'|'+pair[1]();",
+    );
+    assert_eq!(result, "2|8");
+}
+
+#[test]
 fn mapped_definitions_update_or_sever_parameter_aliases_exactly() {
     let result = string_result(
         "function inspect(a,b,c,d){a=10;const own=Object.getOwnPropertyDescriptor(arguments,'0').value;\
@@ -312,7 +353,7 @@ fn mapped_arguments_binding_cell_limit_failure_is_atomic() {
     let authority = TestCompiler
         .compile(OrdinaryDynamicFunctionSource::new(
             Arc::from([]),
-            JsString::from_utf8("function inspect(a){return arguments.length;}return inspect;")
+            JsString::from_utf8("function inspect(a,a){return arguments.length;}return inspect;")
                 .expect("body"),
         ))
         .expect("dynamic Function authority");
@@ -351,10 +392,26 @@ fn mapped_arguments_binding_cell_limit_failure_is_atomic() {
         .expect("inspect creation")
         .into_function()
         .expect("inspect function");
-    let before = context.runtime_usage();
     let argument = context.number(JsNumber::from_i32(1));
-    let failure = context
+    let inactive = context
         .call(&function, &[argument], ExecutionLimits::default())
+        .expect("an unsupplied last duplicate allocates no mapped cell");
+    assert!(
+        inactive
+            .as_number()
+            .expect("live value")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(1))
+    );
+    runtime
+        .collect_cycles()
+        .expect("collect inactive unmapped arguments object");
+    let mut context = runtime.context(&realm).expect("context after collection");
+    let before = context.runtime_usage();
+    let first = context.number(JsNumber::from_i32(1));
+    let second = context.number(JsNumber::from_i32(2));
+    let failure = context
+        .call(&function, &[first, second], ExecutionLimits::default())
         .expect_err("mapped arguments must exceed the binding-cell limit");
     assert!(
         matches!(

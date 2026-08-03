@@ -8121,7 +8121,21 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             };
             captured.push(captured_binding);
         }
-        Ok(CompilerCaptureLayout::new(Arc::from(captured)))
+        let mut capture_layout = CompilerCaptureLayout::new(Arc::from(captured));
+        let executable_metadata = self
+            .planned
+            .plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        if !executable_metadata.is_strict()
+            && bindings
+                .iter()
+                .any(crate::storage::BindingStorage::is_arguments_object)
+        {
+            capture_layout = capture_layout
+                .with_mapped_arguments(Arc::from(executable_metadata.mapped_parameter_indices()));
+        }
+        Ok(capture_layout)
     }
 
     fn compiled_variable_definitions(
@@ -8179,12 +8193,11 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 constants,
             )?);
         }
-        if arguments.iter().any(Option::is_none) {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "every simple parameter has an argument definition",
-                span: Some(executable_metadata.span()),
-            });
-        }
+        Self::complete_duplicate_parameter_definitions(
+            executable_metadata,
+            argument_count,
+            &mut arguments,
+        )?;
 
         let scope_links = self.compiled_local_scope_links(function_scope, layout)?;
         let capacity = argument_count.checked_add(layout.locals.len()).ok_or(
@@ -8210,6 +8223,49 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             )?);
         }
         Ok(definitions)
+    }
+
+    fn complete_duplicate_parameter_definitions(
+        executable: &Executable,
+        argument_count: usize,
+        arguments: &mut [Option<VariableDefinition>],
+    ) -> Result<(), LeafCompilationError> {
+        if executable.parameter_binding_indices().len() != argument_count {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "every simple parameter has a binding position",
+                span: Some(executable.span()),
+            });
+        }
+        for index in 0..argument_count {
+            if arguments[index].is_some() {
+                continue;
+            }
+            let representative = usize::try_from(executable.parameter_binding_indices()[index])
+                .map_err(|_| LeafCompilationError::CapacityExceeded {
+                    domain: "function parameter bindings",
+                })?;
+            if representative == index {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "a binding-owning parameter has an argument definition",
+                    span: Some(executable.span()),
+                });
+            }
+            let representative = arguments
+                .get(representative)
+                .and_then(Option::as_ref)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "duplicate parameter names a binding-owning formal position",
+                    span: Some(executable.span()),
+                })?;
+            arguments[index] = Some(VariableDefinition::new(
+                representative.name(),
+                ScopeLink::End,
+                representative.policy(),
+                false,
+                None,
+            ));
+        }
+        Ok(())
     }
 
     fn compiled_variable_definition(

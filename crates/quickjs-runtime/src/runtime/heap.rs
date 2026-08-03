@@ -1383,14 +1383,23 @@ impl Runtime {
         realm: RealmId,
         callee: FunctionId,
         values: Vec<StoredValue>,
-        mapped_count: usize,
+        mapped_indices: &[u32],
     ) -> Result<ObjectId, crate::ExecutionError> {
-        if mapped_count > values.len() {
-            return Err(crate::EngineFault::RuntimeInvariant {
-                message: "mapped arguments do not exceed supplied arguments",
-            }
-            .into());
-        }
+        let active_mapping_count = mapped_indices
+            .iter()
+            .take_while(|index| usize::try_from(**index).is_ok_and(|index| index < values.len()))
+            .count();
+        let mapping_len = mapped_indices[..active_mapping_count]
+            .last()
+            .copied()
+            .map_or(Ok(0_usize), |index| {
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_add(1))
+                    .ok_or(crate::EngineFault::RuntimeInvariant {
+                        message: "mapped arguments domain fits usize",
+                    })
+            })?;
         let property_count =
             values
                 .len()
@@ -1414,7 +1423,7 @@ impl Runtime {
         check_execution_limit(
             RuntimeResource::BindingCells,
             self.limits.max_binding_cells,
-            usize_to_u64(self.cells.len()).saturating_add(usize_to_u64(mapped_count)),
+            usize_to_u64(self.cells.len()).saturating_add(usize_to_u64(active_mapping_count)),
         )?;
         let length =
             u32::try_from(values.len()).map_err(|_| crate::ExecutionError::LimitExceeded {
@@ -1428,23 +1437,31 @@ impl Runtime {
         }
 
         let mut mapped_values = Vec::new();
-        mapped_values.try_reserve_exact(mapped_count).map_err(|_| {
-            crate::ExecutionError::AllocationFailed {
+        mapped_values
+            .try_reserve_exact(active_mapping_count)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::BindingCells,
-                additional: mapped_count,
-            }
-        })?;
-        mapped_values.extend(values.iter().take(mapped_count).map(StoredValue::duplicate));
+                additional: active_mapping_count,
+            })?;
+        for &index in mapped_indices.iter().take(active_mapping_count) {
+            let value = values
+                .get(index as usize)
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "active mapped argument was supplied",
+                })?;
+            mapped_values.push((index, value.duplicate()));
+        }
         let record =
             self.build_mapped_arguments_record(intrinsics, callee, values, length, property_count)?;
 
-        self.commit_mapped_arguments_object(record, mapped_values, property_count)
+        self.commit_mapped_arguments_object(record, mapped_values, mapping_len, property_count)
     }
 
     fn commit_mapped_arguments_object(
         &mut self,
         record: ObjectRecord,
-        mapped_values: Vec<StoredValue>,
+        mapped_values: Vec<(u32, StoredValue)>,
+        mapping_len: usize,
         property_count: usize,
     ) -> Result<ObjectId, crate::ExecutionError> {
         let mapped_count = mapped_values.len();
@@ -1461,12 +1478,13 @@ impl Runtime {
             }
         })?;
         let mut parameter_map = Vec::new();
-        parameter_map.try_reserve_exact(mapped_count).map_err(|_| {
+        parameter_map.try_reserve_exact(mapping_len).map_err(|_| {
             crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::BindingCells,
-                additional: mapped_count,
+                additional: mapping_len,
             }
         })?;
+        parameter_map.resize(mapping_len, None);
         let mut rollback_cells = Vec::new();
         rollback_cells
             .try_reserve_exact(mapped_count)
@@ -1475,7 +1493,7 @@ impl Runtime {
                 additional: mapped_count,
             })?;
 
-        for value in mapped_values {
+        for (index, value) in mapped_values {
             let Ok(cell) = self.cells.try_insert(BindingCell {
                 value: SlotValue::Value(value),
             }) else {
@@ -1488,8 +1506,27 @@ impl Runtime {
                     additional: 1,
                 });
             };
-            parameter_map.push(Some(cell));
             rollback_cells.push(cell);
+            let Some(target) = parameter_map.get_mut(index as usize) else {
+                for cell in rollback_cells {
+                    let removed = self.cells.remove(cell);
+                    debug_assert!(removed.is_some());
+                }
+                return Err(crate::EngineFault::RuntimeInvariant {
+                    message: "mapped argument index belongs to its parameter map",
+                }
+                .into());
+            };
+            if target.replace(cell).is_some() {
+                for cell in rollback_cells {
+                    let removed = self.cells.remove(cell);
+                    debug_assert!(removed.is_some());
+                }
+                return Err(crate::EngineFault::RuntimeInvariant {
+                    message: "mapped argument indices are unique",
+                }
+                .into());
+            }
         }
 
         let Ok(object) = self

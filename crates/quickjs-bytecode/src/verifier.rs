@@ -162,6 +162,7 @@ enum CompilerCapturedBindingIdentity {
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct CompilerCaptureLayout {
     bindings: Arc<[CompilerCapturedBinding]>,
+    mapped_arguments: Option<Arc<[u32]>>,
 }
 
 impl CompilerCaptureLayout {
@@ -169,7 +170,19 @@ impl CompilerCaptureLayout {
     /// `bindings` order.
     #[must_use]
     pub const fn new(bindings: Arc<[CompilerCapturedBinding]>) -> Self {
-        Self { bindings }
+        Self {
+            bindings,
+            mapped_arguments: None,
+        }
+    }
+
+    /// Attaches the ascending formal positions mapped by a sloppy arguments
+    /// exotic object. `Some(empty)` distinguishes a zero-parameter mapped
+    /// object from a function without arguments-object authority.
+    #[must_use]
+    pub fn with_mapped_arguments(mut self, indices: Arc<[u32]>) -> Self {
+        self.mapped_arguments = Some(indices);
+        self
     }
 
     /// Returns the dense variable-reference binding table.
@@ -183,6 +196,19 @@ impl CompilerCaptureLayout {
     pub fn binding_for_variable_reference(&self, index: u32) -> Option<CompilerCapturedBinding> {
         let index = usize::try_from(index).ok()?;
         self.bindings.get(index).copied()
+    }
+
+    /// Returns the compiler-authorized mapped formal positions.
+    #[must_use]
+    pub fn mapped_arguments(&self) -> Option<&[u32]> {
+        self.mapped_arguments.as_deref()
+    }
+
+    /// Clones the shared mapped-formal-position certificate without copying
+    /// its entries.
+    #[must_use]
+    pub fn mapped_arguments_arc(&self) -> Option<Arc<[u32]>> {
+        self.mapped_arguments.clone()
     }
 }
 
@@ -947,6 +973,20 @@ pub enum VerificationErrorKind {
         /// same index identify the same frame binding.
         binding: CompilerCapturedBinding,
     },
+    /// A mapped arguments position is outside the function argument domain.
+    CompilerMappedArgumentIndexOutOfBounds {
+        /// Rejected formal position.
+        index: u32,
+        /// Function argument-domain length.
+        len: u32,
+    },
+    /// Mapped arguments positions are not strictly ascending.
+    CompilerMappedArgumentsNotAscending {
+        /// Earlier position.
+        previous: u32,
+        /// Repeated or descending position.
+        index: u32,
+    },
     /// `close_loc` does not name an explicitly scoped captured local.
     CloseLocRequiresScopedCapture {
         /// Rejected local index.
@@ -1256,6 +1296,14 @@ impl fmt::Display for VerificationErrorKind {
                     "compiler capture {binding} names a duplicate frame binding"
                 )
             }
+            Self::CompilerMappedArgumentIndexOutOfBounds { index, len } => write!(
+                formatter,
+                "mapped arguments position {index} is outside argument domain length {len}"
+            ),
+            Self::CompilerMappedArgumentsNotAscending { previous, index } => write!(
+                formatter,
+                "mapped arguments positions are not strictly ascending at {previous}, {index}"
+            ),
             Self::CloseLocRequiresScopedCapture { local } => write!(
                 formatter,
                 "close_loc local {local} is not an explicitly scoped compiler capture"
@@ -1720,6 +1768,28 @@ fn validate_compiler_capture_layout(
             return Err(VerificationError::root(
                 VerificationErrorKind::CompilerCaptureIndexOutOfBounds { binding, len },
             ));
+        }
+    }
+
+    if let Some(mapped_arguments) = &layout.mapped_arguments {
+        let mut previous = None;
+        for &index in mapped_arguments.iter() {
+            if index >= domains.argument_count {
+                return Err(VerificationError::root(
+                    VerificationErrorKind::CompilerMappedArgumentIndexOutOfBounds {
+                        index,
+                        len: domains.argument_count,
+                    },
+                ));
+            }
+            if let Some(previous) = previous
+                && index <= previous
+            {
+                return Err(VerificationError::root(
+                    VerificationErrorKind::CompilerMappedArgumentsNotAscending { previous, index },
+                ));
+            }
+            previous = Some(index);
         }
     }
 

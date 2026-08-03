@@ -16,7 +16,7 @@ use crate::{
     AtomPoolIndex, BytecodePc, CompilerClosureSource, FinalOpcode, FunctionKind,
     FunctionTemplateId, Operands, VerifiedCompilerFunction, VerifiedCompilerFunctionGraph,
     VerifiedControlFlow, VerifiedInstruction,
-    verifier::{CompilerCapturedBinding, InstructionIndex},
+    verifier::{CompilerCaptureLayout, CompilerCapturedBinding, InstructionIndex},
 };
 
 const DEFAULT_MAX_VARIABLE_DEFINITIONS: u64 = 1_048_576;
@@ -4967,6 +4967,10 @@ fn verify_supported_opcodes(
     authority_kind: CompilerExecutableKind,
 ) -> Result<(), BytecodeVerificationError> {
     let mut arguments_object_count = 0_u8;
+    let mapped_arguments_authority = flow
+        .compiler_capture_layout()
+        .and_then(CompilerCaptureLayout::mapped_arguments)
+        .is_some();
     for instruction in flow.instructions() {
         let decoded = instruction.decoded();
         let instruction = decoded.instruction();
@@ -4987,6 +4991,7 @@ fn verify_supported_opcodes(
                         (Operands::U8(0), true) | (Operands::U8(1), false)
                     ) || executable_kind != CompilerExecutableKind::OrdinaryFunction
                         || arguments_object_count != 1
+                        || matches!(operands, Operands::U8(kind) if (kind == 1) != mapped_arguments_authority)
             )
             || matches!(
                 (opcode, instruction.operands()),
@@ -5003,6 +5008,15 @@ fn verify_supported_opcodes(
                 },
             ));
         }
+    }
+    if arguments_object_count == 0 && mapped_arguments_authority {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                pc: BytecodePc::ZERO,
+                opcode: FinalOpcode::SpecialObject,
+            },
+        ));
     }
     Ok(())
 }

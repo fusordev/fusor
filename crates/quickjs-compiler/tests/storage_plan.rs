@@ -774,6 +774,33 @@ fn explicit_arguments_bindings_with_ordinary_semantics_remain_supported() {
 }
 
 #[test]
+fn duplicate_parameters_share_the_last_formal_argument_slot() {
+    let plan = script("function f(a, a) { return a + arguments[0] + arguments[1]; }");
+    let function = plan.executables()[1].id();
+    let parameters = plan
+        .bindings_for(function)
+        .unwrap()
+        .iter()
+        .filter(|binding| binding.name() == "a")
+        .collect::<Vec<_>>();
+
+    assert_eq!(plan.executables()[1].parameter_count(), 2);
+    assert_eq!(plan.executables()[1].parameter_binding_indices(), [1, 1]);
+    assert_eq!(plan.executables()[1].mapped_parameter_indices(), [1]);
+    assert_eq!(parameters.len(), 1);
+    assert_eq!(
+        parameters[0].placement(),
+        StoragePlacement::Argument { parameter_index: 1 }
+    );
+    assert!(
+        plan.bindings_for(function)
+            .unwrap()
+            .iter()
+            .any(quickjs_compiler::BindingStorage::is_arguments_object)
+    );
+}
+
+#[test]
 fn module_root_and_nested_declarations_have_distinct_storage() {
     let plan = module("var top; { let nested; }");
     let top = plan
@@ -815,10 +842,6 @@ fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
         (
             "function f(...rest) {}",
             UnsupportedFeature::NonSimpleParameters,
-        ),
-        (
-            "function f(a, a) {}",
-            UnsupportedFeature::DuplicateParameters,
         ),
         ("with (object) value;", UnsupportedFeature::WithStatement),
         ("class Box {}", UnsupportedFeature::ClassSyntheticSlots),

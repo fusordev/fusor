@@ -29,9 +29,9 @@ use std::{
 };
 
 use quickjs_bytecode::{
-    CompilerBindingKind, CompilerBindingPolicy, CompilerCapturedBinding, CompilerClosureBinding,
-    CompilerConstant, CompilerConstantValue, CompilerExecutableKind, FinalOpcode,
-    FunctionTemplateId, Operands, VerifiedBytecode,
+    CompilerBindingKind, CompilerBindingPolicy, CompilerCaptureLayout, CompilerCapturedBinding,
+    CompilerClosureBinding, CompilerConstant, CompilerConstantValue, CompilerExecutableKind,
+    FinalOpcode, FunctionTemplateId, Operands, VerifiedBytecode,
 };
 
 use crate::{
@@ -340,6 +340,7 @@ pub(crate) struct InstalledTemplate {
     pub(crate) atoms: Vec<Atom>,
     pub(crate) constants: Vec<InstalledConstant>,
     pub(crate) own_cell_bindings: Vec<FrameBindingAddress>,
+    pub(crate) mapped_arguments: Option<Arc<[u32]>>,
 }
 
 pub(crate) struct InstalledCode {

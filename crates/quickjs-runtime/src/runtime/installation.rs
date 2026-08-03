@@ -26,14 +26,14 @@
 //! Failure-atomic verified bytecode staging, environments, and root publication.
 
 use super::{
-    CompilerCapturedBinding, CompilerClosureBinding, CompilerConstant, CompilerConstantValue,
-    EnvironmentBinding, FrameBindingAddress, FunctionId, HashSet, HeapReference, InstallError,
-    InstalledCodeId, InstalledConstant, InstalledRoot, InstalledTemplate, JsNumber, JsValue,
-    OwnProperty, PropertyKey, RealmGlobalBinding, RealmGlobalRequest, RealmId, RootEnvironment,
-    RootTarget, Runtime, RuntimeError, RuntimeResource, StoredValue, VerifiedBytecode,
-    check_execution_limit, check_install_limit, dynamic_function_declaration_property_layout,
-    global_function_replacement_layout, rejected_global_declaration, runtime_string,
-    stale_heap_reference, usize_to_u64,
+    CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureBinding, CompilerConstant,
+    CompilerConstantValue, EnvironmentBinding, FrameBindingAddress, FunctionId, HashSet,
+    HeapReference, InstallError, InstalledCodeId, InstalledConstant, InstalledRoot,
+    InstalledTemplate, JsNumber, JsValue, OwnProperty, PropertyKey, RealmGlobalBinding,
+    RealmGlobalRequest, RealmId, RootEnvironment, RootTarget, Runtime, RuntimeError,
+    RuntimeResource, StoredValue, VerifiedBytecode, check_execution_limit, check_install_limit,
+    dynamic_function_declaration_property_layout, global_function_replacement_layout,
+    rejected_global_declaration, runtime_string, stale_heap_reference, usize_to_u64,
 };
 
 impl Runtime {
@@ -319,11 +319,14 @@ impl Runtime {
                     message: "capture layout length differs from the verified header",
                 });
             }
+            let mapped_arguments =
+                capture_layout.and_then(CompilerCaptureLayout::mapped_arguments_arc);
 
             templates.push(InstalledTemplate {
                 atoms,
                 constants,
                 own_cell_bindings: bindings,
+                mapped_arguments,
             });
         }
         Ok(templates)

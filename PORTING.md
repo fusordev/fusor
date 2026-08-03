@@ -378,8 +378,8 @@ Known intentional runtime differences:
   shrink results at non-configurable indices, and install a requested
   non-writable final state even when that shrink returns `false`.
 - [ ] Remaining RegExp-dependent String method surface, shape sharing/transition
-  interning, remaining exotics (arguments, Proxy), dense indexed storage,
-  deterministic finalization, and diagnostics.
+  interning, explicit `arguments` binding collisions and Proxy exotics, dense
+  indexed storage, deterministic finalization, and diagnostics.
 
 ### Built-ins and asynchronous semantics
 
@@ -435,15 +435,19 @@ Known intentional runtime differences:
   supplied argument list under the frame-value ceiling and atomically creates
   the `[[ParameterMap]]`-branded ordinary object with exact indexed, `length`,
   `@@iterator`, and restricted `callee` properties.
-- [x] Implement sloppy mapped arguments objects for simple unique parameter
-  lists. The sloppy `special_object 1` authority promotes supplied parameter
-  slots into resource-bounded, GC-traced binding cells, installs the exact
-  indexed/`length`/`@@iterator`/`callee` surface, and applies all five arguments
-  exotic internal methods. Descriptor reads substitute live binding values;
-  writes alias only for the arguments object receiver; accessor conversion,
-  non-writable definition, deletion, and freezing sever the map at the exact
-  specification points. Duplicate parameter names and the remaining explicit
-  `arguments` declaration collision stay fail-closed for the next arguments
+- [x] Implement sloppy mapped arguments objects for every simple parameter
+  list, including duplicate names. Compiler authority carries the exact sorted
+  formal positions retained by `CreateMappedArgumentsObject`; the verifier
+  rejects missing, unused, repeated, descending, and out-of-domain mappings.
+  Runtime allocation promotes only supplied mapped positions into
+  resource-bounded, GC-traced binding cells, so only the last occurrence of a
+  duplicate name aliases and an unsupplied last occurrence never falls back to
+  an earlier argument. Compiler variable metadata still defines every formal
+  slot while assigning source binding identity only to the last occurrence.
+  The exact indexed/`length`/`@@iterator`/`callee` surface and all five arguments
+  exotic internal methods preserve the earlier descriptor, receiver, deletion,
+  freeze, GC, and atomic-limit behavior. `var arguments` and named function
+  expression collision handling remain fail-closed for the next arguments
   tranche.
 - [x] Implement `JSON.parse` on a realm-owned `%JSON%` object: an iterative
   UTF-16 parser accepts exactly the ECMA-404 JSON grammar, preserves escapes,

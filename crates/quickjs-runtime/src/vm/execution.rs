@@ -589,15 +589,19 @@ pub(super) fn execute_one(
             let object = if arguments_kind == 0 {
                 runtime.allocate_unmapped_arguments_object(realm, arguments)?
             } else {
-                let mapped_count = frame.arguments.len().min(arguments.len());
-                preflight_mapped_arguments_frame(frame, mapped_count)?;
+                let mapped_arguments = mapped_arguments_authority(runtime, frame)?;
+                let supplied_count = arguments.len();
+                let active_count =
+                    mapped_arguments.partition_point(|index| (*index as usize) < supplied_count);
+                let active_arguments = &mapped_arguments[..active_count];
+                preflight_mapped_arguments_frame(frame, active_arguments)?;
                 let object = runtime.allocate_mapped_arguments_object(
                     realm,
                     frame.function,
                     arguments,
-                    mapped_count,
+                    &mapped_arguments,
                 )?;
-                install_mapped_arguments_cells(runtime, frame, object, mapped_count)?;
+                install_mapped_arguments_cells(runtime, frame, object, active_arguments)?;
                 object
             };
             push(frame, StoredValue::Object(object));
@@ -2061,19 +2065,38 @@ pub(super) fn execute_one(
     Ok(Step::Continue)
 }
 
-fn preflight_mapped_arguments_frame(frame: &Frame, mapped_count: usize) -> Result<(), EngineFault> {
-    if frame
-        .arguments
-        .iter()
-        .take(mapped_count)
-        .any(|binding| !matches!(binding, FrameBinding::Direct(SlotValue::Value(_))))
-    {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "mapped arguments are promoted before executable body entry",
-        });
+fn mapped_arguments_authority(runtime: &Runtime, frame: &Frame) -> Result<Arc<[u32]>, EngineFault> {
+    let template = usize::try_from(frame.template.get()).map_err(|_| {
+        EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        }
+    })?;
+    code(runtime, frame.code)?
+        .templates
+        .get(template)
+        .and_then(|template| template.mapped_arguments.as_ref())
+        .cloned()
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })
+}
+
+fn preflight_mapped_arguments_frame(
+    frame: &Frame,
+    active_arguments: &[u32],
+) -> Result<(), EngineFault> {
+    for &index in active_arguments {
+        if !matches!(
+            frame.arguments.get(index as usize),
+            Some(FrameBinding::Direct(SlotValue::Value(_)))
+        ) {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "mapped arguments are promoted before executable body entry",
+            });
+        }
     }
     for (own_index, address) in frame.own_cell_bindings.iter().enumerate() {
-        if matches!(address, FrameBindingAddress::Argument(index) if (*index as usize) < mapped_count)
+        if matches!(address, FrameBindingAddress::Argument(index) if active_arguments.binary_search(index).is_ok())
             && frame.own_cells.get(own_index).copied().flatten().is_some()
         {
             return Err(EngineFault::RuntimeInvariant {
@@ -2088,12 +2111,9 @@ fn install_mapped_arguments_cells(
     runtime: &Runtime,
     frame: &mut Frame,
     object: ObjectId,
-    mapped_count: usize,
+    active_arguments: &[u32],
 ) -> Result<(), EngineFault> {
-    for index in 0..mapped_count {
-        let index = u32::try_from(index).map_err(|_| EngineFault::RuntimeInvariant {
-            message: "mapped parameter index fits u32",
-        })?;
+    for &index in active_arguments {
         if runtime
             .mapped_arguments_cell(
                 object,
@@ -2111,10 +2131,7 @@ fn install_mapped_arguments_cells(
         }
     }
 
-    for index in 0..mapped_count {
-        let index = u32::try_from(index).map_err(|_| EngineFault::RuntimeInvariant {
-            message: "mapped parameter index fits u32",
-        })?;
+    for &index in active_arguments {
         let key = PropertyKey::from_index(ArrayIndex::new(index).ok_or(
             EngineFault::RuntimeInvariant {
                 message: "mapped parameter index is an array index",
@@ -2132,7 +2149,7 @@ fn install_mapped_arguments_cells(
         let FrameBindingAddress::Argument(index) = *address else {
             continue;
         };
-        if index as usize >= mapped_count {
+        if active_arguments.binary_search(&index).is_err() {
             continue;
         }
         let key = PropertyKey::from_index(ArrayIndex::new(index).ok_or(

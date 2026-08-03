@@ -123,6 +123,8 @@ pub struct Executable {
     name_span: Option<Span>,
     strict: bool,
     parameter_count: u32,
+    parameter_binding_indices: Arc<[u32]>,
+    mapped_parameter_indices: Arc<[u32]>,
     binding_start: u32,
     binding_end: u32,
     resolved_start: u32,
@@ -180,6 +182,20 @@ impl Executable {
     #[must_use]
     pub const fn parameter_count(&self) -> u32 {
         self.parameter_count
+    }
+
+    /// Returns, for each formal position, the last position that owns the
+    /// source binding for that parameter name.
+    #[must_use]
+    pub fn parameter_binding_indices(&self) -> &[u32] {
+        &self.parameter_binding_indices
+    }
+
+    /// Returns the last source position for each distinct simple parameter
+    /// name, in ascending position order.
+    #[must_use]
+    pub fn mapped_parameter_indices(&self) -> &[u32] {
+        &self.mapped_parameter_indices
     }
 }
 
@@ -667,8 +683,6 @@ pub enum UnsupportedFeature {
     ParameterExpressions,
     /// A rest or destructured parameter.
     NonSimpleParameters,
-    /// Duplicate sloppy-mode parameter names.
-    DuplicateParameters,
     /// Annex B's paired block-lexical and var-like function binding.
     AnnexBBlockFunction,
     /// Class-created functions, private names, and synthetic slots.
@@ -750,6 +764,13 @@ pub(crate) fn build_planned_storage(
 struct ParameterStorage {
     executable: ExecutableId,
     parameter_index: u32,
+}
+
+#[derive(Default)]
+struct ParameterLayout {
+    count: u32,
+    binding_indices: Arc<[u32]>,
+    mapped_indices: Arc<[u32]>,
 }
 
 struct ExecutableDraft {
@@ -1087,17 +1108,17 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let semantic = self.unit.semantic();
         let nodes = semantic.nodes();
         for (node_id, node) in nodes.iter_enumerated() {
-            let (kind, scope_id, span, name, name_span, parameter_count) = match node.kind() {
+            let (kind, scope_id, span, name, name_span, parameters) = match node.kind() {
                 AstKind::Program(program) => (
                     self.root_executable_kind,
                     program.scope_id(),
                     program.span,
                     None,
                     None,
-                    0,
+                    ParameterLayout::default(),
                 ),
                 AstKind::Function(function) => {
-                    let parameter_count = self.validate_parameters(function.params.as_ref())?;
+                    let parameters = self.validate_parameters(function.params.as_ref())?;
                     (
                         ExecutableKind::Function {
                             asynchronous: function.r#async,
@@ -1110,11 +1131,11 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                             .as_ref()
                             .map(|identifier| Arc::<str>::from(identifier.name.as_str())),
                         function.id.as_ref().map(|identifier| identifier.span),
-                        parameter_count,
+                        parameters,
                     )
                 }
                 AstKind::ArrowFunctionExpression(arrow) => {
-                    let parameter_count = self.validate_parameters(arrow.params.as_ref())?;
+                    let parameters = self.validate_parameters(arrow.params.as_ref())?;
                     (
                         ExecutableKind::Arrow {
                             asynchronous: arrow.r#async,
@@ -1123,7 +1144,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         arrow.span,
                         None,
                         None,
-                        parameter_count,
+                        parameters,
                     )
                 }
                 _ => continue,
@@ -1164,7 +1185,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 name,
                 name_span,
                 strict,
-                parameter_count,
+                parameter_count: parameters.count,
+                parameter_binding_indices: parameters.binding_indices,
+                mapped_parameter_indices: parameters.mapped_indices,
                 binding_start: 0,
                 binding_end: 0,
                 resolved_start: 0,
@@ -1209,12 +1232,11 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn validate_parameters(
         &mut self,
         parameters: &oxc_ast::ast::FormalParameters<'arena>,
-    ) -> Result<u32, CompilerError> {
+    ) -> Result<ParameterLayout, CompilerError> {
         if let Some(rest) = &parameters.rest {
             return unsupported(UnsupportedFeature::NonSimpleParameters, rest.span);
         }
         let executable = executable_id(self.executable_drafts.len())?;
-        let mut names = HashSet::with_capacity(parameters.items.len());
         for (index, parameter) in parameters.items.iter().enumerate() {
             if parameter.initializer.is_some() {
                 return unsupported(UnsupportedFeature::ParameterExpressions, parameter.span);
@@ -1225,26 +1247,20 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
                 return unsupported(UnsupportedFeature::NonSimpleParameters, parameter.span);
             };
-            if !names.insert(identifier.name.as_str()) {
-                return unsupported(UnsupportedFeature::DuplicateParameters, identifier.span);
-            }
             let parameter_index =
                 u32::try_from(index).map_err(|_| CompilerError::CapacityExceeded {
                     domain: "function parameters",
                 })?;
-            if self
-                .parameter_storage
-                .insert(
-                    identifier.symbol_id(),
-                    ParameterStorage {
-                        executable,
-                        parameter_index,
-                    },
-                )
-                .is_some()
+            if let Some(previous) = self.parameter_storage.insert(
+                identifier.symbol_id(),
+                ParameterStorage {
+                    executable,
+                    parameter_index,
+                },
+            ) && previous.executable != executable
             {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "one simple parameter per Oxc symbol",
+                    invariant: "parameter symbol belongs to one executable",
                     span: Some(identifier.span),
                 });
             }
@@ -1253,7 +1269,54 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             u32::try_from(parameters.items.len()).map_err(|_| CompilerError::CapacityExceeded {
                 domain: "function parameters",
             })?;
-        Ok(count)
+        let mut binding_index_by_name = HashMap::with_capacity(parameters.items.len());
+        let mut mapped_indices = Vec::new();
+        mapped_indices
+            .try_reserve_exact(parameters.items.len())
+            .map_err(|_| CompilerError::CapacityExceeded {
+                domain: "mapped function parameters",
+            })?;
+        for (index, parameter) in parameters.items.iter().enumerate().rev() {
+            let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "validated simple parameter remains an identifier",
+                    span: Some(parameter.span),
+                });
+            };
+            if !binding_index_by_name.contains_key(identifier.name.as_str()) {
+                let index = u32::try_from(index).map_err(|_| CompilerError::CapacityExceeded {
+                    domain: "mapped function parameters",
+                })?;
+                binding_index_by_name.insert(identifier.name.as_str(), index);
+                mapped_indices.push(index);
+            }
+        }
+        mapped_indices.reverse();
+        let mut binding_indices = Vec::new();
+        binding_indices
+            .try_reserve_exact(parameters.items.len())
+            .map_err(|_| CompilerError::CapacityExceeded {
+                domain: "function parameter bindings",
+            })?;
+        for parameter in &parameters.items {
+            let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "validated simple parameter remains an identifier",
+                    span: Some(parameter.span),
+                });
+            };
+            binding_indices.push(*binding_index_by_name.get(identifier.name.as_str()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "validated parameter name has a binding position",
+                    span: Some(identifier.span),
+                },
+            )?);
+        }
+        Ok(ParameterLayout {
+            count,
+            binding_indices: binding_indices.into(),
+            mapped_indices: mapped_indices.into(),
+        })
     }
 
     fn assign_scope_owners(&mut self) -> Result<(), CompilerError> {

@@ -98,6 +98,29 @@ fn flow_with_header(
     constant_kinds: &[CompilerConstantKind],
     header: UnverifiedFunctionHeader,
 ) -> Arc<VerifiedControlFlow> {
+    flow_with_header_and_capture_layout(
+        instructions,
+        atoms,
+        arguments,
+        locals,
+        imported_closures,
+        constant_kinds,
+        header,
+        CompilerCaptureLayout::new(Arc::from(captures)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flow_with_header_and_capture_layout(
+    instructions: &[(FinalOpcode, Operands)],
+    atoms: u32,
+    arguments: u32,
+    locals: u32,
+    imported_closures: u32,
+    constant_kinds: &[CompilerConstantKind],
+    header: UnverifiedFunctionHeader,
+    capture_layout: CompilerCaptureLayout,
+) -> Arc<VerifiedControlFlow> {
     Arc::new(
         verify_compiler_control_flow(
             UnverifiedCompilerFunctionBody::new(
@@ -111,11 +134,31 @@ fn flow_with_header(
                 ),
                 header,
             )
-            .with_capture_layout(CompilerCaptureLayout::new(Arc::from(captures)))
+            .with_capture_layout(capture_layout)
             .with_constant_layout(CompilerConstantLayout::new(Arc::from(constant_kinds))),
             VerificationLimits::default(),
         )
         .expect("fixture body"),
+    )
+}
+
+fn mapped_arguments_flow(
+    instructions: &[(FinalOpcode, Operands)],
+    arguments: u32,
+    mapped_arguments: &[u32],
+    strict: bool,
+) -> Arc<VerifiedControlFlow> {
+    flow_with_header_and_capture_layout(
+        instructions,
+        1,
+        arguments,
+        0,
+        0,
+        &[],
+        UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
+            strict, arguments, 0,
+        ),
+        CompilerCaptureLayout::default().with_mapped_arguments(Arc::from(mapped_arguments)),
     )
 }
 
@@ -4458,6 +4501,36 @@ fn shaped_input_with_strict(
     )
 }
 
+fn shaped_mapped_arguments_input(
+    instructions: &[(FinalOpcode, Operands)],
+    arguments: u32,
+    mapped_arguments: &[u32],
+    source: CompilerSource,
+    strict: bool,
+) -> UnverifiedCompilerBytecodeGraph {
+    let flow = mapped_arguments_flow(instructions, arguments, mapped_arguments, strict);
+    let graph = verify_compiler_function_graph(
+        UnverifiedCompilerFunctionGraph::new(
+            FunctionTemplateId::new(0),
+            Arc::from([
+                UnverifiedCompilerFunction::new(flow, Arc::from([]), Arc::from([]))
+                    .with_atom_pool(Arc::from([atom("f")])),
+            ]),
+        ),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("mapped arguments fixture graph");
+    UnverifiedCompilerBytecodeGraph::new(
+        Arc::new(graph),
+        Arc::from([UnverifiedFunctionMetadata::new(
+            Some(AtomPoolIndex::new(0)),
+            Arc::from([]),
+            Arc::from([]),
+            source,
+        )]),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn profiled_single_input(
     instructions: &[(FinalOpcode, Operands)],
@@ -5355,14 +5428,11 @@ fn arguments_object_authority_is_single_site_mode_and_kind_exact() {
             .contains(&ExecutionRequirement::OrdinaryObjects)
     );
 
-    let mapped = shaped_input_with_strict(
+    let mapped = shaped_mapped_arguments_input(
         &[
             (FinalOpcode::SpecialObject, Operands::U8(1)),
             (FinalOpcode::Return, Operands::None),
         ],
-        &[atom("f")],
-        &[],
-        0,
         0,
         &[],
         source_for(&[(0, function_span), (2, function_span)]),
@@ -5371,14 +5441,11 @@ fn arguments_object_authority_is_single_site_mode_and_kind_exact() {
     verify_compiler_bytecode_graph(mapped, BytecodeGraphVerificationLimits::default())
         .expect("one sloppy mapped arguments object is admitted");
 
-    let mode_mismatch = shaped_input_with_strict(
+    let mode_mismatch = shaped_mapped_arguments_input(
         &[
             (FinalOpcode::SpecialObject, Operands::U8(1)),
             (FinalOpcode::Return, Operands::None),
         ],
-        &[atom("f")],
-        &[],
-        0,
         0,
         &[],
         source_for(&[(0, function_span), (2, function_span)]),
@@ -5424,6 +5491,61 @@ fn arguments_object_authority_is_single_site_mode_and_kind_exact() {
             pc,
             opcode: FinalOpcode::SpecialObject,
         } if *pc == BytecodePc::new(3)
+    ));
+}
+
+#[test]
+fn mapped_arguments_opcode_and_mapping_certificate_are_bijective() {
+    let text = "function f(){return arguments}";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let source_for = |mappings: &[(u32, SourceByteSpan)]| {
+        source(
+            text,
+            function_span,
+            Some(SourceByteSpan::new(9, 10)),
+            mappings,
+        )
+    };
+    let missing_mapping = shaped_input_with_strict(
+        &[
+            (FinalOpcode::SpecialObject, Operands::U8(1)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("f")],
+        &[],
+        0,
+        0,
+        &[],
+        source_for(&[(0, function_span), (2, function_span)]),
+        false,
+    );
+    let error =
+        verify_compiler_bytecode_graph(missing_mapping, BytecodeGraphVerificationLimits::default())
+            .expect_err("mapped arguments require exact compiler mapping authority");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::ZERO
+    ));
+
+    let unused_mapping = shaped_mapped_arguments_input(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        0,
+        &[],
+        source_for(&[(0, function_span)]),
+        false,
+    );
+    let error =
+        verify_compiler_bytecode_graph(unused_mapping, BytecodeGraphVerificationLimits::default())
+            .expect_err("mapping authority cannot survive without its allocation site");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::ZERO
     ));
 }
 

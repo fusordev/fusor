@@ -123,6 +123,22 @@ fn lexical_identifier_leaf_matches_the_quickjs_final_opcode_oracle() {
 }
 
 #[test]
+fn sloppy_duplicate_parameters_authorize_only_the_last_formal_positions() {
+    let compiled = compile("function f(a,a,b){return arguments;}", "f");
+    let flow = compiled.control_flow();
+    let layout = flow
+        .compiler_capture_layout()
+        .expect("compiler arguments certificate");
+
+    assert_eq!(layout.mapped_arguments(), Some([1, 2].as_slice()));
+    assert!(flow.instructions().iter().any(|instruction| {
+        let instruction = instruction.decoded().instruction();
+        instruction.opcode() == FinalOpcode::SpecialObject
+            && instruction.operands() == Operands::U8(1)
+    }));
+}
+
+#[test]
 fn deepest_leaf_reads_forwarded_parent_cells_through_capture_slots() {
     let compiled = compile(
         "function outer(arg){ let local=1; function middle(){ function inner(){ return arg+local; } } }",
