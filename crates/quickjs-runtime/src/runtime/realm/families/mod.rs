@@ -713,6 +713,7 @@ const fn accessor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::realm::{atoms::RealmAtomPlan, reservation::RealmReservationPlan};
 
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
@@ -737,6 +738,102 @@ mod tests {
             assert_eq!(
                 schema.objects.iter().filter(|spec| spec.id == id).count(),
                 1
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_method_maintenance_is_derived_from_one_schema_declaration() {
+        let mut schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
+        let baseline_atoms = RealmAtomPlan::try_new(&schema).expect("baseline atom plan");
+        let baseline_reservation =
+            RealmReservationPlan::try_new(&baseline_atoms, &schema).expect("baseline reservation");
+        let method_id = IntrinsicFunctionId(NativeFunctionKind::ErrorIsError);
+
+        let function_index = schema
+            .specs
+            .iter()
+            .position(|function| function.id == method_id)
+            .expect("Error.isError function declaration");
+        let function = schema.specs.remove(function_index);
+        let mandatory_index = schema
+            .mandatory_functions
+            .iter()
+            .position(|candidate| *candidate == method_id)
+            .expect("Error.isError mandatory identity");
+        let mandatory = schema.mandatory_functions.remove(mandatory_index);
+        let property_index = schema
+            .properties
+            .iter()
+            .position(|property| {
+                matches!(
+                    property.descriptor,
+                    IntrinsicDescriptorSpec::Data {
+                        value: IntrinsicValueSpec::Function(candidate),
+                        ..
+                    } if candidate == method_id
+                )
+            })
+            .expect("Error.isError publication declaration");
+        assert_eq!(
+            schema
+                .properties
+                .iter()
+                .filter(|property| {
+                    matches!(
+                        property.descriptor,
+                        IntrinsicDescriptorSpec::Data {
+                            value: IntrinsicValueSpec::Function(candidate),
+                            ..
+                        } if candidate == method_id
+                    )
+                })
+                .count(),
+            1
+        );
+        let property = schema.properties.remove(property_index);
+
+        let reduced_atoms = RealmAtomPlan::try_new(&schema).expect("derived reduced atom plan");
+        let reduced_reservation = RealmReservationPlan::try_new(&reduced_atoms, &schema)
+            .expect("derived reduced reservation");
+        assert_eq!(reduced_atoms.len() + 1, baseline_atoms.len());
+        assert_eq!(
+            reduced_atoms.description_code_units() + "isError".encode_utf16().count(),
+            baseline_atoms.description_code_units()
+        );
+        assert_eq!(
+            reduced_reservation.functions() + 1,
+            baseline_reservation.functions()
+        );
+        assert_eq!(
+            reduced_reservation.object_properties() + 3,
+            baseline_reservation.object_properties()
+        );
+
+        schema.specs.insert(function_index, function);
+        schema
+            .mandatory_functions
+            .insert(mandatory_index, mandatory);
+        schema.properties.insert(property_index, property);
+        schema.validate().expect("restored complete Realm schema");
+        let restored_atoms = RealmAtomPlan::try_new(&schema).expect("restored atom plan");
+        let restored_reservation =
+            RealmReservationPlan::try_new(&restored_atoms, &schema).expect("restored reservation");
+        assert_eq!(restored_atoms.len(), baseline_atoms.len());
+        assert_eq!(
+            restored_atoms.description_code_units(),
+            baseline_atoms.description_code_units()
+        );
+        assert_eq!(restored_reservation, baseline_reservation);
+    }
+
+    #[test]
+    fn realm_facade_has_no_manual_bootstrap_mirrors() {
+        let facade = include_str!("../../realm.rs");
+        for obsolete_mirror in ["_ATOM_START", "RealmRecords", "RealmGraph"] {
+            assert!(
+                !facade.contains(obsolete_mirror),
+                "Realm facade reintroduced {obsolete_mirror}"
             );
         }
     }
