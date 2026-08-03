@@ -332,6 +332,25 @@ fn expression_free_destructured_formals_initialize_left_to_right() {
 }
 
 #[test]
+fn parameter_expressions_initialize_left_to_right_with_tdz_bindings() {
+    let result = string_result(
+        "function defaults(a=1,b=a+1){return defaults.length+':'+a+':'+b;}\
+            const first=defaults();const second=defaults(5);const third=defaults(undefined,10);\
+            let tdz=false;function forward(a=b,b=2){}\
+            try{forward();}catch(error){tdz=error instanceof ReferenceError;}\
+            let log='';function pattern({[log+='k']:value=3}={}){return value+':'+log;}\
+            function supplied(value=arguments.length){return value+':'+arguments.length;}\
+            function rest(value=1,...[tail=2]){return value+':'+tail+':'+rest.length;}\
+            /* ECMA-262 keeps this parameter cell live; pinned QuickJS 2026-06-04\
+               snapshots 1 here, so this is an intentional spec-first divergence. */\
+            function capture(value=1,reader=function inner(){return value;}){value=4;return reader();}\
+            return first+'|'+second+'|'+third+'|'+tdz+'|'+pattern()+'|'+\
+                supplied(undefined,7)+'|'+rest()+'|'+capture();",
+    );
+    assert_eq!(result, "0:1:2|0:5:6|0:1:10|true|3:k|2:2|1:2:0|4");
+}
+
+#[test]
 fn formal_rest_parameters_snapshot_an_independent_supplied_tail() {
     let result = string_result(
         "function inspect(fixed,...rest){const before=rest[0]+'|'+arguments[1];\

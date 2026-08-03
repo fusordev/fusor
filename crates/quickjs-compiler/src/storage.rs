@@ -124,7 +124,9 @@ pub struct Executable {
     name_span: Option<Span>,
     strict: bool,
     parameter_count: u32,
+    defined_parameter_count: u32,
     simple_parameter_list: bool,
+    parameter_expressions: bool,
     parameter_binding_indices: Arc<[u32]>,
     mapped_parameter_indices: Arc<[u32]>,
     binding_start: u32,
@@ -186,10 +188,24 @@ impl Executable {
         self.parameter_count
     }
 
+    /// Returns the number of leading formal parameters before the first
+    /// top-level initializer. Rest parameters never contribute.
+    #[must_use]
+    pub const fn defined_parameter_count(&self) -> u32 {
+        self.defined_parameter_count
+    }
+
     /// Returns whether every formal parameter is a plain binding identifier.
     #[must_use]
     pub const fn has_simple_parameter_list(&self) -> bool {
         self.simple_parameter_list
+    }
+
+    /// Returns whether the formal parameter list contains a default
+    /// initializer or computed binding-pattern key.
+    #[must_use]
+    pub const fn has_parameter_expressions(&self) -> bool {
+        self.parameter_expressions
     }
 
     /// Returns, for each simple formal position, the last position that owns
@@ -688,8 +704,8 @@ pub enum UnsupportedFeature {
     DirectEval,
     /// A `with` statement.
     WithStatement,
-    /// A parameter initializer, destructuring default, or computed pattern key.
-    ParameterExpressions,
+    /// A parameter binding that must be split from a same-name body binding.
+    ParameterEnvironmentCollision,
     /// Annex B's paired block-lexical and var-like function binding.
     AnnexBBlockFunction,
     /// Class-created functions, private names, and synthetic slots.
@@ -772,7 +788,9 @@ struct ParameterStorage {
 #[derive(Default)]
 struct ParameterLayout {
     count: u32,
+    defined_count: u32,
     simple: bool,
+    expressions: bool,
     binding_indices: Arc<[u32]>,
     mapped_indices: Arc<[u32]>,
 }
@@ -1122,6 +1140,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "executable inventory keeps AST form, scope identity, and complete parameter metadata in one checked pass"
+    )]
     fn inventory_executables(&mut self) -> Result<(), CompilerError> {
         let semantic = self.unit.semantic();
         let nodes = semantic.nodes();
@@ -1204,7 +1226,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 name_span,
                 strict,
                 parameter_count: parameters.count,
+                defined_parameter_count: parameters.defined_count,
                 simple_parameter_list: parameters.simple,
+                parameter_expressions: parameters.expressions,
                 parameter_binding_indices: parameters.binding_indices,
                 mapped_parameter_indices: parameters.mapped_indices,
                 binding_start: 0,
@@ -1248,27 +1272,30 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "formal layout validates raw, defined, mapped, and expression-bearing parameter domains together"
+    )]
     fn validate_parameters(
         &mut self,
         parameters: &oxc_ast::ast::FormalParameters<'arena>,
     ) -> Result<ParameterLayout, CompilerError> {
-        if let Some(rest) = &parameters.rest
-            && let Some(span) = binding_pattern_expression_span(&rest.rest.argument)
-        {
-            return unsupported(UnsupportedFeature::ParameterExpressions, span);
-        }
         let executable = executable_id(self.executable_drafts.len())?;
+        let expressions = parameters.items.iter().any(|parameter| {
+            parameter.initializer.is_some()
+                || binding_pattern_expression_span(&parameter.pattern).is_some()
+        }) || parameters
+            .rest
+            .as_ref()
+            .is_some_and(|rest| binding_pattern_expression_span(&rest.rest.argument).is_some());
         let simple = parameters.rest.is_none()
             && parameters.items.iter().all(|parameter| {
                 parameter.initializer.is_none()
                     && matches!(parameter.pattern, BindingPattern::BindingIdentifier(_))
             });
         for (index, parameter) in parameters.items.iter().enumerate() {
-            if parameter.initializer.is_some() {
-                return unsupported(UnsupportedFeature::ParameterExpressions, parameter.span);
-            }
-            if let Some(span) = binding_pattern_expression_span(&parameter.pattern) {
-                return unsupported(UnsupportedFeature::ParameterExpressions, span);
+            if expressions {
+                continue;
             }
             let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
                 continue;
@@ -1295,10 +1322,21 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             u32::try_from(parameters.items.len()).map_err(|_| CompilerError::CapacityExceeded {
                 domain: "function parameters",
             })?;
+        let defined_count = parameters
+            .items
+            .iter()
+            .position(|parameter| parameter.initializer.is_some())
+            .map_or(parameters.items.len(), |index| index);
+        let defined_count =
+            u32::try_from(defined_count).map_err(|_| CompilerError::CapacityExceeded {
+                domain: "defined function parameters",
+            })?;
         if !simple {
             return Ok(ParameterLayout {
                 count,
+                defined_count,
                 simple,
+                expressions,
                 binding_indices: Arc::from([]),
                 mapped_indices: Arc::from([]),
             });
@@ -1348,7 +1386,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         }
         Ok(ParameterLayout {
             count,
+            defined_count,
             simple,
+            expressions,
             binding_indices: binding_indices.into(),
             mapped_indices: mapped_indices.into(),
         })
@@ -1407,6 +1447,23 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 scoping.symbol_scope_id(symbol_id),
                 Some(scoping.symbol_span(symbol_id)),
             )?;
+            if self.executable_drafts[owner.index()]
+                .executable
+                .has_parameter_expressions()
+                && facts.contains(DeclarationFacts::PARAMETER)
+                && (facts.contains(DeclarationFacts::VAR)
+                    || facts.contains(DeclarationFacts::FUNCTION))
+            {
+                let span = scoping
+                    .symbol_declarations(symbol_id)
+                    .find_map(|declaration| match semantic.nodes().kind(declaration) {
+                        AstKind::VariableDeclarator(declarator) => Some(declarator.span),
+                        AstKind::Function(function) => Some(function.span),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| scoping.symbol_span(symbol_id));
+                return unsupported(UnsupportedFeature::ParameterEnvironmentCollision, span);
+            }
             let name = scoping.symbol_name(symbol_id);
             let placement = self.placement(symbol_id, owner, kind)?;
             let policy = self.declaration_policy(owner, kind, facts.function_scope_entry);
@@ -1556,9 +1613,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         function_scope_entry: bool,
     ) -> DeclarationPolicy {
         let (initialization, writes, temporal_dead_zone) = match kind {
-            DeclarationKind::Parameter => {
-                (InitializationPolicy::Argument, WritePolicy::Mutable, false)
-            }
+            DeclarationKind::Parameter => (
+                InitializationPolicy::Argument,
+                WritePolicy::Mutable,
+                self.executable_drafts[owner.index()]
+                    .executable
+                    .has_parameter_expressions(),
+            ),
             DeclarationKind::Var => (
                 InitializationPolicy::UndefinedAtInstantiation,
                 WritePolicy::Mutable,
@@ -1814,6 +1875,20 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         first_references
             .sort_unstable_by_key(|(owner, span)| (owner.index(), span.start, span.end));
         for (owner, span) in first_references {
+            if self.executable_drafts[owner.index()]
+                .executable
+                .has_parameter_expressions()
+                && let Some(binding) = bindings.iter().find(|binding| {
+                    binding.executable == owner
+                        && binding.name.as_ref() == "arguments"
+                        && binding.policy.kind == DeclarationKind::Var
+                })
+            {
+                return unsupported(
+                    UnsupportedFeature::ParameterEnvironmentCollision,
+                    binding.declaration_spans.first().copied().unwrap_or(span),
+                );
+            }
             let mut reusable = bindings.iter_mut().filter(|binding| {
                 binding.executable == owner
                     && binding.name.as_ref() == "arguments"

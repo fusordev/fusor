@@ -245,6 +245,7 @@ fn anonymous_functions_in_inferred_name_contexts_fail_closed() {
     for source in [
         "function outer(){ let inferred = function(){}; }",
         "function outer(){ let inferred; inferred = (function(){}); }",
+        "function outer(inferred=function(){}){}",
     ] {
         let error = with_parsed_program(
             source,

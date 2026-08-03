@@ -171,6 +171,15 @@ fn parameter_policy() -> CompilerBindingPolicy {
     )
 }
 
+fn parameter_tdz_policy() -> CompilerBindingPolicy {
+    CompilerBindingPolicy::new(
+        CompilerBindingKind::Parameter,
+        CompilerInitializationPolicy::Argument,
+        CompilerWritePolicy::Mutable,
+        true,
+    )
+}
+
 fn let_policy() -> CompilerBindingPolicy {
     CompilerBindingPolicy::new(
         CompilerBindingKind::Let,
@@ -6625,6 +6634,132 @@ fn metadata_names_counts_scope_links_and_source_pcs_are_fail_closed() {
     assert!(matches!(
         error.kind(),
         BytecodeVerificationErrorKind::ScopeLinkKindMismatch { .. }
+    ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn parameter_expression_authority_requires_non_simple_reduced_length_and_local_tdz_storage() {
+    let text = "function f(value=1){return value}";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let variables = [
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(1)),
+            ScopeLink::End,
+            parameter_policy(),
+            false,
+            None,
+        ),
+        VariableDefinition::new(
+            Some(AtomPoolIndex::new(2)),
+            ScopeLink::End,
+            parameter_tdz_policy(),
+            false,
+            None,
+        ),
+    ];
+    let instructions = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::GetArg0, Operands::NoneArg),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::GetLocCheck, Operands::Loc(0)),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let header = UnverifiedFunctionHeader::ordinary_source_function(false, 0)
+        .with_simple_parameter_list(false);
+    let input = profiled_single_input(
+        &instructions,
+        header,
+        CompilerExecutableKind::OrdinaryFunction,
+        &[atom("f"), atom("_arg_0_"), atom("value")],
+        Some(AtomPoolIndex::new(0)),
+        &variables,
+        1,
+        1,
+        &[],
+        source(
+            text,
+            function_span,
+            Some(SourceByteSpan::new(9, 10)),
+            &[
+                (0, SourceByteSpan::new(11, 18)),
+                (3, SourceByteSpan::new(11, 18)),
+                (4, SourceByteSpan::new(11, 18)),
+                (5, SourceByteSpan::new(27, 32)),
+                (8, SourceByteSpan::new(20, 33)),
+            ],
+        ),
+    );
+    verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect("a reduced non-simple header and one activated parameter TDZ local are valid");
+
+    let simple_header = UnverifiedFunctionHeader::ordinary_source_function(false, 0);
+    let error = verify_compiler_bytecode_graph(
+        profiled_single_input(
+            &instructions,
+            simple_header,
+            CompilerExecutableKind::OrdinaryFunction,
+            &[atom("f"), atom("_arg_0_"), atom("value")],
+            Some(AtomPoolIndex::new(0)),
+            &variables,
+            1,
+            1,
+            &[],
+            source(
+                text,
+                function_span,
+                Some(SourceByteSpan::new(9, 10)),
+                &[
+                    (0, SourceByteSpan::new(11, 18)),
+                    (3, SourceByteSpan::new(11, 18)),
+                    (4, SourceByteSpan::new(11, 18)),
+                    (5, SourceByteSpan::new(27, 32)),
+                    (8, SourceByteSpan::new(20, 33)),
+                ],
+            ),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a simple header cannot reduce observable function length");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::DefinedArgumentCountMismatch { .. }
+    ));
+
+    let error = verify_compiler_bytecode_graph(
+        profiled_single_input(
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            UnverifiedFunctionHeader::ordinary_source_function(false, 1)
+                .with_simple_parameter_list(false),
+            CompilerExecutableKind::OrdinaryFunction,
+            &[atom("f"), atom("value")],
+            Some(AtomPoolIndex::new(0)),
+            &[VariableDefinition::new(
+                Some(AtomPoolIndex::new(1)),
+                ScopeLink::End,
+                parameter_tdz_policy(),
+                false,
+                None,
+            )],
+            1,
+            0,
+            &[],
+            source(
+                text,
+                function_span,
+                Some(SourceByteSpan::new(9, 10)),
+                &[(0, function_span)],
+            ),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("raw argument slots are already initialized and cannot carry TDZ policy");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::BindingPolicyViolation {
+            reason: BindingPolicyViolationReason::InvalidArgumentDefinition,
+            ..
+        }
     ));
 }
 

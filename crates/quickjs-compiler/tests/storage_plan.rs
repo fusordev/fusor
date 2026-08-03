@@ -976,6 +976,44 @@ fn formal_rest_parameters_start_after_fixed_arguments_and_bind_locally() {
 }
 
 #[test]
+fn parameter_expressions_use_tdz_locals_and_stop_observable_length() {
+    let plan = script(
+        "function f(first,{[first]: value = 2} = {},last = value,...[tail = last]){\
+            return first+value+last+tail+arguments.length;}",
+    );
+    let executable = &plan.executables()[1];
+    assert_eq!(executable.parameter_count(), 3);
+    assert_eq!(executable.defined_parameter_count(), 1);
+    assert!(!executable.has_simple_parameter_list());
+    assert!(executable.has_parameter_expressions());
+
+    let bindings = plan.bindings_for(executable.id()).unwrap();
+    for name in ["first", "value", "last", "tail"] {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.name() == name)
+            .unwrap_or_else(|| panic!("missing parameter-expression binding {name}"));
+        assert_eq!(binding.placement(), StoragePlacement::Local, "{name}");
+        assert_eq!(
+            binding.policy().kind(),
+            DeclarationKind::Parameter,
+            "{name}"
+        );
+        assert_eq!(
+            binding.policy().initialization(),
+            InitializationPolicy::Argument,
+            "{name}"
+        );
+        assert!(binding.policy().has_temporal_dead_zone(), "{name}");
+    }
+    assert!(
+        bindings
+            .iter()
+            .any(quickjs_compiler::BindingStorage::is_arguments_object)
+    );
+}
+
+#[test]
 fn non_simple_body_functions_activate_after_parameter_initialization() {
     let plan = script(
         "function f({value}){function value(){return 1;}function other(){return 2;}\
@@ -1056,20 +1094,16 @@ fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
     let cases = [
         ("eval('code')", UnsupportedFeature::DirectEval),
         (
-            "function f(a = 1) {}",
-            UnsupportedFeature::ParameterExpressions,
+            "function f(a = 1) { var a; }",
+            UnsupportedFeature::ParameterEnvironmentCollision,
         ),
         (
-            "function f({ value = 1 }) {}",
-            UnsupportedFeature::ParameterExpressions,
+            "function f({ value = 1 }) { function value() {} }",
+            UnsupportedFeature::ParameterEnvironmentCollision,
         ),
         (
-            "function f({ [key]: value }) {}",
-            UnsupportedFeature::ParameterExpressions,
-        ),
-        (
-            "function f(...[value = 1]) {}",
-            UnsupportedFeature::ParameterExpressions,
+            "function f(value = 1) { var arguments; return arguments; }",
+            UnsupportedFeature::ParameterEnvironmentCollision,
         ),
         ("with (object) value;", UnsupportedFeature::WithStatement),
         ("class Box {}", UnsupportedFeature::ClassSyntheticSlots),

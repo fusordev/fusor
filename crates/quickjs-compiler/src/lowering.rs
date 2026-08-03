@@ -811,6 +811,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             executable_kind,
             strict,
             argument_count,
+            defined_argument_count,
             local_count,
             capture_count,
             capture_layout,
@@ -853,7 +854,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 .executable(executable)
                 .ok_or(LeafCompilationError::InvalidExecutable { executable })?
                 .has_simple_parameter_list(),
-            argument_count,
+            defined_argument_count,
             variable_reference_count,
         );
         let constant_layout = CompilerConstantLayout::new(
@@ -1068,6 +1069,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             executable_kind,
             strict: executable.is_strict(),
             argument_count: executable.parameter_count(),
+            defined_argument_count: executable.defined_parameter_count(),
             local_count: layout.local_count,
             capture_count,
             capture_layout,
@@ -1139,6 +1141,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             executable_kind: CompilerExecutableKind::DynamicFunctionScript,
             strict: executable.is_strict(),
             argument_count: 0,
+            defined_argument_count: 0,
             local_count: layout.local_count,
             capture_count,
             capture_layout,
@@ -1358,7 +1361,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             return Ok(());
         };
         for (index, parameter) in parameters.items.iter().enumerate() {
-            if matches!(parameter.pattern, BindingPattern::BindingIdentifier(_)) {
+            if !executable.has_parameter_expressions()
+                && matches!(parameter.pattern, BindingPattern::BindingIdentifier(_))
+            {
                 continue;
             }
             let index =
@@ -3740,6 +3745,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         )?;
         entries.sort_unstable_by_key(ScopeEntryInitialization::order_key);
         if function_scope {
+            self.emit_parameter_binding_activations(executable, planning.layout, flow)?;
             self.emit_arguments_object_initializer(executable, planning.layout, flow)?;
             self.emit_parameter_pattern_initializers(executable, planning, flow)?;
             self.emit_realm_global_function_initializers(
@@ -3805,6 +3811,66 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     flow,
                 )?;
             }
+        }
+        Ok(())
+    }
+
+    fn emit_parameter_binding_activations(
+        &self,
+        executable: ExecutableId,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let metadata = self
+            .planned
+            .plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        if !metadata.has_parameter_expressions() {
+            return Ok(());
+        }
+        let bindings = self
+            .planned
+            .plan
+            .bindings_for(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let mut parameters = bindings
+            .iter()
+            .filter(|binding| {
+                binding.policy().kind() == DeclarationKind::Parameter
+                    && binding.policy().initialization() == InitializationPolicy::Argument
+                    && binding.policy().has_temporal_dead_zone()
+            })
+            .map(|binding| {
+                let span = binding.declaration_spans().first().copied().ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "parameter-expression binding has a source anchor",
+                        span: Some(metadata.span()),
+                    },
+                )?;
+                let FrameSlot::Local(slot) =
+                    layout
+                        .slot(binding.id())
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "parameter-expression binding has a local slot",
+                            span: Some(span),
+                        })?
+                else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "parameter-expression binding uses local storage",
+                        span: Some(span),
+                    });
+                };
+                Ok((slot, span))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        parameters.sort_unstable_by_key(|(slot, _)| slot.index());
+        for (slot, span) in parameters {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::SetLocUninitialized,
+                Operands::Loc(slot.index()),
+                span,
+            ))?;
         }
         Ok(())
     }
@@ -3923,10 +3989,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
         };
         for (index, parameter) in function.params.items.iter().enumerate() {
-            if parameter.initializer.is_some() {
-                return unsupported(UnsupportedLeafFeature::UnsupportedBinding, parameter.span);
-            }
-            if matches!(parameter.pattern, BindingPattern::BindingIdentifier(_)) {
+            if !metadata.has_parameter_expressions()
+                && matches!(parameter.pattern, BindingPattern::BindingIdentifier(_))
+            {
                 continue;
             }
             let slot = ArgumentSlot(checked_function_index(
@@ -3935,6 +4000,41 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             )?);
             let (opcode, operands) = compact_get_argument(slot);
             flow.emit(PlannedInstruction::new(opcode, operands, parameter.span))?;
+            if let Some(initializer) = &parameter.initializer {
+                let skip = flow.new_label(parameter.span)?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    parameter.span,
+                ))?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Undefined,
+                    Operands::None,
+                    parameter.span,
+                ))?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::StrictEq,
+                    Operands::None,
+                    parameter.span,
+                ))?;
+                flow.branch(BranchKind::IfFalse, &skip, parameter.span)?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    parameter.span,
+                ))?;
+                if let Some(span) = anonymous_named_evaluation_span(initializer) {
+                    return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+                }
+                self.plan_expression(
+                    initializer,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    flow,
+                )?;
+                flow.bind(&skip)?;
+            }
             self.plan_destructuring_pattern_value(
                 &parameter.pattern,
                 DestructuringBindingInitialization::Parameter,
@@ -5483,7 +5583,6 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             DestructuringBindingInitialization::Parameter => {
                 if storage.placement() != StoragePlacement::Local
                     || storage.policy().writes() != WritePolicy::Mutable
-                    || storage.policy().has_temporal_dead_zone()
                 {
                     return unsupported(
                         UnsupportedLeafFeature::UnsupportedBinding,
@@ -9917,21 +10016,21 @@ const fn executable_header(
     kind: CompilerExecutableKind,
     strict: bool,
     simple_parameter_list: bool,
-    argument_count: u32,
+    defined_argument_count: u32,
     variable_reference_count: u32,
 ) -> UnverifiedFunctionHeader {
     let header = match kind {
         CompilerExecutableKind::OrdinaryFunction => {
             UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
                 strict,
-                argument_count,
+                defined_argument_count,
                 variable_reference_count,
             )
         }
         CompilerExecutableKind::OrdinaryMethod => {
             UnverifiedFunctionHeader::ordinary_method_with_variable_references(
                 strict,
-                argument_count,
+                defined_argument_count,
                 variable_reference_count,
             )
         }
@@ -10787,6 +10886,7 @@ struct ValidatedFunction {
     executable_kind: CompilerExecutableKind,
     strict: bool,
     argument_count: u32,
+    defined_argument_count: u32,
     local_count: u32,
     capture_count: u32,
     capture_layout: CompilerCaptureLayout,

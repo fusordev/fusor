@@ -211,6 +211,45 @@ fn formal_rest_starts_after_fixed_arguments_and_uses_the_unmapped_prologue() {
 }
 
 #[test]
+fn parameter_expression_prologue_activates_tdz_bindings_before_arguments_and_values() {
+    let compiled = compile(
+        "function f(first=1,{[first]:value=2}={},...[tail=3]){\
+            return first+value+tail+arguments.length;}",
+        "f",
+    );
+    let flow = compiled.control_flow();
+    assert_eq!(flow.domains().argument_count(), 2);
+    assert_eq!(flow.function_header().defined_argument_count(), 0);
+    assert!(!flow.function_header().flags().has_simple_parameter_list());
+
+    let instructions = flow
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+    let activations = instructions
+        .iter()
+        .take_while(|(opcode, _)| *opcode == FinalOpcode::SetLocUninitialized)
+        .count();
+    assert_eq!(activations, 3);
+    assert_eq!(
+        instructions[activations],
+        (FinalOpcode::SpecialObject, Operands::U8(0))
+    );
+    let first_value = instructions
+        .iter()
+        .position(|instruction| *instruction == (FinalOpcode::GetArg0, Operands::NoneArg))
+        .expect("first raw argument read");
+    assert!(activations < first_value);
+    assert!(instructions.contains(&(FinalOpcode::StrictEq, Operands::None)));
+    assert!(instructions.contains(&(FinalOpcode::GetLocCheck, Operands::Loc(0))));
+    assert!(instructions.contains(&(FinalOpcode::Rest, Operands::U16(2))));
+}
+
+#[test]
 fn deepest_leaf_reads_forwarded_parent_cells_through_capture_slots() {
     let compiled = compile(
         "function outer(arg){ let local=1; function middle(){ function inner(){ return arg+local; } } }",

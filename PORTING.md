@@ -378,8 +378,8 @@ Known intentional runtime differences:
   shrink results at non-configurable indices, and install a requested
   non-writable final state even when that shrink returns `false`.
 - [ ] Remaining RegExp-dependent String method surface, shape sharing/transition
-  interning, parameter-expression instantiation and Proxy exotics, dense
-  indexed storage, deterministic finalization, and diagnostics.
+  interning, parameter/body environment binding splits and Proxy exotics,
+  dense indexed storage, deterministic finalization, and diagnostics.
 
 ### Built-ins and asynchronous semantics
 
@@ -465,9 +465,23 @@ Known intentional runtime differences:
   array/object/rest destructuring machinery. The QuickJS simple-parameter
   header bit is cleared, sloppy functions and object methods receive an
   unmapped arguments object, and a destructured binding named `arguments`
-  suppresses that object. Default initializers, computed parameter keys, formal
-  parameter expressions, and expression-bearing rest patterns still fail closed
-  until their separate parameter-environment certificates land.
+  suppresses that object.
+- [x] Implement collision-free parameter expressions with their separate
+  parameter-binding semantics. Every formal binding is created as a local TDZ
+  cell before `arguments`, then fixed arguments are initialized left-to-right:
+  top-level and nested defaults run only for `undefined`, computed object keys
+  preserve evaluation order, expression-bearing rest patterns reuse the same
+  binding machinery, and initializer-created named closures capture the live
+  parameter cells. Forward references throw `ReferenceError`, the observable
+  function `length` stops before the first top-level default, and non-simple
+  header authority permits only a defined count within the raw argument domain.
+  This intentionally follows ECMA-262 over pinned QuickJS 2026-06-04 for a
+  closure created by a later default that reads an earlier parameter after the
+  body mutates it: the live cell exposes the new value, while that QuickJS
+  release exposes its initializer-time value.
+  Same-name parameter/body `var` or function bindings, the separate body
+  `arguments` copy, and anonymous inferred-name defaults remain fail-closed
+  until the body-environment split and inferred-name certificates land.
 - [x] Implement formal rest parameters through the pinned `rest firstArgument`
   entry operation. The fixed argument domain and observable function `length`
   stop before the rest binding; exactly one non-simple rest site snapshots the

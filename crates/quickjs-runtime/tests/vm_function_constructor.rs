@@ -182,6 +182,25 @@ fn generated_function_accepts_a_formal_rest_fragment() {
 }
 
 #[test]
+fn generated_function_accepts_parameter_default_expressions() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let f=Function('a=1','b=a+1','return a*10+b;');\
+            return f.length*10000+f()*100+f(5);",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function parameter defaults");
+
+    assert_number(&result, 1_256);
+}
+
+#[test]
 fn function_prototype_call_forwards_the_dynamic_function_compiler_service() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

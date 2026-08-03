@@ -150,7 +150,6 @@ impl CompilerBindingPolicy {
             CompilerBindingKind::Parameter => {
                 matches!(self.initialization, CompilerInitializationPolicy::Argument)
                     && matches!(self.writes, CompilerWritePolicy::Mutable)
-                    && !self.temporal_dead_zone
             }
             CompilerBindingKind::Var => {
                 matches!(
@@ -1647,7 +1646,7 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             }
             Self::DefinedArgumentCountMismatch { defined, arguments } => write!(
                 formatter,
-                "defined argument count {defined} does not equal simple argument count {arguments}"
+                "defined argument count {defined} is incompatible with argument domain {arguments} and the parameter-list form"
             ),
             Self::VariableDefinitionCountMismatch { declared, entries } => write!(
                 formatter,
@@ -2379,7 +2378,10 @@ fn verify_header(
                     BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
                 ));
             }
-            if header.defined_argument_count() != arguments {
+            if header.defined_argument_count() > arguments
+                || (header.flags().has_simple_parameter_list()
+                    && header.defined_argument_count() != arguments)
+            {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::DefinedArgumentCountMismatch {
@@ -2399,7 +2401,10 @@ fn verify_header(
                     BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
                 ));
             }
-            if header.defined_argument_count() != arguments {
+            if header.defined_argument_count() > arguments
+                || (header.flags().has_simple_parameter_list()
+                    && header.defined_argument_count() != arguments)
+            {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::DefinedArgumentCountMismatch {
@@ -2542,6 +2547,7 @@ fn verify_variables(
         }
         if index < arguments {
             if definition.policy.kind != CompilerBindingKind::Parameter
+                || definition.policy.temporal_dead_zone
                 || definition.has_scope
                 || definition.scope_next != ScopeLink::End
             {
