@@ -552,6 +552,17 @@ Known intentional runtime differences:
   32-bit representation. Pinned order/metadata, abrupt coercions, resource
   ceilings, and realm rollback remain covered; only `sumPrecise` and the
   `%Math%` constants remain open.
+- [x] Implement `Math.sumPrecise` with the specification's synchronous
+  iterator protocol and strict Number-only element requirement. Iteration is
+  resumable across `@@iterator`, `next`, `done`, and `value`; non-number and
+  count-limit failures perform `IteratorClose`, while abrupt iterator-step
+  property access does not. A fixed-width signed superaccumulator covers the
+  complete binary64 exponent range, preserves the specified empty and
+  negative-zero states, combines infinities and NaN correctly, and rounds only
+  once to nearest ties-to-even. Exceptional close now also preserves a frozen
+  stack for the original engine-created error. Shared fuel, tracing, exact
+  metadata/order, resource ceilings, and realm rollback remain covered; only
+  the `%Math%` constants remain open.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,

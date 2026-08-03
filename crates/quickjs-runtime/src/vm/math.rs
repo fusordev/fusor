@@ -132,6 +132,17 @@ pub(super) fn begin_math_method(
         )));
     }
 
+    if method == MathMethod::SumPrecise {
+        return begin_math_sum_precise(
+            runtime,
+            arguments.take_first_or_undefined(),
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+
     if method.is_binary() {
         let left = arguments.take_first_or_undefined();
         let right = arguments.take_first_or_undefined();
@@ -381,7 +392,8 @@ pub(super) fn finish_math_unary(
         | MathMethod::Pow
         | MathMethod::Hypot
         | MathMethod::Random
-        | MathMethod::Imul => {
+        | MathMethod::Imul
+        | MathMethod::SumPrecise => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "a non-unary Math method entered the unary continuation",
             }

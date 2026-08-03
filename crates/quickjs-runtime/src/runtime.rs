@@ -819,10 +819,11 @@ pub(crate) enum MathMethod {
     FRound,
     Imul,
     Clz32,
+    SumPrecise,
 }
 
 impl MathMethod {
-    pub(crate) const ALL: [Self; 36] = [
+    pub(crate) const ALL: [Self; 37] = [
         Self::Min,
         Self::Max,
         Self::Abs,
@@ -859,6 +860,7 @@ impl MathMethod {
         Self::FRound,
         Self::Imul,
         Self::Clz32,
+        Self::SumPrecise,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -899,6 +901,7 @@ impl MathMethod {
             Self::FRound => "fround",
             Self::Imul => "imul",
             Self::Clz32 => "clz32",
+            Self::SumPrecise => "sumPrecise",
         }
     }
 
@@ -934,7 +937,8 @@ impl MathMethod {
             | Self::Cbrt
             | Self::F16Round
             | Self::FRound
-            | Self::Clz32 => 1,
+            | Self::Clz32
+            | Self::SumPrecise => 1,
         }
     }
 

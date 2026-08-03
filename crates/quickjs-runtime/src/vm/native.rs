@@ -319,6 +319,9 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::GroupBy(state) => {
                 advance_group_by(runtime, *state, value, return_to, execution_budget)?
             }
+            NativeContinuation::MathSumPrecise(state) => {
+                advance_math_sum_precise(runtime, *state, value, return_to, execution_budget)?
+            }
             NativeContinuation::JsonParse(state) => {
                 advance_json_parse(runtime, *state, value, return_to, execution_budget)?
             }

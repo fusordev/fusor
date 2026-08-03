@@ -112,7 +112,7 @@ fn math_is_an_ordinary_tagged_object_with_exact_prefix_order() {
         ("Object.prototype.toString.call(Math)", "[object Math]"),
         (
             "Object.getOwnPropertyNames(Math).join(',')",
-            "min,max,abs,floor,ceil,round,sqrt,acos,asin,atan,atan2,cos,exp,log,pow,sin,tan,trunc,sign,cosh,sinh,tanh,acosh,asinh,atanh,expm1,log1p,log2,log10,cbrt,hypot,random,f16round,fround,imul,clz32",
+            "min,max,abs,floor,ceil,round,sqrt,acos,asin,atan,atan2,cos,exp,log,pow,sin,tan,trunc,sign,cosh,sinh,tanh,acosh,asinh,atanh,expm1,log1p,log2,log10,cbrt,hypot,random,f16round,fround,imul,clz32,sumPrecise",
         ),
         ("Object.getOwnPropertySymbols(Math).length", "1"),
         (
@@ -164,6 +164,10 @@ fn math_method_identities_and_descriptors_are_exact() {
         ("Math.fround.length+'|'+Math.fround.name", "1|fround"),
         ("Math.imul.length+'|'+Math.imul.name", "2|imul"),
         ("Math.clz32.length+'|'+Math.clz32.name", "1|clz32"),
+        (
+            "Math.sumPrecise.length+'|'+Math.sumPrecise.name",
+            "1|sumPrecise",
+        ),
         (
             "Object.getOwnPropertyNames(Math.min).join(',')",
             "length,name",
@@ -476,6 +480,53 @@ fn math_integer_methods_apply_uint32_in_specification_order() {
         (
             "(function(){let touched=false;try{Math.imul(1n,{valueOf(){touched=true;return 2}})}catch(e){return (e instanceof TypeError)+'|'+touched}})()",
             "true|false",
+        ),
+    ]);
+}
+
+#[test]
+fn math_sum_precise_rounds_once_and_preserves_special_states() {
+    assert_all(&[
+        ("1/Math.sumPrecise([])", "-Infinity"),
+        ("1/Math.sumPrecise([-0,-0])", "-Infinity"),
+        ("1/Math.sumPrecise([-0,0])", "Infinity"),
+        ("Math.sumPrecise([1,2,3])", "6"),
+        ("Math.sumPrecise([1e30,1,-1e30])", "1"),
+        ("Math.sumPrecise([0.1,0.2,0.3])", "0.6"),
+        ("Math.sumPrecise([Infinity,1])", "Infinity"),
+        ("Math.sumPrecise([-Infinity,1])", "-Infinity"),
+        (
+            "Number.isNaN(Math.sumPrecise([Infinity,-Infinity]))",
+            "true",
+        ),
+        ("Number.isNaN(Math.sumPrecise([NaN,Infinity]))", "true"),
+    ]);
+}
+
+#[test]
+fn math_sum_precise_rejects_non_numbers_and_closes_after_yield() {
+    assert_all(&[
+        (
+            "(function(){let closed=false;const items={[Symbol.iterator](){let sent=false;return {next(){if(sent)return {done:true};sent=true;return {done:false,value:'1'}},return(){closed=true;throw 'close'}}}};try{Math.sumPrecise(items)}catch(e){return (e instanceof TypeError)+'|'+closed}})()",
+            "true|true",
+        ),
+        (
+            "(function(){let converted=false;let closed=false;const boxed={valueOf(){converted=true;return 1}};const items={[Symbol.iterator](){let sent=false;return {next(){if(sent)return {done:true};sent=true;return {done:false,value:boxed}},return(){closed=true;return {done:true}}}}};try{Math.sumPrecise(items)}catch(e){return (e instanceof TypeError)+'|'+converted+'|'+closed}})()",
+            "true|false|true",
+        ),
+    ]);
+}
+
+#[test]
+fn math_sum_precise_does_not_close_iterator_step_value_failures() {
+    assert_all(&[
+        (
+            "(function(){let closed=false;const items={[Symbol.iterator](){return {next(){return {done:false,get value(){throw 'value'}}},return(){closed=true;return {done:true}}}}};try{Math.sumPrecise(items)}catch(e){return e+'|'+closed}})()",
+            "value|false",
+        ),
+        (
+            "(function(){let closed=false;const items={[Symbol.iterator](){return {next(){return {get done(){throw 'done'}}},return(){closed=true;return {done:true}}}}};try{Math.sumPrecise(items)}catch(e){return e+'|'+closed}})()",
+            "done|false",
         ),
     ]);
 }

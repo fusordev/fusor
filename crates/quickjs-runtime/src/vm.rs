@@ -92,6 +92,7 @@ mod json_parse;
 mod json_stringify;
 mod locale_string;
 mod math;
+mod math_sum_precise;
 mod native;
 mod object_intrinsics;
 mod properties;
@@ -110,8 +111,9 @@ use {
     array_mutators::*, array_search::*, array_sort::*, array_statics::*, bigint_intrinsics::*,
     bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*,
     errors::*, exceptions::*, execution::*, from_entries::*, group_by::*, iterators::*,
-    json_parse::*, json_stringify::*, locale_string::*, math::*, native::*, object_intrinsics::*,
-    properties::*, reflect::*, stack::*, string_methods::*, string_raw::*, uri::*,
+    json_parse::*, json_stringify::*, locale_string::*, math::*, math_sum_precise::*, native::*,
+    object_intrinsics::*, properties::*, reflect::*, stack::*, string_methods::*, string_raw::*,
+    uri::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -298,6 +300,7 @@ enum NativeContinuation {
     AggregateError(AggregateErrorContinuation),
     FromEntries(Box<FromEntriesContinuation>),
     GroupBy(Box<GroupByContinuation>),
+    MathSumPrecise(Box<MathSumPreciseContinuation>),
     JsonParse(Box<JsonParseContinuation>),
     JsonStringify(Box<JsonStringifyContinuation>),
     ErrorConstructor(ErrorConstructorContinuation),
@@ -345,6 +348,7 @@ impl NativeContinuation {
             Self::AggregateError(state) => state.retained_values(),
             Self::FromEntries(state) => state.retained_values(),
             Self::GroupBy(state) => state.retained_values(),
+            Self::MathSumPrecise(state) => state.retained_values(),
             Self::JsonParse(state) => state.retained_values(),
             Self::JsonStringify(state) => state.retained_values(),
             Self::ErrorConstructor(state) => state.retained_values(),
@@ -1426,6 +1430,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::AggregateError(state) => state.trace_roots(mark),
         NativeContinuation::FromEntries(state) => state.trace_roots(mark),
         NativeContinuation::GroupBy(state) => state.trace_roots(mark),
+        NativeContinuation::MathSumPrecise(state) => state.trace_roots(mark),
         NativeContinuation::JsonParse(state) => state.trace_roots(mark),
         NativeContinuation::JsonStringify(state) => state.trace_roots(mark),
         NativeContinuation::ErrorConstructor(state) => state.trace_roots(mark),
@@ -1779,6 +1784,11 @@ enum PendingExceptionPayload {
     EngineError {
         kind: ExceptionKind,
         message: JsString,
+    },
+    FrozenEngineError {
+        kind: ExceptionKind,
+        message: JsString,
+        stack: JsString,
     },
     ThrownValue(StoredValue),
 }

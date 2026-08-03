@@ -359,15 +359,7 @@ pub(super) fn dispatch_pending_exception(
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<(), ExecutionError> {
-    let frozen_engine_stack = if matches!(
-        &pending.payload,
-        PendingExceptionPayload::EngineError { .. }
-    ) {
-        let snapshot = capture_error_stack(runtime, frames, &pending.origin)?;
-        Some(render_error_stack(runtime, &snapshot)?)
-    } else {
-        None
-    };
+    freeze_pending_engine_stack(runtime, frames, &mut pending)?;
     loop {
         #[derive(Clone, Copy)]
         enum Handler {
@@ -444,7 +436,8 @@ pub(super) fn dispatch_pending_exception(
             if cleanup_temporary_receivers && runtime.collection_pending {
                 let pending_root = match &pending.payload {
                     PendingExceptionPayload::ThrownValue(value) => Some(value),
-                    PendingExceptionPayload::EngineError { .. } => None,
+                    PendingExceptionPayload::EngineError { .. }
+                    | PendingExceptionPayload::FrozenEngineError { .. } => None,
                 };
                 let pending_roots = pending_root.map_or(&[][..], std::slice::from_ref);
                 collect_cycles_with_execution_roots(runtime, frames, &[], pending_roots)?;
@@ -516,6 +509,7 @@ pub(super) fn dispatch_pending_exception(
                 }
                 Err(NativeFailure::Abrupt(next)) => {
                     pending = next;
+                    freeze_pending_engine_stack(runtime, frames, &mut pending)?;
                     continue;
                 }
                 Err(NativeFailure::AbruptAfterTransient(next)) => {
@@ -523,6 +517,7 @@ pub(super) fn dispatch_pending_exception(
                         parent.transient_cleanup_pending = true;
                     }
                     pending = next;
+                    freeze_pending_engine_stack(runtime, frames, &mut pending)?;
                     continue;
                 }
                 Err(NativeFailure::Execution(error)) => return Err(error),
@@ -627,6 +622,7 @@ pub(super) fn dispatch_pending_exception(
                 }
                 Err(NativeFailure::Abrupt(next)) => {
                     pending = next;
+                    freeze_pending_engine_stack(runtime, frames, &mut pending)?;
                     continue;
                 }
                 Err(NativeFailure::AbruptAfterTransient(next)) => {
@@ -634,6 +630,7 @@ pub(super) fn dispatch_pending_exception(
                         parent.transient_cleanup_pending = true;
                     }
                     pending = next;
+                    freeze_pending_engine_stack(runtime, frames, &mut pending)?;
                     continue;
                 }
                 Err(NativeFailure::Execution(error)) => return Err(error),
@@ -652,18 +649,21 @@ pub(super) fn dispatch_pending_exception(
         } = pending;
         let caught = match payload {
             PendingExceptionPayload::ThrownValue(value) => value,
-            PendingExceptionPayload::EngineError { kind, message } => {
-                let stack = frozen_engine_stack
-                    .clone()
-                    .ok_or(EngineFault::RuntimeInvariant {
-                        message: "caught engine error has no frozen stack snapshot",
-                    })?;
-                StoredValue::Object(runtime.materialize_error_object(
-                    realm,
-                    kind,
-                    message,
-                    Some(stack),
-                )?)
+            PendingExceptionPayload::FrozenEngineError {
+                kind,
+                message,
+                stack,
+            } => StoredValue::Object(runtime.materialize_error_object(
+                realm,
+                kind,
+                message,
+                Some(stack),
+            )?),
+            PendingExceptionPayload::EngineError { .. } => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "caught engine error has no frozen stack snapshot",
+                }
+                .into());
             }
         };
 
@@ -711,6 +711,34 @@ pub(super) fn dispatch_pending_exception(
     }
 }
 
+fn freeze_pending_engine_stack(
+    runtime: &Runtime,
+    frames: &[Frame],
+    pending: &mut PendingException,
+) -> Result<(), ExecutionError> {
+    if !matches!(
+        &pending.payload,
+        PendingExceptionPayload::EngineError { .. }
+    ) {
+        return Ok(());
+    }
+    let snapshot = capture_error_stack(runtime, frames, &pending.origin)?;
+    let stack = render_error_stack(runtime, &snapshot)?;
+    let payload = std::mem::replace(
+        &mut pending.payload,
+        PendingExceptionPayload::ThrownValue(StoredValue::Undefined),
+    );
+    let PendingExceptionPayload::EngineError { kind, message } = payload else {
+        unreachable!("engine-error payload was checked before replacement")
+    };
+    pending.payload = PendingExceptionPayload::FrozenEngineError {
+        kind,
+        message,
+        stack,
+    };
+    Ok(())
+}
+
 pub(super) fn finish_exception(
     runtime: &mut Runtime,
     pending: PendingException,
@@ -722,9 +750,12 @@ pub(super) fn finish_exception(
         origin,
     } = pending;
     Ok(match payload {
-        PendingExceptionPayload::EngineError { kind, message } => {
-            JsException::engine_error(kind, message, origin, caller_frames)
-        }
+        PendingExceptionPayload::EngineError { kind, message }
+        | PendingExceptionPayload::FrozenEngineError {
+            kind,
+            message,
+            stack: _,
+        } => JsException::engine_error(kind, message, origin, caller_frames),
         PendingExceptionPayload::ThrownValue(value) => {
             JsException::explicit_throw(runtime.public_value(value)?, origin, caller_frames)
         }
