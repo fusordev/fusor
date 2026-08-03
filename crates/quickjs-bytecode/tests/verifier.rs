@@ -1,11 +1,18 @@
+mod support;
+
+use std::sync::Arc;
+
 use quickjs_bytecode::{
-    AtomPoolIndex, BytecodeBuilder, BytecodePc, ControlFlowEdge, DecodeError, FinalOpcode,
+    AtomPoolIndex, BytecodeBuilder, BytecodePc, CompilerCaptureLayout, CompilerCapturedBinding,
+    CompilerConstantKind, CompilerConstantLayout, ControlFlowEdge, DecodeError, FinalOpcode,
     FunctionCountDomain, FunctionIndexDomains, FunctionKind, FunctionKindRequirement,
     InvalidControlFlowTargetReason, OperandIndexDomain, Operands, SecondaryOperandField,
     UnsupportedVerifierFeature, UnverifiedCompilerFunctionBody, UnverifiedFunctionBody,
     UnverifiedFunctionHeader, VerificationError, VerificationErrorKind, VerificationLimits,
     VerificationResource, VerifiedSuccessorKind, verify_compiler_control_flow, verify_control_flow,
 };
+
+use support::snapshot_verified_control_flow;
 
 fn encode(instructions: &[(FinalOpcode, Operands)]) -> Vec<u8> {
     let mut builder = BytecodeBuilder::new();
@@ -52,6 +59,46 @@ fn reject(
         VerificationLimits::default(),
     )
     .expect_err("test bytecode must be rejected")
+}
+
+#[test]
+fn compiler_control_flow_certificate_has_a_complete_stable_snapshot() {
+    let bytecode = encode(&[
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse, Operands::Label(10)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Goto, Operands::Label(5)),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::Nop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ]);
+    let body = UnverifiedCompilerFunctionBody::new(
+        bytecode,
+        FunctionIndexDomains::new(1, 2, 2, 2, 2),
+        UnverifiedFunctionHeader::stripped_ordinary_source_function_with_variable_references(
+            true, 1, 2,
+        ),
+    )
+    .with_capture_layout(
+        CompilerCaptureLayout::new(Arc::from([
+            CompilerCapturedBinding::Argument(0),
+            CompilerCapturedBinding::ScopedLocal(1),
+        ]))
+        .with_mapped_arguments(Arc::from([0])),
+    )
+    .with_constant_layout(CompilerConstantLayout::new(Arc::from([
+        CompilerConstantKind::Value,
+        CompilerConstantKind::Function,
+    ])));
+
+    let verified = verify_compiler_control_flow(body, VerificationLimits::default())
+        .expect("the characterization body must verify");
+
+    assert_eq!(
+        snapshot_verified_control_flow(&verified),
+        include_str!("support/snapshots/compiler-control-flow.txt")
+    );
 }
 
 #[test]
