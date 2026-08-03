@@ -1562,6 +1562,10 @@ fn finish_operator_primitive_target(
             }
             .into()),
         },
+        OperatorPrimitiveTarget::GlobalUri(function) => {
+            let text = operator_primitive_to_string(value, realm, origin)?;
+            finish_uri_function(function, &text, realm, origin, execution_budget)
+        }
         OperatorPrimitiveTarget::GlobalParseIntString { radix } => {
             let text = operator_primitive_to_string(value, realm, origin)?;
             begin_operator_primitive_conversion(

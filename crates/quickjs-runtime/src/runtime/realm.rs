@@ -37,12 +37,12 @@ use super::{
     ObjectRecord, PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId,
     RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError,
     RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringIntrinsics, StringMethod,
-    SymbolIntrinsics, check_limit, predefined_string, usize_to_u64,
+    SymbolIntrinsics, UriFunction, check_limit, predefined_string, usize_to_u64,
 };
 
 const REALM_OBJECT_COUNT: usize = 22;
-const REALM_FUNCTION_COUNT: usize = 155;
-const REALM_PROPERTY_COUNT: u64 = 515;
+const REALM_FUNCTION_COUNT: usize = 159;
+const REALM_PROPERTY_COUNT: u64 = 527;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -202,6 +202,14 @@ const GLOBAL_NUMERIC_FUNCTIONS: [(GlobalNumericFunction, i32); 4] = [
     (GlobalNumericFunction::ParseInt, 2),
 ];
 
+/// The four ECMA-262 URI handling functions, in global property order.
+const URI_FUNCTIONS: [(&str, UriFunction); 4] = [
+    ("decodeURI", UriFunction::DecodeUri),
+    ("decodeURIComponent", UriFunction::DecodeUriComponent),
+    ("encodeURI", UriFunction::EncodeUri),
+    ("encodeURIComponent", UriFunction::EncodeUriComponent),
+];
+
 /// The `String` constructor's code-unit factories.
 ///
 /// Both report arity 1 even though both are variadic, which the pinned oracle
@@ -249,6 +257,9 @@ const PARSE_FLOAT_ATOM_INDEX: usize = JSON_STRINGIFY_ATOM_INDEX + 1;
 /// `Number.parseInt`.
 const PARSE_INT_ATOM_INDEX: usize = PARSE_FLOAT_ATOM_INDEX + 1;
 
+/// Index of the first realm-local URI function name.
+const URI_ATOM_START: usize = PARSE_INT_ATOM_INDEX + 1;
+
 /// Exact number of non-predefined atoms interned by one realm transaction.
 const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
     + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len()
@@ -266,7 +277,7 @@ const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
     + NUMBER_FORMAT_METHODS.len()
     + ARRAY_CALLBACK_METHODS.len()
     + ARRAY_REDUCTION_METHODS.len()
-    + 7;
+    + 11;
 
 /// The `Array.prototype` reductions this profile installs.
 const ARRAY_REDUCTION_METHODS: [ArrayReduction; 2] =
@@ -833,6 +844,7 @@ struct RealmRecords {
     string_methods: [ObjectRecord; STRING_PROTOTYPE_METHODS.len()],
     number_predicates: [ObjectRecord; NUMBER_PREDICATE_STATICS.len()],
     global_numeric_functions: [ObjectRecord; GLOBAL_NUMERIC_FUNCTIONS.len()],
+    uri_functions: [ObjectRecord; URI_FUNCTIONS.len()],
     string_from_statics: [ObjectRecord; STRING_FROM_STATICS.len()],
     array_searches: [ObjectRecord; ARRAY_SEARCH_METHODS.len()],
     array_mutators: [ObjectRecord; ARRAY_MUTATOR_METHODS.len()],
@@ -858,7 +870,7 @@ impl RealmRecords {
         // Keep these reservations in the original transaction order so a
         // recoverable allocation failure reports the same `additional` value.
         let base = RealmBaseRecords {
-            global: reserved_record(25)?,
+            global: reserved_record(29)?,
             object_prototype: reserved_record(3 + OBJECT_PROTOTYPE_REFLECTION.len())?,
             function_prototype: reserved_record(10)?,
             throw_type_error: reserved_record(2)?,
@@ -907,6 +919,7 @@ impl RealmRecords {
         )?;
         let number_predicates = number_predicate_records()?;
         let global_numeric_functions = global_numeric_function_records()?;
+        let uri_functions = uri_function_records()?;
         let bigint = BigIntIntrinsicRecords::try_new()?;
         // `String.prototype` additionally carries `length`, its iterator, and
         // every installed method.
@@ -983,6 +996,7 @@ impl RealmRecords {
             string_methods,
             number_predicates,
             global_numeric_functions,
+            uri_functions,
             string_from_statics,
             array_searches: array_search_records()?,
             array_mutators: array_mutator_records()?,
@@ -1136,6 +1150,7 @@ struct RealmGraph {
     string_methods: [FunctionId; STRING_PROTOTYPE_METHODS.len()],
     number_predicates: [FunctionId; NUMBER_PREDICATE_STATICS.len()],
     global_numeric_functions: [FunctionId; GLOBAL_NUMERIC_FUNCTIONS.len()],
+    uri_functions: [FunctionId; URI_FUNCTIONS.len()],
     string_from_statics: [FunctionId; STRING_FROM_STATICS.len()],
     array_searches: [FunctionId; ARRAY_SEARCH_METHODS.len()],
     array_mutators: [FunctionId; ARRAY_MUTATOR_METHODS.len()],
@@ -1188,6 +1203,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for function in self.string_from_statics.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
+        for function in self.uri_functions.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for function in self.global_numeric_functions.into_iter().rev() {
@@ -1441,6 +1459,7 @@ impl Runtime {
         let number_predicates = self.insert_number_predicates(&base, records.number_predicates);
         let global_numeric_functions =
             self.insert_global_numeric_functions(&base, records.global_numeric_functions);
+        let uri_functions = self.insert_uri_functions(&base, records.uri_functions);
         let string_from_statics =
             self.insert_string_from_statics(&base, records.string_from_statics);
         let array_searches = self.insert_array_searches(&base, records.array_searches);
@@ -1473,6 +1492,7 @@ impl Runtime {
             string_methods,
             number_predicates,
             global_numeric_functions,
+            uri_functions,
             string_from_statics,
             array_searches,
             array_mutators,
@@ -1605,6 +1625,9 @@ impl Runtime {
             intern(&mut self.atoms, &mut dynamic_atoms, &names.stringify)?;
             interned(&mut self.atoms, &mut dynamic_atoms, "parseFloat")?;
             interned(&mut self.atoms, &mut dynamic_atoms, "parseInt")?;
+            for (literal, _) in URI_FUNCTIONS {
+                interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
+            }
             Ok(())
         })();
         if let Err(error) = outcome {
@@ -2076,6 +2099,24 @@ impl Runtime {
         inserted.map(|slot| slot.expect("every global numeric function was inserted"))
     }
 
+    /// Inserts the four realm-owned URI handling functions.
+    fn insert_uri_functions(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; URI_FUNCTIONS.len()],
+    ) -> [FunctionId; URI_FUNCTIONS.len()] {
+        let mut inserted = [None; URI_FUNCTIONS.len()];
+        for ((slot, (_, kind)), record) in inserted.iter_mut().zip(URI_FUNCTIONS).zip(records) {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::GlobalUri(kind),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every URI function was inserted"))
+    }
+
     /// Inserts one native function per installed `String.prototype` method.
     ///
     /// The result keeps `STRING_PROTOTYPE_METHODS` order so the publication step
@@ -2488,6 +2529,7 @@ impl Runtime {
         self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
         self.publish_global_value_properties(graph)?;
         self.publish_global_numeric_functions(graph, keys)?;
+        self.publish_uri_functions(graph, keys)?;
         self.publish_symbol_intrinsic_properties(&graph.symbol, graph, keys, names)?;
         self.publish_reflect_intrinsic_properties(graph, keys, names)?;
         self.publish_json_intrinsic_properties(graph, keys, names)?;
@@ -2690,6 +2732,36 @@ impl Runtime {
                     .append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
             }
             self.append_function_identity(function, &name, length, keys)?;
+        }
+        Ok(())
+    }
+
+    /// Publishes the four ordinary URI handling methods on the global object.
+    fn publish_uri_functions(
+        &mut self,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+    ) -> Result<(), TryReserveError> {
+        for (((_, _), function), atom) in URI_FUNCTIONS
+            .into_iter()
+            .zip(graph.uri_functions)
+            .zip(&graph.dynamic_atoms[URI_ATOM_START..])
+        {
+            let atom = atom.clone();
+            let name = atom
+                .description()
+                .expect("URI function name has a description")
+                .clone();
+            self.objects
+                .get_mut(graph.base.global_object)
+                .expect("new realm global object remains live")
+                .record
+                .append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            self.append_function_identity(function, &name, 1, keys)?;
         }
         Ok(())
     }
@@ -3820,6 +3892,16 @@ fn global_numeric_function_records()
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every global numeric record was reserved")))
+}
+
+/// Reserves one record per global URI handling function.
+fn uri_function_records() -> Result<[ObjectRecord; URI_FUNCTIONS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; URI_FUNCTIONS.len()] =
+        [const { None }; URI_FUNCTIONS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every URI function record was reserved")))
 }
 
 /// Reserves one record per installed `String.prototype` method.

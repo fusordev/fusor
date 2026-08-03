@@ -161,6 +161,7 @@ impl ErrorIntrinsicKind {
             ExceptionKind::ReferenceError => Self::ReferenceError,
             ExceptionKind::SyntaxError => Self::SyntaxError,
             ExceptionKind::TypeError => Self::TypeError,
+            ExceptionKind::UriError => Self::UriError,
         }
     }
 }
@@ -554,6 +555,28 @@ pub(crate) enum GlobalNumericFunction {
     ParseInt,
 }
 
+/// One URI handling function installed on the global object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UriFunction {
+    DecodeUri,
+    DecodeUriComponent,
+    EncodeUri,
+    EncodeUriComponent,
+}
+
+impl UriFunction {
+    /// Returns whether this function operates on a URI component rather than
+    /// a complete URI.
+    pub(crate) const fn is_component(self) -> bool {
+        matches!(self, Self::DecodeUriComponent | Self::EncodeUriComponent)
+    }
+
+    /// Returns whether this function percent-encodes rather than decodes.
+    pub(crate) const fn is_encode(self) -> bool {
+        matches!(self, Self::EncodeUri | Self::EncodeUriComponent)
+    }
+}
+
 /// How one argument is coerced before the method body runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StringArgument {
@@ -742,6 +765,8 @@ pub(crate) enum NativeFunctionKind {
     NumberPredicateStatic(NumberPredicate),
     /// One coercing numeric function on the realm's global object.
     GlobalNumeric(GlobalNumericFunction),
+    /// One global URI encoder or decoder.
+    GlobalUri(UriFunction),
     /// `Array.isArray`.
     ArrayIsArray,
     /// One `Array.prototype` search sharing the resumable element loop.

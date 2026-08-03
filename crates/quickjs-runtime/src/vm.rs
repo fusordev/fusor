@@ -36,9 +36,9 @@ use quickjs_bytecode::{
 use crate::{
     ArrayIndex, BigIntError, Context, DynamicFunctionCompileFailure, EngineFault, ExceptionKind,
     ExecutionError, Function, HandleError, HandleKind, JsBigInt, JsException, JsNumber,
-    JsStackFrame, JsString, JsStringError, JsValue, OrdinaryDynamicFunctionCompiler,
-    OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey, PropertyLayout, Runtime,
-    RuntimeError, RuntimeResource,
+    JsStackFrame, JsString, JsStringError, JsValue, MAX_STRING_CODE_UNITS,
+    OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey,
+    PropertyLayout, Runtime, RuntimeError, RuntimeResource,
     conversion::{
         number_to_index, number_to_int32, number_to_integer_or_infinity, number_to_length,
         number_to_uint16, number_to_uint32, string_to_number, string_to_parse_float,
@@ -59,7 +59,7 @@ use crate::{
         GlobalNumericFunction, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
         InstalledTemplate, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
         PreparedIteratorResultPlan, RealmGlobalBindingState, ReflectMethod, SetPrototypeOutcome,
-        StringArgument, StringMethod, array_length_from_number, check_execution_limit,
+        StringArgument, StringMethod, UriFunction, array_length_from_number, check_execution_limit,
         global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
@@ -92,6 +92,7 @@ mod properties;
 mod reflect;
 mod stack;
 mod string_methods;
+mod uri;
 
 #[allow(
     clippy::wildcard_imports,
@@ -103,6 +104,7 @@ use {
     define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*, exceptions::*,
     execution::*, from_entries::*, group_by::*, iterators::*, json_parse::*, json_stringify::*,
     native::*, object_intrinsics::*, properties::*, reflect::*, stack::*, string_methods::*,
+    uri::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -916,6 +918,8 @@ enum OperatorPrimitiveTarget {
     /// One coercing global numeric function's first argument, awaiting the
     /// conversion selected by that function.
     GlobalNumeric(GlobalNumericFunction),
+    /// One URI function's argument, awaiting `ToString`.
+    GlobalUri(UriFunction),
     /// `parseInt`'s input, awaiting `ToString` while retaining its radix.
     GlobalParseIntString {
         radix: StoredValue,
@@ -988,6 +992,7 @@ impl OperatorPrimitiveTarget {
             | Self::StringIteratorIntrinsic
             | Self::JsonRawJsonText
             | Self::GlobalNumeric(_)
+            | Self::GlobalUri(_)
             | Self::BigIntToString { .. }
             | Self::BigIntTruncationBits { .. }
             | Self::BigIntTruncationValue { .. } => 0,
@@ -1188,6 +1193,7 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::NumberToString { .. }
         | OperatorPrimitiveTarget::NumberFormatDigits { .. }
         | OperatorPrimitiveTarget::GlobalNumeric(_)
+        | OperatorPrimitiveTarget::GlobalUri(_)
         | OperatorPrimitiveTarget::GlobalParseIntRadix { .. }
         | OperatorPrimitiveTarget::SymbolIntrinsic { .. }
         | OperatorPrimitiveTarget::StringIteratorIntrinsic

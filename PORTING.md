@@ -387,6 +387,14 @@ Known intentional runtime differences:
   implement exact power-of-two and decimal binary64 rounding, and charge scan
   work to the shared fuel budget. `Number.parseFloat` and `Number.parseInt`
   reuse the corresponding realm-global function identities.
+- [x] Implement `encodeURI`, `encodeURIComponent`, `decodeURI`, and
+  `decodeURIComponent` from the ECMA-262 `Encode` and `Decode` algorithms.
+  Encoding walks exact UTF-16 code points, rejects unpaired surrogates, uses
+  uppercase UTF-8 percent octets, and distinguishes the RFC 2396 complete-URI
+  reserved set from component text. Decoding preserves only reserved ASCII
+  escapes for complete URIs and rejects truncated, overlong, surrogate, and
+  out-of-range UTF-8 as realm-owned `URIError`; all four perform resumable
+  `ToString` first and charge their bounded scans to shared execution fuel.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,

@@ -3644,6 +3644,10 @@ fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
         1
     );
     assert_eq!(
+        continuation(OperatorPrimitiveTarget::GlobalUri(UriFunction::EncodeUri,)).retained_values(),
+        1
+    );
+    assert_eq!(
         continuation(OperatorPrimitiveTarget::GlobalParseIntString {
             radix: StoredValue::Object(object),
         })
@@ -4824,7 +4828,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(517))
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(529))
         .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
@@ -4846,8 +4850,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 517,
-            observed: 518,
+            limit: 529,
+            observed: 530,
         }
     ));
     let failed = runtime.usage();

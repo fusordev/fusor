@@ -1453,6 +1453,19 @@ pub(super) fn dispatch_native_call_with_frames(
                 }
             }
         }
+        NativeFunctionKind::GlobalUri(function) => {
+            let mut arguments = inputs.arguments;
+            begin_operator_primitive_conversion(
+                runtime,
+                arguments.take_first_or_undefined(),
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::GlobalUri(function),
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::NumberConstructor => {
             let mut arguments = inputs.arguments;
             let Some(argument) = arguments.take_first() else {

@@ -1668,6 +1668,7 @@ const fn exception_name(kind: ExceptionKind) -> &'static str {
         ExceptionKind::ReferenceError => "ReferenceError",
         ExceptionKind::SyntaxError => "SyntaxError",
         ExceptionKind::TypeError => "TypeError",
+        ExceptionKind::UriError => "URIError",
     }
 }
 

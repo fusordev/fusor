@@ -389,6 +389,9 @@ pub enum ExceptionKind {
     SyntaxError,
     /// A value was used in an operation requiring another JavaScript type.
     TypeError,
+    /// A URI codec received an unpaired surrogate or malformed percent-encoded
+    /// UTF-8 sequence.
+    UriError,
 }
 
 /// One verified caller location retained on an escaping JavaScript exception.
@@ -586,6 +589,7 @@ impl fmt::Display for JsException {
                     ExceptionKind::ReferenceError => "ReferenceError",
                     ExceptionKind::SyntaxError => "SyntaxError",
                     ExceptionKind::TypeError => "TypeError",
+                    ExceptionKind::UriError => "URIError",
                 };
                 write!(
                     formatter,
@@ -1123,5 +1127,23 @@ mod tests {
             exception.to_string(),
             "RangeError: radix must be between 2 and 36"
         );
+    }
+
+    #[test]
+    fn uri_exceptions_render_the_javascript_error_name() {
+        let exception = JsException::engine_error(
+            ExceptionKind::UriError,
+            string("malformed UTF-8"),
+            JsStackFrame::new(
+                FunctionTemplateId::new(0),
+                BytecodePc::ZERO,
+                Arc::from("<caller>"),
+                Arc::from("decodeURI('%C0%80')"),
+                SourceByteSpan::new(0, 21),
+            ),
+            Vec::new(),
+        );
+
+        assert_eq!(exception.to_string(), "URIError: malformed UTF-8");
     }
 }
