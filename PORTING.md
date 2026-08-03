@@ -542,6 +542,16 @@ Known intentional runtime differences:
   assigns a distinct sequence only after realm construction commits. Both
   methods preserve pinned metadata/order, tracing, exact resource ceilings,
   and rollback invariants; the remaining `%Math%` methods start at `f16round`.
+- [x] Implement `Math.f16round`, `Math.fround`, `Math.imul`, and `Math.clz32`.
+  `f16round` converts binary64 directly to binary16 with
+  round-to-nearest-ties-even, including subnormal, overflow, signed-zero, and
+  the specification's double-rounding counterexample, without routing through
+  binary32. `fround` performs the specified binary32 round trip; `imul`
+  converts both operands left-to-right with `ToUint32` and returns the signed
+  low 32-bit product; `clz32` shares the same conversion and counts the exact
+  32-bit representation. Pinned order/metadata, abrupt coercions, resource
+  ceilings, and realm rollback remain covered; only `sumPrecise` and the
+  `%Math%` constants remain open.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,

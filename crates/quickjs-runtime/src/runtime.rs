@@ -815,10 +815,14 @@ pub(crate) enum MathMethod {
     Cbrt,
     Hypot,
     Random,
+    F16Round,
+    FRound,
+    Imul,
+    Clz32,
 }
 
 impl MathMethod {
-    pub(crate) const ALL: [Self; 32] = [
+    pub(crate) const ALL: [Self; 36] = [
         Self::Min,
         Self::Max,
         Self::Abs,
@@ -851,6 +855,10 @@ impl MathMethod {
         Self::Cbrt,
         Self::Hypot,
         Self::Random,
+        Self::F16Round,
+        Self::FRound,
+        Self::Imul,
+        Self::Clz32,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -887,12 +895,16 @@ impl MathMethod {
             Self::Cbrt => "cbrt",
             Self::Hypot => "hypot",
             Self::Random => "random",
+            Self::F16Round => "f16round",
+            Self::FRound => "fround",
+            Self::Imul => "imul",
+            Self::Clz32 => "clz32",
         }
     }
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Min | Self::Max | Self::Atan2 | Self::Pow | Self::Hypot => 2,
+            Self::Min | Self::Max | Self::Atan2 | Self::Pow | Self::Hypot | Self::Imul => 2,
             Self::Random => 0,
             Self::Abs
             | Self::Floor
@@ -919,7 +931,10 @@ impl MathMethod {
             | Self::Log1p
             | Self::Log2
             | Self::Log10
-            | Self::Cbrt => 1,
+            | Self::Cbrt
+            | Self::F16Round
+            | Self::FRound
+            | Self::Clz32 => 1,
         }
     }
 
@@ -928,7 +943,7 @@ impl MathMethod {
     }
 
     pub(crate) const fn is_binary(self) -> bool {
-        matches!(self, Self::Atan2 | Self::Pow)
+        matches!(self, Self::Atan2 | Self::Pow | Self::Imul)
     }
 }
 

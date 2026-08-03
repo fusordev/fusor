@@ -63,9 +63,9 @@ fn atom_failure_rolls_back_the_complete_installation() {
         "fail",
     );
     let atom_limits = AtomLimits::new(
-        PREDEFINED_ATOM_COUNT + 146,
-        PREDEFINED_DESCRIPTION_CODE_UNITS + 1_166,
-        PREDEFINED_INTERNER_SLOTS + 146,
+        PREDEFINED_ATOM_COUNT + 150,
+        PREDEFINED_DESCRIPTION_CODE_UNITS + 1_189,
+        PREDEFINED_INTERNER_SLOTS + 150,
     );
     let mut runtime =
         Runtime::try_new(RuntimeLimits::default().with_atom_limits(atom_limits)).expect("runtime");
@@ -214,10 +214,10 @@ fn public_root_metadata_preflight_is_failure_atomic() {
             24,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(694),
+            RuntimeLimits::default().with_max_object_properties(706),
             RuntimeResource::ObjectProperties,
-            694,
-            695,
+            706,
+            707,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -354,7 +354,7 @@ fn long_lived_context_drains_dropped_roots_before_installation_limits() {
     let mut runtime = Runtime::try_new(
         RuntimeLimits::default()
             .with_max_public_roots(1)
-            .with_max_heap_functions(214),
+            .with_max_heap_functions(218),
     )
     .expect("runtime");
     let realm = runtime.create_realm().expect("realm");

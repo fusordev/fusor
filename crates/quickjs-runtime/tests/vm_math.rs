@@ -112,7 +112,7 @@ fn math_is_an_ordinary_tagged_object_with_exact_prefix_order() {
         ("Object.prototype.toString.call(Math)", "[object Math]"),
         (
             "Object.getOwnPropertyNames(Math).join(',')",
-            "min,max,abs,floor,ceil,round,sqrt,acos,asin,atan,atan2,cos,exp,log,pow,sin,tan,trunc,sign,cosh,sinh,tanh,acosh,asinh,atanh,expm1,log1p,log2,log10,cbrt,hypot,random",
+            "min,max,abs,floor,ceil,round,sqrt,acos,asin,atan,atan2,cos,exp,log,pow,sin,tan,trunc,sign,cosh,sinh,tanh,acosh,asinh,atanh,expm1,log1p,log2,log10,cbrt,hypot,random,f16round,fround,imul,clz32",
         ),
         ("Object.getOwnPropertySymbols(Math).length", "1"),
         (
@@ -160,6 +160,10 @@ fn math_method_identities_and_descriptors_are_exact() {
         ("Math.cbrt.length+'|'+Math.cbrt.name", "1|cbrt"),
         ("Math.hypot.length+'|'+Math.hypot.name", "2|hypot"),
         ("Math.random.length+'|'+Math.random.name", "0|random"),
+        ("Math.f16round.length+'|'+Math.f16round.name", "1|f16round"),
+        ("Math.fround.length+'|'+Math.fround.name", "1|fround"),
+        ("Math.imul.length+'|'+Math.imul.name", "2|imul"),
+        ("Math.clz32.length+'|'+Math.clz32.name", "1|clz32"),
         (
             "Object.getOwnPropertyNames(Math.min).join(',')",
             "length,name",
@@ -427,6 +431,53 @@ fn math_random_sequences_are_distinct_across_realms() {
     };
 
     assert_ne!(first.to_bits(), second.to_bits());
+}
+
+#[test]
+fn math_float_rounding_uses_direct_ties_to_even_conversions() {
+    assert_all(&[
+        ("1/Math.f16round(-0)", "-Infinity"),
+        ("Math.f16round(Infinity)", "Infinity"),
+        ("Number.isNaN(Math.f16round(NaN))", "true"),
+        ("Math.f16round(1.00048828125000022204)", "1.0009765625"),
+        (
+            "Math.f16round(5.960464477539063e-8)",
+            "5.960464477539063e-8",
+        ),
+        ("1/Math.f16round(2.9802322387695312e-8)", "Infinity"),
+        (
+            "Math.f16round(2.980232238769532e-8)",
+            "5.960464477539063e-8",
+        ),
+        ("Math.f16round(65519)", "65504"),
+        ("Math.f16round(65520)", "Infinity"),
+        ("1/Math.fround(-0)", "-Infinity"),
+        ("Math.fround(1.337)", "1.3370000123977661"),
+        ("Math.fround(Infinity)", "Infinity"),
+        ("Number.isNaN(Math.fround(NaN))", "true"),
+    ]);
+}
+
+#[test]
+fn math_integer_methods_apply_uint32_in_specification_order() {
+    assert_all(&[
+        ("Math.imul()", "0"),
+        ("Math.imul(0xffffffff,5)", "-5"),
+        ("Math.imul(0x7fffffff,2)", "-2"),
+        ("Math.imul(NaN,7)", "0"),
+        ("Math.clz32()", "32"),
+        ("Math.clz32(1)", "31"),
+        ("Math.clz32(0x80000000)", "0"),
+        ("Math.clz32(-1)", "0"),
+        (
+            "(function(){let log=[];const left={valueOf(){log.push('left');return 3}};const right={valueOf(){log.push('right');return 7}};const value=Math.imul(left,right);return log.join(',')+'|'+value})()",
+            "left,right|21",
+        ),
+        (
+            "(function(){let touched=false;try{Math.imul(1n,{valueOf(){touched=true;return 2}})}catch(e){return (e instanceof TypeError)+'|'+touched}})()",
+            "true|false",
+        ),
+    ]);
 }
 
 #[test]

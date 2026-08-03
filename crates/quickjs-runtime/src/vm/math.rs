@@ -372,12 +372,16 @@ pub(super) fn finish_math_unary(
         MathMethod::Log2 => value.log2(),
         MathMethod::Log10 => value.log10(),
         MathMethod::Cbrt => value.cbrt(),
+        MathMethod::F16Round => math_f16round(value),
+        MathMethod::FRound => math_fround(value),
+        MathMethod::Clz32 => f64::from(number_to_uint32(number).leading_zeros()),
         MathMethod::Min
         | MathMethod::Max
         | MathMethod::Atan2
         | MathMethod::Pow
         | MathMethod::Hypot
-        | MathMethod::Random => {
+        | MathMethod::Random
+        | MathMethod::Imul => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "a non-unary Math method entered the unary continuation",
             }
@@ -402,6 +406,11 @@ pub(super) fn finish_math_binary(
         // same receiver/argument order and preserves the specified zero signs.
         MathMethod::Atan2 => left.atan2(right),
         MathMethod::Pow => number_exponentiate(left, right),
+        MathMethod::Imul => {
+            let product = number_to_uint32(JsNumber::from_f64(left))
+                .wrapping_mul(number_to_uint32(JsNumber::from_f64(right)));
+            f64::from(i32::from_ne_bytes(product.to_ne_bytes()))
+        }
         _ => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "a non-binary Math method entered the binary continuation",
@@ -433,4 +442,38 @@ fn math_round(value: f64) -> f64 {
     } else {
         lower + 1.0
     }
+}
+
+/// Converts one binary64 value directly to binary16 under roundTiesToEven and
+/// widens the exact result back to binary64 without a binary32 intermediate.
+fn math_f16round(value: f64) -> f64 {
+    if !value.is_finite() || value == 0.0 {
+        return value;
+    }
+
+    let magnitude = value.abs();
+    let rounded = if magnitude < 2.0_f64.powi(-14) {
+        magnitude.mul_add(2.0_f64.powi(24), 0.0).round_ties_even() * 2.0_f64.powi(-24)
+    } else {
+        let biased_exponent = ((magnitude.to_bits() >> 52) & 0x7ff) as i32;
+        let exponent = biased_exponent - 1023;
+        let quantum = 2.0_f64.powi(exponent - 10);
+        (magnitude / quantum).round_ties_even() * quantum
+    };
+    let rounded = if rounded > 65_504.0 {
+        f64::INFINITY
+    } else {
+        rounded
+    };
+    rounded.copysign(value)
+}
+
+/// Performs the deliberate IEEE binary64-to-binary32 narrowing required by
+/// ECMA-262 and widens the rounded value back to an ECMAScript Number.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "Math.fround is specified as an intentional binary32 narrowing"
+)]
+fn math_fround(value: f64) -> f64 {
+    f64::from(value as f32)
 }
