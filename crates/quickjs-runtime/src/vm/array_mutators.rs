@@ -23,13 +23,14 @@
  * THE SOFTWARE.
  */
 
-//! `Array.prototype.push`, `pop`, `shift`, `unshift`, `reverse`, and `fill`.
+//! `Array.prototype.push`, `pop`, `shift`, `unshift`, `reverse`, `fill`, and
+//! `copyWithin`.
 //!
 //! These are the mutators that move elements without a user callback. They share
 //! one resumable driver because they share one skeleton: read `length` once with
 //! `ToLength`, then perform a bounded sequence of element reads, writes, and
-//! deletes, then write `length` back. Every one of those steps can enter an
-//! accessor, so each is a suspension point.
+//! deletes, then write `length` back when the method changes it. Every one of
+//! those steps can enter an accessor, so each is a suspension point.
 //!
 //! The pinned oracle fixes the observable order. For `push` on an array-like
 //! with a `length` accessor and an index setter it logs `getlen`, `set1:x`,
@@ -83,6 +84,10 @@ enum ArrayMutatorStage {
     /// Awaiting the `fill` arguments' numeric conversions.
     AwaitFillStart,
     AwaitFillEnd,
+    /// Awaiting `copyWithin`'s target, start, and end conversions.
+    AwaitCopyTarget,
+    AwaitCopyStart,
+    AwaitCopyEnd,
     /// Ready to perform the next planned step.
     NextStep,
     /// Awaiting the first element read of the current step.
@@ -123,6 +128,12 @@ pub(crate) struct ArrayMutatorContinuation {
     /// `fill`'s resolved bounds.
     fill_start: u64,
     fill_end: u64,
+    /// `copyWithin`'s resolved endpoints and bounded, lazy move cursor.
+    copy_to: u64,
+    copy_from: u64,
+    copy_final: u64,
+    copy_remaining: u64,
+    copy_backward: bool,
     /// The value this mutator returns.
     result: StoredValue,
     /// The length to write back once the moves finish.
@@ -169,18 +180,13 @@ pub(super) fn begin_array_mutator(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    // Every mutator begins with `ToObject(this)`, so a nullish receiver throws
-    // before `length` is read.
-    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
-        return Err(NativeFailure::Abrupt(PendingException {
-            realm,
-            payload: PendingExceptionPayload::EngineError {
-                kind: ExceptionKind::TypeError,
-                message: JsString::from_utf8("cannot convert to object")?,
-            },
-            origin,
-        }));
-    }
+    // Every mutator begins with `ToObject(this)`: nullish receivers throw and
+    // other primitives become realm-owned wrappers. The wrapper matters for
+    // methods such as `copyWithin`, `reverse`, and `fill` that return `O`.
+    let receiver = match to_object_value(runtime, realm, receiver, origin.clone())? {
+        Ok(receiver) => receiver,
+        Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+    };
     let mut collected = Vec::new();
     for value in arguments.into_remaining_iter() {
         collected
@@ -204,6 +210,11 @@ pub(super) fn begin_array_mutator(
         second_absent: false,
         fill_start: 0,
         fill_end: 0,
+        copy_to: 0,
+        copy_from: 0,
+        copy_final: 0,
+        copy_remaining: 0,
+        copy_backward: false,
         result: StoredValue::Undefined,
         final_length: 0,
         realm,
@@ -260,12 +271,30 @@ pub(super) fn advance_array_mutator(
             }
             ArrayMutatorStage::AwaitLengthConversion => {
                 let value = take_completion(&mut completion)?;
+                if needs_conversion(&value) {
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::Number,
+                        OperatorPrimitiveTarget::ArrayMutatorArgument(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
                 let number = operator_to_number(value, state.realm, &state.origin)?;
                 state.length = number_to_length(number);
                 // `fill` converts its bounds after the length and before any
                 // element, which the oracle reports as `len|start|end`.
                 if matches!(state.mutator, ArrayMutator::Fill) {
                     state.stage = ArrayMutatorStage::AwaitFillStart;
+                    continue;
+                }
+                if matches!(state.mutator, ArrayMutator::CopyWithin) {
+                    state.stage = ArrayMutatorStage::AwaitCopyTarget;
                     continue;
                 }
                 plan_moves(&mut state)?;
@@ -342,7 +371,105 @@ pub(super) fn advance_array_mutator(
                     }
                 }
             }
+            ArrayMutatorStage::AwaitCopyTarget => {
+                if let Some(value) = completion.take() {
+                    let number = operator_to_number(value, state.realm, &state.origin)?;
+                    state.copy_to =
+                        relative_bound(number_to_integer_or_infinity(number), state.length);
+                    state.stage = ArrayMutatorStage::AwaitCopyStart;
+                    continue;
+                }
+                match state.arguments.first() {
+                    Some(value) if needs_conversion(value) => {
+                        let value = value.duplicate();
+                        let realm = state.realm;
+                        let origin = state.origin.clone();
+                        return begin_operator_primitive_conversion(
+                            runtime,
+                            value,
+                            OperatorPrimitiveHint::Number,
+                            OperatorPrimitiveTarget::ArrayMutatorArgument(Box::new(state)),
+                            realm,
+                            return_to,
+                            origin,
+                            execution_budget,
+                        );
+                    }
+                    Some(value) => completion = Some(value.duplicate()),
+                    None => completion = Some(StoredValue::Undefined),
+                }
+            }
+            ArrayMutatorStage::AwaitCopyStart => {
+                if let Some(value) = completion.take() {
+                    let number = operator_to_number(value, state.realm, &state.origin)?;
+                    state.copy_from =
+                        relative_bound(number_to_integer_or_infinity(number), state.length);
+                    state.stage = ArrayMutatorStage::AwaitCopyEnd;
+                    continue;
+                }
+                match state.arguments.get(1) {
+                    Some(value) if needs_conversion(value) => {
+                        let value = value.duplicate();
+                        let realm = state.realm;
+                        let origin = state.origin.clone();
+                        return begin_operator_primitive_conversion(
+                            runtime,
+                            value,
+                            OperatorPrimitiveHint::Number,
+                            OperatorPrimitiveTarget::ArrayMutatorArgument(Box::new(state)),
+                            realm,
+                            return_to,
+                            origin,
+                            execution_budget,
+                        );
+                    }
+                    Some(value) => completion = Some(value.duplicate()),
+                    None => completion = Some(StoredValue::Undefined),
+                }
+            }
+            ArrayMutatorStage::AwaitCopyEnd => {
+                if let Some(value) = completion.take() {
+                    let number = operator_to_number(value, state.realm, &state.origin)?;
+                    state.copy_final =
+                        relative_bound(number_to_integer_or_infinity(number), state.length);
+                    plan_moves(&mut state)?;
+                    state.stage = ArrayMutatorStage::NextStep;
+                    continue;
+                }
+                match state.arguments.get(2) {
+                    Some(StoredValue::Undefined) | None => {
+                        state.copy_final = state.length;
+                        plan_moves(&mut state)?;
+                        state.stage = ArrayMutatorStage::NextStep;
+                    }
+                    Some(value) if needs_conversion(value) => {
+                        let value = value.duplicate();
+                        let realm = state.realm;
+                        let origin = state.origin.clone();
+                        return begin_operator_primitive_conversion(
+                            runtime,
+                            value,
+                            OperatorPrimitiveHint::Number,
+                            OperatorPrimitiveTarget::ArrayMutatorArgument(Box::new(state)),
+                            realm,
+                            return_to,
+                            origin,
+                            execution_budget,
+                        );
+                    }
+                    Some(value) => completion = Some(value.duplicate()),
+                }
+            }
             ArrayMutatorStage::NextStep => {
+                if matches!(state.mutator, ArrayMutator::CopyWithin) {
+                    state.moves.clear();
+                    state.next_move = 0;
+                    let Some(step) = next_copy_within_step(&mut state) else {
+                        state.stage = ArrayMutatorStage::AwaitLengthWrite;
+                        continue;
+                    };
+                    state.moves.push(step);
+                }
                 let Some(step) = state.moves.get(state.next_move).copied() else {
                     state.stage = ArrayMutatorStage::AwaitLengthWrite;
                     continue;
@@ -488,9 +615,12 @@ pub(super) fn advance_array_mutator(
                     state.stage = ArrayMutatorStage::Done;
                     continue;
                 }
-                // `reverse` and `fill` never change the length, so they skip the
-                // write entirely and return the receiver.
-                if matches!(state.mutator, ArrayMutator::Reverse | ArrayMutator::Fill) {
+                // These methods never change the length, so they skip the write
+                // entirely and return the receiver.
+                if matches!(
+                    state.mutator,
+                    ArrayMutator::Reverse | ArrayMutator::Fill | ArrayMutator::CopyWithin
+                ) {
                     state.result = state.target.duplicate();
                     state.stage = ArrayMutatorStage::Done;
                     continue;
@@ -567,10 +697,11 @@ pub(super) fn advance_array_mutator(
 
 /// Plans the element moves each mutator performs.
 ///
-/// Planning up front is what lets one driver serve all six: the differences
-/// between them are entirely in this table of source/destination pairs and in
-/// the final length, so the stepping, suspension, and hole handling are shared.
-/// A `from` of `u64::MAX` marks a write of a call argument rather than a move.
+/// Planning up front lets one driver serve the finite mutators. `copyWithin`
+/// instead keeps a constant-space cursor because its `ToLength` input can be as
+/// large as `2^53 - 1`; each completed step prepares only its immediate
+/// successor, so instruction fuel bounds the scan without an attacker-sized
+/// allocation before the first observable element operation.
 fn plan_moves(state: &mut ArrayMutatorContinuation) -> Result<(), NativeFailure> {
     let length = state.length;
     match state.mutator {
@@ -679,8 +810,52 @@ fn plan_moves(state: &mut ArrayMutatorContinuation) -> Result<(), NativeFailure>
             }
             state.final_length = length;
         }
+        ArrayMutator::CopyWithin => plan_copy_within(state, length)?,
     }
     Ok(())
+}
+
+/// Resolves the overlap direction and initializes `copyWithin`'s lazy cursor.
+fn plan_copy_within(
+    state: &mut ArrayMutatorContinuation,
+    length: u64,
+) -> Result<(), NativeFailure> {
+    let count = state
+        .copy_final
+        .saturating_sub(state.copy_from)
+        .min(length.saturating_sub(state.copy_to));
+    state.copy_remaining = count;
+    state.copy_backward =
+        state.copy_from < state.copy_to && state.copy_to < state.copy_from + count;
+    if state.copy_backward && count > 0 {
+        state.copy_from += count - 1;
+        state.copy_to += count - 1;
+    }
+    // Reserve one reusable slot. Clearing the vector between steps retains
+    // this capacity, keeping the whole copy constant-space.
+    reserve_moves(state, usize::from(count > 0))?;
+    state.final_length = length;
+    Ok(())
+}
+
+/// Produces the next `copyWithin` move and advances its constant-space cursor.
+fn next_copy_within_step(state: &mut ArrayMutatorContinuation) -> Option<ElementStep> {
+    if state.copy_remaining == 0 {
+        return None;
+    }
+    let step = ElementStep::Move {
+        from: state.copy_from,
+        to: state.copy_to,
+    };
+    state.copy_remaining -= 1;
+    if state.copy_backward {
+        state.copy_from = state.copy_from.saturating_sub(1);
+        state.copy_to = state.copy_to.saturating_sub(1);
+    } else {
+        state.copy_from = state.copy_from.saturating_add(1);
+        state.copy_to = state.copy_to.saturating_add(1);
+    }
+    Some(step)
 }
 
 /// Reserves the move plan's storage fallibly.
@@ -840,15 +1015,16 @@ fn length_as_f64(length: u64) -> f64 {
     length as f64
 }
 
-/// Returns the property key for one element index.
-fn element_key(index: u64) -> Result<PropertyKey, NativeFailure> {
-    let index = u32::try_from(index).map_err(|_| EngineFault::RuntimeInvariant {
-        message: "array mutator index exceeded the array-index domain",
-    })?;
-    let index = ArrayIndex::new(index).ok_or(EngineFault::RuntimeInvariant {
-        message: "array mutator index reached the non-index sentinel",
-    })?;
-    Ok(PropertyKey::from_index(index))
+/// Returns an integer-index key, including ordinary string keys above the
+/// Array-index domain admitted by `LengthOfArrayLike`.
+fn element_key(runtime: &mut Runtime, index: u64) -> Result<PropertyKey, NativeFailure> {
+    if let Ok(index) = u32::try_from(index)
+        && let Some(index) = ArrayIndex::new(index)
+    {
+        return Ok(PropertyKey::from_index(index));
+    }
+    let name = JsNumber::from_f64(length_as_f64(index)).to_javascript_string()?;
+    Ok(runtime.property_key_from_string(&name)?)
 }
 
 /// Extracts the awaited completion value.
@@ -909,7 +1085,7 @@ fn read_element(
     index: u64,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<ElementRead, NativeFailure> {
-    let key = element_key(index)?;
+    let key = element_key(runtime, index)?;
     charge_mutator_lookup(runtime, &state.target, execution_budget)?;
     // A missing index is a hole, not `undefined`, so the destination is deleted
     // rather than written. This is what keeps `[1,,3].reverse()` sparse.
@@ -943,14 +1119,20 @@ fn write_element(
     absent: bool,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<ElementWrite, NativeFailure> {
-    let key = element_key(index)?;
+    let key = element_key(runtime, index)?;
     charge_mutator_lookup(runtime, &state.target, execution_budget)?;
     if absent {
         match delete_static_property(runtime, &state.target, &key)? {
-            // A refused delete is not an error here: the element simply stays,
-            // which is the same outcome a non-configurable property produces.
-            PropertyDeleteOutcome::Deleted | PropertyDeleteOutcome::Refused => {
-                return Ok(ElementWrite::Complete);
+            PropertyDeleteOutcome::Deleted => return Ok(ElementWrite::Complete),
+            // These algorithms use `DeletePropertyOrThrow`, so a sparse move
+            // into a non-configurable destination is an abrupt completion.
+            PropertyDeleteOutcome::Refused => {
+                return Err(NativeFailure::Abrupt(property_exception_at(
+                    state.realm,
+                    state.origin.clone(),
+                    None,
+                    PropertyFailure::NotDeletable,
+                )?));
             }
             PropertyDeleteOutcome::Failed(failure) => {
                 return Err(NativeFailure::Abrupt(property_exception_at(
@@ -1262,7 +1444,7 @@ pub(super) fn advance_array_splice(
                 let offset = state.next_extract;
                 state.next_extract = state.next_extract.saturating_add(1);
                 let index = state.start.saturating_add(offset);
-                let key = element_key(index)?;
+                let key = element_key(runtime, index)?;
                 charge_splice_lookup(runtime, &state.target, execution_budget)?;
                 // A removed hole stays a hole in the result.
                 if !has_property(runtime, state.realm, &state.target, &key)? {
@@ -1285,7 +1467,7 @@ pub(super) fn advance_array_splice(
             ArraySpliceStage::AwaitExtract => {
                 let value = take_completion(&mut completion)?;
                 let index = state.next_extract.saturating_sub(1);
-                let key = element_key(index)?;
+                let key = element_key(runtime, index)?;
                 match runtime.define_array_data_property(
                     state.destination,
                     key,
@@ -1321,7 +1503,7 @@ pub(super) fn advance_array_splice(
                         state.stage = ArraySpliceStage::AwaitShiftWrite;
                     }
                     ElementStep::Move { from, .. } => {
-                        let key = element_key(from)?;
+                        let key = element_key(runtime, from)?;
                         charge_splice_lookup(runtime, &state.target, execution_budget)?;
                         if !has_property(runtime, state.realm, &state.target, &key)? {
                             state.pending_absent = true;
@@ -1375,7 +1557,7 @@ pub(super) fn advance_array_splice(
                         .into());
                     }
                 };
-                let key = element_key(index)?;
+                let key = element_key(runtime, index)?;
                 charge_splice_lookup(runtime, &state.target, execution_budget)?;
                 if state.pending_absent {
                     match delete_static_property(runtime, &state.target, &key)? {

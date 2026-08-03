@@ -485,6 +485,7 @@ pub(crate) enum ArrayMutator {
     Unshift,
     Reverse,
     Fill,
+    CopyWithin,
 }
 
 impl ArrayMutator {
@@ -494,6 +495,7 @@ impl ArrayMutator {
             // `push` and `unshift` are variadic but report 1; `fill` reports 1
             // even though it accepts three arguments.
             Self::Push | Self::Unshift | Self::Fill => 1,
+            Self::CopyWithin => 2,
             Self::Pop | Self::Shift | Self::Reverse => 0,
         }
     }
@@ -507,6 +509,7 @@ impl ArrayMutator {
             Self::Unshift => "unshift",
             Self::Reverse => "reverse",
             Self::Fill => "fill",
+            Self::CopyWithin => "copyWithin",
         }
     }
 }

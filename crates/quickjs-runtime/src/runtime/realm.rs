@@ -41,8 +41,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 22;
-const REALM_FUNCTION_COUNT: usize = 162;
-const REALM_PROPERTY_COUNT: u64 = 536;
+const REALM_FUNCTION_COUNT: usize = 163;
+const REALM_PROPERTY_COUNT: u64 = 539;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -330,15 +330,17 @@ const ARRAY_COPIER_ATOM_START: usize = ARRAY_MUTATOR_ATOM_START + ARRAY_MUTATOR_
 
 /// The `Array.prototype` mutators this profile installs.
 ///
-/// Each name and arity comes from the pinned oracle, which reports `1` for
-/// `push`, `unshift`, and `fill` and `0` for `pop`, `shift`, and `reverse`.
-const ARRAY_MUTATOR_METHODS: [ArrayMutator; 6] = [
+/// Each name and arity comes from the pinned oracle, which reports `2` for
+/// `copyWithin`, `1` for `push`, `unshift`, and `fill`, and `0` for `pop`,
+/// `shift`, and `reverse`.
+const ARRAY_MUTATOR_METHODS: [ArrayMutator; 7] = [
     ArrayMutator::Push,
     ArrayMutator::Pop,
     ArrayMutator::Shift,
     ArrayMutator::Unshift,
     ArrayMutator::Reverse,
     ArrayMutator::Fill,
+    ArrayMutator::CopyWithin,
 ];
 
 /// Index of the first `Array.prototype` mutator name in the dynamic atoms.

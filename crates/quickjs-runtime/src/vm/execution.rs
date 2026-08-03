@@ -185,7 +185,7 @@ pub(super) fn plan_frame(
 /// through, primitives are boxed into their realm wrapper, and `null` or
 /// `undefined` produce the exact `cannot convert to object` `TypeError`.
 /// Returns the converted object or a pending exception.
-fn to_object_value(
+pub(super) fn to_object_value(
     runtime: &mut Runtime,
     realm: RealmId,
     value: StoredValue,
