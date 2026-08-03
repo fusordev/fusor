@@ -686,6 +686,9 @@ pub(crate) enum StringMethod {
     PadEnd,
     PadStart,
     Repeat,
+    /// `String.prototype.replace`, whose `@@replace` protocol dispatch must run
+    /// before the receiver and fallback arguments are string-coerced.
+    Replace,
     Slice,
     StartsWith,
     Substr,
@@ -726,6 +729,7 @@ impl StringMethod {
             | Self::ToLowerCase
             | Self::ToUpperCase
             | Self::Concat
+            | Self::Replace
             | Self::FromCharCode
             | Self::FromCodePoint => &[],
             Self::At | Self::CharAt | Self::CharCodeAt | Self::CodePointAt => {

@@ -1764,6 +1764,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::StringRawValue(state) => {
             advance_string_raw(runtime, *state, Some(value), return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::StringReplaceValue(state) => {
+            advance_string_replace(runtime, *state, value, return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::LocaleStringValue(state) => {
             advance_locale_string(runtime, *state, Some(value), return_to, execution_budget)
         }

@@ -550,6 +550,12 @@ fn finish_string_method(
             }
             StoredValue::String(repeat_string(subject, count, state)?)
         }
+        StringMethod::Replace => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "String.prototype.replace entered the simple String method machine",
+            }
+            .into());
+        }
         StringMethod::PadStart | StringMethod::PadEnd => {
             let target = argument(0)?.integer()?;
             let filler = match argument(1)? {
@@ -954,7 +960,7 @@ fn matches_at(subject: &JsString, needle: &JsString, start: u32) -> bool {
 ///
 /// An empty needle matches at `start`, which is why `"hello".indexOf("", 99)` is
 /// the subject length rather than `-1`.
-fn find_forward(subject: &JsString, needle: &JsString, start: u32) -> Option<u32> {
+pub(super) fn find_forward(subject: &JsString, needle: &JsString, start: u32) -> Option<u32> {
     let last = subject.len().checked_sub(needle.len())?;
     (start..=last).find(|index| matches_at(subject, needle, *index))
 }

@@ -377,6 +377,18 @@ Known intentional runtime differences:
   definitions run their two observable numeric conversions, preserve partial
   shrink results at non-configurable indices, and install a requested
   non-writable final state even when that shrink returns `false`.
+- [x] `String.prototype.replace` as the first RegExp-dependent String method
+  tranche. An object search value gets the exact `GetMethod(@@replace)` and
+  `Call` path before any fallback coercion, including accessor suspension,
+  callable validation, the original receiver and replacement arguments, and an
+  uncoerced protocol result. The plain-string path then applies
+  `RequireObjectCoercible`, resumable receiver/search/replacement conversions in
+  specification order, first-match UTF-16 search, callable replacers with
+  `(matched, position, string)`, resumable result conversion, and the empty-list
+  `GetSubstitution` rules for `$$`, `$&`, ``$` ``, and `$'`; capture and named
+  references remain literal because this path has no captures. Continuation
+  roots, shared instruction fuel, exact method metadata/descriptors, lone
+  surrogates, no-match side effects, and QuickJS/Node oracle parity are covered.
 - [ ] Remaining RegExp-dependent String method surface, shape sharing/transition
   interning, remaining arguments and Proxy exotics, dense indexed storage,
   deterministic finalization, and diagnostics.

@@ -42,8 +42,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 23;
-const REALM_FUNCTION_COUNT: usize = 218;
-const REALM_PROPERTY_COUNT: u64 = 715;
+const REALM_FUNCTION_COUNT: usize = 219;
+const REALM_PROPERTY_COUNT: u64 = 718;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -71,14 +71,15 @@ const STRING_METHOD_ATOM_START: usize = BIGINT_STATIC_ATOM_START + BIGINT_INTERN
 
 /// The `String.prototype` methods this profile installs.
 ///
-/// The set is deliberately narrower than the pinned oracle's: it omits every
-/// method needing `RegExp` (`match`, `matchAll`, `replace`, `replaceAll`,
-/// `search`, `split`) and the Annex B HTML wrappers. An absent method therefore
-/// fails closed as a missing property rather than behaving incorrectly.
+/// The set is deliberately narrower than the pinned oracle's: `replace`
+/// implements its `@@replace` protocol and exact plain-string path, while the
+/// remaining RegExp-coupled methods (`match`, `matchAll`, `replaceAll`,
+/// `search`, and `split`) and the Annex B HTML wrappers remain absent and
+/// therefore fail closed rather than behaving incorrectly.
 ///
 /// Each `length` matches the pinned oracle, which reports `1` for most methods
 /// and `2` for `slice`, `substr`, and `substring`.
-const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 27] = [
+const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 28] = [
     StringPrototypeMethod::interned("at", StringMethod::At, 1),
     StringPrototypeMethod::interned("charAt", StringMethod::CharAt, 1),
     StringPrototypeMethod::interned("charCodeAt", StringMethod::CharCodeAt, 1),
@@ -91,6 +92,7 @@ const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 27] = [
     StringPrototypeMethod::interned("padEnd", StringMethod::PadEnd, 1),
     StringPrototypeMethod::interned("padStart", StringMethod::PadStart, 1),
     StringPrototypeMethod::interned("repeat", StringMethod::Repeat, 1),
+    StringPrototypeMethod::interned("replace", StringMethod::Replace, 2),
     StringPrototypeMethod::interned("slice", StringMethod::Slice, 2),
     StringPrototypeMethod::interned("startsWith", StringMethod::StartsWith, 1),
     StringPrototypeMethod::interned("substr", StringMethod::Substr, 2),

@@ -214,10 +214,10 @@ fn public_root_metadata_preflight_is_failure_atomic() {
             24,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(718),
+            RuntimeLimits::default().with_max_object_properties(721),
             RuntimeResource::ObjectProperties,
-            718,
-            719,
+            721,
+            722,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -354,7 +354,7 @@ fn long_lived_context_drains_dropped_roots_before_installation_limits() {
     let mut runtime = Runtime::try_new(
         RuntimeLimits::default()
             .with_max_public_roots(1)
-            .with_max_heap_functions(219),
+            .with_max_heap_functions(220),
     )
     .expect("runtime");
     let realm = runtime.create_realm().expect("realm");

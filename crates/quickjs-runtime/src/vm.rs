@@ -100,6 +100,7 @@ mod reflect;
 mod stack;
 mod string_methods;
 mod string_raw;
+mod string_replace;
 mod uri;
 
 #[allow(
@@ -113,7 +114,7 @@ use {
     errors::*, exceptions::*, execution::*, from_entries::*, group_by::*, iterators::*,
     json_parse::*, json_stringify::*, locale_string::*, math::*, math_sum_precise::*, native::*,
     object_intrinsics::*, properties::*, reflect::*, stack::*, string_methods::*, string_raw::*,
-    uri::*,
+    string_replace::*, uri::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -327,6 +328,7 @@ enum NativeContinuation {
     ArrayFlatten(Box<ArrayFlattenContinuation>),
     ArrayStatic(Box<ArrayStaticContinuation>),
     StringRaw(Box<StringRawContinuation>),
+    StringReplace(Box<StringReplaceContinuation>),
     LocaleString(Box<LocaleStringContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
@@ -375,6 +377,7 @@ impl NativeContinuation {
             Self::ArrayFlatten(state) => state.retained_values(),
             Self::ArrayStatic(state) => state.retained_values(),
             Self::StringRaw(state) => state.retained_values(),
+            Self::StringReplace(state) => state.retained_values(),
             Self::LocaleString(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
@@ -1022,6 +1025,9 @@ enum OperatorPrimitiveTarget {
     ArrayStaticLength(Box<ArrayStaticContinuation>),
     /// One `String.raw` length, literal, or substitution conversion.
     StringRawValue(Box<StringRawContinuation>),
+    /// One `String.prototype.replace` fallback operand or callback result,
+    /// awaiting `ToString`.
+    StringReplaceValue(Box<StringReplaceContinuation>),
     /// A locale-string length or invocation result awaiting primitive conversion.
     LocaleStringValue(Box<LocaleStringContinuation>),
     ArrayLengthWrite(ArrayLengthWriteState),
@@ -1092,6 +1098,7 @@ impl OperatorPrimitiveTarget {
             Self::ArrayFlattenValue(state) => state.retained_values(),
             Self::ArrayStaticLength(state) => state.retained_values(),
             Self::StringRawValue(state) => state.retained_values(),
+            Self::StringReplaceValue(state) => state.retained_values(),
             Self::LocaleStringValue(state) => state.retained_values(),
             Self::MathExtrema(state) => state.retained_values(),
             Self::MathHypot(state) => state.retained_values(),
@@ -1309,6 +1316,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArrayFlattenValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayStaticLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::StringRawValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::StringReplaceValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::LocaleStringValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::MathExtrema(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::MathHypot(state) => state.trace_roots(mark),
@@ -1393,6 +1401,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ArrayFlatten(state) => state.trace_roots(mark),
         NativeContinuation::ArrayStatic(state) => state.trace_roots(mark),
         NativeContinuation::StringRaw(state) => state.trace_roots(mark),
+        NativeContinuation::StringReplace(state) => state.trace_roots(mark),
         NativeContinuation::LocaleString(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {

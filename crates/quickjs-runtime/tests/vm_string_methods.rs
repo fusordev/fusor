@@ -58,6 +58,10 @@
 //! "ab".repeat(undefined) => ""     concat(undefined) => "helloundefined"
 //! at(undefined) => "h"             charAt(undefined) => "h"
 //! conversion order (recv, arg, pos) => "recv,arg,pos"
+//! "abcabc".replace("b", "X") => "aXcabc"
+//! "abc".replace("", "X") => "Xabc"
+//! substitution template => "a[b][a][cabc][$][$1][$<x>]cabc"
+//! replace conversion order => "get,recv,search,repl"
 //! ```
 
 use std::{error::Error, fmt, sync::Arc};
@@ -316,6 +320,97 @@ fn concat_converts_every_argument_to_a_string() {
     ]);
 }
 
+/// The plain-string `replace` path changes only the first match and expands
+/// exactly the substitutions admitted by an empty captures list.
+#[test]
+fn replace_applies_plain_string_search_and_substitution() {
+    assert_all(&[
+        ("'abcabc'.replace('b', 'X')", "aXcabc"),
+        ("'abcabc'.replace('z', 'X')", "abcabc"),
+        ("'abc'.replace('', 'X')", "Xabc"),
+        (
+            r#""abcabc".replace("b", "[$&][$`][$'][$$][$1][$<x>]")"#,
+            "a[b][a][cabc][$][$1][$<x>]cabc",
+        ),
+        // With no captures, decimal and named-capture references stay literal.
+        (
+            "'a'.replace('a', '$0|$00|$01|$99|$<x>')",
+            "$0|$00|$01|$99|$<x>",
+        ),
+        // Search and callback positions are UTF-16 code-unit based.
+        (
+            "(function(){let args;const r='\\uD800x'.replace('x',function(){args=arguments;return 'Y';});return r.charCodeAt(0)+','+r+'|'+args[1]+','+args[2].length;})()",
+            "55296,�Y|1,2",
+        ),
+    ]);
+}
+
+/// An object search value gets first refusal through `@@replace`; neither the
+/// receiver nor replacement is coerced when that method is present.
+#[test]
+fn replace_dispatches_the_symbol_protocol_before_fallback_coercion() {
+    assert_all(&[
+        (
+            "(function(){const recv={toString(){throw 1;}};const repl={toString(){throw 2;}};const search={[Symbol.replace](r,x){return (r===recv)+'|'+(x===repl);}};return String.prototype.replace.call(recv,search,repl);})()",
+            "true|true",
+        ),
+        (
+            "(function(){let thisValue;const result={};const search={get [Symbol.replace](){return function(){'use strict';thisValue=this;return result;};}};return ('abc'.replace(search,'X')===result)+'|'+(thisValue===search);})()",
+            "true|true",
+        ),
+        (
+            "(function(){let log='';const search={get [Symbol.replace](){log+='get,';return undefined;},toString(){log+='search,';return 'b';}};const recv={toString(){log+='recv,';return 'abc';}};const repl={toString(){log+='repl';return 'X';}};const result=String.prototype.replace.call(recv,search,repl);return result+'|'+log;})()",
+            "aXc|get,recv,search,repl",
+        ),
+        // `null` from GetMethod has the same fallback meaning as `undefined`.
+        (
+            "(function(){const search={[Symbol.replace]:null,toString(){return 'b';}};return 'abc'.replace(search,'X');})()",
+            "aXc",
+        ),
+    ]);
+    assert_throws(
+        "return 'abc'.replace({[Symbol.replace]: 1}, 'X');",
+        ExceptionKind::TypeError,
+        "not a function",
+    );
+}
+
+/// Fallback coercions and a functional replacement can each re-enter the VM.
+#[test]
+fn replace_preserves_fallback_and_callback_observation_order() {
+    assert_all(&[
+        // A non-callable replacement is converted before the search result is
+        // tested, even when there is no match.
+        (
+            "(function(){let n=0;const result='abc'.replace('z',{toString(){n++;return 'X';}});return result+'|'+n;})()",
+            "abc|1",
+        ),
+        // A callable replacement is not invoked when there is no match.
+        (
+            "(function(){let n=0;const result='abc'.replace('z',function(){n++;return 'X';});return result+'|'+n;})()",
+            "abc|0",
+        ),
+        (
+            "(function(){let log='';const result='abc'.replace('b',function(m,p,s){'use strict';log+=(this===undefined)+','+m+','+p+','+s+';';return {toString(){log+='result';return 'X';}};});return result+'|'+log;})()",
+            "aXc|true,b,1,abc;result",
+        ),
+    ]);
+}
+
+/// `RequireObjectCoercible` precedes even the `@@replace` getter.
+#[test]
+fn replace_rejects_a_nullish_receiver_before_protocol_lookup() {
+    assert_all(&[(
+        "(function(){let touched=false;const search={get [Symbol.replace](){touched=true;}};try{String.prototype.replace.call(null,search,'X');}catch(e){}return touched;})()",
+        "false",
+    )]);
+    assert_throws(
+        "return String.prototype.replace.call(undefined, {}, 'X');",
+        ExceptionKind::TypeError,
+        "null or undefined are forbidden",
+    );
+}
+
 /// `repeat` truncates its count and rejects a negative or infinite one.
 #[test]
 fn repeat_rejects_a_negative_or_infinite_count() {
@@ -550,6 +645,8 @@ fn the_installed_methods_have_the_pinned_shape() {
         ("String.prototype.slice.length", "2"),
         ("String.prototype.substr.length", "2"),
         ("String.prototype.substring.length", "2"),
+        ("String.prototype.replace.length", "2"),
+        ("String.prototype.replace.name", "replace"),
         ("String.prototype.trim.length", "0"),
         ("String.prototype.trim.name", "trim"),
         ("String.prototype.isWellFormed.length", "0"),
