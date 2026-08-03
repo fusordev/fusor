@@ -26,7 +26,9 @@
 //! Runtime construction and failure-atomic realm intrinsic graph publication.
 
 mod atoms;
+mod reservation;
 mod schema;
+mod transaction;
 mod validation;
 
 use std::collections::TryReserveError;
@@ -46,11 +48,9 @@ use super::{
 };
 
 use atoms::{RealmAtomBindings, RealmAtomPlan};
+use reservation::RealmReservationPlan;
 use schema::RealmNameId;
-
-const REALM_OBJECT_COUNT: usize = 23;
-const REALM_FUNCTION_COUNT: usize = 219;
-const REALM_PROPERTY_COUNT: u64 = 718;
+use transaction::RealmBuildTransaction;
 
 /// The `BigInt` static names that have no predefined atom.
 const BIGINT_INTERNED_STATICS: [&str; 2] = ["asIntN", "asUintN"];
@@ -1082,34 +1082,6 @@ struct MathGraph {
     methods: [FunctionId; MathMethod::ALL.len()],
 }
 
-impl RealmBase {
-    fn rollback(self, runtime: &mut Runtime) {
-        for function in self.object_statics.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.object_reflection.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in [
-            self.function_has_instance,
-            self.function_bind,
-            self.function_apply,
-            self.function_call,
-            self.function_to_string,
-            self.object_value_of,
-            self.object_to_string,
-            self.object_constructor,
-            self.function_constructor,
-            self.function_prototype,
-        ] {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        debug_assert!(runtime.realms.remove(self.realm).is_some());
-        debug_assert!(runtime.objects.remove(self.global_object).is_some());
-        debug_assert!(runtime.objects.remove(self.object_prototype).is_some());
-    }
-}
-
 struct RealmGraph {
     base: RealmBase,
     dynamic_atoms: RealmAtomBindings,
@@ -1142,130 +1114,6 @@ struct RealmGraph {
     reflect: ReflectGraph,
     json: JsonGraph,
     math: MathGraph,
-}
-
-impl RealmGraph {
-    #[allow(
-        clippy::too_many_lines,
-        reason = "failure rollback mirrors the complete realm graph's insertion order in one auditable reverse sequence"
-    )]
-    fn rollback(self, runtime: &mut Runtime) {
-        for function in self.math.methods.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        debug_assert!(runtime.functions.remove(self.json.stringify).is_some());
-        debug_assert!(runtime.functions.remove(self.json.raw_json).is_some());
-        debug_assert!(runtime.functions.remove(self.json.is_raw_json).is_some());
-        debug_assert!(runtime.functions.remove(self.json.parse).is_some());
-        for function in self.reflect.methods.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for intrinsic in self.errors.entries.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(intrinsic.constructor).is_some());
-        }
-        for function in [self.errors.is_error, self.errors.to_string] {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.array_statics.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        debug_assert!(runtime.functions.remove(self.array_is_array).is_some());
-        debug_assert!(runtime.functions.remove(self.array_splice).is_some());
-        for function in self.array_reductions.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.array_callbacks.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.number_formats.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.locale_strings.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.array_flattens.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.array_sorts.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.array_copiers.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.array_mutators.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.array_searches.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        debug_assert!(runtime.functions.remove(self.string_raw).is_some());
-        for function in self.string_from_statics.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.uri_functions.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.global_numeric_functions.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.number_predicates.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in self.string_methods.into_iter().rev() {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for function in [
-            self.symbol.key_for,
-            self.symbol.symbol_for,
-            self.symbol.description,
-            self.symbol.to_primitive,
-            self.symbol.value_of,
-            self.symbol.to_string,
-            self.symbol.constructor,
-            self.iterators.string_iterator,
-            self.iterators.string_iterator_next,
-            self.iterators.array_entries,
-            self.iterators.array_keys,
-            self.iterators.array_values,
-            self.iterators.array_iterator_next,
-            self.iterators.iterator_method,
-            self.array.to_string,
-            self.array.join,
-            self.array.species,
-            self.array.constructor,
-            self.string.value_of,
-            self.string.to_string,
-            self.string.constructor,
-            self.number.value_of,
-            self.number.to_string,
-            self.number.constructor,
-            self.boolean.value_of,
-            self.boolean.to_string,
-            self.boolean.constructor,
-        ] {
-            debug_assert!(runtime.functions.remove(function).is_some());
-        }
-        for intrinsic in self.errors.entries.into_iter().rev() {
-            debug_assert!(runtime.objects.remove(intrinsic.prototype).is_some());
-        }
-        for object in [
-            self.math.object,
-            self.json.object,
-            self.reflect.object,
-            self.symbol.prototype,
-            self.iterators.string_iterator_prototype,
-            self.iterators.array_iterator_prototype,
-            self.iterators.iterator_prototype,
-            self.array.prototype,
-            self.string.prototype,
-            self.number.prototype,
-            self.boolean.prototype,
-        ] {
-            debug_assert!(runtime.objects.remove(object).is_some());
-        }
-        self.base.rollback(runtime);
-        self.dynamic_atoms.rollback(&mut runtime.atoms);
-    }
 }
 
 impl Runtime {
@@ -1317,27 +1165,27 @@ impl Runtime {
     )]
     pub fn create_realm(&mut self) -> Result<Realm, RuntimeError> {
         self.drain_releases();
-        self.preflight_and_reserve_realm()?;
-
         let keys = RealmKeys::new(&self.atoms);
         let names = RealmNames::try_new(&self.atoms)?;
         let atom_plan = RealmAtomPlan::try_new(&names)?;
+        let reservation = RealmReservationPlan::try_new(&atom_plan)?;
+        reservation.preflight_and_reserve(self)?;
         let records = RealmRecords::try_new(&keys.length)?;
-        let graph = self.build_realm_graph(records, &atom_plan)?;
+        let mut transaction = RealmBuildTransaction::try_new(self, reservation.journal_entries())?;
+        let graph = transaction.build_realm_graph(records, &atom_plan)?;
 
-        if self
+        if transaction
             .publish_realm_properties(&graph, &keys, &names)
             .is_err()
         {
-            graph.rollback(self);
             return Err(property_allocation_failed(1));
         }
 
         let id = graph.base.realm;
-        let math_random_seed = self.next_math_random_seed;
-        self.next_math_random_seed = self.next_math_random_seed.wrapping_add(1).max(1);
-        let state = self.realms.get_mut(id).expect("new realm remains live");
-        state.math_random_state = math_random_seed;
+        let state = transaction
+            .realms
+            .get_mut(id)
+            .expect("new realm remains live");
         state.intrinsics = RealmIntrinsics::Ready {
             function_prototype: graph.base.function_prototype,
             throw_type_error: graph.base.throw_type_error,
@@ -1374,9 +1222,18 @@ impl Runtime {
                 array_values: graph.iterators.array_values,
             },
         };
-        self.object_properties += REALM_PROPERTY_COUNT;
+        transaction.commit();
+        let math_random_seed = transaction.next_math_random_seed;
+        transaction.next_math_random_seed =
+            transaction.next_math_random_seed.wrapping_add(1).max(1);
+        transaction
+            .realms
+            .get_mut(id)
+            .expect("committed Realm remains live")
+            .math_random_state = math_random_seed;
+        transaction.object_properties += reservation.object_properties();
         Ok(Realm(Arc::new(RealmHandle {
-            owner: Arc::downgrade(&self.mailbox),
+            owner: Arc::downgrade(&transaction.mailbox),
             id,
         })))
     }
@@ -1405,39 +1262,9 @@ impl Runtime {
         let bits = (0x3ff_u64 << 52) | (output >> 12);
         Ok(JsNumber::from_f64(f64::from_bits(bits) - 1.0))
     }
+}
 
-    fn preflight_and_reserve_realm(&mut self) -> Result<(), RuntimeError> {
-        check_limit(
-            RuntimeResource::Realms,
-            self.limits.max_realms,
-            usize_to_u64(self.realms.len()).saturating_add(1),
-        )?;
-        check_limit(
-            RuntimeResource::HeapObjects,
-            self.limits.max_heap_objects,
-            usize_to_u64(self.objects.len()).saturating_add(usize_to_u64(REALM_OBJECT_COUNT)),
-        )?;
-        check_limit(
-            RuntimeResource::HeapFunctions,
-            self.limits.max_heap_functions,
-            usize_to_u64(self.functions.len()).saturating_add(usize_to_u64(REALM_FUNCTION_COUNT)),
-        )?;
-        check_limit(
-            RuntimeResource::ObjectProperties,
-            self.limits.max_object_properties,
-            self.object_properties.saturating_add(REALM_PROPERTY_COUNT),
-        )?;
-        self.realms
-            .try_reserve(1)
-            .map_err(|_| allocation_failed(RuntimeResource::Realms, 1))?;
-        self.objects
-            .try_reserve(REALM_OBJECT_COUNT)
-            .map_err(|_| allocation_failed(RuntimeResource::HeapObjects, REALM_OBJECT_COUNT))?;
-        self.functions
-            .try_reserve(REALM_FUNCTION_COUNT)
-            .map_err(|_| allocation_failed(RuntimeResource::HeapFunctions, REALM_FUNCTION_COUNT))
-    }
-
+impl RealmBuildTransaction<'_> {
     #[expect(
         clippy::too_many_lines,
         reason = "one flat insertion transaction keeps the exact intrinsic order auditable"
@@ -1448,6 +1275,7 @@ impl Runtime {
         atom_plan: &RealmAtomPlan<'_>,
     ) -> Result<RealmGraph, RuntimeError> {
         let dynamic_atoms = self.intern_realm_atom_plan(atom_plan)?;
+        self.record_atoms(&dynamic_atoms);
         let base = self.insert_realm_base(records.base);
 
         let errors = self.insert_error_intrinsics(&base, records.errors);
@@ -1616,6 +1444,7 @@ impl Runtime {
                 math_random_state: 1,
             })
             .expect("the realm transaction reserved its realm slot");
+        self.record_realm(realm);
 
         let function_prototype = self.insert_reserved_native(
             realm,
@@ -2469,19 +2298,25 @@ impl Runtime {
         mut object: ObjectRecord,
     ) -> FunctionId {
         object.replace_prototype(Some(prototype));
-        self.functions
+        let function = self
+            .functions
             .try_insert(HeapFunction {
                 implementation: FunctionImplementation::Native(NativeFunction { realm, kind }),
                 object,
                 public_roots: 0,
             })
-            .expect("the realm transaction reserved all intrinsic function slots")
+            .expect("the realm transaction reserved all intrinsic function slots");
+        self.record_function(function);
+        function
     }
 
     fn insert_reserved_object(&mut self, object: HeapObject) -> ObjectId {
-        self.objects
+        let object = self
+            .objects
             .try_insert(object)
-            .expect("the realm transaction reserved all intrinsic object slots")
+            .expect("the realm transaction reserved all intrinsic object slots");
+        self.record_object(object);
+        object
     }
 
     fn insert_reserved_object_with_prototype(
@@ -2502,7 +2337,9 @@ impl Runtime {
         record.replace_prototype(Some(prototype));
         self.insert_reserved_object(HeapObject::with_boxed_primitive(record, primitive))
     }
+}
 
+impl Runtime {
     fn publish_realm_properties(
         &mut self,
         graph: &RealmGraph,

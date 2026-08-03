@@ -108,7 +108,6 @@ impl<'a> RealmAtomPlan<'a> {
         self.entries.len()
     }
 
-    #[cfg(test)]
     pub(super) const fn description_code_units(&self) -> usize {
         self.description_code_units
     }
@@ -134,6 +133,10 @@ impl RealmAtomBindings {
         for atom in self.atoms.into_iter().rev() {
             atoms.rollback_interned_string(atom);
         }
+    }
+
+    pub(super) fn atoms(&self) -> impl Iterator<Item = &Atom> {
+        self.atoms.iter()
     }
 }
 
