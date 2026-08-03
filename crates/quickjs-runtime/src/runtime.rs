@@ -514,6 +514,28 @@ impl ArrayMutator {
     }
 }
 
+/// Which `SortIndexedProperties`-based Array method a continuation performs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArraySort {
+    Sort,
+    ToSorted,
+}
+
+impl ArraySort {
+    /// Returns the property name this method is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Sort => "sort",
+            Self::ToSorted => "toSorted",
+        }
+    }
+
+    /// Returns whether the method produces a fresh dense Array.
+    pub(crate) const fn copies(self) -> bool {
+        matches!(self, Self::ToSorted)
+    }
+}
+
 /// Which search a continuation is performing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArraySearch {
@@ -785,6 +807,8 @@ pub(crate) enum NativeFunctionKind {
     ArrayPrototypeMutator(ArrayMutator),
     /// One `Array.prototype` copying method sharing the resumable element read.
     ArrayPrototypeCopier(ArrayCopier),
+    /// One stable `SortIndexedProperties`-based Array method.
+    ArrayPrototypeSort(ArraySort),
     /// One `Array.prototype` callback method sharing the resumable loop.
     ArrayPrototypeCallback(ArrayCallback),
     /// One `Array.prototype` reduction sharing the resumable fold.

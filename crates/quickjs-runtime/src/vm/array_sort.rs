@@ -1,0 +1,763 @@
+/*
+ * JavaScript Array sorting semantics derived from QuickJS.
+ *
+ * Copyright (c) 2017-2018 Fabrice Bellard
+ * Copyright (c) 2017-2018 Charlie Gordon
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+//! Stable, resumable `Array.prototype.sort` and `toSorted`.
+//!
+//! Both methods first collect every value required by `SortIndexedProperties`,
+//! then run a bottom-up stable merge sort. A comparison is an explicit
+//! suspension boundary: a user comparator can call arbitrary JavaScript and a
+//! default comparison can enter `ToString` twice. The merge cursor and scratch
+//! list live in the traced continuation, so neither Rust recursion nor an
+//! untraced host callback participates in JavaScript execution.
+//!
+//! `sort` uses the specification's skip-holes mode, writes the sorted values
+//! back, then deletes the remaining indices. `toSorted` allocates its result
+//! before reading an element and uses read-through-holes, so its result is dense.
+
+#[allow(
+    clippy::wildcard_imports,
+    reason = "this private VM sibling participates in the shared interpreter implementation namespace"
+)]
+use super::*;
+
+/// One non-`undefined` value participating in comparisons.
+struct SortItem {
+    value: StoredValue,
+    /// `QuickJS` caches one default string conversion per source position.
+    text: Option<JsString>,
+}
+
+impl SortItem {
+    fn duplicate(&self) -> Self {
+        Self {
+            value: self.value.duplicate(),
+            text: self.text.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArraySortStage {
+    AwaitLength,
+    AwaitLengthConversion,
+    NextRead,
+    AwaitRead,
+    NextMerge,
+    AwaitComparator,
+    AwaitLeftString,
+    AwaitRightString,
+    NextWrite,
+    AwaitWrite,
+    NextDelete,
+    Done,
+}
+
+/// One in-progress `SortIndexedProperties` invocation and result publication.
+pub(crate) struct ArraySortContinuation {
+    method: ArraySort,
+    target: StoredValue,
+    comparator: Option<FunctionId>,
+    destination: Option<ObjectId>,
+    length: u64,
+    next_read: u64,
+    items: Vec<SortItem>,
+    scratch: Vec<SortItem>,
+    undefined_count: u64,
+    width: usize,
+    merge_start: usize,
+    left: usize,
+    left_end: usize,
+    right: usize,
+    right_end: usize,
+    next_write: u64,
+    left_string: Option<JsString>,
+    realm: RealmId,
+    stage: ArraySortStage,
+    origin: JsStackFrame,
+}
+
+impl ArraySortContinuation {
+    pub(crate) fn retained_values(&self) -> u64 {
+        1_u64
+            .saturating_add(u64::from(self.comparator.is_some()))
+            .saturating_add(u64::from(self.destination.is_some()))
+            .saturating_add(usize_to_u64(self.items.len()))
+            .saturating_add(usize_to_u64(self.scratch.len()))
+    }
+
+    pub(crate) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.target, mark);
+        if let Some(comparator) = self.comparator {
+            mark(CollectionRoot::Heap(HeapReference::Function(comparator)));
+        }
+        if let Some(destination) = self.destination {
+            mark(CollectionRoot::Heap(HeapReference::Object(destination)));
+        }
+        for item in self.items.iter().chain(&self.scratch) {
+            trace_stored_value_root(&item.value, mark);
+        }
+    }
+}
+
+/// Starts `sort` or `toSorted`, validating the comparator before `ToObject`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "native dispatch supplies the method, realm, call values, return target, origin, and shared budget"
+)]
+pub(super) fn begin_array_sort(
+    runtime: &mut Runtime,
+    method: ArraySort,
+    realm: RealmId,
+    receiver: StoredValue,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let comparator = match arguments.take_first_or_undefined() {
+        StoredValue::Undefined => None,
+        StoredValue::Function(function) => Some(function),
+        _ => return Err(sort_type_error(realm, &origin, "not a function")),
+    };
+    let target = match to_object_value(runtime, realm, receiver, origin.clone())? {
+        Ok(target) => target,
+        Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+    };
+    let state = ArraySortContinuation {
+        method,
+        target,
+        comparator,
+        destination: None,
+        length: 0,
+        next_read: 0,
+        items: Vec::new(),
+        scratch: Vec::new(),
+        undefined_count: 0,
+        width: 1,
+        merge_start: 0,
+        left: 0,
+        left_end: 0,
+        right: 0,
+        right_end: 0,
+        next_write: 0,
+        left_string: None,
+        realm,
+        stage: ArraySortStage::AwaitLength,
+        origin,
+    };
+    advance_array_sort(runtime, state, None, return_to, execution_budget)
+}
+
+/// Advances collection, stable merging, comparison, and result publication.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the explicit stages keep every accessor, comparator, conversion, write, and deletion suspension in specification order"
+)]
+pub(super) fn advance_array_sort(
+    runtime: &mut Runtime,
+    mut state: ArraySortContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            ArraySortStage::AwaitLength => {
+                let key = runtime.predefined_property_key(PredefinedAtom::Length);
+                charge_sort_lookup(runtime, &state.target, execution_budget)?;
+                match read_static_property(runtime, state.realm, &state.target, &key)? {
+                    PropertyReadOutcome::Value(value) => {
+                        completion = Some(value);
+                        state.stage = ArraySortStage::AwaitLengthConversion;
+                    }
+                    PropertyReadOutcome::Getter { function, receiver } => {
+                        state.stage = ArraySortStage::AwaitLengthConversion;
+                        return suspend_sort(state, function, receiver, Vec::new(), return_to);
+                    }
+                    PropertyReadOutcome::Failed(failure) => {
+                        return Err(sort_property_failure(&state, failure));
+                    }
+                }
+            }
+            ArraySortStage::AwaitLengthConversion => {
+                let value = take_sort_completion(&mut completion)?;
+                if needs_sort_conversion(&value) {
+                    return convert_sort_value(
+                        runtime,
+                        state,
+                        value,
+                        OperatorPrimitiveHint::Number,
+                        return_to,
+                        execution_budget,
+                    );
+                }
+                state.length =
+                    number_to_length(operator_to_number(value, state.realm, &state.origin)?);
+                if state.method.copies() {
+                    allocate_sorted_destination(runtime, &mut state)?;
+                }
+                state.stage = ArraySortStage::NextRead;
+            }
+            ArraySortStage::NextRead => {
+                if state.next_read >= state.length {
+                    prepare_sort(&mut state)?;
+                    continue;
+                }
+                execution_budget.charge_instructions(1)?;
+                let index = state.next_read;
+                state.next_read = state.next_read.saturating_add(1);
+                let key = sort_element_key(runtime, index)?;
+                charge_sort_lookup(runtime, &state.target, execution_budget)?;
+                if !state.method.copies()
+                    && !has_property(runtime, state.realm, &state.target, &key)?
+                {
+                    continue;
+                }
+                match read_static_property(runtime, state.realm, &state.target, &key)? {
+                    PropertyReadOutcome::Value(value) => append_sort_value(&mut state, value)?,
+                    PropertyReadOutcome::Getter { function, receiver } => {
+                        state.stage = ArraySortStage::AwaitRead;
+                        return suspend_sort(state, function, receiver, Vec::new(), return_to);
+                    }
+                    PropertyReadOutcome::Failed(failure) => {
+                        return Err(sort_property_failure(&state, failure));
+                    }
+                }
+            }
+            ArraySortStage::AwaitRead => {
+                append_sort_value(&mut state, take_sort_completion(&mut completion)?)?;
+                state.stage = ArraySortStage::NextRead;
+            }
+            ArraySortStage::NextMerge => match next_merge_action(&mut state) {
+                MergeAction::Complete => {
+                    state.next_write = 0;
+                    state.stage = ArraySortStage::NextWrite;
+                }
+                MergeAction::Take { index, from_left } => {
+                    execution_budget.charge_instructions(1)?;
+                    append_merged_item(&mut state, index, from_left)?;
+                }
+                MergeAction::Compare => {
+                    execution_budget.charge_instructions(1)?;
+                    if let Some(comparator) = state.comparator {
+                        let mut arguments = Vec::new();
+                        arguments.try_reserve_exact(2).map_err(|_| {
+                            ExecutionError::AllocationFailed {
+                                resource: RuntimeResource::Frames,
+                                additional: 2,
+                            }
+                        })?;
+                        arguments.push(state.items[state.left].value.duplicate());
+                        arguments.push(state.items[state.right].value.duplicate());
+                        state.stage = ArraySortStage::AwaitComparator;
+                        return suspend_sort(
+                            state,
+                            comparator,
+                            StoredValue::Undefined,
+                            arguments,
+                            return_to,
+                        );
+                    }
+                    state.stage = ArraySortStage::AwaitLeftString;
+                }
+            },
+            ArraySortStage::AwaitComparator => {
+                let value = take_sort_completion(&mut completion)?;
+                if needs_sort_conversion(&value) {
+                    return convert_sort_value(
+                        runtime,
+                        state,
+                        value,
+                        OperatorPrimitiveHint::Number,
+                        return_to,
+                        execution_budget,
+                    );
+                }
+                let compared = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+                finish_sort_comparison(&mut state, compared <= 0.0 || compared.is_nan())?;
+            }
+            ArraySortStage::AwaitLeftString => {
+                if state.items[state.left].text.is_none() {
+                    if let Some(value) = completion.take() {
+                        state.items[state.left].text = Some(operator_primitive_to_string(
+                            value,
+                            state.realm,
+                            &state.origin,
+                        )?);
+                    } else {
+                        let value = state.items[state.left].value.duplicate();
+                        return convert_sort_value(
+                            runtime,
+                            state,
+                            value,
+                            OperatorPrimitiveHint::String,
+                            return_to,
+                            execution_budget,
+                        );
+                    }
+                }
+                state.left_string.clone_from(&state.items[state.left].text);
+                state.stage = ArraySortStage::AwaitRightString;
+            }
+            ArraySortStage::AwaitRightString => {
+                if state.items[state.right].text.is_none() {
+                    if let Some(value) = completion.take() {
+                        state.items[state.right].text = Some(operator_primitive_to_string(
+                            value,
+                            state.realm,
+                            &state.origin,
+                        )?);
+                    } else {
+                        let value = state.items[state.right].value.duplicate();
+                        return convert_sort_value(
+                            runtime,
+                            state,
+                            value,
+                            OperatorPrimitiveHint::String,
+                            return_to,
+                            execution_budget,
+                        );
+                    }
+                }
+                let left = state
+                    .left_string
+                    .take()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "array sort lost its left comparison string",
+                    })?;
+                let right = state.items[state.right].text.as_ref().ok_or(
+                    EngineFault::RuntimeInvariant {
+                        message: "array sort lost its right comparison string",
+                    },
+                )?;
+                execution_budget.charge_instructions(
+                    u64::from(left.len())
+                        .saturating_add(u64::from(right.len()))
+                        .saturating_add(1),
+                )?;
+                let take_left = left <= *right;
+                finish_sort_comparison(&mut state, take_left)?;
+            }
+            ArraySortStage::NextWrite => {
+                let sortable = usize_to_u64(state.items.len());
+                let item_count = sortable.saturating_add(state.undefined_count);
+                if state.next_write >= item_count {
+                    state.stage = if state.method.copies() {
+                        ArraySortStage::Done
+                    } else {
+                        ArraySortStage::NextDelete
+                    };
+                    continue;
+                }
+                execution_budget.charge_instructions(1)?;
+                let index = state.next_write;
+                let value = if index < sortable {
+                    state.items[usize::try_from(index).map_err(|_| {
+                        EngineFault::RuntimeInvariant {
+                            message: "array sort write index exceeded the item list",
+                        }
+                    })?]
+                    .value
+                    .duplicate()
+                } else {
+                    StoredValue::Undefined
+                };
+                if let Some(destination) = state.destination {
+                    define_sorted_element(runtime, destination, index, value)?;
+                    state.next_write = state.next_write.saturating_add(1);
+                    continue;
+                }
+                let key = sort_element_key(runtime, index)?;
+                charge_sort_lookup(runtime, &state.target, execution_budget)?;
+                match write_static_property(
+                    runtime,
+                    state.realm,
+                    &state.target,
+                    key,
+                    value,
+                    true,
+                    execution_budget,
+                )? {
+                    PropertyWriteOutcome::Complete => {
+                        state.next_write = state.next_write.saturating_add(1);
+                    }
+                    PropertyWriteOutcome::Setter {
+                        function,
+                        receiver,
+                        value,
+                    } => {
+                        state.stage = ArraySortStage::AwaitWrite;
+                        return suspend_sort(
+                            state,
+                            function,
+                            receiver,
+                            single_sort_argument(value)?,
+                            return_to,
+                        );
+                    }
+                    PropertyWriteOutcome::Failed(failure) => {
+                        return Err(sort_property_failure(&state, failure));
+                    }
+                }
+            }
+            ArraySortStage::AwaitWrite => {
+                let _ = take_sort_completion(&mut completion)?;
+                state.next_write = state.next_write.saturating_add(1);
+                state.stage = ArraySortStage::NextWrite;
+            }
+            ArraySortStage::NextDelete => {
+                if state.next_write >= state.length {
+                    state.stage = ArraySortStage::Done;
+                    continue;
+                }
+                execution_budget.charge_instructions(1)?;
+                let key = sort_element_key(runtime, state.next_write)?;
+                charge_sort_lookup(runtime, &state.target, execution_budget)?;
+                match delete_static_property(runtime, &state.target, &key)? {
+                    PropertyDeleteOutcome::Deleted => {
+                        state.next_write = state.next_write.saturating_add(1);
+                    }
+                    PropertyDeleteOutcome::Refused => {
+                        return Err(sort_property_failure(&state, PropertyFailure::NotDeletable));
+                    }
+                    PropertyDeleteOutcome::Failed(failure) => {
+                        return Err(sort_property_failure(&state, failure));
+                    }
+                }
+            }
+            ArraySortStage::Done => {
+                let result = state
+                    .destination
+                    .map_or_else(|| state.target.duplicate(), StoredValue::Object);
+                return Ok(NativeDispatch::Immediate(result));
+            }
+        }
+    }
+}
+
+fn append_sort_value(
+    state: &mut ArraySortContinuation,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    if matches!(value, StoredValue::Undefined) {
+        state.undefined_count = state.undefined_count.saturating_add(1);
+        return Ok(());
+    }
+    state
+        .items
+        .try_reserve(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    state.items.push(SortItem { value, text: None });
+    Ok(())
+}
+
+fn prepare_sort(state: &mut ArraySortContinuation) -> Result<(), NativeFailure> {
+    state
+        .scratch
+        .try_reserve_exact(state.items.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: state.items.len(),
+        })?;
+    if state.items.len() < 2 {
+        state.stage = ArraySortStage::NextWrite;
+        return Ok(());
+    }
+    state.width = 1;
+    prepare_merge_run(state, 0);
+    state.stage = ArraySortStage::NextMerge;
+    Ok(())
+}
+
+enum MergeAction {
+    Complete,
+    Take { index: usize, from_left: bool },
+    Compare,
+}
+
+fn next_merge_action(state: &mut ArraySortContinuation) -> MergeAction {
+    loop {
+        if state.left < state.left_end && state.right < state.right_end {
+            return MergeAction::Compare;
+        }
+        if state.left < state.left_end {
+            return MergeAction::Take {
+                index: state.left,
+                from_left: true,
+            };
+        }
+        if state.right < state.right_end {
+            return MergeAction::Take {
+                index: state.right,
+                from_left: false,
+            };
+        }
+        state.merge_start = state.right_end;
+        if state.merge_start < state.items.len() {
+            prepare_merge_run(state, state.merge_start);
+            continue;
+        }
+        std::mem::swap(&mut state.items, &mut state.scratch);
+        state.scratch.clear();
+        state.width = state.width.saturating_mul(2);
+        if state.width >= state.items.len() {
+            return MergeAction::Complete;
+        }
+        prepare_merge_run(state, 0);
+    }
+}
+
+fn prepare_merge_run(state: &mut ArraySortContinuation, start: usize) {
+    state.merge_start = start;
+    state.left = start;
+    state.left_end = start.saturating_add(state.width).min(state.items.len());
+    state.right = state.left_end;
+    state.right_end = state
+        .right
+        .saturating_add(state.width)
+        .min(state.items.len());
+}
+
+fn append_merged_item(
+    state: &mut ArraySortContinuation,
+    index: usize,
+    from_left: bool,
+) -> Result<(), NativeFailure> {
+    state
+        .scratch
+        .try_reserve(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    state.scratch.push(state.items[index].duplicate());
+    if from_left && index == state.left {
+        state.left = state.left.saturating_add(1);
+    } else if !from_left && index == state.right {
+        state.right = state.right.saturating_add(1);
+    } else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "array sort selected an item outside the active merge heads",
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn finish_sort_comparison(
+    state: &mut ArraySortContinuation,
+    take_left: bool,
+) -> Result<(), NativeFailure> {
+    let index = if take_left { state.left } else { state.right };
+    append_merged_item(state, index, take_left)?;
+    state.stage = ArraySortStage::NextMerge;
+    Ok(())
+}
+
+fn allocate_sorted_destination(
+    runtime: &mut Runtime,
+    state: &mut ArraySortContinuation,
+) -> Result<(), NativeFailure> {
+    let length = u32::try_from(state.length).map_err(|_| {
+        sort_type_error_with_kind(
+            state.realm,
+            &state.origin,
+            ExceptionKind::RangeError,
+            "invalid array length",
+        )
+    })?;
+    let prototype = runtime.realm_array_prototype(state.realm)?;
+    state.destination = Some(
+        runtime.allocate_sparse_array_with_prototype(HeapReference::Object(prototype), length)?,
+    );
+    Ok(())
+}
+
+fn define_sorted_element(
+    runtime: &mut Runtime,
+    destination: ObjectId,
+    index: u64,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    let index = u32::try_from(index).map_err(|_| EngineFault::RuntimeInvariant {
+        message: "toSorted output index exceeded the Array-index domain",
+    })?;
+    let key = ArrayIndex::new(index).ok_or(EngineFault::RuntimeInvariant {
+        message: "toSorted output reached the non-index sentinel",
+    })?;
+    match runtime.define_array_data_property(
+        destination,
+        PropertyKey::from_index(key),
+        PropertyLayout::data(true, true, true),
+        value,
+    )? {
+        ArrayDefineOutcome::Complete => Ok(()),
+        ArrayDefineOutcome::ReadOnlyLength | ArrayDefineOutcome::NonExtensible => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "fresh toSorted destination refused an indexed definition",
+            }
+            .into())
+        }
+    }
+}
+
+fn convert_sort_value(
+    runtime: &mut Runtime,
+    state: ArraySortContinuation,
+    value: StoredValue,
+    hint: OperatorPrimitiveHint,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        hint,
+        OperatorPrimitiveTarget::ArraySortValue(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn suspend_sort(
+    state: ArraySortContinuation,
+    function: FunctionId,
+    receiver: StoredValue,
+    arguments: Vec<StoredValue>,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::ArraySort(Box::new(state)));
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::from_values(arguments),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    }))
+}
+
+fn single_sort_argument(value: StoredValue) -> Result<Vec<StoredValue>, NativeFailure> {
+    let mut arguments = Vec::new();
+    arguments
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    arguments.push(value);
+    Ok(arguments)
+}
+
+fn sort_element_key(runtime: &mut Runtime, index: u64) -> Result<PropertyKey, NativeFailure> {
+    if let Ok(index) = u32::try_from(index)
+        && let Some(index) = ArrayIndex::new(index)
+    {
+        return Ok(PropertyKey::from_index(index));
+    }
+    let name = JsNumber::from_f64(length_as_f64(index)).to_javascript_string()?;
+    Ok(runtime.property_key_from_string(&name)?)
+}
+
+fn charge_sort_lookup(
+    runtime: &Runtime,
+    base: &StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    if base.heap_reference().is_none() {
+        execution_budget.charge_instructions(1)?;
+        return Ok(());
+    }
+    charge_heap_property_lookup(runtime, base, execution_budget)
+}
+
+const fn needs_sort_conversion(value: &StoredValue) -> bool {
+    matches!(value, StoredValue::Function(_) | StoredValue::Object(_))
+}
+
+fn take_sort_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, NativeFailure> {
+    completion.take().ok_or_else(|| {
+        EngineFault::RuntimeInvariant {
+            message: "array sort resumed without its awaited completion",
+        }
+        .into()
+    })
+}
+
+fn sort_property_failure(state: &ArraySortContinuation, failure: PropertyFailure) -> NativeFailure {
+    match property_exception_at(state.realm, state.origin.clone(), None, failure) {
+        Ok(exception) => NativeFailure::Abrupt(exception),
+        Err(error) => error.into(),
+    }
+}
+
+fn sort_type_error(realm: RealmId, origin: &JsStackFrame, message: &str) -> NativeFailure {
+    sort_type_error_with_kind(realm, origin, ExceptionKind::TypeError, message)
+}
+
+fn sort_type_error_with_kind(
+    realm: RealmId,
+    origin: &JsStackFrame,
+    kind: ExceptionKind,
+    message: &str,
+) -> NativeFailure {
+    match JsString::from_utf8(message) {
+        Ok(message) => NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError { kind, message },
+            origin: origin.clone(),
+        }),
+        Err(error) => error.into(),
+    }
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "ToLength bounds every integer by 2^53 - 1, which binary64 represents exactly"
+)]
+fn length_as_f64(length: u64) -> f64 {
+    length as f64
+}

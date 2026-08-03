@@ -258,6 +258,15 @@ Known intentional runtime differences:
   one move regardless of array-like length, so shared instruction fuel bounds
   scans up to `2^53 - 1`; ordinary decimal keys above the Array-index domain and
   primitive `ToObject` receivers remain observable without special cases.
+- [x] `Array.prototype.sort` and `toSorted` through one resumable
+  `SortIndexedProperties` machine. Comparator validation precedes `ToObject`;
+  length and indexed collection complete before a stable bottom-up merge sort
+  begins. Each user comparison and each default `ToString` is a suspension
+  boundary, comparator results receive resumable `ToNumber`, `NaN` is a stable
+  tie, and UTF-16 lexical comparison charges its scan to shared fuel. In-place
+  `sort` skips holes, performs strict ordered writes, then applies
+  `DeletePropertyOrThrow`; `toSorted` allocates first, reads through holes, and
+  defines a fresh dense base Array without touching the source.
 - [x] `Number.prototype.toFixed`, `toExponential`, and `toPrecision`, rendered
   from the *exact* value the binary64 holds rather than from its shortest decimal
   spelling. That distinction is observable and is why these use `JsBigInt`
@@ -329,8 +338,8 @@ Known intentional runtime differences:
   definitions run their two observable numeric conversions, preserve partial
   shrink results at non-configurable indices, and install a requested
   non-writable final state even when that shrink returns `false`.
-- [ ] Remaining String/Number/Array method surface (`sort`, `flat`, `flatMap`,
-  `toSorted`, and the locale-dependent renderings), shape
+- [ ] Remaining String/Number/Array method surface (`flat`, `flatMap`, and the
+  locale-dependent renderings), shape
   sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.

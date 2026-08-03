@@ -54,13 +54,13 @@ use crate::{
     object::{ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty, PropertyDeletion},
     runtime::{
         ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayMutator,
-        ArrayReduction, ArraySearch, BindingCell, BoundFunction, BytecodeFunction, CollectionRoot,
-        EnvironmentBinding, ForInAdvance, FrameBindingAddress, FunctionImplementation,
-        GlobalNumericFunction, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
-        InstalledTemplate, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
-        PreparedIteratorResultPlan, RealmGlobalBindingState, ReflectMethod, SetPrototypeOutcome,
-        StringArgument, StringMethod, UriFunction, array_length_from_number, check_execution_limit,
-        global_declaration_error, usize_to_u64,
+        ArrayReduction, ArraySearch, ArraySort, BindingCell, BoundFunction, BytecodeFunction,
+        CollectionRoot, EnvironmentBinding, ForInAdvance, FrameBindingAddress,
+        FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
+        InstalledConstant, InstalledRoot, InstalledTemplate, NativeFunction, NativeFunctionKind,
+        NumberFormat, NumberPredicate, PreparedIteratorResultPlan, RealmGlobalBindingState,
+        ReflectMethod, SetPrototypeOutcome, StringArgument, StringMethod, UriFunction,
+        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -71,6 +71,7 @@ mod array_copiers;
 mod array_join;
 mod array_mutators;
 mod array_search;
+mod array_sort;
 mod bigint_intrinsics;
 mod bindings;
 mod conversions;
@@ -100,7 +101,7 @@ mod uri;
 )]
 use {
     aggregate_error::*, array_callbacks::*, array_copiers::*, array_join::*, array_mutators::*,
-    array_search::*, bigint_intrinsics::*, bindings::*, conversions::*,
+    array_search::*, array_sort::*, bigint_intrinsics::*, bindings::*, conversions::*,
     define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*, exceptions::*,
     execution::*, from_entries::*, group_by::*, iterators::*, json_parse::*, json_stringify::*,
     native::*, object_intrinsics::*, properties::*, reflect::*, stack::*, string_methods::*,
@@ -311,6 +312,7 @@ enum NativeContinuation {
     ArrayCallback(Box<ArrayCallbackContinuation>),
     ArrayReduction(Box<ArrayReductionContinuation>),
     ArraySplice(Box<ArraySpliceContinuation>),
+    ArraySort(Box<ArraySortContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
     InstanceOf(InstanceOfContinuation),
@@ -353,6 +355,7 @@ impl NativeContinuation {
             Self::ArrayCallback(_) => ArrayCallbackContinuation::retained_values(),
             Self::ArrayReduction(_) => ArrayReductionContinuation::retained_values(),
             Self::ArraySplice(state) => state.retained_values(),
+            Self::ArraySort(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
@@ -973,6 +976,8 @@ enum OperatorPrimitiveTarget {
     ArrayCopierArgument(Box<ArrayCopierContinuation>),
     /// `Array.prototype.splice`'s argument, awaiting `ToNumber`.
     ArraySpliceArgument(Box<ArraySpliceContinuation>),
+    /// A sorting method's length, comparator result, or default string value.
+    ArraySortValue(Box<ArraySortContinuation>),
     ArrayLengthWrite(ArrayLengthWriteState),
     /// A `String.prototype` method's receiver, awaiting `ToString`.
     StringMethodSubject(Box<StringMethodContinuation>),
@@ -1034,6 +1039,7 @@ impl OperatorPrimitiveTarget {
             Self::ArrayMutatorArgument(state) => state.retained_values(),
             Self::ArrayCopierArgument(state) => state.retained_values(),
             Self::ArraySpliceArgument(state) => state.retained_values(),
+            Self::ArraySortValue(state) => state.retained_values(),
         }
     }
 }
@@ -1240,6 +1246,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArrayMutatorArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayCopierArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArraySpliceArgument(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::ArraySortValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayJoinSeparator(state)
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
             trace_stored_value_root(state.target(), mark);
@@ -1317,6 +1324,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ArrayCallback(state) => state.trace_roots(mark),
         NativeContinuation::ArrayReduction(state) => state.trace_roots(mark),
         NativeContinuation::ArraySplice(state) => state.trace_roots(mark),
+        NativeContinuation::ArraySort(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {
             trace_function_bind_roots(state, mark);

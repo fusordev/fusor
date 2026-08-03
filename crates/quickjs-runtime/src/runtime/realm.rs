@@ -29,20 +29,21 @@ use std::collections::TryReserveError;
 
 use super::{
     Arc, Arena, ArrayCallback, ArrayCopier, ArrayIntrinsics, ArrayMutator, ArrayReduction,
-    ArraySearch, ArrayState, Atom, AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics,
-    BoxedPrimitive, Context, ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId,
-    FunctionImplementation, GlobalNumericFunction, HandleError, HandleKind, HashMap, HeapFunction,
-    HeapObject, HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString,
-    NativeFunction, NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId,
-    ObjectRecord, PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId,
-    RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError,
-    RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringIntrinsics, StringMethod,
-    SymbolIntrinsics, UriFunction, check_limit, predefined_string, usize_to_u64,
+    ArraySearch, ArraySort, ArrayState, Atom, AtomError, AtomTable, BigIntIntrinsics,
+    BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic, ErrorIntrinsicKind,
+    ErrorIntrinsics, FunctionId, FunctionImplementation, GlobalNumericFunction, HandleError,
+    HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
+    IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind, NumberFormat,
+    NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey,
+    PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, ReflectMethod,
+    ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource,
+    StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction, check_limit,
+    predefined_string, usize_to_u64,
 };
 
 const REALM_OBJECT_COUNT: usize = 22;
-const REALM_FUNCTION_COUNT: usize = 163;
-const REALM_PROPERTY_COUNT: u64 = 539;
+const REALM_FUNCTION_COUNT: usize = 165;
+const REALM_PROPERTY_COUNT: u64 = 545;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -260,6 +261,12 @@ const PARSE_INT_ATOM_INDEX: usize = PARSE_FLOAT_ATOM_INDEX + 1;
 /// Index of the first realm-local URI function name.
 const URI_ATOM_START: usize = PARSE_INT_ATOM_INDEX + 1;
 
+/// Index of the first sorting method name, appended after existing realm atoms.
+const ARRAY_SORT_ATOM_START: usize = URI_ATOM_START + URI_FUNCTIONS.len();
+
+/// The stable sorting methods sharing `SortIndexedProperties`.
+const ARRAY_SORT_METHODS: [ArraySort; 2] = [ArraySort::Sort, ArraySort::ToSorted];
+
 /// Exact number of non-predefined atoms interned by one realm transaction.
 const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
     + DYNAMIC_SYMBOL_STATIC_PROPERTIES.len()
@@ -277,6 +284,7 @@ const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
     + NUMBER_FORMAT_METHODS.len()
     + ARRAY_CALLBACK_METHODS.len()
     + ARRAY_REDUCTION_METHODS.len()
+    + ARRAY_SORT_METHODS.len()
     + 11;
 
 /// The `Array.prototype` reductions this profile installs.
@@ -858,6 +866,7 @@ struct RealmRecords {
     array_searches: [ObjectRecord; ARRAY_SEARCH_METHODS.len()],
     array_mutators: [ObjectRecord; ARRAY_MUTATOR_METHODS.len()],
     array_copiers: [ObjectRecord; ARRAY_COPIER_TOTAL],
+    array_sorts: [ObjectRecord; ARRAY_SORT_METHODS.len()],
     number_formats: [ObjectRecord; NUMBER_FORMAT_METHODS.len()],
     array_callbacks: [ObjectRecord; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [ObjectRecord; ARRAY_REDUCTION_METHODS.len()],
@@ -943,6 +952,7 @@ impl RealmRecords {
                 8 + ARRAY_SEARCH_METHODS.len()
                     + ARRAY_MUTATOR_METHODS.len()
                     + ARRAY_COPIER_TOTAL
+                    + ARRAY_SORT_METHODS.len()
                     + NUMBER_FORMAT_METHODS.len()
                     + ARRAY_CALLBACK_METHODS.len()
                     + ARRAY_REDUCTION_METHODS.len()
@@ -1010,6 +1020,7 @@ impl RealmRecords {
             array_searches: array_search_records()?,
             array_mutators: array_mutator_records()?,
             array_copiers: array_copier_records()?,
+            array_sorts: array_sort_records()?,
             number_formats: number_format_records()?,
             array_callbacks: array_callback_records()?,
             array_reductions: array_reduction_records()?,
@@ -1164,6 +1175,7 @@ struct RealmGraph {
     array_searches: [FunctionId; ARRAY_SEARCH_METHODS.len()],
     array_mutators: [FunctionId; ARRAY_MUTATOR_METHODS.len()],
     array_copiers: [FunctionId; ARRAY_COPIER_TOTAL],
+    array_sorts: [FunctionId; ARRAY_SORT_METHODS.len()],
     number_formats: [FunctionId; NUMBER_FORMAT_METHODS.len()],
     array_callbacks: [FunctionId; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [FunctionId; ARRAY_REDUCTION_METHODS.len()],
@@ -1200,6 +1212,9 @@ impl RealmGraph {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for function in self.number_formats.into_iter().rev() {
+            debug_assert!(runtime.functions.remove(function).is_some());
+        }
+        for function in self.array_sorts.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
         for function in self.array_copiers.into_iter().rev() {
@@ -1474,6 +1489,7 @@ impl Runtime {
         let array_searches = self.insert_array_searches(&base, records.array_searches);
         let array_mutators = self.insert_array_mutators(&base, records.array_mutators);
         let array_copiers = self.insert_array_copiers(&base, records.array_copiers);
+        let array_sorts = self.insert_array_sorts(&base, records.array_sorts);
         let number_formats = self.insert_number_formats(&base, records.number_formats);
         let array_callbacks = self.insert_array_callbacks(&base, records.array_callbacks);
         let array_reductions = self.insert_array_reductions(&base, records.array_reductions);
@@ -1506,6 +1522,7 @@ impl Runtime {
             array_searches,
             array_mutators,
             array_copiers,
+            array_sorts,
             number_formats,
             array_callbacks,
             array_reductions,
@@ -1636,6 +1653,9 @@ impl Runtime {
             interned(&mut self.atoms, &mut dynamic_atoms, "parseInt")?;
             for (literal, _) in URI_FUNCTIONS {
                 interned(&mut self.atoms, &mut dynamic_atoms, literal)?;
+            }
+            for method in ARRAY_SORT_METHODS {
+                interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
             }
             Ok(())
         })();
@@ -2023,6 +2043,24 @@ impl Runtime {
             ));
         }
         inserted.map(|slot| slot.expect("every Array mutator function was inserted"))
+    }
+
+    /// Inserts one native function per `SortIndexedProperties` method.
+    fn insert_array_sorts(
+        &mut self,
+        base: &RealmBase,
+        records: [ObjectRecord; ARRAY_SORT_METHODS.len()],
+    ) -> [FunctionId; ARRAY_SORT_METHODS.len()] {
+        let mut inserted = [None; ARRAY_SORT_METHODS.len()];
+        for ((slot, method), record) in inserted.iter_mut().zip(ARRAY_SORT_METHODS).zip(records) {
+            *slot = Some(self.insert_reserved_native(
+                base.realm,
+                HeapReference::Function(base.function_prototype),
+                NativeFunctionKind::ArrayPrototypeSort(method),
+                record,
+            ));
+        }
+        inserted.map(|slot| slot.expect("every Array sort function was inserted"))
     }
 
     /// Inserts one native function per `Array.prototype` search.
@@ -3325,6 +3363,28 @@ impl Runtime {
         }
 
         for (function, atom) in graph
+            .array_sorts
+            .into_iter()
+            .zip(&graph.dynamic_atoms[ARRAY_SORT_ATOM_START..])
+        {
+            let atom = atom.clone();
+            let name = atom
+                .description()
+                .expect("interned Array sort name has a description")
+                .clone();
+            self.objects
+                .get_mut(graph.array.prototype)
+                .expect("new Array.prototype remains live")
+                .record
+                .append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    METHOD_PROPERTY,
+                    StoredValue::Function(function),
+                )?;
+            self.append_function_identity(function, &name, 1, keys)?;
+        }
+
+        for (function, atom) in graph
             .number_formats
             .into_iter()
             .zip(&graph.dynamic_atoms[NUMBER_FORMAT_ATOM_START..])
@@ -3849,6 +3909,16 @@ fn array_copier_records() -> Result<[ObjectRecord; ARRAY_COPIER_TOTAL], RuntimeE
         *slot = Some(reserved_record(2)?);
     }
     Ok(records.map(|record| record.expect("every Array copier record was reserved")))
+}
+
+/// Reserves one record per stable Array sorting method.
+fn array_sort_records() -> Result<[ObjectRecord; ARRAY_SORT_METHODS.len()], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; ARRAY_SORT_METHODS.len()] =
+        [const { None }; ARRAY_SORT_METHODS.len()];
+    for slot in &mut records {
+        *slot = Some(reserved_record(2)?);
+    }
+    Ok(records.map(|record| record.expect("every Array sort record was reserved")))
 }
 
 /// Reserves one record per `Array.prototype` mutator.
