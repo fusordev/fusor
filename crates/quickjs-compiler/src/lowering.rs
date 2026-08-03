@@ -24,17 +24,17 @@ use oxc_syntax::operator::{
 };
 use quickjs_bytecode::{
     AtomPoolIndex, Binary64Constant, BranchKind, BytecodeGraphVerificationLimits,
-    ClosureVariableDefinition as VerifiedClosureVariableDefinition, CompilerAtom,
+    ClosureVariableDefinition as VerifiedClosureVariableDefinition,
     CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
     CompilerCapturedBinding, CompilerClosureSource as CompilerGraphClosureSource,
-    CompilerConstantLayout, CompilerExecutableKind,
-    CompilerInitializationPolicy as VerifiedInitializationPolicy, CompilerSource,
+    CompilerInitializationPolicy as VerifiedInitializationPolicy,
     CompilerWritePolicy as VerifiedWritePolicy, FinalOpcode, FunctionGraphVerificationLimits,
-    FunctionIndexDomains, MAX_FUNCTION_INDEX_ENTRIES, Operands, PcSourceSpan, ScopeLink,
-    SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedFunctionHeader,
-    UnverifiedFunctionMetadata, VariableDefinition, VerificationLimits,
+    MAX_FUNCTION_INDEX_ENTRIES, Operands, ScopeLink, SourceByteSpan,
+    UnverifiedCompilerBytecodeGraph, VariableDefinition, VerificationLimits,
     verify_compiler_bytecode_graph,
 };
+#[cfg(test)]
+use quickjs_bytecode::{FunctionIndexDomains, UnverifiedFunctionHeader};
 use quickjs_frontend::{CompilationGoal, DynamicFunctionKind, ParsedUnit, Span};
 
 use crate::storage::{
@@ -72,7 +72,7 @@ pub use context::{CompilationContext, CompilationExecutable};
 use control_flow::exact_source_span;
 use control_flow::{CompilerLabel, PlannedControlFlow, PlannedInstruction};
 pub use error::{LeafCompilationError, UnsupportedLeafFeature};
-use function::{FunctionLoweringSession, FunctionPlanningContext};
+use function::FunctionPlanningContext;
 use function_graph::verify_compiled_function_graph;
 use layouts::{
     ArgumentSlot, FrameLayout, FrameLayoutInput, FrameSlot, FunctionTreeLayout,
@@ -87,7 +87,7 @@ use plan::{
     LoweredReference, ScopeEntryInitialization, StatementCompletion, StatementControlStack,
     StatementPlanningState, StatementWork,
 };
-use validation::OrdinaryFunctionForm;
+use validation::{OrdinaryFunctionForm, object_method_or_accessor_span};
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
     fn compile_subtree_with_all_limits(
@@ -154,132 +154,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             );
         }
         Ok(())
-    }
-
-    fn compile_function(
-        &self,
-        executable: ExecutableId,
-        tree_layout: &FunctionTreeLayout,
-        limits: VerificationLimits,
-    ) -> Result<CompiledFunction, LeafCompilationError> {
-        let validated = self.validate_executable(executable, tree_layout, limits)?;
-        let ValidatedFunction {
-            executable_kind,
-            strict,
-            argument_count,
-            defined_argument_count,
-            local_count,
-            capture_count,
-            capture_layout,
-            locals,
-            constants,
-            atoms,
-            closure_variables,
-            realm_globals,
-            function_name,
-            variable_definitions,
-            closure_definitions,
-            function_span,
-            function_name_span,
-            flow,
-        } = validated;
-        let atom_count =
-            u32::try_from(atoms.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
-                domain: "atom pool entries",
-            })?;
-        let constant_count =
-            u32::try_from(constants.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
-                domain: "constant pool entries",
-            })?;
-        let domains = FunctionIndexDomains::new(
-            atom_count,
-            constant_count,
-            argument_count,
-            local_count,
-            capture_count,
-        );
-        let variable_reference_count = checked_function_entry_count(
-            capture_layout.bindings().len(),
-            "function variable references",
-        )?;
-        let header = executable_header(
-            executable_kind,
-            strict,
-            self.planned
-                .plan
-                .executable(executable)
-                .ok_or(LeafCompilationError::InvalidExecutable { executable })?
-                .has_simple_parameter_list(),
-            defined_argument_count,
-            variable_reference_count,
-        );
-        let constant_layout = CompilerConstantLayout::new(
-            constants
-                .iter()
-                .map(CompiledConstant::kind)
-                .collect::<Vec<_>>()
-                .into(),
-        );
-        let finished = flow.finish()?;
-        let (source_instructions, control_flow) = finished.verify_with_layouts(
-            domains,
-            header,
-            capture_layout,
-            constant_layout,
-            limits,
-        )?;
-        let source_mappings = source_instructions
-            .iter()
-            .map(|instruction| {
-                PcSourceSpan::new(instruction.pc(), source_byte_span(instruction.span()))
-            })
-            .collect::<Vec<_>>();
-        let metadata = UnverifiedFunctionMetadata::new(
-            function_name,
-            variable_definitions.into(),
-            closure_definitions.into(),
-            CompilerSource::new(
-                Arc::clone(&self.source_name),
-                Arc::clone(&self.source_text),
-                function_span,
-                function_name_span,
-                source_mappings.into(),
-            ),
-        )
-        .with_executable_kind(executable_kind);
-
-        Ok(CompiledFunction {
-            executable,
-            storage_plan: Arc::clone(&self.planned.plan),
-            source_text: Arc::clone(&self.source_text),
-            locals: locals.into(),
-            atoms,
-            constants,
-            closure_variables: closure_variables.into(),
-            realm_globals: realm_globals.into(),
-            source_instructions: source_instructions.into(),
-            control_flow: Arc::new(control_flow),
-            metadata,
-        })
-    }
-
-    fn validate_executable(
-        &self,
-        executable: ExecutableId,
-        tree_layout: &FunctionTreeLayout,
-        limits: VerificationLimits,
-    ) -> Result<ValidatedFunction, LeafCompilationError> {
-        let metadata = self
-            .planned
-            .plan
-            .executable(executable)
-            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
-        match metadata.kind() {
-            ExecutableKind::Script {
-                asynchronous: false,
-            } => self.validate_dynamic_function_script(executable, tree_layout, limits),
-            _ => self.validate_function(executable, tree_layout, limits),
-        }
     }
 
     fn resolve_selection(
@@ -359,181 +233,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             seed,
             constant_pools,
             function_declarations,
-        })
-    }
-
-    fn validate_function(
-        &self,
-        executable_id: ExecutableId,
-        tree_layout: &FunctionTreeLayout,
-        limits: VerificationLimits,
-    ) -> Result<ValidatedFunction, LeafCompilationError> {
-        let (executable, function, form) = self.selected_ordinary_function(executable_id)?;
-        let layout = FrameLayout::new(FrameLayoutInput::new(&self.planned.plan, executable_id))?;
-        let body = function
-            .body
-            .as_ref()
-            .ok_or(LeafCompilationError::Unsupported {
-                feature: UnsupportedLeafFeature::UnsupportedBody,
-                span: function.span,
-            })?;
-        let constants = tree_layout.constant_pool(executable_id)?;
-        let planning = FunctionPlanningContext {
-            executable: executable_id,
-            layout: &layout,
-            tree_layout,
-            constants,
-        };
-        let flow = FunctionLoweringSession::for_function(self, function, body, planning, limits)?
-            .lower()?;
-        let function_scope = self.created_scope(
-            function.scope_id.get(),
-            function.node_id.get(),
-            function.span,
-        )?;
-        let capture_layout =
-            self.compiler_capture_layout(executable_id, function_scope, &layout, tree_layout)?;
-        let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
-        let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
-        let (executable_kind, function_span, function_name, function_name_span) = match form {
-            OrdinaryFunctionForm::Function => (
-                CompilerExecutableKind::OrdinaryFunction,
-                function.span,
-                executable
-                    .name()
-                    .map(|_| constants.metadata_atom_index(CompiledMetadataAtomKey::FunctionName))
-                    .transpose()?,
-                executable.name_span().map(source_byte_span),
-            ),
-            OrdinaryFunctionForm::ObjectMethod {
-                property_span: source_span,
-            } => (
-                CompilerExecutableKind::OrdinaryMethod,
-                source_span,
-                None,
-                None,
-            ),
-        };
-        let variable_definitions = self.compiled_variable_definitions(
-            executable_id,
-            function_scope,
-            &layout,
-            tree_layout,
-            constants,
-        )?;
-        let closure_definitions =
-            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
-        let capture_count = checked_function_entry_count(
-            closure_variables
-                .len()
-                .checked_add(realm_globals.len())
-                .ok_or(LeafCompilationError::CapacityExceeded {
-                    domain: "function closure variables",
-                })?,
-            "function closure variables",
-        )?;
-
-        Ok(ValidatedFunction {
-            executable_kind,
-            strict: executable.is_strict(),
-            argument_count: executable.parameter_count(),
-            defined_argument_count: executable.defined_parameter_count(),
-            local_count: layout.local_count,
-            capture_count,
-            capture_layout,
-            locals: layout
-                .locals
-                .iter()
-                .map(|local| LoweredLocal {
-                    binding: local.binding,
-                    slot: local.slot,
-                })
-                .collect(),
-            constants: Arc::clone(constants.entries()),
-            atoms: Arc::clone(constants.atoms()),
-            closure_variables,
-            realm_globals,
-            function_name,
-            variable_definitions,
-            closure_definitions,
-            function_span: source_byte_span(function_span),
-            function_name_span,
-            flow,
-        })
-    }
-
-    fn validate_dynamic_function_script(
-        &self,
-        executable_id: ExecutableId,
-        tree_layout: &FunctionTreeLayout,
-        limits: VerificationLimits,
-    ) -> Result<ValidatedFunction, LeafCompilationError> {
-        let (executable, program) = self.selected_dynamic_function_script(executable_id)?;
-        let layout = FrameLayout::new(
-            FrameLayoutInput::new(&self.planned.plan, executable_id).with_internal_locals(1),
-        )?;
-        let completion = layout.internal_local(0)?;
-        let constants = tree_layout.constant_pool(executable_id)?;
-        let planning = FunctionPlanningContext {
-            executable: executable_id,
-            layout: &layout,
-            tree_layout,
-            constants,
-        };
-        let flow =
-            FunctionLoweringSession::for_program(self, program, completion, planning, limits)?
-                .lower()?;
-        let program_scope =
-            self.created_scope(program.scope_id.get(), program.node_id.get(), program.span)?;
-        let capture_layout =
-            self.compiler_capture_layout(executable_id, program_scope, &layout, tree_layout)?;
-        let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
-        if !closure_variables.is_empty() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "dynamic Function Script root imports no caller closure",
-                span: Some(program.span),
-            });
-        }
-        let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
-        let mut variable_definitions = self.compiled_variable_definitions(
-            executable_id,
-            program_scope,
-            &layout,
-            tree_layout,
-            constants,
-        )?;
-        variable_definitions.push(script_completion_variable_definition(constants)?);
-        let closure_definitions =
-            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
-        let capture_count =
-            checked_function_entry_count(realm_globals.len(), "function closure variables")?;
-
-        Ok(ValidatedFunction {
-            executable_kind: CompilerExecutableKind::DynamicFunctionScript,
-            strict: executable.is_strict(),
-            argument_count: 0,
-            defined_argument_count: 0,
-            local_count: layout.local_count,
-            capture_count,
-            capture_layout,
-            locals: layout
-                .locals
-                .iter()
-                .map(|local| LoweredLocal {
-                    binding: local.binding,
-                    slot: local.slot,
-                })
-                .collect(),
-            constants: Arc::clone(constants.entries()),
-            atoms: Arc::clone(constants.atoms()),
-            closure_variables,
-            realm_globals,
-            function_name: None,
-            variable_definitions,
-            closure_definitions,
-            function_span: source_byte_span(program.span),
-            function_name_span: None,
-            flow,
         })
     }
 
@@ -1007,73 +706,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         }
         Ok(())
     }
-    fn validate_realm_global_var_declaration(
-        &self,
-        declaration_kind: VariableDeclarationKind,
-        storage: &crate::storage::BindingStorage,
-        span: Span,
-    ) -> Result<(), LeafCompilationError> {
-        let merged_global_policy = matches!(
-            (storage.policy().kind(), storage.policy().initialization()),
-            (
-                DeclarationKind::Var,
-                InitializationPolicy::UndefinedAtInstantiation
-            ) | (
-                DeclarationKind::Function,
-                InitializationPolicy::FunctionAtInstantiation
-            )
-        );
-        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
-            || declaration_kind != VariableDeclarationKind::Var
-            || !merged_global_policy
-            || storage.policy().writes() != WritePolicy::Mutable
-            || storage.policy().has_temporal_dead_zone()
-        {
-            return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, span);
-        }
-        Ok(())
-    }
-
-    fn validate_declaration_storage(
-        &self,
-        declaration_kind: VariableDeclarationKind,
-        binding: BindingId,
-        frame_slot: FrameSlot,
-        span: Span,
-    ) -> Result<(), LeafCompilationError> {
-        let storage =
-            self.planned
-                .plan
-                .binding(binding)
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "declared compiler binding exists",
-                    span: Some(span),
-                })?;
-        let valid = match declaration_kind {
-            VariableDeclarationKind::Let => {
-                matches!(storage.policy().kind(), DeclarationKind::Let)
-                    && storage.policy().has_temporal_dead_zone()
-                    && matches!(frame_slot, FrameSlot::Local(_))
-            }
-            VariableDeclarationKind::Const => {
-                matches!(storage.policy().kind(), DeclarationKind::Const)
-                    && storage.policy().has_temporal_dead_zone()
-                    && matches!(frame_slot, FrameSlot::Local(_))
-            }
-            VariableDeclarationKind::Var => {
-                matches!(
-                    storage.policy().kind(),
-                    DeclarationKind::Var | DeclarationKind::Parameter | DeclarationKind::Function
-                ) && !storage.policy().has_temporal_dead_zone()
-            }
-            VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing => false,
-        };
-        if !valid {
-            return unsupported(UnsupportedLeafFeature::UnsupportedBinding, span);
-        }
-        Ok(())
-    }
-
     #[allow(
         clippy::too_many_lines,
         reason = "the iterative expression dispatcher keeps one explicit work-stack loop"
@@ -1661,159 +1293,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             })
     }
 
-    fn selected_ordinary_function(
-        &self,
-        executable_id: ExecutableId,
-    ) -> Result<(&Executable, &Function<'arena>, OrdinaryFunctionForm), LeafCompilationError> {
-        let executable = self.planned.plan.executable(executable_id).ok_or(
-            LeafCompilationError::InvalidExecutable {
-                executable: executable_id,
-            },
-        )?;
-        let node_id = self
-            .planned
-            .identities
-            .node_by_executable
-            .get(executable_id.index())
-            .copied()
-            .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "executable has an Oxc node identity",
-                span: Some(executable.span()),
-            })?;
-        if self
-            .planned
-            .identities
-            .executable_by_node
-            .get(node_id.index())
-            .copied()
-            .flatten()
-            != Some(executable_id)
-        {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "Oxc node and executable identities are bijective",
-                span: Some(executable.span()),
-            });
-        }
-
-        let AstKind::Function(function) = self.unit.semantic().nodes().kind(node_id) else {
-            return unsupported(
-                UnsupportedLeafFeature::NonOrdinaryFunction,
-                executable.span(),
-            );
-        };
-        if function.r#async || function.generator {
-            return unsupported(UnsupportedLeafFeature::NonOrdinaryFunction, function.span);
-        }
-        let is_declaration = function.r#type == FunctionType::FunctionDeclaration;
-        let is_expression = function.r#type == FunctionType::FunctionExpression;
-        if !is_declaration && !is_expression {
-            return unsupported(
-                UnsupportedLeafFeature::UnsupportedFunctionForm,
-                function.span,
-            );
-        }
-        let form = object_method_or_accessor_span(self.unit, node_id)
-            .map_or(OrdinaryFunctionForm::Function, |property_span| {
-                OrdinaryFunctionForm::ObjectMethod { property_span }
-            });
-        if !matches!(
-            executable.kind(),
-            ExecutableKind::Function {
-                asynchronous: false,
-                generator: false,
-            }
-        ) {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "ordinary Oxc function has ordinary executable metadata",
-                span: Some(function.span),
-            });
-        }
-        if self.planned.plan.kind() != CompilationUnitKind::Script {
-            return unsupported(
-                UnsupportedLeafFeature::UnsupportedCompilationUnit,
-                function.span,
-            );
-        }
-        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
-            && let Some(reference) = self
-                .planned
-                .plan
-                .unresolved_globals_for(executable_id)
-                .and_then(|references| references.first())
-        {
-            return unsupported(
-                UnsupportedLeafFeature::UnresolvedReference,
-                reference.span(),
-            );
-        }
-        Ok((executable, function, form))
-    }
-
-    fn selected_dynamic_function_script(
-        &self,
-        executable_id: ExecutableId,
-    ) -> Result<(&Executable, &Program<'arena>), LeafCompilationError> {
-        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) {
-            return unsupported(
-                UnsupportedLeafFeature::DynamicFunctionRequiresScriptRoot,
-                self.unit.program().span,
-            );
-        }
-        let executable = self.planned.plan.executable(executable_id).ok_or(
-            LeafCompilationError::InvalidExecutable {
-                executable: executable_id,
-            },
-        )?;
-        let node_id = self
-            .planned
-            .identities
-            .node_by_executable
-            .get(executable_id.index())
-            .copied()
-            .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "dynamic Script executable has an Oxc node identity",
-                span: Some(executable.span()),
-            })?;
-        if self
-            .planned
-            .identities
-            .executable_by_node
-            .get(node_id.index())
-            .copied()
-            .flatten()
-            != Some(executable_id)
-        {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "dynamic Script Oxc node and executable identities are bijective",
-                span: Some(executable.span()),
-            });
-        }
-        let AstKind::Program(program) = self.unit.semantic().nodes().kind(node_id) else {
-            return unsupported(
-                UnsupportedLeafFeature::DynamicFunctionRequiresScriptRoot,
-                executable.span(),
-            );
-        };
-        if executable_id.index() != 0
-            || executable.parent().is_some()
-            || executable.parameter_count() != 0
-            || executable.is_strict()
-            || !matches!(
-                executable.kind(),
-                ExecutableKind::Script {
-                    asynchronous: false
-                }
-            )
-            || self.planned.plan.kind() != CompilationUnitKind::Script
-        {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "ordinary dynamic Function has one synchronous sloppy Script root",
-                span: Some(program.span),
-            });
-        }
-        Ok((executable, program))
-    }
-
     fn binding_for_identifier(
         &self,
         symbol_id: Option<SymbolId>,
@@ -2018,47 +1497,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     }
 }
 
-fn object_method_or_accessor_span(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> Option<Span> {
-    let AstKind::ObjectProperty(property) = unit.semantic().nodes().parent_kind(node_id) else {
-        return None;
-    };
-    let Expression::FunctionExpression(value) = &property.value else {
-        return None;
-    };
-    (value.node_id.get() == node_id
-        && (property.method || !matches!(property.kind, PropertyKind::Init)))
-    .then_some(property.span)
-}
-
-const fn executable_header(
-    kind: CompilerExecutableKind,
-    strict: bool,
-    simple_parameter_list: bool,
-    defined_argument_count: u32,
-    variable_reference_count: u32,
-) -> UnverifiedFunctionHeader {
-    let header = match kind {
-        CompilerExecutableKind::OrdinaryFunction => {
-            UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
-                strict,
-                defined_argument_count,
-                variable_reference_count,
-            )
-        }
-        CompilerExecutableKind::OrdinaryMethod => {
-            UnverifiedFunctionHeader::ordinary_method_with_variable_references(
-                strict,
-                defined_argument_count,
-                variable_reference_count,
-            )
-        }
-        CompilerExecutableKind::DynamicFunctionScript => {
-            UnverifiedFunctionHeader::dynamic_function_script(variable_reference_count)
-        }
-    };
-    header.with_simple_parameter_list(simple_parameter_list)
-}
-
 fn checked_function_entry_count<T>(
     count: T,
     domain: &'static str,
@@ -2084,27 +1522,6 @@ where
         return Err(LeafCompilationError::CapacityExceeded { domain });
     }
     u16::try_from(index).map_err(|_| LeafCompilationError::CapacityExceeded { domain })
-}
-
-struct ValidatedFunction {
-    executable_kind: CompilerExecutableKind,
-    strict: bool,
-    argument_count: u32,
-    defined_argument_count: u32,
-    local_count: u32,
-    capture_count: u32,
-    capture_layout: CompilerCaptureLayout,
-    locals: Vec<LoweredLocal>,
-    atoms: Arc<[CompilerAtom]>,
-    constants: Arc<[CompiledConstant]>,
-    closure_variables: Vec<CompiledClosureVariable>,
-    realm_globals: Vec<CompiledRealmGlobal>,
-    function_name: Option<AtomPoolIndex>,
-    variable_definitions: Vec<VariableDefinition>,
-    closure_definitions: Vec<VerifiedClosureVariableDefinition>,
-    function_span: SourceByteSpan,
-    function_name_span: Option<SourceByteSpan>,
-    flow: PlannedControlFlow,
 }
 
 fn is_noncomputed_static_property_key_node(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> bool {

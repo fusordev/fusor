@@ -1,13 +1,23 @@
+use std::sync::Arc;
+
 use oxc_ast::ast::{Function, FunctionBody, Program};
-use quickjs_bytecode::VerificationLimits;
+use quickjs_bytecode::{
+    AtomPoolIndex, ClosureVariableDefinition as VerifiedClosureVariableDefinition, CompilerAtom,
+    CompilerCaptureLayout, CompilerConstantLayout, CompilerExecutableKind, CompilerSource,
+    FunctionIndexDomains, PcSourceSpan, SourceByteSpan, UnverifiedFunctionHeader,
+    UnverifiedFunctionMetadata, VariableDefinition, VerificationLimits,
+};
 use quickjs_frontend::Span;
 
 use super::{
-    CompilationContext, CompiledConstantPool, FrameLayout, FunctionTreeLayout,
-    LeafCompilationError, LocalSlot, PlannedControlFlow, StatementCompletion,
-    StatementControlStack, StatementPlanningState, StatementWork,
+    CompilationContext, CompiledClosureVariable, CompiledConstant, CompiledConstantPool,
+    CompiledFunction, CompiledMetadataAtomKey, CompiledRealmGlobal, FrameLayout, FrameLayoutInput,
+    FunctionTreeLayout, LeafCompilationError, LocalSlot, LoweredLocal, OrdinaryFunctionForm,
+    PlannedControlFlow, StatementCompletion, StatementControlStack, StatementPlanningState,
+    StatementWork, UnsupportedLeafFeature, checked_function_entry_count,
+    script_completion_variable_definition, source_byte_span,
 };
-use crate::storage::ExecutableId;
+use crate::storage::{ExecutableId, ExecutableKind};
 
 #[derive(Clone, Copy)]
 pub(in crate::lowering) struct FunctionPlanningContext<'layout> {
@@ -164,6 +174,361 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                 .ensure_script_terminal(completion, self.body_span)?,
         }
         Ok(self.flow)
+    }
+}
+
+impl CompilationContext<'_, '_, '_> {
+    fn validate_executable(
+        &self,
+        executable: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        limits: VerificationLimits,
+    ) -> Result<ValidatedFunction, LeafCompilationError> {
+        let metadata = self
+            .planned
+            .plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        match metadata.kind() {
+            ExecutableKind::Script {
+                asynchronous: false,
+            } => self.validate_dynamic_function_script(executable, tree_layout, limits),
+            _ => self.validate_function(executable, tree_layout, limits),
+        }
+    }
+
+    fn validate_function(
+        &self,
+        executable_id: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        limits: VerificationLimits,
+    ) -> Result<ValidatedFunction, LeafCompilationError> {
+        let (executable, function, form) = self.selected_ordinary_function(executable_id)?;
+        let layout = FrameLayout::new(FrameLayoutInput::new(&self.planned.plan, executable_id))?;
+        let body = function
+            .body
+            .as_ref()
+            .ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedBody,
+                span: function.span,
+            })?;
+        let constants = tree_layout.constant_pool(executable_id)?;
+        let planning = FunctionPlanningContext {
+            executable: executable_id,
+            layout: &layout,
+            tree_layout,
+            constants,
+        };
+        let flow = FunctionLoweringSession::for_function(self, function, body, planning, limits)?
+            .lower()?;
+        let function_scope = self.created_scope(
+            function.scope_id.get(),
+            function.node_id.get(),
+            function.span,
+        )?;
+        let capture_layout =
+            self.compiler_capture_layout(executable_id, function_scope, &layout, tree_layout)?;
+        let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
+        let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
+        let (executable_kind, function_span, function_name, function_name_span) = match form {
+            OrdinaryFunctionForm::Function => (
+                CompilerExecutableKind::OrdinaryFunction,
+                function.span,
+                executable
+                    .name()
+                    .map(|_| constants.metadata_atom_index(CompiledMetadataAtomKey::FunctionName))
+                    .transpose()?,
+                executable.name_span().map(source_byte_span),
+            ),
+            OrdinaryFunctionForm::ObjectMethod {
+                property_span: source_span,
+            } => (
+                CompilerExecutableKind::OrdinaryMethod,
+                source_span,
+                None,
+                None,
+            ),
+        };
+        let variable_definitions = self.compiled_variable_definitions(
+            executable_id,
+            function_scope,
+            &layout,
+            tree_layout,
+            constants,
+        )?;
+        let closure_definitions =
+            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
+        let capture_count = checked_function_entry_count(
+            closure_variables
+                .len()
+                .checked_add(realm_globals.len())
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "function closure variables",
+                })?,
+            "function closure variables",
+        )?;
+
+        Ok(ValidatedFunction {
+            executable_kind,
+            strict: executable.is_strict(),
+            argument_count: executable.parameter_count(),
+            defined_argument_count: executable.defined_parameter_count(),
+            local_count: layout.local_count,
+            capture_count,
+            capture_layout,
+            locals: layout
+                .locals
+                .iter()
+                .map(|local| LoweredLocal {
+                    binding: local.binding,
+                    slot: local.slot,
+                })
+                .collect(),
+            constants: Arc::clone(constants.entries()),
+            atoms: Arc::clone(constants.atoms()),
+            closure_variables,
+            realm_globals,
+            function_name,
+            variable_definitions,
+            closure_definitions,
+            function_span: source_byte_span(function_span),
+            function_name_span,
+            flow,
+        })
+    }
+
+    fn validate_dynamic_function_script(
+        &self,
+        executable_id: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        limits: VerificationLimits,
+    ) -> Result<ValidatedFunction, LeafCompilationError> {
+        let (executable, program) = self.selected_dynamic_function_script(executable_id)?;
+        let layout = FrameLayout::new(
+            FrameLayoutInput::new(&self.planned.plan, executable_id).with_internal_locals(1),
+        )?;
+        let completion = layout.internal_local(0)?;
+        let constants = tree_layout.constant_pool(executable_id)?;
+        let planning = FunctionPlanningContext {
+            executable: executable_id,
+            layout: &layout,
+            tree_layout,
+            constants,
+        };
+        let flow =
+            FunctionLoweringSession::for_program(self, program, completion, planning, limits)?
+                .lower()?;
+        let program_scope =
+            self.created_scope(program.scope_id.get(), program.node_id.get(), program.span)?;
+        let capture_layout =
+            self.compiler_capture_layout(executable_id, program_scope, &layout, tree_layout)?;
+        let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
+        if !closure_variables.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "dynamic Function Script root imports no caller closure",
+                span: Some(program.span),
+            });
+        }
+        let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
+        let mut variable_definitions = self.compiled_variable_definitions(
+            executable_id,
+            program_scope,
+            &layout,
+            tree_layout,
+            constants,
+        )?;
+        variable_definitions.push(script_completion_variable_definition(constants)?);
+        let closure_definitions =
+            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
+        let capture_count =
+            checked_function_entry_count(realm_globals.len(), "function closure variables")?;
+
+        Ok(ValidatedFunction {
+            executable_kind: CompilerExecutableKind::DynamicFunctionScript,
+            strict: executable.is_strict(),
+            argument_count: 0,
+            defined_argument_count: 0,
+            local_count: layout.local_count,
+            capture_count,
+            capture_layout,
+            locals: layout
+                .locals
+                .iter()
+                .map(|local| LoweredLocal {
+                    binding: local.binding,
+                    slot: local.slot,
+                })
+                .collect(),
+            constants: Arc::clone(constants.entries()),
+            atoms: Arc::clone(constants.atoms()),
+            closure_variables,
+            realm_globals,
+            function_name: None,
+            variable_definitions,
+            closure_definitions,
+            function_span: source_byte_span(program.span),
+            function_name_span: None,
+            flow,
+        })
+    }
+}
+
+struct ValidatedFunction {
+    executable_kind: CompilerExecutableKind,
+    strict: bool,
+    argument_count: u32,
+    defined_argument_count: u32,
+    local_count: u32,
+    capture_count: u32,
+    capture_layout: CompilerCaptureLayout,
+    locals: Vec<LoweredLocal>,
+    atoms: Arc<[CompilerAtom]>,
+    constants: Arc<[CompiledConstant]>,
+    closure_variables: Vec<CompiledClosureVariable>,
+    realm_globals: Vec<CompiledRealmGlobal>,
+    function_name: Option<AtomPoolIndex>,
+    variable_definitions: Vec<VariableDefinition>,
+    closure_definitions: Vec<VerifiedClosureVariableDefinition>,
+    function_span: SourceByteSpan,
+    function_name_span: Option<SourceByteSpan>,
+    flow: PlannedControlFlow,
+}
+
+const fn executable_header(
+    kind: CompilerExecutableKind,
+    strict: bool,
+    simple_parameter_list: bool,
+    defined_argument_count: u32,
+    variable_reference_count: u32,
+) -> UnverifiedFunctionHeader {
+    let header = match kind {
+        CompilerExecutableKind::OrdinaryFunction => {
+            UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
+                strict,
+                defined_argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::OrdinaryMethod => {
+            UnverifiedFunctionHeader::ordinary_method_with_variable_references(
+                strict,
+                defined_argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::DynamicFunctionScript => {
+            UnverifiedFunctionHeader::dynamic_function_script(variable_reference_count)
+        }
+    };
+    header.with_simple_parameter_list(simple_parameter_list)
+}
+
+impl CompilationContext<'_, '_, '_> {
+    pub(in crate::lowering) fn compile_function(
+        &self,
+        executable: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        limits: VerificationLimits,
+    ) -> Result<CompiledFunction, LeafCompilationError> {
+        let validated = self.validate_executable(executable, tree_layout, limits)?;
+        let ValidatedFunction {
+            executable_kind,
+            strict,
+            argument_count,
+            defined_argument_count,
+            local_count,
+            capture_count,
+            capture_layout,
+            locals,
+            constants,
+            atoms,
+            closure_variables,
+            realm_globals,
+            function_name,
+            variable_definitions,
+            closure_definitions,
+            function_span,
+            function_name_span,
+            flow,
+        } = validated;
+        let atom_count =
+            u32::try_from(atoms.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "atom pool entries",
+            })?;
+        let constant_count =
+            u32::try_from(constants.len()).map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "constant pool entries",
+            })?;
+        let domains = FunctionIndexDomains::new(
+            atom_count,
+            constant_count,
+            argument_count,
+            local_count,
+            capture_count,
+        );
+        let variable_reference_count = checked_function_entry_count(
+            capture_layout.bindings().len(),
+            "function variable references",
+        )?;
+        let header = executable_header(
+            executable_kind,
+            strict,
+            self.planned
+                .plan
+                .executable(executable)
+                .ok_or(LeafCompilationError::InvalidExecutable { executable })?
+                .has_simple_parameter_list(),
+            defined_argument_count,
+            variable_reference_count,
+        );
+        let constant_layout = CompilerConstantLayout::new(
+            constants
+                .iter()
+                .map(CompiledConstant::kind)
+                .collect::<Vec<_>>()
+                .into(),
+        );
+        let finished = flow.finish()?;
+        let (source_instructions, control_flow) = finished.verify_with_layouts(
+            domains,
+            header,
+            capture_layout,
+            constant_layout,
+            limits,
+        )?;
+        let source_mappings = source_instructions
+            .iter()
+            .map(|instruction| {
+                PcSourceSpan::new(instruction.pc(), source_byte_span(instruction.span()))
+            })
+            .collect::<Vec<_>>();
+        let metadata = UnverifiedFunctionMetadata::new(
+            function_name,
+            variable_definitions.into(),
+            closure_definitions.into(),
+            CompilerSource::new(
+                Arc::clone(&self.source_name),
+                Arc::clone(&self.source_text),
+                function_span,
+                function_name_span,
+                source_mappings.into(),
+            ),
+        )
+        .with_executable_kind(executable_kind);
+
+        Ok(CompiledFunction {
+            executable,
+            storage_plan: Arc::clone(&self.planned.plan),
+            source_text: Arc::clone(&self.source_text),
+            locals: locals.into(),
+            atoms,
+            constants,
+            closure_variables: closure_variables.into(),
+            realm_globals: realm_globals.into(),
+            source_instructions: source_instructions.into(),
+            control_flow: Arc::new(control_flow),
+            metadata,
+        })
     }
 }
 
