@@ -201,6 +201,31 @@ fn generated_function_accepts_parameter_default_expressions() {
 }
 
 #[test]
+fn generated_function_splits_parameter_and_body_environments() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let copied=Function('a=1','var a;return a;');\
+            let separated=Function('a=1','reader=function inner(){return a;}',\
+                'var a=2;return reader()*10+a;');\
+            let declared=Function('a=1','reader=function inner(){return a;}',\
+                'function a(){return 3;}return reader()*10+a();');\
+            let args=Function('value=arguments.length',\
+                'var arguments;return value*10+arguments.length;');\
+            return copied()*1000000+separated()*10000+declared()*100+args(undefined,6);",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function parameter/body environments");
+
+    assert_number(&result, 1_121_322);
+}
+
+#[test]
 fn function_prototype_call_forwards_the_dynamic_function_compiler_service() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

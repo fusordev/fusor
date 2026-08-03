@@ -250,6 +250,38 @@ fn parameter_expression_prologue_activates_tdz_bindings_before_arguments_and_val
 }
 
 #[test]
+fn parameter_expression_body_var_copies_into_a_distinct_local() {
+    let compiled = compile("function f(value=1){var value;return value;}", "f");
+    let instructions = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        instructions.first(),
+        Some(&(FinalOpcode::SetLocUninitialized, Operands::Loc(0)))
+    );
+    let parameter_read = instructions
+        .iter()
+        .position(|instruction| *instruction == (FinalOpcode::GetLocCheck, Operands::Loc(0)))
+        .expect("initialized parameter cell is copied");
+    let body_write = instructions
+        .iter()
+        .position(|instruction| *instruction == (FinalOpcode::PutLoc1, Operands::NoneLoc))
+        .expect("body variable receives its copy");
+    let body_read = instructions
+        .iter()
+        .rposition(|instruction| *instruction == (FinalOpcode::GetLoc1, Operands::NoneLoc))
+        .expect("body reads select the copied variable cell");
+    assert!(parameter_read < body_write && body_write < body_read);
+}
+
+#[test]
 fn deepest_leaf_reads_forwarded_parent_cells_through_capture_slots() {
     let compiled = compile(
         "function outer(arg){ let local=1; function middle(){ function inner(){ return arg+local; } } }",

@@ -577,6 +577,7 @@ pub(crate) struct OxcIdentityMap {
     pub(crate) executable_by_node: Box<[Option<ExecutableId>]>,
     pub(crate) node_by_executable: Box<[NodeId]>,
     pub(crate) binding_by_symbol: Box<[Option<BindingId>]>,
+    pub(crate) binding_by_declaration: HashMap<(SymbolId, u32, u32), BindingId>,
     pub(crate) scope_by_binding: Box<[Option<ScopeId>]>,
     pub(crate) reference_by_id: Box<[Option<NativeReferenceId>]>,
 }
@@ -704,8 +705,6 @@ pub enum UnsupportedFeature {
     DirectEval,
     /// A `with` statement.
     WithStatement,
-    /// A parameter binding that must be split from a same-name body binding.
-    ParameterEnvironmentCollision,
     /// Annex B's paired block-lexical and var-like function binding.
     AnnexBBlockFunction,
     /// Class-created functions, private names, and synthetic slots.
@@ -803,12 +802,20 @@ struct ExecutableDraft {
 
 struct BindingDraft {
     symbol_id: Option<SymbolId>,
+    primary_symbol_binding: bool,
     executable: ExecutableId,
     name: Arc<str>,
     declaration_spans: Arc<[Span]>,
     placement: StoragePlacement,
     policy: DeclarationPolicy,
     arguments_object: bool,
+}
+
+struct FrozenBindings {
+    bindings: Vec<BindingStorage>,
+    primary_by_symbol: Vec<Option<BindingId>>,
+    source_symbols: Vec<Option<SymbolId>>,
+    by_declaration: HashMap<(SymbolId, u32, u32), BindingId>,
 }
 
 #[derive(Default)]
@@ -939,6 +946,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         })
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "planning freezes bindings, references, captures, and their identity maps together"
+    )]
     fn build(mut self) -> Result<PlannedStorage, CompilerError> {
         self.reject_preflight_features()?;
         self.inventory_executables()?;
@@ -962,12 +973,21 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 binding.name.clone(),
             )
         });
-        let (mut bindings, symbol_bindings) =
-            freeze_bindings(binding_drafts, self.unit.semantic().scoping().symbols_len())?;
-        let scope_by_binding = self.binding_scope_map(&symbol_bindings, &bindings)?;
+        let FrozenBindings {
+            mut bindings,
+            primary_by_symbol: symbol_bindings,
+            source_symbols,
+            by_declaration: declaration_bindings,
+        } = self.freeze_binding_drafts(binding_drafts)?;
+        let scope_by_binding =
+            self.binding_scope_map(&symbol_bindings, &source_symbols, &bindings)?;
 
-        let mut resolved_drafts =
-            self.resolved_drafts(&symbol_bindings, &bindings, &implicit_arguments_references)?;
+        let mut resolved_drafts = self.resolved_drafts(
+            &symbol_bindings,
+            &source_symbols,
+            &bindings,
+            &implicit_arguments_references,
+        )?;
         let unresolved_drafts = self.unresolved_drafts()?;
         let (arguments_references, mut unresolved_drafts) = Self::resolve_arguments_references(
             unresolved_drafts,
@@ -1038,15 +1058,24 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 executable_by_node: self.node_executables.into_boxed_slice(),
                 node_by_executable: node_by_executable.into_boxed_slice(),
                 binding_by_symbol: symbol_bindings.into_boxed_slice(),
+                binding_by_declaration: declaration_bindings,
                 scope_by_binding: scope_by_binding.into_boxed_slice(),
                 reference_by_id: reference_by_id.into_boxed_slice(),
             },
         })
     }
 
+    fn freeze_binding_drafts(
+        &self,
+        drafts: Vec<BindingDraft>,
+    ) -> Result<FrozenBindings, CompilerError> {
+        freeze_bindings(drafts, self.unit.semantic().scoping().symbols_len())
+    }
+
     fn binding_scope_map(
         &self,
         symbol_bindings: &[Option<BindingId>],
+        source_symbols: &[Option<SymbolId>],
         bindings: &[BindingStorage],
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
         let scoping = self.unit.semantic().scoping();
@@ -1062,6 +1091,29 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 )
             }),
         )?;
+        for (binding, source_symbol) in source_symbols.iter().copied().enumerate() {
+            let Some(symbol) = source_symbol else {
+                continue;
+            };
+            let scope = scoping.symbol_scope_id(symbol);
+            let span = scoping.symbol_span(symbol);
+            let target = scopes
+                .get_mut(binding)
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "source-backed compiler binding scope index is in range",
+                    span: Some(span),
+                })?;
+            match *target {
+                None => *target = Some(scope),
+                Some(existing) if existing == scope => {}
+                Some(_) => {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "split compiler bindings share their semantic scope",
+                        span: Some(span),
+                    });
+                }
+            }
+        }
         for binding in bindings.iter().filter(|binding| binding.arguments_object) {
             let scope = self
                 .executable_drafts
@@ -1437,41 +1489,75 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 });
             }
             let facts = self.declaration_facts(symbol_id, flags)?;
+            let owner = self.scope_owner(
+                scoping.symbol_scope_id(symbol_id),
+                Some(scoping.symbol_span(symbol_id)),
+            )?;
+            let name = Arc::<str>::from(scoping.symbol_name(symbol_id));
+            let declaration_spans = declaration_spans(scoping, symbol_id);
+            let split_parameter_environment = self.executable_drafts[owner.index()]
+                .executable
+                .has_parameter_expressions()
+                && facts.contains(DeclarationFacts::PARAMETER)
+                && (facts.contains(DeclarationFacts::VAR)
+                    || facts.contains(DeclarationFacts::FUNCTION));
+            if split_parameter_environment {
+                let parameter_span = self.parameter_list_span(owner).ok_or(
+                    CompilerError::SemanticInvariant {
+                        invariant: "parameter/body collision belongs to a function parameter list",
+                        span: Some(scoping.symbol_span(symbol_id)),
+                    },
+                )?;
+                let (parameter_spans, body_spans): (Vec<_>, Vec<_>) = declaration_spans
+                    .iter()
+                    .copied()
+                    .partition(|span| span_within(*span, parameter_span));
+                if parameter_spans.is_empty() || body_spans.is_empty() {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "split parameter and body bindings retain exact declarations",
+                        span: Some(scoping.symbol_span(symbol_id)),
+                    });
+                }
+                drafts.push(BindingDraft {
+                    symbol_id: Some(symbol_id),
+                    primary_symbol_binding: false,
+                    executable: owner,
+                    name: Arc::clone(&name),
+                    declaration_spans: parameter_spans.into(),
+                    placement: StoragePlacement::Local,
+                    policy: self.declaration_policy(owner, DeclarationKind::Parameter, false),
+                    arguments_object: false,
+                });
+                let body_kind = if facts.contains(DeclarationFacts::FUNCTION) {
+                    DeclarationKind::Function
+                } else {
+                    DeclarationKind::Var
+                };
+                drafts.push(BindingDraft {
+                    symbol_id: Some(symbol_id),
+                    primary_symbol_binding: true,
+                    executable: owner,
+                    name,
+                    declaration_spans: body_spans.into(),
+                    placement: StoragePlacement::Local,
+                    policy: self.declaration_policy(owner, body_kind, facts.function_scope_entry),
+                    arguments_object: false,
+                });
+                continue;
+            }
             let kind = facts
                 .effective_kind()
                 .ok_or(CompilerError::SemanticInvariant {
                     invariant: "known JavaScript declaration kind",
                     span: Some(scoping.symbol_span(symbol_id)),
                 })?;
-            let owner = self.scope_owner(
-                scoping.symbol_scope_id(symbol_id),
-                Some(scoping.symbol_span(symbol_id)),
-            )?;
-            if self.executable_drafts[owner.index()]
-                .executable
-                .has_parameter_expressions()
-                && facts.contains(DeclarationFacts::PARAMETER)
-                && (facts.contains(DeclarationFacts::VAR)
-                    || facts.contains(DeclarationFacts::FUNCTION))
-            {
-                let span = scoping
-                    .symbol_declarations(symbol_id)
-                    .find_map(|declaration| match semantic.nodes().kind(declaration) {
-                        AstKind::VariableDeclarator(declarator) => Some(declarator.span),
-                        AstKind::Function(function) => Some(function.span),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| scoping.symbol_span(symbol_id));
-                return unsupported(UnsupportedFeature::ParameterEnvironmentCollision, span);
-            }
-            let name = scoping.symbol_name(symbol_id);
             let placement = self.placement(symbol_id, owner, kind)?;
             let policy = self.declaration_policy(owner, kind, facts.function_scope_entry);
-            let declaration_spans = declaration_spans(scoping, symbol_id);
             drafts.push(BindingDraft {
                 symbol_id: Some(symbol_id),
+                primary_symbol_binding: true,
                 executable: owner,
-                name: Arc::from(name),
+                name,
                 declaration_spans,
                 placement,
                 policy,
@@ -1479,6 +1565,15 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             });
         }
         Ok(drafts)
+    }
+
+    fn parameter_list_span(&self, executable: ExecutableId) -> Option<Span> {
+        let node = self.executable_drafts.get(executable.index())?.node_id;
+        match self.unit.semantic().nodes().kind(node) {
+            AstKind::Function(function) => Some(function.params.span),
+            AstKind::ArrowFunctionExpression(arrow) => Some(arrow.params.span),
+            _ => None,
+        }
     }
 
     fn declaration_facts(
@@ -1710,6 +1805,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let policy = self.synthetic_default_policy()?;
         bindings.push(BindingDraft {
             symbol_id: None,
+            primary_symbol_binding: false,
             executable: ExecutableId(0),
             name: Arc::from("*default*"),
             declaration_spans: synthetic_spans.into(),
@@ -1783,6 +1879,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn resolved_drafts(
         &self,
         symbol_bindings: &[Option<BindingId>],
+        source_symbols: &[Option<SymbolId>],
         bindings: &[BindingStorage],
         implicit_arguments_references: &HashMap<ReferenceId, ExecutableId>,
     ) -> Result<Vec<ResolvedDraft>, CompilerError> {
@@ -1793,6 +1890,23 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             .filter(|binding| binding.arguments_object)
             .map(|binding| (binding.executable, binding.id))
             .collect::<HashMap<_, _>>();
+        let mut split_parameter_bindings = HashMap::new();
+        for (binding, symbol) in bindings.iter().zip(source_symbols.iter().copied()) {
+            let Some(symbol) = symbol else {
+                continue;
+            };
+            if binding.policy.kind == DeclarationKind::Parameter
+                && symbol_bindings.get(symbol.index()).copied().flatten() != Some(binding.id)
+                && split_parameter_bindings
+                    .insert(symbol, binding.id)
+                    .is_some()
+            {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one split parameter binding per semantic symbol",
+                    span: binding.declaration_spans.first().copied(),
+                });
+            }
+        }
         let mut drafts = Vec::with_capacity(scoping.references_len());
         for symbol_id in scoping.symbol_ids() {
             let source_binding = symbol_bindings
@@ -1815,6 +1929,14 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                             span: Some(span),
                         },
                     )?
+                } else if let Some(parameter_binding) =
+                    split_parameter_bindings.get(&symbol_id).copied()
+                    && bindings
+                        .get(source_binding.index())
+                        .and_then(|binding| self.parameter_list_span(binding.executable))
+                        .is_some_and(|parameters| span_within(span, parameters))
+                {
+                    parameter_binding
                 } else {
                     source_binding
                 };
@@ -1875,24 +1997,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         first_references
             .sort_unstable_by_key(|(owner, span)| (owner.index(), span.start, span.end));
         for (owner, span) in first_references {
-            if self.executable_drafts[owner.index()]
-                .executable
-                .has_parameter_expressions()
-                && let Some(binding) = bindings.iter().find(|binding| {
-                    binding.executable == owner
-                        && binding.name.as_ref() == "arguments"
-                        && binding.policy.kind == DeclarationKind::Var
-                })
-            {
-                return unsupported(
-                    UnsupportedFeature::ParameterEnvironmentCollision,
-                    binding.declaration_spans.first().copied().unwrap_or(span),
-                );
-            }
             let mut reusable = bindings.iter_mut().filter(|binding| {
                 binding.executable == owner
                     && binding.name.as_ref() == "arguments"
                     && binding.policy.kind == DeclarationKind::Var
+                    && !self.executable_drafts[owner.index()]
+                        .executable
+                        .has_parameter_expressions()
             });
             if let Some(binding) = reusable.next() {
                 if reusable.next().is_some()
@@ -1910,6 +2021,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
             bindings.push(BindingDraft {
                 symbol_id: None,
+                primary_symbol_binding: false,
                 executable: owner,
                 name: Arc::from("arguments"),
                 declaration_spans: Arc::from([span]),
@@ -1927,11 +2039,22 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     ) -> Result<ImplicitArgumentsPlan, CompilerError> {
         let semantic = self.unit.semantic();
         let scoping = semantic.scoping();
+        let arguments_parameter_owners = bindings
+            .iter()
+            .filter(|binding| {
+                binding.name.as_ref() == "arguments"
+                    && binding.policy.kind == DeclarationKind::Parameter
+            })
+            .map(|binding| binding.executable)
+            .collect::<HashSet<_>>();
         let mut binding_by_symbol = vec![None; scoping.symbols_len()];
         for (index, binding) in bindings.iter().enumerate() {
             let Some(symbol) = binding.symbol_id else {
                 continue;
             };
+            if !binding.primary_symbol_binding {
+                continue;
+            }
             let target = binding_by_symbol.get_mut(symbol.index()).ok_or(
                 CompilerError::SemanticInvariant {
                     invariant: "arguments source symbol indexes its binding draft",
@@ -1966,9 +2089,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 let Some(owner) = self.arguments_owner(executable, span)? else {
                     continue;
                 };
-                if self
-                    .reference_uses_explicit_arguments_binding(executable, owner, binding, span)?
-                {
+                if self.reference_uses_explicit_arguments_binding(
+                    executable,
+                    owner,
+                    binding,
+                    arguments_parameter_owners.contains(&owner),
+                    span,
+                )? {
                     continue;
                 }
                 Self::record_implicit_arguments_reference(
@@ -1998,10 +2125,52 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 span,
             )?;
         }
+        self.seed_body_arguments_object_requirements(
+            bindings,
+            &arguments_parameter_owners,
+            &mut first_references,
+        )?;
         Ok(ImplicitArgumentsPlan {
             reference_owners: implicit_references,
             first_references,
         })
+    }
+
+    fn seed_body_arguments_object_requirements(
+        &self,
+        bindings: &[BindingDraft],
+        arguments_parameter_owners: &HashSet<ExecutableId>,
+        first_references: &mut HashMap<ExecutableId, Span>,
+    ) -> Result<(), CompilerError> {
+        for binding in bindings {
+            let needs_separate_object = binding.name.as_ref() == "arguments"
+                && matches!(
+                    binding.policy.kind,
+                    DeclarationKind::Var | DeclarationKind::Function
+                )
+                && self.executable_drafts[binding.executable.index()]
+                    .executable
+                    .has_parameter_expressions()
+                && !arguments_parameter_owners.contains(&binding.executable);
+            if !needs_separate_object {
+                continue;
+            }
+            let span = binding.declaration_spans.first().copied().ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "body arguments declaration has a source span",
+                    span: None,
+                },
+            )?;
+            first_references
+                .entry(binding.executable)
+                .and_modify(|first| {
+                    if (span.start, span.end) < (first.start, first.end) {
+                        *first = span;
+                    }
+                })
+                .or_insert(span);
+        }
+        Ok(())
     }
 
     fn reference_uses_explicit_arguments_binding(
@@ -2009,9 +2178,29 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         reference_executable: ExecutableId,
         arguments_owner: ExecutableId,
         binding: &BindingDraft,
+        owner_has_arguments_parameter: bool,
         span: Span,
     ) -> Result<bool, CompilerError> {
         if binding.executable == arguments_owner {
+            if owner_has_arguments_parameter {
+                return Ok(true);
+            }
+            if self.executable_drafts[arguments_owner.index()]
+                .executable
+                .has_parameter_expressions()
+                && matches!(
+                    binding.policy.kind,
+                    DeclarationKind::Var | DeclarationKind::Function
+                )
+            {
+                let parameters = self.parameter_list_span(arguments_owner).ok_or(
+                    CompilerError::SemanticInvariant {
+                        invariant: "parameter-expression arguments owner has formal parameters",
+                        span: Some(span),
+                    },
+                )?;
+                return Ok(!span_within(span, parameters));
+            }
             return Ok(!matches!(
                 binding.policy.kind,
                 DeclarationKind::Var | DeclarationKind::FunctionName
@@ -2223,6 +2412,10 @@ fn declaration_spans(scoping: &oxc_semantic::Scoping, symbol_id: SymbolId) -> Ar
     spans.into()
 }
 
+const fn span_within(inner: Span, outer: Span) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
+}
+
 fn declaration_kind_invariant(kind: AstKind<'_>) -> &'static str {
     match kind {
         AstKind::BindingIdentifier(_) => "symbol declaration points to declaration owner",
@@ -2244,9 +2437,11 @@ fn placement_order(placement: StoragePlacement) -> u8 {
 fn freeze_bindings(
     drafts: Vec<BindingDraft>,
     symbol_count: usize,
-) -> Result<(Vec<BindingStorage>, Vec<Option<BindingId>>), CompilerError> {
+) -> Result<FrozenBindings, CompilerError> {
     let mut bindings = Vec::with_capacity(drafts.len());
     let mut symbol_bindings = vec![None; symbol_count];
+    let mut source_symbols = Vec::with_capacity(drafts.len());
+    let mut declaration_bindings = HashMap::new();
     for (index, draft) in drafts.into_iter().enumerate() {
         let id = u32::try_from(index)
             .map(BindingId)
@@ -2259,13 +2454,25 @@ fn freeze_bindings(
                     span,
                 },
             )?;
-            if slot.replace(id).is_some() {
+            if draft.primary_symbol_binding && slot.replace(id).is_some() {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "one compiler binding per semantic symbol",
+                    invariant: "one primary compiler binding per semantic symbol",
                     span,
                 });
             }
+            for declaration in draft.declaration_spans.iter().copied() {
+                if declaration_bindings
+                    .insert((symbol_id, declaration.start, declaration.end), id)
+                    .is_some()
+                {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "one compiler binding per semantic declaration",
+                        span: Some(declaration),
+                    });
+                }
+            }
         }
+        source_symbols.push(draft.symbol_id);
         bindings.push(BindingStorage {
             id,
             executable: draft.executable,
@@ -2283,7 +2490,12 @@ fn freeze_bindings(
             span: None,
         });
     }
-    Ok((bindings, symbol_bindings))
+    Ok(FrozenBindings {
+        bindings,
+        primary_by_symbol: symbol_bindings,
+        source_symbols,
+        by_declaration: declaration_bindings,
+    })
 }
 
 fn reverse_binding_scopes(

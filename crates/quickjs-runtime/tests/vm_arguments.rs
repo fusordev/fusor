@@ -351,6 +351,35 @@ fn parameter_expressions_initialize_left_to_right_with_tdz_bindings() {
 }
 
 #[test]
+fn parameter_expression_body_environments_copy_and_then_diverge() {
+    let result = string_result(
+        "function copied(a=1){var a;return ''+a;}\
+            function separated(a=1,reader=function inner(){return a}){\
+                var a=2;return reader()+':'+a;}\
+            function declared(a=1,reader=function inner(){return a}){\
+                function a(){return 3;}return reader()+':'+a();}\
+            let outer=7;function bodyOnly(value=outer){var outer=2;return value+':'+outer;}\
+            function copiedArgs(value=1){var arguments;\
+                return arguments.length+':'+arguments[1];}\
+            function assignedArgs(value=arguments.length){var arguments;arguments=9;\
+                return value+':'+arguments;}\
+            function replacedArgs(value=arguments.length){function arguments(){return 3;}\
+                return value+':'+arguments();}\
+            function parameterArgs(arguments=4){var arguments;return ''+arguments;}\
+            function pattern({value=1}={}){var value;return ''+value;}\
+            function patternFunction({value=1}={}){function value(){return 3;}\
+                return ''+value();}\
+            const holder={method(a=1,reader=function inner(){return a}){\
+                var a=2;return reader()+':'+a;}};\
+            return copied()+'|'+separated()+'|'+declared()+'|'+bodyOnly()+'|'+\
+                copiedArgs(5,6)+'|'+assignedArgs(undefined,6)+'|'+\
+                replacedArgs(undefined,6)+'|'+parameterArgs()+'|'+pattern()+'|'+\
+                patternFunction()+'|'+holder.method();",
+    );
+    assert_eq!(result, "1|1:2|1:3|7:2|2:6|2:9|2:3|4|1|3|1:2");
+}
+
+#[test]
 fn formal_rest_parameters_snapshot_an_independent_supplied_tail() {
     let result = string_result(
         "function inspect(fixed,...rest){const before=rest[0]+'|'+arguments[1];\

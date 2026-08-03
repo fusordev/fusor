@@ -1014,6 +1014,52 @@ fn parameter_expressions_use_tdz_locals_and_stop_observable_length() {
 }
 
 #[test]
+fn parameter_expression_collisions_split_parameter_and_body_bindings() {
+    let plan = script(
+        "function f(a=1,reader=function inner(){return a}){var a;function reader(){}\
+            var arguments;return a+reader+arguments.length;}",
+    );
+    let executable = plan.executables()[1].id();
+    let bindings = plan.bindings_for(executable).unwrap();
+
+    let a = bindings
+        .iter()
+        .filter(|binding| binding.name() == "a")
+        .collect::<Vec<_>>();
+    assert_eq!(a.len(), 2);
+    assert_eq!(a[0].policy().kind(), DeclarationKind::Parameter);
+    assert!(a[0].policy().has_temporal_dead_zone());
+    assert_eq!(a[1].policy().kind(), DeclarationKind::Var);
+    assert!(!a[1].policy().has_temporal_dead_zone());
+
+    let reader = bindings
+        .iter()
+        .filter(|binding| binding.name() == "reader")
+        .collect::<Vec<_>>();
+    assert_eq!(reader.len(), 2);
+    assert_eq!(reader[0].policy().kind(), DeclarationKind::Parameter);
+    assert_eq!(reader[1].policy().kind(), DeclarationKind::Function);
+    assert_eq!(
+        reader[1].policy().initialization(),
+        InitializationPolicy::FunctionAtScopeEntry
+    );
+
+    let arguments = bindings
+        .iter()
+        .filter(|binding| binding.name() == "arguments")
+        .collect::<Vec<_>>();
+    assert_eq!(arguments.len(), 2);
+    assert!(
+        arguments
+            .iter()
+            .any(|binding| binding.is_arguments_object())
+    );
+    assert!(arguments.iter().any(|binding| {
+        !binding.is_arguments_object() && binding.policy().kind() == DeclarationKind::Var
+    }));
+}
+
+#[test]
 fn non_simple_body_functions_activate_after_parameter_initialization() {
     let plan = script(
         "function f({value}){function value(){return 1;}function other(){return 2;}\
@@ -1093,18 +1139,6 @@ fn unsupported(source: &str, mode: ParseMode) -> (UnsupportedFeature, quickjs_fr
 fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
     let cases = [
         ("eval('code')", UnsupportedFeature::DirectEval),
-        (
-            "function f(a = 1) { var a; }",
-            UnsupportedFeature::ParameterEnvironmentCollision,
-        ),
-        (
-            "function f({ value = 1 }) { function value() {} }",
-            UnsupportedFeature::ParameterEnvironmentCollision,
-        ),
-        (
-            "function f(value = 1) { var arguments; return arguments; }",
-            UnsupportedFeature::ParameterEnvironmentCollision,
-        ),
         ("with (object) value;", UnsupportedFeature::WithStatement),
         ("class Box {}", UnsupportedFeature::ClassSyntheticSlots),
     ];

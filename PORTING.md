@@ -378,8 +378,8 @@ Known intentional runtime differences:
   shrink results at non-configurable indices, and install a requested
   non-writable final state even when that shrink returns `false`.
 - [ ] Remaining RegExp-dependent String method surface, shape sharing/transition
-  interning, parameter/body environment binding splits and Proxy exotics,
-  dense indexed storage, deterministic finalization, and diagnostics.
+  interning, remaining arguments and Proxy exotics, dense indexed storage,
+  deterministic finalization, and diagnostics.
 
 ### Built-ins and asynchronous semantics
 
@@ -479,9 +479,20 @@ Known intentional runtime differences:
   closure created by a later default that reads an earlier parameter after the
   body mutates it: the live cell exposes the new value, while that QuickJS
   release exposes its initializer-time value.
-  Same-name parameter/body `var` or function bindings, the separate body
-  `arguments` copy, and anonymous inferred-name defaults remain fail-closed
-  until the body-environment split and inferred-name certificates land.
+  Anonymous inferred-name defaults remain fail-closed until their name-setting
+  certificates land.
+- [x] Split parameter and body VariableEnvironment bindings for functions with
+  parameter expressions. Oxc's legally merged redeclaration symbol is retained
+  as source authority but maps to distinct compiler cells by exact declaration
+  and reference spans: initializer-created closures keep the parameter cell,
+  body references select the copied `var` or instantiated function cell, and a
+  body-only name in a default still resolves through the outer environment.
+  Body `var` bindings copy matching parameter values before body functions are
+  installed; `funcNames` start independently and then receive their closures.
+  The parameter-environment `arguments` object is likewise distinct from a
+  body `var`/function named `arguments`, except when a formal parameter already
+  suppresses that object. Source functions and dynamic `Function` construction
+  share the same verified prologue and capture behavior.
 - [x] Implement formal rest parameters through the pinned `rest firstArgument`
   entry operation. The fixed argument domain and observable function `length`
   stop before the rest binding; exactly one non-simple rest site snapshots the

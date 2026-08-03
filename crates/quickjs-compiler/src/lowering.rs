@@ -3748,6 +3748,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             self.emit_parameter_binding_activations(executable, planning.layout, flow)?;
             self.emit_arguments_object_initializer(executable, planning.layout, flow)?;
             self.emit_parameter_pattern_initializers(executable, planning, flow)?;
+            self.emit_parameter_body_binding_copies(executable, planning.layout, flow)?;
             self.emit_realm_global_function_initializers(
                 executable,
                 planning.tree_layout,
@@ -4067,6 +4068,62 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    fn emit_parameter_body_binding_copies(
+        &self,
+        executable: ExecutableId,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let metadata = self
+            .planned
+            .plan
+            .executable(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        if !metadata.has_parameter_expressions() {
+            return Ok(());
+        }
+        let bindings = self
+            .planned
+            .plan
+            .bindings_for(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        for destination in bindings.iter().filter(|binding| {
+            binding.policy().kind() == DeclarationKind::Var && !binding.is_arguments_object()
+        }) {
+            let source = bindings.iter().find(|candidate| {
+                candidate.name() == destination.name()
+                    && (candidate.policy().kind() == DeclarationKind::Parameter
+                        || candidate.is_arguments_object())
+            });
+            let Some(source) = source else {
+                continue;
+            };
+            let span = destination.declaration_spans().first().copied().ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "body variable copy has a declaration span",
+                    span: Some(metadata.span()),
+                },
+            )?;
+            let source_slot =
+                layout
+                    .slot(source.id())
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "parameter-environment copy source has a frame slot",
+                        span: Some(span),
+                    })?;
+            let destination_slot =
+                layout
+                    .slot(destination.id())
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "body variable copy destination has a frame slot",
+                        span: Some(span),
+                    })?;
+            flow.emit(self.plan_read_slot(source.id(), source_slot, span)?)?;
+            flow.emit(plan_put_slot(destination_slot, span))?;
+        }
+        Ok(())
+    }
+
     fn scope_entry_initializations(
         &self,
         executable: ExecutableId,
@@ -4074,29 +4131,23 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
     ) -> Result<Vec<ScopeEntryInitialization>, LeafCompilationError> {
-        let scoping = self.unit.semantic().scoping();
         let mut entries = Vec::new();
-        for symbol in scoping.iter_bindings_in(scope) {
-            if scoping.symbol_scope_id(symbol) != scope {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "Oxc exact-scope binding belongs to that scope",
-                    span: Some(scoping.symbol_span(symbol)),
-                });
+        let bindings = self
+            .planned
+            .plan
+            .bindings_for(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        for storage in bindings {
+            if self.scope_for_binding(storage.id())? != scope {
+                continue;
             }
-            let declaration_span = scoping.symbol_span(symbol);
-            let binding = self.binding_for_identifier(Some(symbol), declaration_span)?;
-            let storage = self.planned.plan.binding(binding).ok_or(
+            let binding = storage.id();
+            let declaration_span = storage.declaration_spans().first().copied().ok_or(
                 LeafCompilationError::SemanticInvariant {
-                    invariant: "scope-entry compiler binding exists",
-                    span: Some(declaration_span),
+                    invariant: "scope-entry compiler binding has a declaration span",
+                    span: None,
                 },
             )?;
-            if storage.executable() != executable {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "scope-entry binding belongs to the selected executable",
-                    span: Some(declaration_span),
-                });
-            }
             if Self::realm_global_scope_entry_is_runtime_instantiated(storage, declaration_span)? {
                 continue;
             }
@@ -4313,29 +4364,23 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         layout: &FrameLayout,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        let scoping = self.unit.semantic().scoping();
         let mut captured_locals = Vec::new();
-        for symbol in scoping.iter_bindings_in(scope) {
-            if scoping.symbol_scope_id(symbol) != scope {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "scope-exit exact-scope binding belongs to that scope",
-                    span: Some(scoping.symbol_span(symbol)),
-                });
+        let bindings = self
+            .planned
+            .plan
+            .bindings_for(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        for storage in bindings {
+            if self.scope_for_binding(storage.id())? != scope {
+                continue;
             }
-            let declaration_span = scoping.symbol_span(symbol);
-            let binding = self.binding_for_identifier(Some(symbol), declaration_span)?;
-            let storage = self.planned.plan.binding(binding).ok_or(
+            let binding = storage.id();
+            let declaration_span = storage.declaration_spans().first().copied().ok_or(
                 LeafCompilationError::SemanticInvariant {
-                    invariant: "scope-exit compiler binding exists",
-                    span: Some(declaration_span),
+                    invariant: "scope-exit compiler binding has a declaration span",
+                    span: None,
                 },
             )?;
-            if storage.executable() != executable {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "scope-exit binding belongs to the selected executable",
-                    span: Some(declaration_span),
-                });
-            }
             if !storage.is_frame_captured() {
                 continue;
             }
@@ -9083,6 +9128,15 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             invariant: "binding identifier has Oxc symbol identity",
             span: Some(span),
         })?;
+        if let Some(binding) = self
+            .planned
+            .identities
+            .binding_by_declaration
+            .get(&(symbol_id, span.start, span.end))
+            .copied()
+        {
+            return Ok(binding);
+        }
         self.planned
             .identities
             .binding_by_symbol
