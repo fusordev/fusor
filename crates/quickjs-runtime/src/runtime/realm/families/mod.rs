@@ -13,10 +13,10 @@ mod string;
 mod symbol;
 
 use super::schema::{
-    FamilyCardinality, IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicFunctionSpec,
-    IntrinsicIdentity, IntrinsicIdentityPublication, IntrinsicKeySpec, IntrinsicNameSpec,
-    IntrinsicObjectId, IntrinsicObjectKind, IntrinsicObjectSpec, IntrinsicPropertySpec,
-    IntrinsicSchema, IntrinsicValueSpec, PrototypeSpec,
+    ConstructorPrototypeSpec, FamilyCardinality, IntrinsicDescriptorSpec, IntrinsicFunctionId,
+    IntrinsicFunctionSpec, IntrinsicIdentity, IntrinsicIdentityPublication, IntrinsicKeySpec,
+    IntrinsicNameSpec, IntrinsicObjectId, IntrinsicObjectKind, IntrinsicObjectSpec,
+    IntrinsicPropertySpec, IntrinsicSchema, IntrinsicValueSpec, PrototypeSpec,
 };
 use super::validation::{SchemaValidationError, validate_intrinsic_schema};
 use super::{NativeFunctionKind, RuntimeError, RuntimeResource, allocation_failed};
@@ -26,14 +26,15 @@ type FunctionSink<'a> = &'a mut dyn FnMut(IntrinsicFunctionSpec);
 type PropertySink<'a> = &'a mut dyn FnMut(IntrinsicPropertySpec);
 
 /// Owned complete declaration table used before Runtime mutation.
-pub(super) struct RealmFunctionSchema {
+pub(super) struct RealmIntrinsicSchema {
     objects: Vec<IntrinsicObjectSpec>,
     specs: Vec<IntrinsicFunctionSpec>,
     properties: Vec<IntrinsicPropertySpec>,
     mandatory_functions: Vec<IntrinsicFunctionId>,
+    constructor_prototypes: Vec<ConstructorPrototypeSpec>,
 }
 
-impl RealmFunctionSchema {
+impl RealmIntrinsicSchema {
     pub(super) fn try_new() -> Result<Self, RuntimeError> {
         let object_count = count_specs(visit_object_specs, RuntimeResource::HeapObjects)?;
         let function_count = count_specs(visit_function_specs, RuntimeResource::HeapFunctions)?;
@@ -58,11 +59,40 @@ impl RealmFunctionSchema {
             .try_reserve_exact(function_count)
             .map_err(|_| allocation_failed(RuntimeResource::HeapFunctions, function_count))?;
         mandatory_functions.extend(specs.iter().map(|spec| spec.id));
+        let mut constructor_prototypes = Vec::new();
+        constructor_prototypes
+            .try_reserve_exact(specs.len())
+            .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, specs.len()))?;
+        for property in &properties {
+            let IntrinsicIdentity::Function(constructor) = property.holder else {
+                continue;
+            };
+            if property.key != IntrinsicKeySpec::PredefinedString(super::PredefinedAtom::Prototype)
+            {
+                continue;
+            }
+            let prototype = match property.descriptor {
+                IntrinsicDescriptorSpec::Data {
+                    value: IntrinsicValueSpec::Object(id),
+                    ..
+                } => IntrinsicIdentity::Object(id),
+                IntrinsicDescriptorSpec::Data {
+                    value: IntrinsicValueSpec::Function(id),
+                    ..
+                } => IntrinsicIdentity::Function(id),
+                _ => continue,
+            };
+            constructor_prototypes.push(ConstructorPrototypeSpec {
+                constructor,
+                prototype,
+            });
+        }
         Ok(Self {
             objects,
             specs,
             properties,
             mandatory_functions,
+            constructor_prototypes,
         })
     }
 
@@ -105,10 +135,9 @@ impl RealmFunctionSchema {
             properties: &self.properties,
             mandatory_objects: &IntrinsicObjectId::ALL,
             mandatory_functions: &self.mandatory_functions,
-            constructor_prototypes: &[],
+            constructor_prototypes: &self.constructor_prototypes,
             family_cardinalities: &cardinalities,
         })
-        .map(|_| ())
     }
 }
 
@@ -687,8 +716,9 @@ mod tests {
 
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
-        let schema = RealmFunctionSchema::try_new().expect("function schema");
+        let schema = RealmIntrinsicSchema::try_new().expect("function schema");
         assert_eq!(schema.specs().len(), 219);
+        assert_eq!(schema.constructor_prototypes.len(), 17);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]
@@ -701,7 +731,7 @@ mod tests {
 
     #[test]
     fn complete_object_schema_has_every_stable_identity_once() {
-        let schema = RealmFunctionSchema::try_new().expect("function schema");
+        let schema = RealmIntrinsicSchema::try_new().expect("function schema");
         assert_eq!(schema.objects.len(), IntrinsicObjectId::ALL.len());
         for id in IntrinsicObjectId::ALL {
             assert_eq!(

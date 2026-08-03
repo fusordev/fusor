@@ -5,11 +5,6 @@
 //! vocabulary consumed by Realm schema validation, atom planning, identity
 //! allocation, and descriptor publication.
 
-#![allow(
-    dead_code,
-    reason = "the typed schema is introduced before the existing bootstrap families migrate to it"
-)]
-
 use super::{
     ArrayCallback, ArrayCopier, ArrayFlatten, ArrayMutator, ArrayReduction, ArraySearch, ArraySort,
     ArrayStatic, ErrorIntrinsicKind, GlobalNumericFunction, LocaleStringMethod, MathMethod,
@@ -150,7 +145,6 @@ pub(in crate::runtime) enum IntrinsicObjectKind {
     Ordinary,
     BooleanPrototype,
     NumberPrototype,
-    BigIntPrototype,
     StringPrototype,
     ArrayPrototype,
 }
@@ -238,7 +232,7 @@ pub(in crate::runtime) struct IntrinsicPropertySpec {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::runtime) struct ConstructorPrototypeSpec {
     pub(in crate::runtime) constructor: IntrinsicFunctionId,
-    pub(in crate::runtime) prototype: IntrinsicObjectId,
+    pub(in crate::runtime) prototype: IntrinsicIdentity,
 }
 
 /// Expected size of one semantic family before it is materialized as an array.
@@ -268,3 +262,17 @@ const _: Option<(
     LocaleStringMethod,
     ReflectMethod,
 )> = None;
+
+// Keep the complete schema vocabulary type-checked even when the current
+// profile has no Realm-created-name, indexed, null, or Boolean descriptor.
+const _: Option<(
+    IntrinsicKeySpec,
+    IntrinsicKeySpec,
+    IntrinsicValueSpec,
+    IntrinsicValueSpec,
+)> = Some((
+    IntrinsicKeySpec::RealmCreatedName(RealmNameId::Call),
+    IntrinsicKeySpec::ArrayIndex(0),
+    IntrinsicValueSpec::Null,
+    IntrinsicValueSpec::Boolean(false),
+));

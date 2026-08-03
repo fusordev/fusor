@@ -4,7 +4,7 @@ use super::{
     ARRAY_LENGTH_PROPERTY, ArrayState, FunctionId, HashMap, HeapObject, HeapReference, JsNumber,
     JsString, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey, RealmBuildTransaction, RealmId,
     RealmIntrinsics, RealmState, RuntimeError, RuntimeResource, StoredValue, allocation_failed,
-    families::{RealmFunctionSchema, is_declarative_function, is_declarative_object},
+    families::{RealmIntrinsicSchema, is_declarative_function, is_declarative_object},
     reserved_record,
     schema::{
         IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicIdentity,
@@ -14,12 +14,12 @@ use super::{
 use crate::runtime::BoxedPrimitive;
 
 /// Pre-reserved records whose capacities are derived from declarative holders.
-pub(super) struct DeclarativeIntrinsicRecords {
+pub(super) struct IntrinsicRecords {
     records: Vec<(IntrinsicIdentity, Option<ObjectRecord>)>,
 }
 
-impl DeclarativeIntrinsicRecords {
-    pub(super) fn try_new(schema: &RealmFunctionSchema) -> Result<Self, RuntimeError> {
+impl IntrinsicRecords {
+    pub(super) fn try_new(schema: &RealmIntrinsicSchema) -> Result<Self, RuntimeError> {
         let count = schema
             .objects()
             .len()
@@ -60,7 +60,7 @@ impl DeclarativeIntrinsicRecords {
     }
 }
 
-fn property_count(schema: &RealmFunctionSchema, holder: IntrinsicIdentity) -> usize {
+fn property_count(schema: &RealmIntrinsicSchema, holder: IntrinsicIdentity) -> usize {
     schema
         .properties()
         .iter()
@@ -73,8 +73,8 @@ impl RealmBuildTransaction<'_> {
     /// whose native functions require the new Realm identity as their owner.
     pub(super) fn insert_realm_kernel(
         &mut self,
-        schema: &RealmFunctionSchema,
-        records: &mut DeclarativeIntrinsicRecords,
+        schema: &RealmIntrinsicSchema,
+        records: &mut IntrinsicRecords,
     ) -> RealmId {
         let object_prototype = self.insert_reserved_object(
             IntrinsicObjectId::ObjectPrototype,
@@ -130,11 +130,11 @@ impl RealmBuildTransaction<'_> {
 
     /// Materializes shell identities for the fully declarative ordinary-object
     /// families without retaining a parallel family graph.
-    pub(super) fn insert_declarative_intrinsics(
+    pub(super) fn insert_intrinsics(
         &mut self,
         realm: RealmId,
-        schema: &RealmFunctionSchema,
-        mut records: DeclarativeIntrinsicRecords,
+        schema: &RealmIntrinsicSchema,
+        mut records: IntrinsicRecords,
     ) {
         for object in schema
             .objects()
@@ -144,9 +144,7 @@ impl RealmBuildTransaction<'_> {
             let mut record = records.take(IntrinsicIdentity::Object(object.id));
             record.replace_prototype(self.resolve_intrinsic_prototype(object.prototype));
             let object_value = match object.kind {
-                IntrinsicObjectKind::Ordinary | IntrinsicObjectKind::BigIntPrototype => {
-                    HeapObject::ordinary(record)
-                }
+                IntrinsicObjectKind::Ordinary => HeapObject::ordinary(record),
                 IntrinsicObjectKind::BooleanPrototype => {
                     HeapObject::with_boxed_primitive(record, BoxedPrimitive::Boolean(false))
                 }

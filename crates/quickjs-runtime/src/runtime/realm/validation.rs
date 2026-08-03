@@ -1,10 +1,5 @@
 //! Allocation-free validation for typed Realm intrinsic declarations.
 
-#![allow(
-    dead_code,
-    reason = "validation becomes the production entry point as intrinsic families migrate"
-)]
-
 use crate::{PredefinedAtom, PropertyLayoutKind, predefined_atoms::PredefinedAtomKind};
 
 use super::schema::{
@@ -52,21 +47,11 @@ pub(in crate::runtime) enum SchemaValidationError {
     },
 }
 
-/// Proof that every reference and fixed-family assumption in a schema holds.
-#[derive(Clone, Copy)]
-pub(in crate::runtime) struct ValidatedIntrinsicSchema<'a>(IntrinsicSchema<'a>);
-
-impl<'a> ValidatedIntrinsicSchema<'a> {
-    pub(in crate::runtime) const fn schema(self) -> IntrinsicSchema<'a> {
-        self.0
-    }
-}
-
 /// Validates the complete declaration graph without allocating any Runtime
 /// arena node or mutating the atom table.
 pub(in crate::runtime) fn validate_intrinsic_schema(
     schema: IntrinsicSchema<'_>,
-) -> Result<ValidatedIntrinsicSchema<'_>, SchemaValidationError> {
+) -> Result<(), SchemaValidationError> {
     validate_unique_identities(schema)?;
     validate_mandatory_identities(schema)?;
     validate_functions(schema)?;
@@ -74,7 +59,7 @@ pub(in crate::runtime) fn validate_intrinsic_schema(
     validate_properties(schema)?;
     validate_constructor_prototypes(schema)?;
     validate_family_cardinalities(schema)?;
-    Ok(ValidatedIntrinsicSchema(schema))
+    Ok(())
 }
 
 fn validate_unique_identities(schema: IntrinsicSchema<'_>) -> Result<(), SchemaValidationError> {
@@ -284,16 +269,10 @@ fn validate_constructor_prototypes(
     for &pair in schema.constructor_prototypes {
         let constructor_property = schema.properties.iter().any(|property| {
             property.holder == IntrinsicIdentity::Function(pair.constructor)
-                && matches!(
-                    property.descriptor,
-                    IntrinsicDescriptorSpec::Data {
-                        value: IntrinsicValueSpec::Object(id),
-                        ..
-                    } if id == pair.prototype
-                )
+                && intrinsic_descriptor_target(property.descriptor) == Some(pair.prototype)
         });
         let prototype_property = schema.properties.iter().any(|property| {
-            property.holder == IntrinsicIdentity::Object(pair.prototype)
+            property.holder == pair.prototype
                 && matches!(
                     property.descriptor,
                     IntrinsicDescriptorSpec::Data {
@@ -307,6 +286,20 @@ fn validate_constructor_prototypes(
         }
     }
     Ok(())
+}
+
+fn intrinsic_descriptor_target(descriptor: IntrinsicDescriptorSpec) -> Option<IntrinsicIdentity> {
+    match descriptor {
+        IntrinsicDescriptorSpec::Data {
+            value: IntrinsicValueSpec::Object(id),
+            ..
+        } => Some(IntrinsicIdentity::Object(id)),
+        IntrinsicDescriptorSpec::Data {
+            value: IntrinsicValueSpec::Function(id),
+            ..
+        } => Some(IntrinsicIdentity::Function(id)),
+        _ => None,
+    }
 }
 
 fn validate_family_cardinalities(schema: IntrinsicSchema<'_>) -> Result<(), SchemaValidationError> {
@@ -577,7 +570,7 @@ mod tests {
     fn rejects_incomplete_constructor_prototype_pairs() {
         let pair = ConstructorPrototypeSpec {
             constructor: FUNCTION,
-            prototype: OBJECT,
+            prototype: IntrinsicIdentity::Object(OBJECT),
         };
         let value = IntrinsicSchema {
             constructor_prototypes: &[pair],

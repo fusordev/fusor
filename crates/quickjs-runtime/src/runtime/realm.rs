@@ -48,9 +48,9 @@ use super::{
     UriFunction, check_limit, predefined_string, usize_to_u64,
 };
 
-use allocation::DeclarativeIntrinsicRecords;
+use allocation::IntrinsicRecords;
 use atoms::{RealmAtomBindings, RealmAtomPlan};
-use families::{DeclarativeBatch, RealmFunctionSchema};
+use families::{DeclarativeBatch, RealmIntrinsicSchema};
 use publication::RealmPublicationError;
 use reservation::RealmReservationPlan;
 use schema::{IntrinsicFunctionId, IntrinsicObjectId, RealmNameId};
@@ -461,48 +461,7 @@ const FROZEN_PROPERTY: PropertyLayout = PropertyLayout::data(false, false, false
 const CONSTRUCTOR_PROTOTYPE_PROPERTY: PropertyLayout = PropertyLayout::data(false, false, false);
 const ARRAY_LENGTH_PROPERTY: PropertyLayout = PropertyLayout::data(true, false, false);
 
-struct RealmNames {
-    call: JsString,
-    bind: JsString,
-    entries: JsString,
-    key_for: JsString,
-    description: JsString,
-    is_error: JsString,
-    reflect: JsString,
-    is_raw_json: JsString,
-    parse: JsString,
-    stringify: JsString,
-}
-
-impl RealmNames {
-    fn try_new() -> Result<Self, RuntimeError> {
-        Ok(Self {
-            call: JsString::from_utf8("call").map_err(AtomError::from)?,
-            bind: JsString::from_utf8("bind").map_err(AtomError::from)?,
-            entries: JsString::from_utf8("entries").map_err(AtomError::from)?,
-            key_for: JsString::from_utf8("keyFor").map_err(AtomError::from)?,
-            description: JsString::from_utf8("description").map_err(AtomError::from)?,
-            is_error: JsString::from_utf8("isError").map_err(AtomError::from)?,
-            reflect: JsString::from_utf8("Reflect").map_err(AtomError::from)?,
-            is_raw_json: JsString::from_utf8("isRawJSON").map_err(AtomError::from)?,
-            parse: JsString::from_utf8("parse").map_err(AtomError::from)?,
-            stringify: JsString::from_utf8("stringify").map_err(AtomError::from)?,
-        })
-    }
-}
-
-struct RealmRecords {
-    declarative: DeclarativeIntrinsicRecords,
-}
-
-impl RealmRecords {
-    fn try_new(schema: &RealmFunctionSchema) -> Result<Self, RuntimeError> {
-        let declarative = DeclarativeIntrinsicRecords::try_new(schema)?;
-        Ok(Self { declarative })
-    }
-}
-
-struct RealmGraph {
+struct RealmPublicationState {
     realm: RealmId,
     dynamic_atoms: RealmAtomBindings,
 }
@@ -556,15 +515,14 @@ impl Runtime {
     )]
     pub fn create_realm(&mut self) -> Result<Realm, RuntimeError> {
         self.drain_releases();
-        let names = RealmNames::try_new()?;
-        let atom_plan = RealmAtomPlan::try_new(&names)?;
-        let intrinsic_schema = RealmFunctionSchema::try_new()?;
+        let intrinsic_schema = RealmIntrinsicSchema::try_new()?;
         intrinsic_schema
             .validate()
             .expect("the immutable complete Realm schema is valid");
+        let atom_plan = RealmAtomPlan::try_new(&intrinsic_schema)?;
         let reservation = RealmReservationPlan::try_new(&atom_plan, &intrinsic_schema)?;
         reservation.preflight_and_reserve(self)?;
-        let records = RealmRecords::try_new(&intrinsic_schema)?;
+        let records = IntrinsicRecords::try_new(&intrinsic_schema)?;
         let mut transaction = RealmBuildTransaction::try_new(self, reservation)?;
         let graph = transaction.build_realm_graph(records, &atom_plan, &intrinsic_schema)?;
         transaction
@@ -627,19 +585,19 @@ impl Runtime {
 impl RealmBuildTransaction<'_> {
     fn build_realm_graph(
         &mut self,
-        records: RealmRecords,
-        atom_plan: &RealmAtomPlan<'_>,
-        intrinsic_schema: &RealmFunctionSchema,
-    ) -> Result<RealmGraph, RuntimeError> {
+        records: IntrinsicRecords,
+        atom_plan: &RealmAtomPlan,
+        intrinsic_schema: &RealmIntrinsicSchema,
+    ) -> Result<RealmPublicationState, RuntimeError> {
         let dynamic_atoms = self.intern_realm_atom_plan(atom_plan)?;
         self.record_atoms(&dynamic_atoms);
         let mut records = records;
-        let realm = self.insert_realm_kernel(intrinsic_schema, &mut records.declarative);
-        self.insert_declarative_intrinsics(realm, intrinsic_schema, records.declarative);
+        let realm = self.insert_realm_kernel(intrinsic_schema, &mut records);
+        self.insert_intrinsics(realm, intrinsic_schema, records);
 
         self.allocated.assert_complete();
 
-        Ok(RealmGraph {
+        Ok(RealmPublicationState {
             realm,
             dynamic_atoms,
         })
@@ -726,8 +684,8 @@ impl RealmBuildTransaction<'_> {
 impl RealmBuildTransaction<'_> {
     fn publish_realm_properties(
         &mut self,
-        graph: &RealmGraph,
-        intrinsic_schema: &RealmFunctionSchema,
+        graph: &RealmPublicationState,
+        intrinsic_schema: &RealmIntrinsicSchema,
     ) -> Result<(), RealmPublicationError> {
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,

@@ -7,95 +7,72 @@ use super::{
     ARRAY_REDUCTION_METHODS, ARRAY_SEARCH_METHODS, ARRAY_SORT_METHODS, AtomError, AtomTable,
     BIGINT_INTERNED_STATICS, DYNAMIC_SYMBOL_STATIC_PROPERTIES, JsString, MATH_CONSTANTS,
     MathMethod, NUMBER_FORMAT_METHODS, NUMBER_PREDICATE_STATICS, NUMBER_VALUE_STATICS,
-    NativeFunctionKind, OBJECT_PROTOTYPE_REFLECTION, OBJECT_STATIC_METHODS, RealmNames, Runtime,
-    RuntimeError, RuntimeResource, STRING_FROM_STATICS, STRING_PROTOTYPE_METHODS, URI_FUNCTIONS,
-    allocation_failed, schema::RealmNameId,
+    NativeFunctionKind, OBJECT_PROTOTYPE_REFLECTION, OBJECT_STATIC_METHODS, Runtime, RuntimeError,
+    RuntimeResource, STRING_FROM_STATICS, STRING_PROTOTYPE_METHODS, URI_FUNCTIONS,
+    allocation_failed,
+    families::RealmIntrinsicSchema,
+    schema::{
+        IntrinsicDescriptorSpec, IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicStringSpec,
+        IntrinsicValueSpec, RealmNameId,
+    },
 };
 
 #[derive(Clone, Copy)]
-enum RealmAtomName<'a> {
-    Existing(&'a JsString),
-    Literal(&'static str),
-}
-
-impl RealmAtomName<'_> {
-    fn description_code_units(self) -> usize {
-        match self {
-            Self::Existing(name) => {
-                usize::try_from(name.len()).expect("u32 string lengths fit usize")
-            }
-            Self::Literal(name) => name.encode_utf16().count(),
-        }
-    }
-
-    fn same_description(self, other: Self) -> bool {
-        match (self, other) {
-            (Self::Existing(left), Self::Existing(right)) => left == right,
-            (Self::Literal(left), Self::Literal(right)) => left == right,
-            (Self::Existing(left), Self::Literal(right))
-            | (Self::Literal(right), Self::Existing(left)) => {
-                left.code_units().eq(right.encode_utf16())
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct RealmAtomSpec<'a> {
-    id: RealmNameId,
-    name: RealmAtomName<'a>,
+struct RealmAtomSpec {
+    name: &'static str,
 }
 
 /// The exact ordered set of strings one Realm creation interns.
-pub(super) struct RealmAtomPlan<'a> {
-    entries: Vec<RealmAtomSpec<'a>>,
+pub(super) struct RealmAtomPlan {
+    entries: Vec<RealmAtomSpec>,
     bindings: Vec<(RealmNameId, usize)>,
     description_code_units: usize,
 }
 
-impl<'a> RealmAtomPlan<'a> {
-    pub(super) fn try_new(names: &'a RealmNames) -> Result<Self, RuntimeError> {
-        let mut declaration_count = 0_usize;
-        visit_realm_atom_specs(names, |_| {
-            declaration_count = declaration_count
-                .checked_add(1)
-                .ok_or_else(|| allocation_failed(RuntimeResource::ObjectProperties, usize::MAX))?;
-            Ok(())
-        })?;
-
+impl RealmAtomPlan {
+    pub(super) fn try_new(schema: &RealmIntrinsicSchema) -> Result<Self, RuntimeError> {
+        let required = required_realm_names(schema)?;
         let mut entries = Vec::new();
         entries
-            .try_reserve_exact(declaration_count)
-            .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, declaration_count))?;
+            .try_reserve_exact(required.len())
+            .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, required.len()))?;
         let mut bindings = Vec::new();
         bindings
-            .try_reserve_exact(declaration_count)
-            .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, declaration_count))?;
+            .try_reserve_exact(required.len())
+            .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, required.len()))?;
         let mut description_code_units = 0_usize;
-        visit_realm_atom_specs(names, |spec| {
+        visit_realm_name_order(|id| {
+            if !required.contains(&id) {
+                return Ok(());
+            }
             debug_assert!(
                 bindings
                     .iter()
-                    .all(|(id, _): &(RealmNameId, usize)| *id != spec.id)
+                    .all(|(candidate, _): &(RealmNameId, usize)| *candidate != id)
             );
+            let name = realm_name_description(id);
             let index = entries
                 .iter()
-                .position(|entry: &RealmAtomSpec<'_>| entry.name.same_description(spec.name));
+                .position(|entry: &RealmAtomSpec| entry.name == name);
             let index = if let Some(index) = index {
                 index
             } else {
                 description_code_units = description_code_units
-                    .checked_add(spec.name.description_code_units())
+                    .checked_add(name.encode_utf16().count())
                     .ok_or_else(|| {
                         allocation_failed(RuntimeResource::ObjectProperties, usize::MAX)
                     })?;
-                entries.push(spec);
+                entries.push(RealmAtomSpec { name });
                 entries.len() - 1
             };
-            bindings.push((spec.id, index));
+            bindings.push((id, index));
             Ok(())
         })?;
-        debug_assert_eq!(bindings.len(), declaration_count);
+        assert_eq!(
+            bindings.len(),
+            required.len(),
+            "every schema Realm name participates in the pinned atom order"
+        );
 
         Ok(Self {
             entries,
@@ -110,6 +87,44 @@ impl<'a> RealmAtomPlan<'a> {
 
     pub(super) const fn description_code_units(&self) -> usize {
         self.description_code_units
+    }
+}
+
+fn required_realm_names(schema: &RealmIntrinsicSchema) -> Result<Vec<RealmNameId>, RuntimeError> {
+    let capacity = schema
+        .specs()
+        .len()
+        .checked_add(schema.properties().len().saturating_mul(2))
+        .ok_or_else(|| allocation_failed(RuntimeResource::ObjectProperties, usize::MAX))?;
+    let mut required = Vec::new();
+    required
+        .try_reserve_exact(capacity)
+        .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, capacity))?;
+    for function in schema.specs() {
+        if let IntrinsicNameSpec::RealmName(id) = function.name {
+            push_unique(&mut required, id);
+        }
+    }
+    for property in schema.properties() {
+        if let IntrinsicKeySpec::InternedString(id) | IntrinsicKeySpec::RealmCreatedName(id) =
+            property.key
+        {
+            push_unique(&mut required, id);
+        }
+        if let IntrinsicDescriptorSpec::Data {
+            value: IntrinsicValueSpec::String(IntrinsicStringSpec::RealmName(id)),
+            ..
+        } = property.descriptor
+        {
+            push_unique(&mut required, id);
+        }
+    }
+    Ok(required)
+}
+
+fn push_unique(names: &mut Vec<RealmNameId>, id: RealmNameId) {
+    if !names.contains(&id) {
+        names.push(id);
     }
 }
 
@@ -143,13 +158,13 @@ impl RealmAtomBindings {
 impl Runtime {
     pub(super) fn intern_realm_atom_plan(
         &mut self,
-        plan: &RealmAtomPlan<'_>,
+        plan: &RealmAtomPlan,
     ) -> Result<RealmAtomBindings, RuntimeError> {
         debug_assert_eq!(
             plan.description_code_units,
             plan.entries
                 .iter()
-                .map(|entry| entry.name.description_code_units())
+                .map(|entry| entry.name.encode_utf16().count())
                 .sum::<usize>()
         );
         let mut atoms = Vec::new();
@@ -166,15 +181,8 @@ impl Runtime {
 
         let outcome = (|| -> Result<(), RuntimeError> {
             for spec in &plan.entries {
-                let owned;
-                let name = match spec.name {
-                    RealmAtomName::Existing(name) => name,
-                    RealmAtomName::Literal(literal) => {
-                        owned = JsString::from_utf8(literal).map_err(AtomError::from)?;
-                        &owned
-                    }
-                };
-                let atom = self.atoms.intern_string(name)?;
+                let name = JsString::from_utf8(spec.name).map_err(AtomError::from)?;
+                let atom = self.atoms.intern_string(&name)?;
                 atoms.push(atom);
             }
             Ok(())
@@ -188,105 +196,167 @@ impl Runtime {
     }
 }
 
-fn visit_realm_atom_specs<'a>(
-    names: &'a RealmNames,
-    mut visit: impl FnMut(RealmAtomSpec<'a>) -> Result<(), RuntimeError>,
+fn visit_realm_name_order(
+    mut visit: impl FnMut(RealmNameId) -> Result<(), RuntimeError>,
 ) -> Result<(), RuntimeError> {
-    let existing = |id, name| RealmAtomSpec {
-        id,
-        name: RealmAtomName::Existing(name),
-    };
-    let literal = |id, name| RealmAtomSpec {
-        id,
-        name: RealmAtomName::Literal(name),
-    };
-
-    for spec in [
-        existing(RealmNameId::Call, &names.call),
-        existing(RealmNameId::Entries, &names.entries),
-        existing(RealmNameId::KeyFor, &names.key_for),
-        existing(RealmNameId::Description, &names.description),
-        existing(RealmNameId::IsError, &names.is_error),
-        existing(RealmNameId::Bind, &names.bind),
+    for id in [
+        RealmNameId::Call,
+        RealmNameId::Entries,
+        RealmNameId::KeyFor,
+        RealmNameId::Description,
+        RealmNameId::IsError,
+        RealmNameId::Bind,
     ] {
-        visit(spec)?;
+        visit(id)?;
     }
-    for (name, symbol) in DYNAMIC_SYMBOL_STATIC_PROPERTIES {
-        visit(literal(RealmNameId::SymbolStatic(symbol), name))?;
+    for (_, symbol) in DYNAMIC_SYMBOL_STATIC_PROPERTIES {
+        visit(RealmNameId::SymbolStatic(symbol))?;
     }
     for method in OBJECT_STATIC_METHODS {
-        if let Some(name) = method.interned_name {
-            visit(literal(RealmNameId::ObjectStatic(method.kind), name))?;
+        if method.interned_name.is_some() {
+            visit(RealmNameId::ObjectStatic(method.kind))?;
         }
     }
-    for (name, kind) in [
-        (BIGINT_INTERNED_STATICS[0], NativeFunctionKind::BigIntAsIntN),
-        (
-            BIGINT_INTERNED_STATICS[1],
-            NativeFunctionKind::BigIntAsUintN,
-        ),
+    for kind in [
+        NativeFunctionKind::BigIntAsIntN,
+        NativeFunctionKind::BigIntAsUintN,
     ] {
-        visit(literal(RealmNameId::BigIntStatic(kind), name))?;
+        visit(RealmNameId::BigIntStatic(kind))?;
     }
     for method in STRING_PROTOTYPE_METHODS {
-        if let Some(name) = method.interned_name {
-            visit(literal(RealmNameId::StringMethod(method.method), name))?;
+        if method.interned_name.is_some() {
+            visit(RealmNameId::StringMethod(method.method))?;
         }
     }
     for (name, _) in NUMBER_VALUE_STATICS {
-        visit(literal(RealmNameId::NumberValue(name), name))?;
+        visit(RealmNameId::NumberValue(name))?;
     }
-    for (name, predicate) in NUMBER_PREDICATE_STATICS {
-        visit(literal(RealmNameId::NumberPredicate(predicate), name))?;
+    for (_, predicate) in NUMBER_PREDICATE_STATICS {
+        visit(RealmNameId::NumberPredicate(predicate))?;
     }
-    visit(literal(RealmNameId::ArrayIsArray, "isArray"))?;
-    for (name, method) in STRING_FROM_STATICS {
-        visit(literal(RealmNameId::StringStatic(method), name))?;
+    visit(RealmNameId::ArrayIsArray)?;
+    for (_, method) in STRING_FROM_STATICS {
+        visit(RealmNameId::StringStatic(method))?;
     }
-    for (name, search) in ARRAY_SEARCH_METHODS {
-        visit(literal(RealmNameId::ArraySearch(search), name))?;
+    for (_, search) in ARRAY_SEARCH_METHODS {
+        visit(RealmNameId::ArraySearch(search))?;
     }
-    for (name, kind, _) in OBJECT_PROTOTYPE_REFLECTION {
-        visit(literal(RealmNameId::ObjectPrototypeMethod(kind), name))?;
+    for (_, kind, _) in OBJECT_PROTOTYPE_REFLECTION {
+        visit(RealmNameId::ObjectPrototypeMethod(kind))?;
     }
     for method in ARRAY_MUTATOR_METHODS {
-        visit(literal(RealmNameId::ArrayMutator(method), method.name()))?;
+        visit(RealmNameId::ArrayMutator(method))?;
     }
     for method in ARRAY_COPIER_METHODS {
-        visit(literal(RealmNameId::ArrayCopier(method), method.name()))?;
+        visit(RealmNameId::ArrayCopier(method))?;
     }
     for method in NUMBER_FORMAT_METHODS {
-        visit(literal(RealmNameId::NumberFormat(method), method.name()))?;
+        visit(RealmNameId::NumberFormat(method))?;
     }
     for method in ARRAY_CALLBACK_METHODS {
-        visit(literal(RealmNameId::ArrayCallback(method), method.name()))?;
+        visit(RealmNameId::ArrayCallback(method))?;
     }
     for method in ARRAY_REDUCTION_METHODS {
-        visit(literal(RealmNameId::ArrayReduction(method), method.name()))?;
+        visit(RealmNameId::ArrayReduction(method))?;
     }
-    visit(literal(RealmNameId::ArraySplice, "splice"))?;
-    visit(existing(RealmNameId::Reflect, &names.reflect))?;
-    visit(existing(RealmNameId::JsonIsRawJson, &names.is_raw_json))?;
-    visit(existing(RealmNameId::JsonParse, &names.parse))?;
-    visit(existing(RealmNameId::JsonStringify, &names.stringify))?;
-    visit(literal(RealmNameId::ParseFloat, "parseFloat"))?;
-    visit(literal(RealmNameId::ParseInt, "parseInt"))?;
-    for (name, function) in URI_FUNCTIONS {
-        visit(literal(RealmNameId::Uri(function), name))?;
+    for id in [
+        RealmNameId::ArraySplice,
+        RealmNameId::Reflect,
+        RealmNameId::JsonIsRawJson,
+        RealmNameId::JsonParse,
+        RealmNameId::JsonStringify,
+        RealmNameId::ParseFloat,
+        RealmNameId::ParseInt,
+    ] {
+        visit(id)?;
+    }
+    for (_, function) in URI_FUNCTIONS {
+        visit(RealmNameId::Uri(function))?;
     }
     for method in ARRAY_SORT_METHODS {
-        visit(literal(RealmNameId::ArraySort(method), method.name()))?;
+        visit(RealmNameId::ArraySort(method))?;
     }
     for method in ARRAY_FLATTEN_METHODS {
-        visit(literal(RealmNameId::ArrayFlatten(method), method.name()))?;
+        visit(RealmNameId::ArrayFlatten(method))?;
     }
     for method in MathMethod::ALL {
-        visit(literal(RealmNameId::MathMethod(method), method.name()))?;
+        visit(RealmNameId::MathMethod(method))?;
     }
     for (name, _) in MATH_CONSTANTS {
-        visit(literal(RealmNameId::MathConstant(name), name))?;
+        visit(RealmNameId::MathConstant(name))?;
     }
     Ok(())
+}
+
+fn realm_name_description(id: RealmNameId) -> &'static str {
+    match id {
+        RealmNameId::Call => "call",
+        RealmNameId::Entries => "entries",
+        RealmNameId::KeyFor => "keyFor",
+        RealmNameId::Description => "description",
+        RealmNameId::IsError => "isError",
+        RealmNameId::Bind => "bind",
+        RealmNameId::Reflect => "Reflect",
+        RealmNameId::JsonIsRawJson => "isRawJSON",
+        RealmNameId::JsonParse => "parse",
+        RealmNameId::JsonStringify => "stringify",
+        RealmNameId::ParseFloat => "parseFloat",
+        RealmNameId::ParseInt => "parseInt",
+        RealmNameId::SymbolStatic(symbol) => DYNAMIC_SYMBOL_STATIC_PROPERTIES
+            .into_iter()
+            .find_map(|(name, candidate)| (candidate == symbol).then_some(name))
+            .expect("every dynamic Symbol static has one declared name"),
+        RealmNameId::Uri(function) => URI_FUNCTIONS
+            .into_iter()
+            .find_map(|(name, candidate)| (candidate == function).then_some(name))
+            .expect("every URI intrinsic has one declared name"),
+        RealmNameId::ObjectStatic(kind) => OBJECT_STATIC_METHODS
+            .into_iter()
+            .find_map(|method| {
+                (method.kind == kind)
+                    .then_some(method.interned_name)
+                    .flatten()
+            })
+            .expect("every dynamic Object static has one declared name"),
+        RealmNameId::BigIntStatic(NativeFunctionKind::BigIntAsIntN) => BIGINT_INTERNED_STATICS[0],
+        RealmNameId::BigIntStatic(NativeFunctionKind::BigIntAsUintN) => BIGINT_INTERNED_STATICS[1],
+        RealmNameId::BigIntStatic(_) => unreachable!("only BigInt statics use this name ID"),
+        RealmNameId::StringMethod(method) => STRING_PROTOTYPE_METHODS
+            .into_iter()
+            .find_map(|candidate| {
+                (candidate.method == method)
+                    .then_some(candidate.interned_name)
+                    .flatten()
+            })
+            .expect("every dynamic String method has one declared name"),
+        RealmNameId::NumberValue(name) | RealmNameId::MathConstant(name) => name,
+        RealmNameId::NumberPredicate(predicate) => NUMBER_PREDICATE_STATICS
+            .into_iter()
+            .find_map(|(name, candidate)| (candidate == predicate).then_some(name))
+            .expect("every Number predicate has one declared name"),
+        RealmNameId::StringStatic(method) => STRING_FROM_STATICS
+            .into_iter()
+            .find_map(|(name, candidate)| (candidate == method).then_some(name))
+            .expect("every String static has one declared name"),
+        RealmNameId::ArraySearch(search) => ARRAY_SEARCH_METHODS
+            .into_iter()
+            .find_map(|(name, candidate)| (candidate == search).then_some(name))
+            .expect("every Array search has one declared name"),
+        RealmNameId::ObjectPrototypeMethod(kind) => OBJECT_PROTOTYPE_REFLECTION
+            .into_iter()
+            .find_map(|(name, candidate, _)| (candidate == kind).then_some(name))
+            .expect("every Object prototype method has one declared name"),
+        RealmNameId::ArrayMutator(method) => method.name(),
+        RealmNameId::ArrayCopier(method) => method.name(),
+        RealmNameId::NumberFormat(method) => method.name(),
+        RealmNameId::ArrayCallback(method) => method.name(),
+        RealmNameId::ArrayReduction(method) => method.name(),
+        RealmNameId::ArraySplice => "splice",
+        RealmNameId::ArrayIsArray => "isArray",
+        RealmNameId::ArraySort(method) => method.name(),
+        RealmNameId::ArrayFlatten(method) => method.name(),
+        RealmNameId::MathMethod(method) => method.name(),
+    }
 }
 
 #[cfg(test)]
@@ -296,8 +366,8 @@ mod tests {
 
     #[test]
     fn atom_plan_derives_the_characterized_count_and_utf16_budget() {
-        let names = RealmNames::try_new().expect("Realm names");
-        let plan = RealmAtomPlan::try_new(&names).expect("atom plan");
+        let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
+        let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
         assert_eq!(plan.len(), 159);
         assert_eq!(plan.description_code_units(), 1_232);
@@ -306,8 +376,8 @@ mod tests {
     #[test]
     fn atom_plan_binds_shared_names_by_typed_identity() {
         let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-        let names = RealmNames::try_new().expect("Realm names");
-        let plan = RealmAtomPlan::try_new(&names).expect("atom plan");
+        let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
+        let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
         let bindings = runtime
             .intern_realm_atom_plan(&plan)
             .expect("atom bindings");
@@ -316,7 +386,7 @@ mod tests {
             bindings
                 .atom(RealmNameId::Entries)
                 .description()
-                .is_some_and(|name| name == &names.entries)
+                .is_some_and(|name| name == &JsString::from_utf8("entries").expect("entries"))
         );
         assert!(
             bindings

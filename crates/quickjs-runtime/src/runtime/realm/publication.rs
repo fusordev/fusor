@@ -7,7 +7,7 @@ use crate::ArrayIndex;
 use super::{
     AtomError, JsNumber, JsString, ObjectRecord, PredefinedAtom, PropertyKey,
     RealmBuildTransaction, RuntimeError, StoredValue,
-    families::{DeclarativeBatch, RealmFunctionSchema, function_batch, property_batch},
+    families::{DeclarativeBatch, RealmIntrinsicSchema, function_batch, property_batch},
     property_allocation_failed,
     schema::{
         IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicIdentity,
@@ -54,7 +54,7 @@ impl RealmBuildTransaction<'_> {
     /// currently migrated declarative families.
     pub(super) fn publish_intrinsic_schema_batch(
         &mut self,
-        schema: &RealmFunctionSchema,
+        schema: &RealmIntrinsicSchema,
         atoms: &super::RealmAtomBindings,
         batch: DeclarativeBatch,
     ) -> Result<(), RealmPublicationError> {
