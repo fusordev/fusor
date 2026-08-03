@@ -1,11 +1,18 @@
 //! Array constructor, prototype, iterator-facing, and method declarations.
 
-use super::{FunctionSink, ObjectSink, object, object_prototype, ordinary};
+use super::{
+    FunctionSink, ObjectSink, PropertySink, accessor, data, method, object, object_prototype,
+    ordinary,
+};
 use crate::runtime::realm::{
-    ARRAY_CALLBACK_METHODS, ARRAY_COPIER_METHODS, ARRAY_FLATTEN_METHODS, ARRAY_MUTATOR_METHODS,
-    ARRAY_PREDEFINED_COPIERS, ARRAY_REDUCTION_METHODS, ARRAY_SEARCH_METHODS, ARRAY_SORT_METHODS,
-    ArrayStatic, LOCALE_STRING_METHODS, NUMBER_FORMAT_METHODS, NativeFunctionKind, PredefinedAtom,
-    schema::{IntrinsicNameSpec, IntrinsicObjectId, IntrinsicObjectKind, RealmNameId},
+    ARRAY_CALLBACK_METHODS, ARRAY_COPIER_METHODS, ARRAY_FLATTEN_METHODS, ARRAY_LENGTH_PROPERTY,
+    ARRAY_MUTATOR_METHODS, ARRAY_PREDEFINED_COPIERS, ARRAY_REDUCTION_METHODS, ARRAY_SEARCH_METHODS,
+    ARRAY_SORT_METHODS, ArrayStatic, CONSTRUCTOR_PROTOTYPE_PROPERTY, LOCALE_STRING_METHODS,
+    NUMBER_FORMAT_METHODS, NativeFunctionKind, PredefinedAtom, PropertyLayout,
+    schema::{
+        IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec,
+        IntrinsicObjectId, IntrinsicObjectKind, IntrinsicValueSpec, RealmNameId,
+    },
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -68,6 +75,132 @@ pub(super) fn visit_method_functions(visit: FunctionSink<'_>) {
             method.length(),
         ));
     }
+}
+
+pub(super) fn visit_properties(visit: PropertySink<'_>) {
+    let prototype = IntrinsicIdentity::Object(IntrinsicObjectId::ArrayPrototype);
+    visit(data(
+        prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Length),
+        ARRAY_LENGTH_PROPERTY,
+        IntrinsicValueSpec::NumberBits(0_f64.to_bits()),
+    ));
+
+    let constructor =
+        IntrinsicIdentity::Function(IntrinsicFunctionId(NativeFunctionKind::ArrayConstructor));
+    visit(method(
+        constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::ArrayIsArray),
+        NativeFunctionKind::ArrayIsArray,
+    ));
+    for method_id in ArrayStatic::ALL {
+        visit(method(
+            constructor,
+            IntrinsicKeySpec::PredefinedString(method_id.predefined_atom()),
+            NativeFunctionKind::ArrayStatic(method_id),
+        ));
+    }
+
+    visit_prototype_methods(prototype, visit);
+    for (key, function) in [
+        (
+            PredefinedAtom::Constructor,
+            NativeFunctionKind::ArrayConstructor,
+        ),
+        (PredefinedAtom::Join, NativeFunctionKind::ArrayPrototypeJoin),
+        (
+            PredefinedAtom::ToString,
+            NativeFunctionKind::ArrayPrototypeToString,
+        ),
+    ] {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::PredefinedString(key),
+            function,
+        ));
+    }
+    visit(data(
+        constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::ArrayPrototype),
+    ));
+    visit(accessor(
+        constructor,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolSpecies),
+        PropertyLayout::accessor(false, true),
+        Some(IntrinsicFunctionId(NativeFunctionKind::ArraySpeciesGetter)),
+        None,
+    ));
+    visit(method(
+        IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Array),
+        NativeFunctionKind::ArrayConstructor,
+    ));
+}
+
+fn visit_prototype_methods(prototype: IntrinsicIdentity, visit: PropertySink<'_>) {
+    for (_, search) in ARRAY_SEARCH_METHODS {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::ArraySearch(search)),
+            NativeFunctionKind::ArrayPrototypeSearch(search),
+        ));
+    }
+    for method_id in ARRAY_MUTATOR_METHODS {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::ArrayMutator(method_id)),
+            NativeFunctionKind::ArrayPrototypeMutator(method_id),
+        ));
+    }
+    for method_id in ARRAY_COPIER_METHODS {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::ArrayCopier(method_id)),
+            NativeFunctionKind::ArrayPrototypeCopier(method_id),
+        ));
+    }
+    for (key, method_id) in ARRAY_PREDEFINED_COPIERS {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::PredefinedString(key),
+            NativeFunctionKind::ArrayPrototypeCopier(method_id),
+        ));
+    }
+    for method_id in ARRAY_SORT_METHODS {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::ArraySort(method_id)),
+            NativeFunctionKind::ArrayPrototypeSort(method_id),
+        ));
+    }
+    for method_id in ARRAY_FLATTEN_METHODS {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::ArrayFlatten(method_id)),
+            NativeFunctionKind::ArrayPrototypeFlatten(method_id),
+        ));
+    }
+    for method_id in ARRAY_CALLBACK_METHODS {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::ArrayCallback(method_id)),
+            NativeFunctionKind::ArrayPrototypeCallback(method_id),
+        ));
+    }
+    for method_id in ARRAY_REDUCTION_METHODS {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::ArrayReduction(method_id)),
+            NativeFunctionKind::ArrayPrototypeReduction(method_id),
+        ));
+    }
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::ArraySplice),
+        NativeFunctionKind::ArrayPrototypeSplice,
+    ));
 }
 
 fn visit_search_and_mutation_functions(visit: FunctionSink<'_>) {

@@ -271,9 +271,6 @@ const ARRAY_PREDEFINED_COPIERS: [(PredefinedAtom, ArrayCopier); 2] = [
     (PredefinedAtom::With, ArrayCopier::With),
 ];
 
-/// The total number of installed copying methods.
-const ARRAY_COPIER_TOTAL: usize = ARRAY_COPIER_METHODS.len() + ARRAY_PREDEFINED_COPIERS.len();
-
 /// The `Array.prototype` mutators this profile installs.
 ///
 /// Each name and arity comes from the pinned oracle, which reports `2` for
@@ -469,8 +466,6 @@ const ARRAY_LENGTH_PROPERTY: PropertyLayout = PropertyLayout::data(true, false, 
 struct RealmKeys {
     function: PropertyKey,
     object: PropertyKey,
-    join: PropertyKey,
-    array: PropertyKey,
     prototype: PropertyKey,
     constructor: PropertyKey,
     length: PropertyKey,
@@ -480,13 +475,7 @@ struct RealmKeys {
     apply: PropertyKey,
     caller: PropertyKey,
     arguments: PropertyKey,
-    values: PropertyKey,
-    keys: PropertyKey,
-    next: PropertyKey,
-    symbol_iterator: PropertyKey,
-    symbol_to_string_tag: PropertyKey,
     symbol_has_instance: PropertyKey,
-    symbol_species: PropertyKey,
 }
 
 impl RealmKeys {
@@ -495,8 +484,6 @@ impl RealmKeys {
         Self {
             function: key(PredefinedAtom::Function),
             object: key(PredefinedAtom::Object),
-            join: key(PredefinedAtom::Join),
-            array: key(PredefinedAtom::Array),
             prototype: key(PredefinedAtom::Prototype),
             constructor: key(PredefinedAtom::Constructor),
             length: key(PredefinedAtom::Length),
@@ -506,20 +493,8 @@ impl RealmKeys {
             apply: key(PredefinedAtom::Apply),
             caller: key(PredefinedAtom::Caller),
             arguments: key(PredefinedAtom::ArgumentsIdentifier),
-            values: key(PredefinedAtom::Values),
-            keys: key(PredefinedAtom::Keys),
-            next: key(PredefinedAtom::Next),
-            symbol_iterator: PropertyKey::from_validated_symbol(
-                atoms.predefined(PredefinedAtom::SymbolIterator),
-            ),
-            symbol_to_string_tag: PropertyKey::from_validated_symbol(
-                atoms.predefined(PredefinedAtom::SymbolToStringTag),
-            ),
             symbol_has_instance: PropertyKey::from_validated_symbol(
                 atoms.predefined(PredefinedAtom::SymbolHasInstance),
-            ),
-            symbol_species: PropertyKey::from_validated_symbol(
-                atoms.predefined(PredefinedAtom::SymbolSpecies),
             ),
         }
     }
@@ -528,8 +503,6 @@ impl RealmKeys {
 struct RealmNames {
     function: JsString,
     object: JsString,
-    join: JsString,
-    array: JsString,
     empty: JsString,
     to_string: JsString,
     value_of: JsString,
@@ -537,17 +510,10 @@ struct RealmNames {
     call: JsString,
     bind: JsString,
     has_instance: JsString,
-    values: JsString,
-    keys: JsString,
     entries: JsString,
-    next: JsString,
     key_for: JsString,
     description: JsString,
     is_error: JsString,
-    array_iterator: JsString,
-    string_iterator: JsString,
-    symbol_iterator_name: JsString,
-    get_species: JsString,
     reflect: JsString,
     is_raw_json: JsString,
     parse: JsString,
@@ -559,8 +525,6 @@ impl RealmNames {
         Ok(Self {
             function: predefined_string(atoms, PredefinedAtom::Function),
             object: predefined_string(atoms, PredefinedAtom::Object),
-            join: predefined_string(atoms, PredefinedAtom::Join),
-            array: predefined_string(atoms, PredefinedAtom::Array),
             empty: predefined_string(atoms, PredefinedAtom::EmptyString),
             to_string: predefined_string(atoms, PredefinedAtom::ToString),
             value_of: predefined_string(atoms, PredefinedAtom::ValueOf),
@@ -568,18 +532,10 @@ impl RealmNames {
             call: JsString::from_utf8("call").map_err(AtomError::from)?,
             bind: JsString::from_utf8("bind").map_err(AtomError::from)?,
             has_instance: JsString::from_utf8("[Symbol.hasInstance]").map_err(AtomError::from)?,
-            values: predefined_string(atoms, PredefinedAtom::Values),
-            keys: predefined_string(atoms, PredefinedAtom::Keys),
             entries: JsString::from_utf8("entries").map_err(AtomError::from)?,
-            next: predefined_string(atoms, PredefinedAtom::Next),
             key_for: JsString::from_utf8("keyFor").map_err(AtomError::from)?,
             description: JsString::from_utf8("description").map_err(AtomError::from)?,
             is_error: JsString::from_utf8("isError").map_err(AtomError::from)?,
-            array_iterator: predefined_string(atoms, PredefinedAtom::ArrayIterator),
-            string_iterator: predefined_string(atoms, PredefinedAtom::StringIterator),
-            symbol_iterator_name: JsString::from_utf8("[Symbol.iterator]")
-                .map_err(AtomError::from)?,
-            get_species: JsString::from_utf8("get [Symbol.species]").map_err(AtomError::from)?,
             reflect: JsString::from_utf8("Reflect").map_err(AtomError::from)?,
             is_raw_json: JsString::from_utf8("isRawJSON").map_err(AtomError::from)?,
             parse: JsString::from_utf8("parse").map_err(AtomError::from)?,
@@ -606,49 +562,13 @@ struct RealmBaseRecords {
     function_has_instance: ObjectRecord,
 }
 
-struct ArrayIntrinsicRecords {
-    prototype: ObjectRecord,
-    constructor: ObjectRecord,
-    species: ObjectRecord,
-    join: ObjectRecord,
-    to_string: ObjectRecord,
-}
-
-struct IteratorIntrinsicRecords {
-    iterator_prototype: ObjectRecord,
-    iterator_method: ObjectRecord,
-    array_iterator_prototype: ObjectRecord,
-    array_iterator_next: ObjectRecord,
-    array_values: ObjectRecord,
-    array_keys: ObjectRecord,
-    array_entries: ObjectRecord,
-    string_iterator_prototype: ObjectRecord,
-    string_iterator_next: ObjectRecord,
-    string_iterator: ObjectRecord,
-}
-
 struct RealmRecords {
     base: RealmBaseRecords,
-    array_searches: [ObjectRecord; ARRAY_SEARCH_METHODS.len()],
-    array_mutators: [ObjectRecord; ARRAY_MUTATOR_METHODS.len()],
-    array_copiers: [ObjectRecord; ARRAY_COPIER_TOTAL],
-    array_sorts: [ObjectRecord; ARRAY_SORT_METHODS.len()],
-    array_flattens: [ObjectRecord; ARRAY_FLATTEN_METHODS.len()],
-    array_callbacks: [ObjectRecord; ARRAY_CALLBACK_METHODS.len()],
-    array_reductions: [ObjectRecord; ARRAY_REDUCTION_METHODS.len()],
-    array_splice: ObjectRecord,
-    array_is_array: ObjectRecord,
-    array_statics: [ObjectRecord; ArrayStatic::ALL.len()],
-    array: ArrayIntrinsicRecords,
-    iterators: IteratorIntrinsicRecords,
     declarative: DeclarativeIntrinsicRecords,
 }
 
 impl RealmRecords {
-    fn try_new(
-        length_key: &PropertyKey,
-        schema: &RealmFunctionSchema,
-    ) -> Result<Self, RuntimeError> {
+    fn try_new(schema: &RealmFunctionSchema) -> Result<Self, RuntimeError> {
         // Keep these reservations in the original transaction order so a
         // recoverable allocation failure reports the same `additional` value.
         let base = RealmBaseRecords {
@@ -668,63 +588,8 @@ impl RealmRecords {
             function_bind: reserved_record(2)?,
             function_has_instance: reserved_record(2)?,
         };
-        let mut array = ArrayIntrinsicRecords {
-            prototype: reserved_record(
-                8 + ARRAY_SEARCH_METHODS.len()
-                    + ARRAY_MUTATOR_METHODS.len()
-                    + ARRAY_COPIER_TOTAL
-                    + ARRAY_SORT_METHODS.len()
-                    + ARRAY_FLATTEN_METHODS.len()
-                    + 1
-                    + NUMBER_FORMAT_METHODS.len()
-                    + ARRAY_CALLBACK_METHODS.len()
-                    + ARRAY_REDUCTION_METHODS.len()
-                    + 1,
-            )?,
-            // `length`, `name`, `isArray`, both generic factories,
-            // `prototype`, and @@species.
-            constructor: reserved_record(5 + ArrayStatic::ALL.len())?,
-            species: reserved_record(2)?,
-            join: reserved_record(2)?,
-            to_string: reserved_record(2)?,
-        };
-        array
-            .prototype
-            .append_data(
-                length_key.clone(),
-                ARRAY_LENGTH_PROPERTY,
-                StoredValue::Number(JsNumber::from_i32(0)),
-            )
-            .map_err(|_| property_allocation_failed(1))?;
-        let iterators = IteratorIntrinsicRecords {
-            iterator_prototype: reserved_record(1)?,
-            iterator_method: reserved_record(2)?,
-            array_iterator_prototype: reserved_record(2)?,
-            array_iterator_next: reserved_record(2)?,
-            array_values: reserved_record(2)?,
-            array_keys: reserved_record(2)?,
-            array_entries: reserved_record(2)?,
-            string_iterator_prototype: reserved_record(2)?,
-            string_iterator_next: reserved_record(2)?,
-            string_iterator: reserved_record(2)?,
-        };
         let declarative = DeclarativeIntrinsicRecords::try_new(schema)?;
-        Ok(Self {
-            base,
-            array_searches: reserved_function_records()?,
-            array_mutators: reserved_function_records()?,
-            array_copiers: reserved_function_records()?,
-            array_sorts: reserved_function_records()?,
-            array_flattens: reserved_function_records()?,
-            array_callbacks: reserved_function_records()?,
-            array_reductions: reserved_function_records()?,
-            array_splice: reserved_record(2)?,
-            array_is_array: reserved_record(2)?,
-            array_statics: reserved_function_records()?,
-            array,
-            iterators,
-            declarative,
-        })
+        Ok(Self { base, declarative })
     }
 }
 
@@ -747,42 +612,9 @@ struct RealmBase {
     function_has_instance: FunctionId,
 }
 
-struct ArrayIntrinsicGraph {
-    prototype: ObjectId,
-    constructor: FunctionId,
-    species: FunctionId,
-    join: FunctionId,
-    to_string: FunctionId,
-}
-
-struct IteratorIntrinsicGraph {
-    iterator_prototype: ObjectId,
-    iterator_method: FunctionId,
-    array_iterator_prototype: ObjectId,
-    array_iterator_next: FunctionId,
-    array_values: FunctionId,
-    array_keys: FunctionId,
-    array_entries: FunctionId,
-    string_iterator_prototype: ObjectId,
-    string_iterator_next: FunctionId,
-    string_iterator: FunctionId,
-}
-
 struct RealmGraph {
     base: RealmBase,
     dynamic_atoms: RealmAtomBindings,
-    array_searches: [FunctionId; ARRAY_SEARCH_METHODS.len()],
-    array_mutators: [FunctionId; ARRAY_MUTATOR_METHODS.len()],
-    array_copiers: [FunctionId; ARRAY_COPIER_TOTAL],
-    array_sorts: [FunctionId; ARRAY_SORT_METHODS.len()],
-    array_flattens: [FunctionId; ARRAY_FLATTEN_METHODS.len()],
-    array_callbacks: [FunctionId; ARRAY_CALLBACK_METHODS.len()],
-    array_reductions: [FunctionId; ARRAY_REDUCTION_METHODS.len()],
-    array_splice: FunctionId,
-    array_is_array: FunctionId,
-    array_statics: [FunctionId; ArrayStatic::ALL.len()],
-    array: ArrayIntrinsicGraph,
-    iterators: IteratorIntrinsicGraph,
 }
 
 impl Runtime {
@@ -843,7 +675,7 @@ impl Runtime {
             .expect("the immutable complete Realm schema is valid");
         let reservation = RealmReservationPlan::try_new(&atom_plan, &intrinsic_schema)?;
         reservation.preflight_and_reserve(self)?;
-        let records = RealmRecords::try_new(&keys.length, &intrinsic_schema)?;
+        let records = RealmRecords::try_new(&intrinsic_schema)?;
         let mut transaction = RealmBuildTransaction::try_new(self, reservation)?;
         let graph = transaction.build_realm_graph(records, &atom_plan, &intrinsic_schema)?;
         transaction
@@ -916,47 +748,13 @@ impl RealmBuildTransaction<'_> {
         self.record_atoms(&dynamic_atoms);
         let base = self.insert_realm_base(records.base);
 
-        let array = self.insert_array_intrinsics(&base, records.array);
-        let iterators = self.insert_iterator_intrinsics(&base, records.iterators);
         self.insert_declarative_intrinsics(base.realm, intrinsic_schema, records.declarative);
-        let array_searches = self.insert_array_searches(&base, records.array_searches);
-        let array_mutators = self.insert_array_mutators(&base, records.array_mutators);
-        let array_copiers = self.insert_array_copiers(&base, records.array_copiers);
-        let array_sorts = self.insert_array_sorts(&base, records.array_sorts);
-        let array_flattens = self.insert_array_flattens(&base, records.array_flattens);
-        let array_callbacks = self.insert_array_callbacks(&base, records.array_callbacks);
-        let array_reductions = self.insert_array_reductions(&base, records.array_reductions);
-        let array_splice = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::ArrayPrototypeSplice,
-            records.array_splice,
-        );
-        let array_is_array = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::ArrayIsArray,
-            records.array_is_array,
-        );
-        let array_statics = self.insert_array_statics(&base, records.array_statics);
 
         self.allocated.assert_complete();
 
         Ok(RealmGraph {
             base,
             dynamic_atoms,
-            array_searches,
-            array_mutators,
-            array_copiers,
-            array_sorts,
-            array_flattens,
-            array_callbacks,
-            array_reductions,
-            array_splice,
-            array_is_array,
-            array_statics,
-            array,
-            iterators,
         })
     }
 
@@ -992,18 +790,18 @@ impl RealmBuildTransaction<'_> {
                 constructor: function(NativeFunctionKind::StringConstructor),
             },
             array: ArrayIntrinsics {
-                prototype: graph.array.prototype,
-                constructor: graph.array.constructor,
+                prototype: object(IntrinsicObjectId::ArrayPrototype),
+                constructor: function(NativeFunctionKind::ArrayConstructor),
             },
             symbol: SymbolIntrinsics {
                 prototype: object(IntrinsicObjectId::SymbolPrototype),
                 constructor: function(NativeFunctionKind::SymbolConstructor),
             },
             iterators: IteratorIntrinsics {
-                iterator_prototype: graph.iterators.iterator_prototype,
-                array_iterator_prototype: graph.iterators.array_iterator_prototype,
-                string_iterator_prototype: graph.iterators.string_iterator_prototype,
-                array_values: graph.iterators.array_values,
+                iterator_prototype: object(IntrinsicObjectId::IteratorPrototype),
+                array_iterator_prototype: object(IntrinsicObjectId::ArrayIteratorPrototype),
+                string_iterator_prototype: object(IntrinsicObjectId::StringIteratorPrototype),
+                array_values: function(NativeFunctionKind::ArrayPrototypeValues),
             },
         }
     }
@@ -1029,24 +827,6 @@ impl RealmBuildTransaction<'_> {
             ));
         }
         inserted.map(|slot| slot.expect("every Object static was inserted"))
-    }
-
-    /// Inserts `Array.from` and `Array.of` in specification property order.
-    fn insert_array_statics(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; ArrayStatic::ALL.len()],
-    ) -> [FunctionId; ArrayStatic::ALL.len()] {
-        let mut inserted = [None; ArrayStatic::ALL.len()];
-        for ((slot, method), record) in inserted.iter_mut().zip(ArrayStatic::ALL).zip(records) {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::ArrayStatic(method),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every Array static was inserted"))
     }
 
     #[expect(
@@ -1180,277 +960,6 @@ impl RealmBuildTransaction<'_> {
         }
     }
 
-    /// Inserts one native function per `Array.prototype` reduction.
-    fn insert_array_reductions(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; ARRAY_REDUCTION_METHODS.len()],
-    ) -> [FunctionId; ARRAY_REDUCTION_METHODS.len()] {
-        let mut inserted = [None; ARRAY_REDUCTION_METHODS.len()];
-        for ((slot, reduction), record) in inserted
-            .iter_mut()
-            .zip(ARRAY_REDUCTION_METHODS)
-            .zip(records)
-        {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::ArrayPrototypeReduction(reduction),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every Array reduction function was inserted"))
-    }
-
-    /// Inserts one native function per `Array.prototype` callback method.
-    fn insert_array_callbacks(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; ARRAY_CALLBACK_METHODS.len()],
-    ) -> [FunctionId; ARRAY_CALLBACK_METHODS.len()] {
-        let mut inserted = [None; ARRAY_CALLBACK_METHODS.len()];
-        for ((slot, method), record) in inserted.iter_mut().zip(ARRAY_CALLBACK_METHODS).zip(records)
-        {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::ArrayPrototypeCallback(method),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every Array callback function was inserted"))
-    }
-
-    /// Inserts one native function per `Array.prototype` copying method.
-    fn insert_array_copiers(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; ARRAY_COPIER_TOTAL],
-    ) -> [FunctionId; ARRAY_COPIER_TOTAL] {
-        let mut inserted = [None; ARRAY_COPIER_TOTAL];
-        // The interned names come first, then the predefined one, which is the
-        // order the publication step walks.
-        let copiers = ARRAY_COPIER_METHODS.into_iter().chain(
-            ARRAY_PREDEFINED_COPIERS
-                .into_iter()
-                .map(|(_, copier)| copier),
-        );
-        for ((slot, copier), record) in inserted.iter_mut().zip(copiers).zip(records) {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::ArrayPrototypeCopier(copier),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every Array copier function was inserted"))
-    }
-
-    /// Inserts one native function per `Array.prototype` mutator.
-    fn insert_array_mutators(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; ARRAY_MUTATOR_METHODS.len()],
-    ) -> [FunctionId; ARRAY_MUTATOR_METHODS.len()] {
-        let mut inserted = [None; ARRAY_MUTATOR_METHODS.len()];
-        for ((slot, mutator), record) in inserted.iter_mut().zip(ARRAY_MUTATOR_METHODS).zip(records)
-        {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::ArrayPrototypeMutator(mutator),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every Array mutator function was inserted"))
-    }
-
-    /// Inserts one native function per `SortIndexedProperties` method.
-    fn insert_array_sorts(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; ARRAY_SORT_METHODS.len()],
-    ) -> [FunctionId; ARRAY_SORT_METHODS.len()] {
-        let mut inserted = [None; ARRAY_SORT_METHODS.len()];
-        for ((slot, method), record) in inserted.iter_mut().zip(ARRAY_SORT_METHODS).zip(records) {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::ArrayPrototypeSort(method),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every Array sort function was inserted"))
-    }
-
-    /// Inserts one native function per `FlattenIntoArray` method.
-    fn insert_array_flattens(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; ARRAY_FLATTEN_METHODS.len()],
-    ) -> [FunctionId; ARRAY_FLATTEN_METHODS.len()] {
-        let mut inserted = [None; ARRAY_FLATTEN_METHODS.len()];
-        for ((slot, method), record) in inserted.iter_mut().zip(ARRAY_FLATTEN_METHODS).zip(records)
-        {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::ArrayPrototypeFlatten(method),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every Array flatten function was inserted"))
-    }
-
-    /// Inserts one native function per `Array.prototype` search.
-    fn insert_array_searches(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; ARRAY_SEARCH_METHODS.len()],
-    ) -> [FunctionId; ARRAY_SEARCH_METHODS.len()] {
-        let mut inserted = [None; ARRAY_SEARCH_METHODS.len()];
-        for ((slot, (_, search)), record) in
-            inserted.iter_mut().zip(ARRAY_SEARCH_METHODS).zip(records)
-        {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::ArrayPrototypeSearch(search),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every Array search function was inserted"))
-    }
-
-    fn insert_array_intrinsics(
-        &mut self,
-        base: &RealmBase,
-        mut records: ArrayIntrinsicRecords,
-    ) -> ArrayIntrinsicGraph {
-        records
-            .prototype
-            .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
-        let prototype = self.insert_reserved_object(
-            IntrinsicObjectId::ArrayPrototype,
-            HeapObject::array(records.prototype, ArrayState::new(0)),
-        );
-        let constructor = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::ArrayConstructor,
-            records.constructor,
-        );
-        let species = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::ArraySpeciesGetter,
-            records.species,
-        );
-        let join = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::ArrayPrototypeJoin,
-            records.join,
-        );
-        let to_string = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::ArrayPrototypeToString,
-            records.to_string,
-        );
-        ArrayIntrinsicGraph {
-            prototype,
-            constructor,
-            species,
-            join,
-            to_string,
-        }
-    }
-
-    fn insert_iterator_intrinsics(
-        &mut self,
-        base: &RealmBase,
-        mut records: IteratorIntrinsicRecords,
-    ) -> IteratorIntrinsicGraph {
-        records
-            .iterator_prototype
-            .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
-        let iterator_prototype = self.insert_reserved_object(
-            IntrinsicObjectId::IteratorPrototype,
-            HeapObject::ordinary(records.iterator_prototype),
-        );
-        let iterator_method = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::IteratorPrototypeIterator,
-            records.iterator_method,
-        );
-
-        records
-            .array_iterator_prototype
-            .replace_prototype(Some(HeapReference::Object(iterator_prototype)));
-        let array_iterator_prototype = self.insert_reserved_object(
-            IntrinsicObjectId::ArrayIteratorPrototype,
-            HeapObject::ordinary(records.array_iterator_prototype),
-        );
-        let array_iterator_next = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::ArrayIteratorNext,
-            records.array_iterator_next,
-        );
-        let array_values = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::ArrayPrototypeValues,
-            records.array_values,
-        );
-        let array_keys = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::ArrayPrototypeKeys,
-            records.array_keys,
-        );
-        let array_entries = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::ArrayPrototypeEntries,
-            records.array_entries,
-        );
-
-        records
-            .string_iterator_prototype
-            .replace_prototype(Some(HeapReference::Object(iterator_prototype)));
-        let string_iterator_prototype = self.insert_reserved_object(
-            IntrinsicObjectId::StringIteratorPrototype,
-            HeapObject::ordinary(records.string_iterator_prototype),
-        );
-        let string_iterator_next = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::StringIteratorNext,
-            records.string_iterator_next,
-        );
-        let string_iterator = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::StringPrototypeIterator,
-            records.string_iterator,
-        );
-        IteratorIntrinsicGraph {
-            iterator_prototype,
-            iterator_method,
-            array_iterator_prototype,
-            array_iterator_next,
-            array_values,
-            array_keys,
-            array_entries,
-            string_iterator_prototype,
-            string_iterator_next,
-            string_iterator,
-        }
-    }
-
     fn insert_reserved_native(
         &mut self,
         realm: RealmId,
@@ -1508,15 +1017,21 @@ impl RealmBuildTransaction<'_> {
             DeclarativeBatch::ErrorGlobals,
         )?;
         self.publish_function_intrinsic_properties(graph, keys, names)?;
-        self.publish_array_constructor_identity(&graph.array, keys, names)?;
-        self.publish_number_statics(graph, keys)?;
-        self.publish_array_intrinsic_properties(&graph.array, keys, names)?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::Arrays,
+        )?;
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,
             &graph.dynamic_atoms,
             DeclarativeBatch::Primitives,
         )?;
-        self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::Iterators,
+        )?;
         self.publish_global_value_properties(graph)?;
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,
@@ -1545,9 +1060,10 @@ impl RealmBuildTransaction<'_> {
             &graph.dynamic_atoms,
             DeclarativeBatch::PrimitiveGlobals,
         )?;
-        self.append_object_methods(
-            graph.base.global_object,
-            [(&keys.array, graph.array.constructor)],
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::ArrayGlobals,
         )?;
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,
@@ -1810,331 +1326,6 @@ impl RealmBuildTransaction<'_> {
             self.append_function_identity(function, &name, length, keys)?;
         }
         Ok(())
-    }
-
-    /// Publishes the Array method families that have not migrated yet.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the remaining Array method families preserve their exact declaration order until the Array schema migration"
-    )]
-    fn publish_number_statics(
-        &mut self,
-        graph: &RealmGraph,
-        keys: &RealmKeys,
-    ) -> Result<(), TryReserveError> {
-        let atom = graph.dynamic_atoms.atom(RealmNameId::ArrayIsArray).clone();
-        let name = atom
-            .description()
-            .expect("interned Array.isArray name has a description")
-            .clone();
-        self.functions
-            .get_mut(graph.array.constructor)
-            .expect("new Array constructor remains live")
-            .object
-            .append_data(
-                PropertyKey::from_validated_atom(atom),
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.array_is_array),
-            )?;
-        self.append_function_identity(graph.array_is_array, &name, 1, keys)?;
-
-        for (method, function) in ArrayStatic::ALL.into_iter().zip(graph.array_statics) {
-            let atom = self.atoms.predefined(method.predefined_atom());
-            let name = atom
-                .description()
-                .expect("predefined Array static name has a description")
-                .clone();
-            self.functions
-                .get_mut(graph.array.constructor)
-                .expect("new Array constructor remains live")
-                .object
-                .append_data(
-                    PropertyKey::from_validated_atom(atom),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
-            self.append_function_identity(function, &name, method.length(), keys)?;
-        }
-
-        for ((_, search), function) in ARRAY_SEARCH_METHODS.into_iter().zip(graph.array_searches) {
-            let atom = graph
-                .dynamic_atoms
-                .atom(RealmNameId::ArraySearch(search))
-                .clone();
-            let name = atom
-                .description()
-                .expect("interned Array search name has a description")
-                .clone();
-            self.objects
-                .get_mut(graph.array.prototype)
-                .expect("new Array.prototype remains live")
-                .record
-                .append_data(
-                    PropertyKey::from_validated_atom(atom),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
-            self.append_function_identity(function, &name, 1, keys)?;
-        }
-
-        for (mutator, function) in ARRAY_MUTATOR_METHODS.into_iter().zip(graph.array_mutators) {
-            let atom = graph
-                .dynamic_atoms
-                .atom(RealmNameId::ArrayMutator(mutator))
-                .clone();
-            let name = atom
-                .description()
-                .expect("interned Array mutator name has a description")
-                .clone();
-            self.objects
-                .get_mut(graph.array.prototype)
-                .expect("new Array.prototype remains live")
-                .record
-                .append_data(
-                    PropertyKey::from_validated_atom(atom),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
-            self.append_function_identity(function, &name, mutator.arity(), keys)?;
-        }
-
-        // The interned names come first, matching the insertion order, and the
-        // predefined `concat` follows.
-        let copier_keys = ARRAY_COPIER_METHODS
-            .into_iter()
-            .map(|copier| {
-                let atom = graph
-                    .dynamic_atoms
-                    .atom(RealmNameId::ArrayCopier(copier))
-                    .clone();
-                let name = atom
-                    .description()
-                    .expect("interned Array copier name has a description")
-                    .clone();
-                (copier, PropertyKey::from_validated_atom(atom), name)
-            })
-            .collect::<Vec<_>>();
-        let predefined_keys = ARRAY_PREDEFINED_COPIERS.map(|(atom, copier)| {
-            (
-                copier,
-                self.predefined_property_key(atom),
-                predefined_string(&self.atoms, atom),
-            )
-        });
-        for ((copier, key, name), function) in copier_keys
-            .into_iter()
-            .chain(predefined_keys)
-            .zip(graph.array_copiers)
-        {
-            self.objects
-                .get_mut(graph.array.prototype)
-                .expect("new Array.prototype remains live")
-                .record
-                .append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
-            self.append_function_identity(function, &name, copier.arity(), keys)?;
-        }
-
-        for (method, function) in ARRAY_SORT_METHODS.into_iter().zip(graph.array_sorts) {
-            let atom = graph
-                .dynamic_atoms
-                .atom(RealmNameId::ArraySort(method))
-                .clone();
-            let name = atom
-                .description()
-                .expect("interned Array sort name has a description")
-                .clone();
-            self.objects
-                .get_mut(graph.array.prototype)
-                .expect("new Array.prototype remains live")
-                .record
-                .append_data(
-                    PropertyKey::from_validated_atom(atom),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
-            self.append_function_identity(function, &name, 1, keys)?;
-        }
-
-        for (method, function) in ARRAY_FLATTEN_METHODS.into_iter().zip(graph.array_flattens) {
-            let atom = graph
-                .dynamic_atoms
-                .atom(RealmNameId::ArrayFlatten(method))
-                .clone();
-            let name = atom
-                .description()
-                .expect("interned Array flatten name has a description")
-                .clone();
-            self.objects
-                .get_mut(graph.array.prototype)
-                .expect("new Array.prototype remains live")
-                .record
-                .append_data(
-                    PropertyKey::from_validated_atom(atom),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
-            self.append_function_identity(function, &name, method.arity(), keys)?;
-        }
-
-        // Every callback method and reduction reports arity 1; `splice` reports
-        // 2, which the pinned oracle confirms.
-        let callback_arities = ARRAY_CALLBACK_METHODS
-            .into_iter()
-            .zip(graph.array_callbacks)
-            .map(|(method, function)| (function, RealmNameId::ArrayCallback(method), 1))
-            .chain(
-                ARRAY_REDUCTION_METHODS
-                    .into_iter()
-                    .zip(graph.array_reductions)
-                    .map(|(method, function)| (function, RealmNameId::ArrayReduction(method), 1)),
-            )
-            .chain(std::iter::once((
-                graph.array_splice,
-                RealmNameId::ArraySplice,
-                2,
-            )));
-        for (function, atom_id, arity) in callback_arities {
-            let atom = graph.dynamic_atoms.atom(atom_id).clone();
-            let name = atom
-                .description()
-                .expect("interned Array callback name has a description")
-                .clone();
-            self.objects
-                .get_mut(graph.array.prototype)
-                .expect("new Array.prototype remains live")
-                .record
-                .append_data(
-                    PropertyKey::from_validated_atom(atom),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
-            self.append_function_identity(function, &name, arity, keys)?;
-        }
-        Ok(())
-    }
-
-    fn publish_array_intrinsic_properties(
-        &mut self,
-        graph: &ArrayIntrinsicGraph,
-        keys: &RealmKeys,
-        names: &RealmNames,
-    ) -> Result<(), TryReserveError> {
-        self.append_object_methods(
-            graph.prototype,
-            [
-                (&keys.constructor, graph.constructor),
-                (&keys.join, graph.join),
-                (&keys.to_string, graph.to_string),
-            ],
-        )?;
-        self.functions
-            .get_mut(graph.constructor)
-            .expect("new Array constructor remains live")
-            .object
-            .append_data(
-                keys.prototype.clone(),
-                CONSTRUCTOR_PROTOTYPE_PROPERTY,
-                StoredValue::Object(graph.prototype),
-            )?;
-        self.functions
-            .get_mut(graph.constructor)
-            .expect("new Array constructor remains live")
-            .object
-            .append_accessor(
-                keys.symbol_species.clone(),
-                PropertyLayout::accessor(false, true),
-                Some(graph.species),
-                None,
-            )?;
-        self.append_function_identity(graph.species, &names.get_species, 0, keys)?;
-        // The pinned table reports `join` with length 1 and `toString` with
-        // length 0 (`quickjs.c:44557-44558`).
-        self.append_function_identity(graph.join, &names.join, 1, keys)?;
-        self.append_function_identity(graph.to_string, &names.to_string, 0, keys)
-    }
-
-    fn publish_array_constructor_identity(
-        &mut self,
-        graph: &ArrayIntrinsicGraph,
-        keys: &RealmKeys,
-        names: &RealmNames,
-    ) -> Result<(), TryReserveError> {
-        self.append_function_identity(graph.constructor, &names.array, 1, keys)
-    }
-
-    fn publish_iterator_intrinsic_properties(
-        &mut self,
-        iterators: &IteratorIntrinsicGraph,
-        graph: &RealmGraph,
-        keys: &RealmKeys,
-        names: &RealmNames,
-    ) -> Result<(), TryReserveError> {
-        self.append_object_methods(
-            iterators.iterator_prototype,
-            [(&keys.symbol_iterator, iterators.iterator_method)],
-        )?;
-        self.append_function_identity(
-            iterators.iterator_method,
-            &names.symbol_iterator_name,
-            0,
-            keys,
-        )?;
-
-        self.append_object_methods(
-            iterators.array_iterator_prototype,
-            [(&keys.next, iterators.array_iterator_next)],
-        )?;
-        self.objects
-            .get_mut(iterators.array_iterator_prototype)
-            .expect("new Array Iterator prototype remains live")
-            .record
-            .append_data(
-                keys.symbol_to_string_tag.clone(),
-                IDENTITY_PROPERTY,
-                StoredValue::String(names.array_iterator.clone()),
-            )?;
-        self.append_function_identity(iterators.array_iterator_next, &names.next, 0, keys)?;
-
-        let entries = PropertyKey::from_validated_atom(
-            graph.dynamic_atoms.atom(RealmNameId::Entries).clone(),
-        );
-        self.append_object_methods(
-            graph.array.prototype,
-            [
-                (&keys.values, iterators.array_values),
-                (&keys.symbol_iterator, iterators.array_values),
-                (&keys.keys, iterators.array_keys),
-                (&entries, iterators.array_entries),
-            ],
-        )?;
-        for (function, name) in [
-            (iterators.array_values, &names.values),
-            (iterators.array_keys, &names.keys),
-            (iterators.array_entries, &names.entries),
-        ] {
-            self.append_function_identity(function, name, 0, keys)?;
-        }
-
-        self.append_object_methods(
-            iterators.string_iterator_prototype,
-            [(&keys.next, iterators.string_iterator_next)],
-        )?;
-        self.objects
-            .get_mut(iterators.string_iterator_prototype)
-            .expect("new String Iterator prototype remains live")
-            .record
-            .append_data(
-                keys.symbol_to_string_tag.clone(),
-                IDENTITY_PROPERTY,
-                StoredValue::String(names.string_iterator.clone()),
-            )?;
-        self.append_function_identity(iterators.string_iterator_next, &names.next, 0, keys)?;
-        self.append_function_identity(
-            iterators.string_iterator,
-            &names.symbol_iterator_name,
-            0,
-            keys,
-        )
     }
 
     fn append_constructor_identity(

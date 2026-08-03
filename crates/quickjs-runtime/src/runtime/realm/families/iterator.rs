@@ -1,11 +1,13 @@
 //! Iterator prototype and iterator function declarations.
 
-use super::{FunctionSink, ObjectSink, object, object_prototype, ordinary};
+use super::{
+    FunctionSink, ObjectSink, PropertySink, data, method, object, object_prototype, ordinary,
+};
 use crate::runtime::realm::{
-    NativeFunctionKind, PredefinedAtom,
+    IDENTITY_PROPERTY, NativeFunctionKind, PredefinedAtom,
     schema::{
-        IntrinsicIdentity, IntrinsicNameSpec, IntrinsicObjectId, IntrinsicObjectKind,
-        PrototypeSpec, RealmNameId,
+        IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicObjectId,
+        IntrinsicObjectKind, IntrinsicStringSpec, IntrinsicValueSpec, PrototypeSpec, RealmNameId,
     },
 };
 
@@ -63,4 +65,64 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     ] {
         visit(ordinary(kind, name, 0));
     }
+}
+
+pub(super) fn visit_properties(visit: PropertySink<'_>) {
+    visit(method(
+        IntrinsicIdentity::Object(IntrinsicObjectId::IteratorPrototype),
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolIterator),
+        NativeFunctionKind::IteratorPrototypeIterator,
+    ));
+
+    let array_iterator = IntrinsicIdentity::Object(IntrinsicObjectId::ArrayIteratorPrototype);
+    visit(method(
+        array_iterator,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Next),
+        NativeFunctionKind::ArrayIteratorNext,
+    ));
+    visit(data(
+        array_iterator,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        IDENTITY_PROPERTY,
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Predefined(
+            PredefinedAtom::ArrayIterator,
+        )),
+    ));
+
+    let array = IntrinsicIdentity::Object(IntrinsicObjectId::ArrayPrototype);
+    for (key, function) in [
+        (
+            IntrinsicKeySpec::PredefinedString(PredefinedAtom::Values),
+            NativeFunctionKind::ArrayPrototypeValues,
+        ),
+        (
+            IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolIterator),
+            NativeFunctionKind::ArrayPrototypeValues,
+        ),
+        (
+            IntrinsicKeySpec::PredefinedString(PredefinedAtom::Keys),
+            NativeFunctionKind::ArrayPrototypeKeys,
+        ),
+        (
+            IntrinsicKeySpec::InternedString(RealmNameId::Entries),
+            NativeFunctionKind::ArrayPrototypeEntries,
+        ),
+    ] {
+        visit(method(array, key, function));
+    }
+
+    let string_iterator = IntrinsicIdentity::Object(IntrinsicObjectId::StringIteratorPrototype);
+    visit(method(
+        string_iterator,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Next),
+        NativeFunctionKind::StringIteratorNext,
+    ));
+    visit(data(
+        string_iterator,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        IDENTITY_PROPERTY,
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Predefined(
+            PredefinedAtom::StringIterator,
+        )),
+    ));
 }

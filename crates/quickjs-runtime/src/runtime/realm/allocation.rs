@@ -1,8 +1,9 @@
 //! Transaction-private materialization of typed intrinsic identities.
 
 use super::{
-    FunctionId, HeapObject, HeapReference, JsNumber, JsString, ObjectId, ObjectRecord,
-    RealmBuildTransaction, RealmId, RuntimeError, RuntimeResource, allocation_failed,
+    ARRAY_LENGTH_PROPERTY, ArrayState, FunctionId, HeapObject, HeapReference, JsNumber, JsString,
+    ObjectId, ObjectRecord, PredefinedAtom, PropertyKey, RealmBuildTransaction, RealmId,
+    RuntimeError, RuntimeResource, StoredValue, allocation_failed,
     families::{RealmFunctionSchema, is_declarative_function, is_declarative_object},
     reserved_record,
     schema::{
@@ -115,7 +116,20 @@ impl RealmBuildTransaction<'_> {
                     BoxedPrimitive::String(JsString::empty()),
                 ),
                 IntrinsicObjectKind::ArrayPrototype => {
-                    unreachable!("Array allocation remains a documented special hook")
+                    // Array's exotic `length` must exist before the object is
+                    // materialized; every other descriptor is published from
+                    // the ordinary schema path after all identities exist.
+                    let length_key = PropertyKey::from_validated_atom(
+                        self.atoms.predefined(PredefinedAtom::Length),
+                    );
+                    record
+                        .append_data(
+                            length_key,
+                            ARRAY_LENGTH_PROPERTY,
+                            StoredValue::Number(JsNumber::from_i32(0)),
+                        )
+                        .expect("the schema-derived Array prototype record is pre-reserved");
+                    HeapObject::array(record, ArrayState::new(0))
                 }
             };
             self.insert_reserved_object(object.id, object_value);

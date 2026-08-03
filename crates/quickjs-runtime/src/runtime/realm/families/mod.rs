@@ -120,6 +120,10 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::NumberPrototype
             | IntrinsicObjectId::BigIntPrototype
             | IntrinsicObjectId::StringPrototype
+            | IntrinsicObjectId::ArrayPrototype
+            | IntrinsicObjectId::IteratorPrototype
+            | IntrinsicObjectId::ArrayIteratorPrototype
+            | IntrinsicObjectId::StringIteratorPrototype
             | IntrinsicObjectId::SymbolPrototype
             | IntrinsicObjectId::Reflect
             | IntrinsicObjectId::Json
@@ -152,6 +156,27 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::StringPrototypeMethod(_)
             | NativeFunctionKind::StringRaw
             | NativeFunctionKind::LocaleString(_)
+            | NativeFunctionKind::ArrayConstructor
+            | NativeFunctionKind::ArraySpeciesGetter
+            | NativeFunctionKind::ArrayPrototypeJoin
+            | NativeFunctionKind::ArrayPrototypeToString
+            | NativeFunctionKind::ArrayPrototypeSearch(_)
+            | NativeFunctionKind::ArrayPrototypeMutator(_)
+            | NativeFunctionKind::ArrayPrototypeCopier(_)
+            | NativeFunctionKind::ArrayPrototypeSort(_)
+            | NativeFunctionKind::ArrayPrototypeFlatten(_)
+            | NativeFunctionKind::ArrayPrototypeCallback(_)
+            | NativeFunctionKind::ArrayPrototypeReduction(_)
+            | NativeFunctionKind::ArrayPrototypeSplice
+            | NativeFunctionKind::ArrayIsArray
+            | NativeFunctionKind::ArrayStatic(_)
+            | NativeFunctionKind::IteratorPrototypeIterator
+            | NativeFunctionKind::ArrayIteratorNext
+            | NativeFunctionKind::ArrayPrototypeValues
+            | NativeFunctionKind::ArrayPrototypeKeys
+            | NativeFunctionKind::ArrayPrototypeEntries
+            | NativeFunctionKind::StringIteratorNext
+            | NativeFunctionKind::StringPrototypeIterator
             | NativeFunctionKind::SymbolConstructor
             | NativeFunctionKind::SymbolPrototypeToString
             | NativeFunctionKind::SymbolPrototypeValueOf
@@ -177,12 +202,16 @@ pub(super) enum DeclarativeBatch {
     Globals,
     Primitives,
     PrimitiveGlobals,
+    Arrays,
+    ArrayGlobals,
+    ArrayExoticInitialization,
+    Iterators,
     Symbols,
     SymbolGlobals,
     NamespaceObjects,
 }
 
-pub(super) const fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatch {
+pub(super) fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatch {
     let referenced_function = match property.descriptor {
         IntrinsicDescriptorSpec::Data {
             value: IntrinsicValueSpec::Function(id),
@@ -190,45 +219,8 @@ pub(super) const fn property_batch(property: IntrinsicPropertySpec) -> Declarati
         } => Some(id),
         _ => None,
     };
-    if matches!(
-        referenced_function,
-        Some(IntrinsicFunctionId(
-            NativeFunctionKind::GlobalNumeric(_) | NativeFunctionKind::GlobalUri(_)
-        ))
-    ) {
-        return DeclarativeBatch::Globals;
-    }
-    if matches!(
-        (property.holder, referenced_function),
-        (
-            IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
-            Some(IntrinsicFunctionId(NativeFunctionKind::ErrorConstructor(_)))
-        )
-    ) {
-        return DeclarativeBatch::ErrorGlobals;
-    }
-    if matches!(
-        (property.holder, referenced_function),
-        (
-            IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
-            Some(IntrinsicFunctionId(
-                NativeFunctionKind::BooleanConstructor
-                    | NativeFunctionKind::NumberConstructor
-                    | NativeFunctionKind::BigIntConstructor
-                    | NativeFunctionKind::StringConstructor
-            ))
-        )
-    ) {
-        return DeclarativeBatch::PrimitiveGlobals;
-    }
-    if matches!(
-        (property.holder, referenced_function),
-        (
-            IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
-            Some(IntrinsicFunctionId(NativeFunctionKind::SymbolConstructor))
-        )
-    ) {
-        return DeclarativeBatch::SymbolGlobals;
+    if let Some(batch) = special_reference_batch(property.holder, referenced_function) {
+        return batch;
     }
     if is_error_identity(property.holder)
         || matches!(
@@ -249,6 +241,19 @@ pub(super) const fn property_batch(property: IntrinsicPropertySpec) -> Declarati
     if is_primitive_identity(property.holder) || references_primitive {
         return DeclarativeBatch::Primitives;
     }
+    if is_iterator_identity(property.holder)
+        || referenced_function.is_some_and(is_iterator_function)
+    {
+        return DeclarativeBatch::Iterators;
+    }
+    if property.holder == IntrinsicIdentity::Object(IntrinsicObjectId::ArrayPrototype)
+        && property.key == IntrinsicKeySpec::PredefinedString(super::PredefinedAtom::Length)
+    {
+        return DeclarativeBatch::ArrayExoticInitialization;
+    }
+    if is_array_identity(property.holder) || referenced_function.is_some_and(is_array_function) {
+        return DeclarativeBatch::Arrays;
+    }
     if is_symbol_identity(property.holder)
         || matches!(
             referenced_function,
@@ -266,6 +271,32 @@ pub(super) const fn property_batch(property: IntrinsicPropertySpec) -> Declarati
         return DeclarativeBatch::Symbols;
     }
     DeclarativeBatch::NamespaceObjects
+}
+
+fn special_reference_batch(
+    holder: IntrinsicIdentity,
+    referenced_function: Option<IntrinsicFunctionId>,
+) -> Option<DeclarativeBatch> {
+    let IntrinsicFunctionId(kind) = referenced_function?;
+    if matches!(
+        kind,
+        NativeFunctionKind::GlobalNumeric(_) | NativeFunctionKind::GlobalUri(_)
+    ) {
+        return Some(DeclarativeBatch::Globals);
+    }
+    if holder != IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject) {
+        return None;
+    }
+    match kind {
+        NativeFunctionKind::ErrorConstructor(_) => Some(DeclarativeBatch::ErrorGlobals),
+        NativeFunctionKind::BooleanConstructor
+        | NativeFunctionKind::NumberConstructor
+        | NativeFunctionKind::BigIntConstructor
+        | NativeFunctionKind::StringConstructor => Some(DeclarativeBatch::PrimitiveGlobals),
+        NativeFunctionKind::ArrayConstructor => Some(DeclarativeBatch::ArrayGlobals),
+        NativeFunctionKind::SymbolConstructor => Some(DeclarativeBatch::SymbolGlobals),
+        _ => None,
+    }
 }
 
 const fn is_error_identity(id: IntrinsicIdentity) -> bool {
@@ -294,6 +325,26 @@ const fn is_symbol_identity(id: IntrinsicIdentity) -> bool {
                     | NativeFunctionKind::SymbolKeyFor,
             ))
     )
+}
+
+const fn is_array_identity(id: IntrinsicIdentity) -> bool {
+    match id {
+        IntrinsicIdentity::Object(IntrinsicObjectId::ArrayPrototype) => true,
+        IntrinsicIdentity::Function(id) => is_array_function(id),
+        IntrinsicIdentity::Object(_) => false,
+    }
+}
+
+const fn is_iterator_identity(id: IntrinsicIdentity) -> bool {
+    match id {
+        IntrinsicIdentity::Object(
+            IntrinsicObjectId::IteratorPrototype
+            | IntrinsicObjectId::ArrayIteratorPrototype
+            | IntrinsicObjectId::StringIteratorPrototype,
+        ) => true,
+        IntrinsicIdentity::Function(id) => is_iterator_function(id),
+        IntrinsicIdentity::Object(_) => false,
+    }
 }
 
 const fn is_primitive_identity(id: IntrinsicIdentity) -> bool {
@@ -334,6 +385,39 @@ const fn is_primitive_function(id: IntrinsicFunctionId) -> bool {
     )
 }
 
+const fn is_array_function(id: IntrinsicFunctionId) -> bool {
+    matches!(
+        id.0,
+        NativeFunctionKind::ArrayConstructor
+            | NativeFunctionKind::ArraySpeciesGetter
+            | NativeFunctionKind::ArrayPrototypeJoin
+            | NativeFunctionKind::ArrayPrototypeToString
+            | NativeFunctionKind::ArrayPrototypeSearch(_)
+            | NativeFunctionKind::ArrayPrototypeMutator(_)
+            | NativeFunctionKind::ArrayPrototypeCopier(_)
+            | NativeFunctionKind::ArrayPrototypeSort(_)
+            | NativeFunctionKind::ArrayPrototypeFlatten(_)
+            | NativeFunctionKind::ArrayPrototypeCallback(_)
+            | NativeFunctionKind::ArrayPrototypeReduction(_)
+            | NativeFunctionKind::ArrayPrototypeSplice
+            | NativeFunctionKind::ArrayIsArray
+            | NativeFunctionKind::ArrayStatic(_)
+    )
+}
+
+const fn is_iterator_function(id: IntrinsicFunctionId) -> bool {
+    matches!(
+        id.0,
+        NativeFunctionKind::IteratorPrototypeIterator
+            | NativeFunctionKind::ArrayIteratorNext
+            | NativeFunctionKind::ArrayPrototypeValues
+            | NativeFunctionKind::ArrayPrototypeKeys
+            | NativeFunctionKind::ArrayPrototypeEntries
+            | NativeFunctionKind::StringIteratorNext
+            | NativeFunctionKind::StringPrototypeIterator
+    )
+}
+
 pub(super) const fn function_batch(id: IntrinsicFunctionId) -> DeclarativeBatch {
     if matches!(
         id.0,
@@ -349,6 +433,10 @@ pub(super) const fn function_batch(id: IntrinsicFunctionId) -> DeclarativeBatch 
         DeclarativeBatch::Globals
     } else if is_primitive_function(id) {
         DeclarativeBatch::Primitives
+    } else if is_array_function(id) {
+        DeclarativeBatch::Arrays
+    } else if is_iterator_function(id) {
+        DeclarativeBatch::Iterators
     } else if matches!(
         id.0,
         NativeFunctionKind::SymbolConstructor
@@ -407,6 +495,8 @@ fn visit_property_specs(visit: PropertySink<'_>) {
     error::visit_properties(visit);
     primitives::visit_properties(visit);
     string::visit_properties(visit);
+    array::visit_properties(visit);
+    iterator::visit_properties(visit);
     symbol::visit_properties(visit);
     globals::visit_properties(visit);
     reflect::visit_properties(visit);
