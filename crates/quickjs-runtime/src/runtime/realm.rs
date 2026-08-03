@@ -34,8 +34,6 @@ mod schema;
 mod transaction;
 mod validation;
 
-use std::collections::TryReserveError;
-
 use super::{
     Arc, Arena, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics, ArrayMutator,
     ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic, AtomError, AtomTable,
@@ -463,53 +461,9 @@ const FROZEN_PROPERTY: PropertyLayout = PropertyLayout::data(false, false, false
 const CONSTRUCTOR_PROTOTYPE_PROPERTY: PropertyLayout = PropertyLayout::data(false, false, false);
 const ARRAY_LENGTH_PROPERTY: PropertyLayout = PropertyLayout::data(true, false, false);
 
-struct RealmKeys {
-    function: PropertyKey,
-    object: PropertyKey,
-    prototype: PropertyKey,
-    constructor: PropertyKey,
-    length: PropertyKey,
-    name: PropertyKey,
-    to_string: PropertyKey,
-    value_of: PropertyKey,
-    apply: PropertyKey,
-    caller: PropertyKey,
-    arguments: PropertyKey,
-    symbol_has_instance: PropertyKey,
-}
-
-impl RealmKeys {
-    fn new(atoms: &AtomTable) -> Self {
-        let key = |atom| PropertyKey::from_validated_atom(atoms.predefined(atom));
-        Self {
-            function: key(PredefinedAtom::Function),
-            object: key(PredefinedAtom::Object),
-            prototype: key(PredefinedAtom::Prototype),
-            constructor: key(PredefinedAtom::Constructor),
-            length: key(PredefinedAtom::Length),
-            name: key(PredefinedAtom::Name),
-            to_string: key(PredefinedAtom::ToString),
-            value_of: key(PredefinedAtom::ValueOf),
-            apply: key(PredefinedAtom::Apply),
-            caller: key(PredefinedAtom::Caller),
-            arguments: key(PredefinedAtom::ArgumentsIdentifier),
-            symbol_has_instance: PropertyKey::from_validated_symbol(
-                atoms.predefined(PredefinedAtom::SymbolHasInstance),
-            ),
-        }
-    }
-}
-
 struct RealmNames {
-    function: JsString,
-    object: JsString,
-    empty: JsString,
-    to_string: JsString,
-    value_of: JsString,
-    apply: JsString,
     call: JsString,
     bind: JsString,
-    has_instance: JsString,
     entries: JsString,
     key_for: JsString,
     description: JsString,
@@ -521,17 +475,10 @@ struct RealmNames {
 }
 
 impl RealmNames {
-    fn try_new(atoms: &AtomTable) -> Result<Self, RuntimeError> {
+    fn try_new() -> Result<Self, RuntimeError> {
         Ok(Self {
-            function: predefined_string(atoms, PredefinedAtom::Function),
-            object: predefined_string(atoms, PredefinedAtom::Object),
-            empty: predefined_string(atoms, PredefinedAtom::EmptyString),
-            to_string: predefined_string(atoms, PredefinedAtom::ToString),
-            value_of: predefined_string(atoms, PredefinedAtom::ValueOf),
-            apply: predefined_string(atoms, PredefinedAtom::Apply),
             call: JsString::from_utf8("call").map_err(AtomError::from)?,
             bind: JsString::from_utf8("bind").map_err(AtomError::from)?,
-            has_instance: JsString::from_utf8("[Symbol.hasInstance]").map_err(AtomError::from)?,
             entries: JsString::from_utf8("entries").map_err(AtomError::from)?,
             key_for: JsString::from_utf8("keyFor").map_err(AtomError::from)?,
             description: JsString::from_utf8("description").map_err(AtomError::from)?,
@@ -544,76 +491,19 @@ impl RealmNames {
     }
 }
 
-struct RealmBaseRecords {
-    global: ObjectRecord,
-    object_prototype: ObjectRecord,
-    function_prototype: ObjectRecord,
-    throw_type_error: ObjectRecord,
-    function_constructor: ObjectRecord,
-    object_constructor: ObjectRecord,
-    object_statics: [ObjectRecord; OBJECT_STATIC_METHODS.len()],
-    object_to_string: ObjectRecord,
-    object_value_of: ObjectRecord,
-    object_reflection: [ObjectRecord; OBJECT_PROTOTYPE_REFLECTION.len()],
-    function_to_string: ObjectRecord,
-    function_call: ObjectRecord,
-    function_apply: ObjectRecord,
-    function_bind: ObjectRecord,
-    function_has_instance: ObjectRecord,
-}
-
 struct RealmRecords {
-    base: RealmBaseRecords,
     declarative: DeclarativeIntrinsicRecords,
 }
 
 impl RealmRecords {
     fn try_new(schema: &RealmFunctionSchema) -> Result<Self, RuntimeError> {
-        // Keep these reservations in the original transaction order so a
-        // recoverable allocation failure reports the same `additional` value.
-        let base = RealmBaseRecords {
-            global: reserved_record(31)?,
-            object_prototype: reserved_record(4 + OBJECT_PROTOTYPE_REFLECTION.len())?,
-            function_prototype: reserved_record(10)?,
-            throw_type_error: reserved_record(2)?,
-            function_constructor: reserved_record(3)?,
-            object_constructor: reserved_record(3 + OBJECT_STATIC_METHODS.len())?,
-            object_statics: reserved_function_records()?,
-            object_to_string: reserved_record(2)?,
-            object_value_of: reserved_record(2)?,
-            object_reflection: reserved_function_records()?,
-            function_to_string: reserved_record(2)?,
-            function_call: reserved_record(2)?,
-            function_apply: reserved_record(2)?,
-            function_bind: reserved_record(2)?,
-            function_has_instance: reserved_record(2)?,
-        };
         let declarative = DeclarativeIntrinsicRecords::try_new(schema)?;
-        Ok(Self { base, declarative })
+        Ok(Self { declarative })
     }
 }
 
-struct RealmBase {
-    realm: RealmId,
-    object_prototype: ObjectId,
-    global_object: ObjectId,
-    function_prototype: FunctionId,
-    throw_type_error: FunctionId,
-    function_constructor: FunctionId,
-    object_constructor: FunctionId,
-    object_statics: [FunctionId; OBJECT_STATIC_METHODS.len()],
-    object_to_string: FunctionId,
-    object_value_of: FunctionId,
-    object_reflection: [FunctionId; OBJECT_PROTOTYPE_REFLECTION.len()],
-    function_to_string: FunctionId,
-    function_call: FunctionId,
-    function_apply: FunctionId,
-    function_bind: FunctionId,
-    function_has_instance: FunctionId,
-}
-
 struct RealmGraph {
-    base: RealmBase,
+    realm: RealmId,
     dynamic_atoms: RealmAtomBindings,
 }
 
@@ -666,8 +556,7 @@ impl Runtime {
     )]
     pub fn create_realm(&mut self) -> Result<Realm, RuntimeError> {
         self.drain_releases();
-        let keys = RealmKeys::new(&self.atoms);
-        let names = RealmNames::try_new(&self.atoms)?;
+        let names = RealmNames::try_new()?;
         let atom_plan = RealmAtomPlan::try_new(&names)?;
         let intrinsic_schema = RealmFunctionSchema::try_new()?;
         intrinsic_schema
@@ -682,14 +571,12 @@ impl Runtime {
             .allocated
             .assert_matches(intrinsic_schema.specs());
 
-        if let Err(error) =
-            transaction.publish_realm_properties(&graph, &keys, &names, &intrinsic_schema)
-        {
+        if let Err(error) = transaction.publish_realm_properties(&graph, &intrinsic_schema) {
             return Err(error.into_runtime_error());
         }
 
-        let id = graph.base.realm;
-        let intrinsics = transaction.ready_realm_intrinsics(&graph);
+        let id = graph.realm;
+        let intrinsics = transaction.ready_realm_intrinsics();
         let state = transaction
             .realms
             .get_mut(id)
@@ -746,25 +633,25 @@ impl RealmBuildTransaction<'_> {
     ) -> Result<RealmGraph, RuntimeError> {
         let dynamic_atoms = self.intern_realm_atom_plan(atom_plan)?;
         self.record_atoms(&dynamic_atoms);
-        let base = self.insert_realm_base(records.base);
-
-        self.insert_declarative_intrinsics(base.realm, intrinsic_schema, records.declarative);
+        let mut records = records;
+        let realm = self.insert_realm_kernel(intrinsic_schema, &mut records.declarative);
+        self.insert_declarative_intrinsics(realm, intrinsic_schema, records.declarative);
 
         self.allocated.assert_complete();
 
         Ok(RealmGraph {
-            base,
+            realm,
             dynamic_atoms,
         })
     }
 
-    fn ready_realm_intrinsics(&self, graph: &RealmGraph) -> RealmIntrinsics {
+    fn ready_realm_intrinsics(&self) -> RealmIntrinsics {
         let object = |id| self.allocated.object(id);
         let function = |kind| self.allocated.function(IntrinsicFunctionId(kind));
         RealmIntrinsics::Ready {
-            function_prototype: graph.base.function_prototype,
-            throw_type_error: graph.base.throw_type_error,
-            function_constructor: graph.base.function_constructor,
+            function_prototype: function(NativeFunctionKind::FunctionPrototype),
+            throw_type_error: function(NativeFunctionKind::ThrowTypeError),
+            function_constructor: function(NativeFunctionKind::OrdinaryFunctionConstructor),
             errors: ErrorIntrinsics {
                 entries: ErrorIntrinsicKind::ALL.map(|kind| ErrorIntrinsic {
                     prototype: object(IntrinsicObjectId::ErrorPrototype(kind)),
@@ -806,160 +693,6 @@ impl RealmBuildTransaction<'_> {
         }
     }
 
-    /// Inserts one reserved native function per `Object` static method.
-    ///
-    /// The result keeps `OBJECT_STATIC_METHODS` order so the publication step
-    /// can pair each function with its name and `length`.
-    fn insert_object_statics(
-        &mut self,
-        realm: RealmId,
-        function_prototype: FunctionId,
-        records: [ObjectRecord; OBJECT_STATIC_METHODS.len()],
-    ) -> [FunctionId; OBJECT_STATIC_METHODS.len()] {
-        let mut inserted = [None; OBJECT_STATIC_METHODS.len()];
-        for ((slot, method), record) in inserted.iter_mut().zip(OBJECT_STATIC_METHODS).zip(records)
-        {
-            *slot = Some(self.insert_reserved_native(
-                realm,
-                HeapReference::Function(function_prototype),
-                method.kind,
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every Object static was inserted"))
-    }
-
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one flat insertion site keeps every base intrinsic's realm ownership and prototype edge auditable together"
-    )]
-    fn insert_realm_base(&mut self, mut records: RealmBaseRecords) -> RealmBase {
-        let object_prototype = self.insert_reserved_object(
-            IntrinsicObjectId::ObjectPrototype,
-            HeapObject::ordinary(records.object_prototype),
-        );
-        records
-            .global
-            .replace_prototype(Some(HeapReference::Object(object_prototype)));
-        let global_object = self.insert_reserved_object(
-            IntrinsicObjectId::GlobalObject,
-            HeapObject::ordinary(records.global),
-        );
-        let realm = self
-            .realms
-            .try_insert(RealmState {
-                object_prototype,
-                global_object,
-                intrinsics: RealmIntrinsics::Initializing,
-                global_bindings: HashMap::new(),
-                math_random_state: 1,
-            })
-            .expect("the realm transaction reserved its realm slot");
-        self.record_realm(realm);
-
-        let function_prototype = self.insert_reserved_native(
-            realm,
-            HeapReference::Object(object_prototype),
-            NativeFunctionKind::FunctionPrototype,
-            records.function_prototype,
-        );
-        let throw_type_error = self.insert_reserved_native(
-            realm,
-            HeapReference::Function(function_prototype),
-            NativeFunctionKind::ThrowTypeError,
-            records.throw_type_error,
-        );
-        let function_constructor = self.insert_reserved_native(
-            realm,
-            HeapReference::Function(function_prototype),
-            NativeFunctionKind::OrdinaryFunctionConstructor,
-            records.function_constructor,
-        );
-        let object_constructor = self.insert_reserved_native(
-            realm,
-            HeapReference::Function(function_prototype),
-            NativeFunctionKind::ObjectConstructor,
-            records.object_constructor,
-        );
-        let object_statics =
-            self.insert_object_statics(realm, function_prototype, records.object_statics);
-        let object_to_string = self.insert_reserved_native(
-            realm,
-            HeapReference::Function(function_prototype),
-            NativeFunctionKind::ObjectPrototypeToString,
-            records.object_to_string,
-        );
-        let object_value_of = self.insert_reserved_native(
-            realm,
-            HeapReference::Function(function_prototype),
-            NativeFunctionKind::ObjectPrototypeValueOf,
-            records.object_value_of,
-        );
-        let mut object_reflection = [None; OBJECT_PROTOTYPE_REFLECTION.len()];
-        for ((slot, (_, kind, _)), record) in object_reflection
-            .iter_mut()
-            .zip(OBJECT_PROTOTYPE_REFLECTION)
-            .zip(records.object_reflection)
-        {
-            *slot = Some(self.insert_reserved_native(
-                realm,
-                HeapReference::Function(function_prototype),
-                kind,
-                record,
-            ));
-        }
-        let object_reflection = object_reflection
-            .map(|slot| slot.expect("every Object reflection method was inserted"));
-        let function_to_string = self.insert_reserved_native(
-            realm,
-            HeapReference::Function(function_prototype),
-            NativeFunctionKind::FunctionPrototypeToString,
-            records.function_to_string,
-        );
-        let function_call = self.insert_reserved_native(
-            realm,
-            HeapReference::Function(function_prototype),
-            NativeFunctionKind::FunctionPrototypeCall,
-            records.function_call,
-        );
-        let function_apply = self.insert_reserved_native(
-            realm,
-            HeapReference::Function(function_prototype),
-            NativeFunctionKind::FunctionPrototypeApply,
-            records.function_apply,
-        );
-        let function_bind = self.insert_reserved_native(
-            realm,
-            HeapReference::Function(function_prototype),
-            NativeFunctionKind::FunctionPrototypeBind,
-            records.function_bind,
-        );
-        let function_has_instance = self.insert_reserved_native(
-            realm,
-            HeapReference::Function(function_prototype),
-            NativeFunctionKind::FunctionPrototypeHasInstance,
-            records.function_has_instance,
-        );
-        RealmBase {
-            realm,
-            object_prototype,
-            global_object,
-            function_prototype,
-            throw_type_error,
-            function_constructor,
-            object_constructor,
-            object_statics,
-            object_to_string,
-            object_value_of,
-            object_reflection,
-            function_to_string,
-            function_call,
-            function_apply,
-            function_bind,
-            function_has_instance,
-        }
-    }
-
     fn insert_reserved_native(
         &mut self,
         realm: RealmId,
@@ -994,18 +727,14 @@ impl RealmBuildTransaction<'_> {
     fn publish_realm_properties(
         &mut self,
         graph: &RealmGraph,
-        keys: &RealmKeys,
-        names: &RealmNames,
         intrinsic_schema: &RealmFunctionSchema,
     ) -> Result<(), RealmPublicationError> {
-        self.append_object_methods(
-            graph.base.object_prototype,
-            [
-                (&keys.to_string, graph.base.object_to_string),
-                (&keys.value_of, graph.base.object_value_of),
-            ],
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::Kernel,
         )?;
-        self.publish_object_reflection_methods(graph, keys)?;
+        self.finalize_realm_kernel();
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,
             &graph.dynamic_atoms,
@@ -1016,7 +745,6 @@ impl RealmBuildTransaction<'_> {
             &graph.dynamic_atoms,
             DeclarativeBatch::ErrorGlobals,
         )?;
-        self.publish_function_intrinsic_properties(graph, keys, names)?;
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,
             &graph.dynamic_atoms,
@@ -1032,7 +760,11 @@ impl RealmBuildTransaction<'_> {
             &graph.dynamic_atoms,
             DeclarativeBatch::Iterators,
         )?;
-        self.publish_global_value_properties(graph)?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::GlobalValues,
+        )?;
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,
             &graph.dynamic_atoms,
@@ -1048,12 +780,10 @@ impl RealmBuildTransaction<'_> {
             &graph.dynamic_atoms,
             DeclarativeBatch::NamespaceObjects,
         )?;
-        self.append_object_methods(
-            graph.base.global_object,
-            [
-                (&keys.function, graph.base.function_constructor),
-                (&keys.object, graph.base.object_constructor),
-            ],
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::KernelGlobals,
         )?;
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,
@@ -1070,324 +800,6 @@ impl RealmBuildTransaction<'_> {
             &graph.dynamic_atoms,
             DeclarativeBatch::SymbolGlobals,
         )?;
-        Ok(())
-    }
-
-    /// Installs the pinned global value properties and `globalThis`.
-    ///
-    /// `undefined`, `NaN`, and `Infinity` are frozen data properties.
-    /// `globalThis` is writable and configurable, and its value is the realm's
-    /// actual global object. The compiler lowers these names as constructor-
-    /// realm global references, so reads resolve through the global object
-    /// exactly like any other realm-global binding.
-    fn publish_global_value_properties(
-        &mut self,
-        graph: &RealmGraph,
-    ) -> Result<(), TryReserveError> {
-        let undefined_key = self.predefined_property_key(PredefinedAtom::Undefined);
-        let nan_key = self.predefined_property_key(PredefinedAtom::Nan);
-        let infinity_key = self.predefined_property_key(PredefinedAtom::Infinity);
-        let global_this_key = self.predefined_property_key(PredefinedAtom::GlobalThis);
-        let record = &mut self
-            .objects
-            .get_mut(graph.base.global_object)
-            .expect("new realm global object remains live")
-            .record;
-        let frozen = FROZEN_PROPERTY;
-        record.append_data(undefined_key, frozen, StoredValue::Undefined)?;
-        record.append_data(
-            nan_key,
-            frozen,
-            StoredValue::Number(JsNumber::from_f64(f64::NAN)),
-        )?;
-        record.append_data(
-            infinity_key,
-            frozen,
-            StoredValue::Number(JsNumber::from_f64(f64::INFINITY)),
-        )?;
-        record.append_data(
-            global_this_key,
-            METHOD_PROPERTY,
-            StoredValue::Object(graph.base.global_object),
-        )
-    }
-
-    fn publish_function_intrinsic_properties(
-        &mut self,
-        graph: &RealmGraph,
-        keys: &RealmKeys,
-        names: &RealmNames,
-    ) -> Result<(), TryReserveError> {
-        {
-            let record = &mut self
-                .functions
-                .get_mut(graph.base.throw_type_error)
-                .expect("new %ThrowTypeError% remains live")
-                .object;
-            record.append_data(
-                keys.length.clone(),
-                FROZEN_PROPERTY,
-                StoredValue::Number(JsNumber::from_i32(0)),
-            )?;
-            record.append_data(
-                keys.name.clone(),
-                FROZEN_PROPERTY,
-                StoredValue::String(names.empty.clone()),
-            )?;
-            record.prevent_extensions();
-        }
-
-        {
-            let record = &mut self
-                .functions
-                .get_mut(graph.base.function_prototype)
-                .expect("new Function.prototype remains live")
-                .object;
-            record.append_data(
-                keys.length.clone(),
-                IDENTITY_PROPERTY,
-                StoredValue::Number(JsNumber::from_i32(0)),
-            )?;
-            record.append_data(
-                keys.name.clone(),
-                IDENTITY_PROPERTY,
-                StoredValue::String(names.empty.clone()),
-            )?;
-            record.append_accessor(
-                keys.caller.clone(),
-                PropertyLayout::accessor(false, true),
-                Some(graph.base.throw_type_error),
-                Some(graph.base.throw_type_error),
-            )?;
-            record.append_accessor(
-                keys.arguments.clone(),
-                PropertyLayout::accessor(false, true),
-                Some(graph.base.throw_type_error),
-                Some(graph.base.throw_type_error),
-            )?;
-            record.append_data(
-                PropertyKey::from_validated_atom(
-                    graph.dynamic_atoms.atom(RealmNameId::Call).clone(),
-                ),
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.base.function_call),
-            )?;
-            record.append_data(
-                keys.apply.clone(),
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.base.function_apply),
-            )?;
-            record.append_data(
-                PropertyKey::from_validated_atom(
-                    graph.dynamic_atoms.atom(RealmNameId::Bind).clone(),
-                ),
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.base.function_bind),
-            )?;
-            record.append_data(
-                keys.to_string.clone(),
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.base.function_to_string),
-            )?;
-            record.append_data(
-                keys.constructor.clone(),
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.base.function_constructor),
-            )?;
-            record.append_data(
-                keys.symbol_has_instance.clone(),
-                // QuickJS pins `Function.prototype[Symbol.hasInstance]` as
-                // non-writable and non-configurable (`quickjs.c:39511-39523`),
-                // matching the specification's frozen descriptor.
-                FROZEN_PROPERTY,
-                StoredValue::Function(graph.base.function_has_instance),
-            )?;
-        }
-
-        self.append_constructor_identity(
-            graph.base.function_constructor,
-            StoredValue::Function(graph.base.function_prototype),
-            &names.function,
-            keys,
-        )?;
-        for (function, name, length) in [
-            (graph.base.object_to_string, &names.to_string, 0),
-            (graph.base.object_value_of, &names.value_of, 0),
-            (graph.base.function_to_string, &names.to_string, 0),
-            (graph.base.function_call, &names.call, 1),
-            (graph.base.function_apply, &names.apply, 2),
-            (graph.base.function_bind, &names.bind, 1),
-            (graph.base.function_has_instance, &names.has_instance, 1),
-        ] {
-            self.append_function_identity(function, name, length, keys)?;
-        }
-        self.publish_object_intrinsic_properties(graph, keys, names)
-    }
-
-    /// Publishes the `Object` constructor, its statics, and the
-    /// `Object.prototype.constructor` back edge.
-    ///
-    /// Only reflection operations the current profile can honor completely are
-    /// installed; the rest of the pinned surface stays absent so it fails
-    /// closed as a missing property instead of behaving incorrectly.
-    fn publish_object_intrinsic_properties(
-        &mut self,
-        graph: &RealmGraph,
-        keys: &RealmKeys,
-        names: &RealmNames,
-    ) -> Result<(), TryReserveError> {
-        self.objects
-            .get_mut(graph.base.object_prototype)
-            .expect("new Object.prototype remains live")
-            .record
-            .append_data(
-                keys.constructor.clone(),
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.base.object_constructor),
-            )?;
-        // QuickJS publishes `Object.length` and `Object.name` before its
-        // method table, then appends `Object.prototype` after that table.
-        // Keeping this order makes `[[OwnPropertyKeys]]` match the pinned
-        // constructor shape while retaining the specification descriptors.
-        self.append_function_identity(graph.base.object_constructor, &names.object, 1, keys)?;
-        for (method, function) in OBJECT_STATIC_METHODS
-            .into_iter()
-            .zip(graph.base.object_statics)
-        {
-            let (key, name) = if let Some(atom) = method.predefined_name {
-                (
-                    self.predefined_property_key(atom),
-                    predefined_string(&self.atoms, atom),
-                )
-            } else if let Some(id) = method.realm_name {
-                let atom = graph.dynamic_atoms.atom(id).clone();
-                let name = atom
-                    .description()
-                    .expect("shared dynamic Object static name has a description")
-                    .clone();
-                (PropertyKey::from_validated_atom(atom), name)
-            } else {
-                let atom = graph
-                    .dynamic_atoms
-                    .atom(RealmNameId::ObjectStatic(method.kind))
-                    .clone();
-                let name = atom
-                    .description()
-                    .expect("interned Object static name has a description")
-                    .clone();
-                (PropertyKey::from_validated_atom(atom), name)
-            };
-            self.functions
-                .get_mut(graph.base.object_constructor)
-                .expect("new Object constructor remains live")
-                .object
-                .append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
-            self.append_function_identity(function, &name, method.length, keys)?;
-        }
-        self.functions
-            .get_mut(graph.base.object_constructor)
-            .expect("new Object constructor remains live")
-            .object
-            .append_data(
-                keys.prototype.clone(),
-                CONSTRUCTOR_PROTOTYPE_PROPERTY,
-                StoredValue::Object(graph.base.object_prototype),
-            )?;
-        Ok(())
-    }
-
-    /// Publishes the `Object.prototype` reflection methods.
-    fn publish_object_reflection_methods(
-        &mut self,
-        graph: &RealmGraph,
-        keys: &RealmKeys,
-    ) -> Result<(), TryReserveError> {
-        for ((_, kind, length), function) in OBJECT_PROTOTYPE_REFLECTION
-            .into_iter()
-            .zip(graph.base.object_reflection)
-        {
-            let atom = graph
-                .dynamic_atoms
-                .atom(RealmNameId::ObjectPrototypeMethod(kind))
-                .clone();
-            let name = atom
-                .description()
-                .expect("interned Object reflection name has a description")
-                .clone();
-            self.objects
-                .get_mut(graph.base.object_prototype)
-                .expect("new Object.prototype remains live")
-                .record
-                .append_data(
-                    PropertyKey::from_validated_atom(atom),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
-            self.append_function_identity(function, &name, length, keys)?;
-        }
-        Ok(())
-    }
-
-    fn append_constructor_identity(
-        &mut self,
-        function: FunctionId,
-        prototype: StoredValue,
-        name: &JsString,
-        keys: &RealmKeys,
-    ) -> Result<(), TryReserveError> {
-        self.functions
-            .get_mut(function)
-            .expect("new intrinsic constructor remains live")
-            .object
-            .append_data(
-                keys.prototype.clone(),
-                CONSTRUCTOR_PROTOTYPE_PROPERTY,
-                prototype,
-            )?;
-        self.append_function_identity(function, name, 1, keys)
-    }
-
-    fn append_function_identity(
-        &mut self,
-        function: FunctionId,
-        name: &JsString,
-        length: i32,
-        keys: &RealmKeys,
-    ) -> Result<(), TryReserveError> {
-        let record = &mut self
-            .functions
-            .get_mut(function)
-            .expect("new intrinsic function remains live")
-            .object;
-        record.append_data(
-            keys.length.clone(),
-            IDENTITY_PROPERTY,
-            StoredValue::Number(JsNumber::from_i32(length)),
-        )?;
-        record.append_data(
-            keys.name.clone(),
-            IDENTITY_PROPERTY,
-            StoredValue::String(name.clone()),
-        )
-    }
-
-    fn append_object_methods<const N: usize>(
-        &mut self,
-        object: ObjectId,
-        methods: [(&PropertyKey, FunctionId); N],
-    ) -> Result<(), TryReserveError> {
-        let record = &mut self
-            .objects
-            .get_mut(object)
-            .expect("new intrinsic object remains live")
-            .record;
-        for (key, function) in methods {
-            record.append_data(
-                key.clone(),
-                METHOD_PROPERTY,
-                StoredValue::Function(function),
-            )?;
-        }
         Ok(())
     }
 }
@@ -1430,19 +842,6 @@ fn reserved_record(capacity: usize) -> Result<ObjectRecord, RuntimeError> {
         .try_reserve_data(capacity)
         .map_err(|_| property_allocation_failed(capacity))?;
     Ok(record)
-}
-
-/// Reserves records for an ordinary native function family.
-///
-/// Every ordinary Realm-native function starts with exactly the non-writable
-/// `length` and `name` own properties. Family-specific extra properties remain
-/// reserved with their holder's declaration.
-fn reserved_function_records<const N: usize>() -> Result<[ObjectRecord; N], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; N] = [const { None }; N];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every native function record was reserved")))
 }
 
 const fn allocation_failed(resource: RuntimeResource, additional: usize) -> RuntimeError {

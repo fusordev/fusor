@@ -197,6 +197,9 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DeclarativeBatch {
+    Kernel,
+    GlobalValues,
+    KernelGlobals,
     Errors,
     ErrorGlobals,
     Globals,
@@ -221,6 +224,9 @@ pub(super) fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatc
     };
     if let Some(batch) = special_reference_batch(property.holder, referenced_function) {
         return batch;
+    }
+    if is_global_value_property(property) {
+        return DeclarativeBatch::GlobalValues;
     }
     if is_error_identity(property.holder)
         || matches!(
@@ -270,7 +276,23 @@ pub(super) fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatc
     {
         return DeclarativeBatch::Symbols;
     }
+    if is_kernel_identity(property.holder) || referenced_function.is_some_and(is_kernel_function) {
+        return DeclarativeBatch::Kernel;
+    }
     DeclarativeBatch::NamespaceObjects
+}
+
+fn is_global_value_property(property: IntrinsicPropertySpec) -> bool {
+    property.holder == IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject)
+        && matches!(
+            property.key,
+            IntrinsicKeySpec::PredefinedString(
+                super::PredefinedAtom::Undefined
+                    | super::PredefinedAtom::Nan
+                    | super::PredefinedAtom::Infinity
+                    | super::PredefinedAtom::GlobalThis
+            )
+        )
 }
 
 fn special_reference_batch(
@@ -295,6 +317,9 @@ fn special_reference_batch(
         | NativeFunctionKind::StringConstructor => Some(DeclarativeBatch::PrimitiveGlobals),
         NativeFunctionKind::ArrayConstructor => Some(DeclarativeBatch::ArrayGlobals),
         NativeFunctionKind::SymbolConstructor => Some(DeclarativeBatch::SymbolGlobals),
+        NativeFunctionKind::OrdinaryFunctionConstructor | NativeFunctionKind::ObjectConstructor => {
+            Some(DeclarativeBatch::KernelGlobals)
+        }
         _ => None,
     }
 }
@@ -309,6 +334,16 @@ const fn is_error_identity(id: IntrinsicIdentity) -> bool {
                     | NativeFunctionKind::ErrorIsError,
             ))
     )
+}
+
+const fn is_kernel_identity(id: IntrinsicIdentity) -> bool {
+    match id {
+        IntrinsicIdentity::Object(
+            IntrinsicObjectId::ObjectPrototype | IntrinsicObjectId::GlobalObject,
+        ) => true,
+        IntrinsicIdentity::Function(id) => is_kernel_function(id),
+        IntrinsicIdentity::Object(_) => false,
+    }
 }
 
 const fn is_symbol_identity(id: IntrinsicIdentity) -> bool {
@@ -385,6 +420,49 @@ const fn is_primitive_function(id: IntrinsicFunctionId) -> bool {
     )
 }
 
+pub(super) const fn is_kernel_function(id: IntrinsicFunctionId) -> bool {
+    matches!(
+        id.0,
+        NativeFunctionKind::FunctionPrototype
+            | NativeFunctionKind::ThrowTypeError
+            | NativeFunctionKind::OrdinaryFunctionConstructor
+            | NativeFunctionKind::ObjectConstructor
+            | NativeFunctionKind::ObjectPrototypeToString
+            | NativeFunctionKind::ObjectPrototypeValueOf
+            | NativeFunctionKind::ObjectPrototypeHasOwnProperty
+            | NativeFunctionKind::ObjectPrototypeIsPrototypeOf
+            | NativeFunctionKind::ObjectPrototypePropertyIsEnumerable
+            | NativeFunctionKind::FunctionPrototypeToString
+            | NativeFunctionKind::FunctionPrototypeCall
+            | NativeFunctionKind::FunctionPrototypeApply
+            | NativeFunctionKind::FunctionPrototypeBind
+            | NativeFunctionKind::FunctionPrototypeHasInstance
+            | NativeFunctionKind::ObjectCreate
+            | NativeFunctionKind::ObjectGetPrototypeOf
+            | NativeFunctionKind::ObjectSetPrototypeOf
+            | NativeFunctionKind::ObjectDefineProperty
+            | NativeFunctionKind::ObjectDefineProperties
+            | NativeFunctionKind::ObjectGetOwnPropertyNames
+            | NativeFunctionKind::ObjectGetOwnPropertySymbols
+            | NativeFunctionKind::ObjectGroupBy
+            | NativeFunctionKind::ObjectKeys
+            | NativeFunctionKind::ObjectValues
+            | NativeFunctionKind::ObjectEntries
+            | NativeFunctionKind::ObjectIsExtensible
+            | NativeFunctionKind::ObjectPreventExtensions
+            | NativeFunctionKind::ObjectGetOwnPropertyDescriptor
+            | NativeFunctionKind::ObjectGetOwnPropertyDescriptors
+            | NativeFunctionKind::ObjectIs
+            | NativeFunctionKind::ObjectAssign
+            | NativeFunctionKind::ObjectSeal
+            | NativeFunctionKind::ObjectFreeze
+            | NativeFunctionKind::ObjectIsSealed
+            | NativeFunctionKind::ObjectIsFrozen
+            | NativeFunctionKind::ObjectFromEntries
+            | NativeFunctionKind::ObjectHasOwn
+    )
+}
+
 const fn is_array_function(id: IntrinsicFunctionId) -> bool {
     matches!(
         id.0,
@@ -419,7 +497,9 @@ const fn is_iterator_function(id: IntrinsicFunctionId) -> bool {
 }
 
 pub(super) const fn function_batch(id: IntrinsicFunctionId) -> DeclarativeBatch {
-    if matches!(
+    if is_kernel_function(id) {
+        DeclarativeBatch::Kernel
+    } else if matches!(
         id.0,
         NativeFunctionKind::ErrorConstructor(_)
             | NativeFunctionKind::ErrorPrototypeToString
@@ -492,6 +572,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
 }
 
 fn visit_property_specs(visit: PropertySink<'_>) {
+    kernel::visit_properties(visit);
     error::visit_properties(visit);
     primitives::visit_properties(visit);
     string::visit_properties(visit);

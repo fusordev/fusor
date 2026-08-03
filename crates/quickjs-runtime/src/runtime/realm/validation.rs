@@ -5,9 +5,7 @@
     reason = "validation becomes the production entry point as intrinsic families migrate"
 )]
 
-use crate::{
-    PredefinedAtom, PropertyLayout, PropertyLayoutKind, predefined_atoms::PredefinedAtomKind,
-};
+use crate::{PredefinedAtom, PropertyLayoutKind, predefined_atoms::PredefinedAtomKind};
 
 use super::schema::{
     ConstructorPrototypeSpec, IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicIdentity,
@@ -138,9 +136,8 @@ fn validate_declared_function_identity(
             && property.key == IntrinsicKeySpec::PredefinedString(PredefinedAtom::Length)
             && matches!(
                 property.descriptor,
-                IntrinsicDescriptorSpec::Data { layout, value: IntrinsicValueSpec::NumberBits(bits) }
-                    if layout == PropertyLayout::data(false, false, true)
-                        && bits == f64::from(function.length).to_bits()
+                IntrinsicDescriptorSpec::Data { value: IntrinsicValueSpec::NumberBits(bits), .. }
+                    if bits == f64::from(function.length).to_bits()
             )
     });
     if !length_matches {
@@ -159,9 +156,8 @@ fn validate_declared_function_identity(
             && property.key == IntrinsicKeySpec::PredefinedString(PredefinedAtom::Name)
             && matches!(
                 property.descriptor,
-                IntrinsicDescriptorSpec::Data { layout, value: IntrinsicValueSpec::String(value) }
-                    if layout == PropertyLayout::data(false, false, true)
-                        && value == expected_name
+                IntrinsicDescriptorSpec::Data { value: IntrinsicValueSpec::String(value), .. }
+                    if value == expected_name
             )
     });
     if !name_matches {

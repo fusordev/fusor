@@ -7,10 +7,7 @@ use crate::ArrayIndex;
 use super::{
     AtomError, JsNumber, JsString, ObjectRecord, PredefinedAtom, PropertyKey,
     RealmBuildTransaction, RuntimeError, StoredValue,
-    families::{
-        DeclarativeBatch, RealmFunctionSchema, function_batch, is_declarative_function,
-        property_batch,
-    },
+    families::{DeclarativeBatch, RealmFunctionSchema, function_batch, property_batch},
     property_allocation_failed,
     schema::{
         IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicIdentity,
@@ -62,8 +59,7 @@ impl RealmBuildTransaction<'_> {
         batch: DeclarativeBatch,
     ) -> Result<(), RealmPublicationError> {
         for function in schema.specs().iter().filter(|function| {
-            is_declarative_function(function.id)
-                && function_batch(function.id) == batch
+            function_batch(function.id) == batch
                 && function.identity_publication == IntrinsicIdentityPublication::Automatic
         }) {
             self.publish_intrinsic_function_identity(function, atoms)?;
@@ -76,6 +72,19 @@ impl RealmBuildTransaction<'_> {
             self.publish_intrinsic_property(property, atoms)?;
         }
         Ok(())
+    }
+
+    /// Applies the sole post-publication kernel invariant that is not an
+    /// ordinary property descriptor: `%ThrowTypeError%` is non-extensible.
+    pub(super) fn finalize_realm_kernel(&mut self) {
+        let function = self.allocated.function(IntrinsicFunctionId(
+            super::NativeFunctionKind::ThrowTypeError,
+        ));
+        self.functions
+            .get_mut(function)
+            .expect("the allocated %ThrowTypeError% remains live")
+            .object
+            .prevent_extensions();
     }
 
     /// Resolves and appends one complete descriptor in declaration order.

@@ -296,8 +296,7 @@ mod tests {
 
     #[test]
     fn atom_plan_derives_the_characterized_count_and_utf16_budget() {
-        let runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-        let names = RealmNames::try_new(&runtime.atoms).expect("Realm names");
+        let names = RealmNames::try_new().expect("Realm names");
         let plan = RealmAtomPlan::try_new(&names).expect("atom plan");
 
         assert_eq!(plan.len(), 159);
@@ -307,7 +306,7 @@ mod tests {
     #[test]
     fn atom_plan_binds_shared_names_by_typed_identity() {
         let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-        let names = RealmNames::try_new(&runtime.atoms).expect("Realm names");
+        let names = RealmNames::try_new().expect("Realm names");
         let plan = RealmAtomPlan::try_new(&names).expect("atom plan");
         let bindings = runtime
             .intern_realm_atom_plan(&plan)

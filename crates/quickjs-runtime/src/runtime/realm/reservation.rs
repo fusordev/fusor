@@ -101,12 +101,11 @@ impl RealmReservationPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{RuntimeLimits, realm::RealmNames};
+    use crate::runtime::realm::RealmNames;
 
     #[test]
     fn reservation_plan_matches_the_characterized_realm_delta() {
-        let runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-        let names = RealmNames::try_new(&runtime.atoms).expect("Realm names");
+        let names = RealmNames::try_new().expect("Realm names");
         let atoms = RealmAtomPlan::try_new(&names).expect("atom plan");
         let schema = RealmFunctionSchema::try_new().expect("function schema");
         let plan = RealmReservationPlan::try_new(&atoms, &schema).expect("reservation plan");
