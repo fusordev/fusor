@@ -85,6 +85,14 @@ impl RealmReservationPlan {
     pub(super) const fn journal_entries(self) -> usize {
         self.journal_entries
     }
+
+    pub(super) const fn objects(self) -> usize {
+        self.objects
+    }
+
+    pub(super) const fn functions(self) -> usize {
+        self.functions
+    }
 }
 
 #[cfg(test)]

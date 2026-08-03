@@ -25,6 +25,7 @@
 
 //! Runtime construction and failure-atomic realm intrinsic graph publication.
 
+mod allocation;
 mod atoms;
 mod reservation;
 mod schema;
@@ -49,6 +50,7 @@ use super::{
 
 use atoms::{RealmAtomBindings, RealmAtomPlan};
 use reservation::RealmReservationPlan;
+use schema::IntrinsicObjectId;
 use schema::RealmNameId;
 use transaction::RealmBuildTransaction;
 
@@ -1006,6 +1008,7 @@ struct PrimitiveIntrinsicGraph {
 
 #[derive(Clone, Copy)]
 struct PrimitiveIntrinsicKinds {
+    prototype: IntrinsicObjectId,
     constructor: NativeFunctionKind,
     to_string: NativeFunctionKind,
     value_of: NativeFunctionKind,
@@ -1171,7 +1174,7 @@ impl Runtime {
         let reservation = RealmReservationPlan::try_new(&atom_plan)?;
         reservation.preflight_and_reserve(self)?;
         let records = RealmRecords::try_new(&keys.length)?;
-        let mut transaction = RealmBuildTransaction::try_new(self, reservation.journal_entries())?;
+        let mut transaction = RealmBuildTransaction::try_new(self, reservation)?;
         let graph = transaction.build_realm_graph(records, &atom_plan)?;
 
         if transaction
@@ -1284,6 +1287,7 @@ impl RealmBuildTransaction<'_> {
             records.boolean,
             BoxedPrimitive::Boolean(false),
             PrimitiveIntrinsicKinds {
+                prototype: IntrinsicObjectId::BooleanPrototype,
                 constructor: NativeFunctionKind::BooleanConstructor,
                 to_string: NativeFunctionKind::BooleanPrototypeToString,
                 value_of: NativeFunctionKind::BooleanPrototypeValueOf,
@@ -1294,6 +1298,7 @@ impl RealmBuildTransaction<'_> {
             records.number,
             BoxedPrimitive::Number(JsNumber::from_i32(0)),
             PrimitiveIntrinsicKinds {
+                prototype: IntrinsicObjectId::NumberPrototype,
                 constructor: NativeFunctionKind::NumberConstructor,
                 to_string: NativeFunctionKind::NumberPrototypeToString,
                 value_of: NativeFunctionKind::NumberPrototypeValueOf,
@@ -1304,6 +1309,7 @@ impl RealmBuildTransaction<'_> {
             records.string,
             BoxedPrimitive::String(JsString::empty()),
             PrimitiveIntrinsicKinds {
+                prototype: IntrinsicObjectId::StringPrototype,
                 constructor: NativeFunctionKind::StringConstructor,
                 to_string: NativeFunctionKind::StringPrototypeToString,
                 value_of: NativeFunctionKind::StringPrototypeValueOf,
@@ -1346,6 +1352,8 @@ impl RealmBuildTransaction<'_> {
             records.array_is_array,
         );
         let array_statics = self.insert_array_statics(&base, records.array_statics);
+
+        self.allocated.assert_complete();
 
         Ok(RealmGraph {
             base,
@@ -1428,12 +1436,17 @@ impl RealmBuildTransaction<'_> {
         reason = "one flat insertion site keeps every base intrinsic's realm ownership and prototype edge auditable together"
     )]
     fn insert_realm_base(&mut self, mut records: RealmBaseRecords) -> RealmBase {
-        let object_prototype =
-            self.insert_reserved_object(HeapObject::ordinary(records.object_prototype));
+        let object_prototype = self.insert_reserved_object(
+            IntrinsicObjectId::ObjectPrototype,
+            HeapObject::ordinary(records.object_prototype),
+        );
         records
             .global
             .replace_prototype(Some(HeapReference::Object(object_prototype)));
-        let global_object = self.insert_reserved_object(HeapObject::ordinary(records.global));
+        let global_object = self.insert_reserved_object(
+            IntrinsicObjectId::GlobalObject,
+            HeapObject::ordinary(records.global),
+        );
         let realm = self
             .realms
             .try_insert(RealmState {
@@ -1566,6 +1579,7 @@ impl RealmBuildTransaction<'_> {
             aggregate_error_records,
         ] = records.entries;
         let error_prototype = self.insert_reserved_object_with_prototype(
+            IntrinsicObjectId::ErrorPrototype(ErrorIntrinsicKind::Error),
             error_records.prototype,
             HeapReference::Object(base.object_prototype),
         );
@@ -1590,6 +1604,7 @@ impl RealmBuildTransaction<'_> {
         let insert_native =
             |runtime: &mut Self, kind: ErrorIntrinsicKind, records: ErrorIntrinsicRecords| {
                 let prototype = runtime.insert_reserved_object_with_prototype(
+                    IntrinsicObjectId::ErrorPrototype(kind),
                     records.prototype,
                     HeapReference::Object(error_prototype),
                 );
@@ -1644,6 +1659,7 @@ impl RealmBuildTransaction<'_> {
         kinds: PrimitiveIntrinsicKinds,
     ) -> PrimitiveIntrinsicGraph {
         let prototype = self.insert_reserved_boxed_object(
+            kinds.prototype,
             records.prototype,
             HeapReference::Object(base.object_prototype),
             primitive,
@@ -1982,7 +1998,10 @@ impl RealmBuildTransaction<'_> {
         records
             .prototype
             .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
-        let prototype = self.insert_reserved_object(HeapObject::ordinary(records.prototype));
+        let prototype = self.insert_reserved_object(
+            IntrinsicObjectId::BigIntPrototype,
+            HeapObject::ordinary(records.prototype),
+        );
         let constructor = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -2031,8 +2050,10 @@ impl RealmBuildTransaction<'_> {
         records
             .prototype
             .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
-        let prototype =
-            self.insert_reserved_object(HeapObject::array(records.prototype, ArrayState::new(0)));
+        let prototype = self.insert_reserved_object(
+            IntrinsicObjectId::ArrayPrototype,
+            HeapObject::array(records.prototype, ArrayState::new(0)),
+        );
         let constructor = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -2074,8 +2095,10 @@ impl RealmBuildTransaction<'_> {
         records
             .iterator_prototype
             .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
-        let iterator_prototype =
-            self.insert_reserved_object(HeapObject::ordinary(records.iterator_prototype));
+        let iterator_prototype = self.insert_reserved_object(
+            IntrinsicObjectId::IteratorPrototype,
+            HeapObject::ordinary(records.iterator_prototype),
+        );
         let iterator_method = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -2086,8 +2109,10 @@ impl RealmBuildTransaction<'_> {
         records
             .array_iterator_prototype
             .replace_prototype(Some(HeapReference::Object(iterator_prototype)));
-        let array_iterator_prototype =
-            self.insert_reserved_object(HeapObject::ordinary(records.array_iterator_prototype));
+        let array_iterator_prototype = self.insert_reserved_object(
+            IntrinsicObjectId::ArrayIteratorPrototype,
+            HeapObject::ordinary(records.array_iterator_prototype),
+        );
         let array_iterator_next = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -2116,8 +2141,10 @@ impl RealmBuildTransaction<'_> {
         records
             .string_iterator_prototype
             .replace_prototype(Some(HeapReference::Object(iterator_prototype)));
-        let string_iterator_prototype =
-            self.insert_reserved_object(HeapObject::ordinary(records.string_iterator_prototype));
+        let string_iterator_prototype = self.insert_reserved_object(
+            IntrinsicObjectId::StringIteratorPrototype,
+            HeapObject::ordinary(records.string_iterator_prototype),
+        );
         let string_iterator_next = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -2152,7 +2179,10 @@ impl RealmBuildTransaction<'_> {
         records
             .prototype
             .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
-        let prototype = self.insert_reserved_object(HeapObject::ordinary(records.prototype));
+        let prototype = self.insert_reserved_object(
+            IntrinsicObjectId::SymbolPrototype,
+            HeapObject::ordinary(records.prototype),
+        );
         let make = |runtime: &mut Self, kind, record| {
             runtime.insert_reserved_native(
                 base.realm,
@@ -2209,7 +2239,10 @@ impl RealmBuildTransaction<'_> {
         records
             .object
             .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
-        let object = self.insert_reserved_object(HeapObject::ordinary(records.object));
+        let object = self.insert_reserved_object(
+            IntrinsicObjectId::Reflect,
+            HeapObject::ordinary(records.object),
+        );
         let mut methods = [None; ReflectMethod::ALL.len()];
         for ((slot, method), record) in methods
             .iter_mut()
@@ -2234,7 +2267,10 @@ impl RealmBuildTransaction<'_> {
         records
             .object
             .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
-        let object = self.insert_reserved_object(HeapObject::ordinary(records.object));
+        let object = self.insert_reserved_object(
+            IntrinsicObjectId::Json,
+            HeapObject::ordinary(records.object),
+        );
         let parse = self.insert_reserved_native(
             base.realm,
             HeapReference::Function(base.function_prototype),
@@ -2273,7 +2309,10 @@ impl RealmBuildTransaction<'_> {
         records
             .object
             .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
-        let object = self.insert_reserved_object(HeapObject::ordinary(records.object));
+        let object = self.insert_reserved_object(
+            IntrinsicObjectId::Math,
+            HeapObject::ordinary(records.object),
+        );
         let mut methods = [None; MathMethod::ALL.len()];
         for ((slot, method), record) in methods.iter_mut().zip(MathMethod::ALL).zip(records.methods)
         {
@@ -2306,36 +2345,38 @@ impl RealmBuildTransaction<'_> {
                 public_roots: 0,
             })
             .expect("the realm transaction reserved all intrinsic function slots");
-        self.record_function(function);
+        self.record_function(schema::IntrinsicFunctionId(kind), function);
         function
     }
 
-    fn insert_reserved_object(&mut self, object: HeapObject) -> ObjectId {
+    fn insert_reserved_object(&mut self, id: IntrinsicObjectId, object: HeapObject) -> ObjectId {
         let object = self
             .objects
             .try_insert(object)
             .expect("the realm transaction reserved all intrinsic object slots");
-        self.record_object(object);
+        self.record_object(id, object);
         object
     }
 
     fn insert_reserved_object_with_prototype(
         &mut self,
+        id: IntrinsicObjectId,
         mut record: ObjectRecord,
         prototype: HeapReference,
     ) -> ObjectId {
         record.replace_prototype(Some(prototype));
-        self.insert_reserved_object(HeapObject::ordinary(record))
+        self.insert_reserved_object(id, HeapObject::ordinary(record))
     }
 
     fn insert_reserved_boxed_object(
         &mut self,
+        id: IntrinsicObjectId,
         mut record: ObjectRecord,
         prototype: HeapReference,
         primitive: BoxedPrimitive,
     ) -> ObjectId {
         record.replace_prototype(Some(prototype));
-        self.insert_reserved_object(HeapObject::with_boxed_primitive(record, primitive))
+        self.insert_reserved_object(id, HeapObject::with_boxed_primitive(record, primitive))
     }
 }
 

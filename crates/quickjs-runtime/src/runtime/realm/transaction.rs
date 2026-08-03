@@ -5,8 +5,12 @@ use std::ops::{Deref, DerefMut};
 use crate::Atom;
 
 use super::{
-    FunctionId, ObjectId, RealmId, Runtime, RuntimeError, RuntimeResource, allocation_failed,
+    FunctionId, ObjectId, RealmId, Runtime, RuntimeError, RuntimeResource,
+    allocation::AllocatedIntrinsics,
+    allocation_failed,
     atoms::RealmAtomBindings,
+    reservation::RealmReservationPlan,
+    schema::{IntrinsicFunctionId, IntrinsicObjectId},
 };
 
 enum RealmUndo {
@@ -24,21 +28,26 @@ enum RealmUndo {
 pub(super) struct RealmBuildTransaction<'runtime> {
     runtime: &'runtime mut Runtime,
     journal: Vec<RealmUndo>,
+    pub(super) allocated: AllocatedIntrinsics,
     committed: bool,
 }
 
 impl<'runtime> RealmBuildTransaction<'runtime> {
     pub(super) fn try_new(
         runtime: &'runtime mut Runtime,
-        journal_entries: usize,
+        reservation: RealmReservationPlan,
     ) -> Result<Self, RuntimeError> {
+        let journal_entries = reservation.journal_entries();
         let mut journal = Vec::new();
         journal
             .try_reserve_exact(journal_entries)
             .map_err(|_| allocation_failed(RuntimeResource::ObjectProperties, journal_entries))?;
+        let allocated =
+            AllocatedIntrinsics::try_new(reservation.objects(), reservation.functions())?;
         Ok(Self {
             runtime,
             journal,
+            allocated,
             committed: false,
         })
     }
@@ -53,11 +62,13 @@ impl<'runtime> RealmBuildTransaction<'runtime> {
         self.push(RealmUndo::Realm(realm));
     }
 
-    pub(super) fn record_object(&mut self, object: ObjectId) {
+    pub(super) fn record_object(&mut self, id: IntrinsicObjectId, object: ObjectId) {
+        self.allocated.insert_object(id, object);
         self.push(RealmUndo::Object(object));
     }
 
-    pub(super) fn record_function(&mut self, function: FunctionId) {
+    pub(super) fn record_function(&mut self, id: IntrinsicFunctionId, function: FunctionId) {
+        self.allocated.insert_function(id, function);
         self.push(RealmUndo::Function(function));
     }
 

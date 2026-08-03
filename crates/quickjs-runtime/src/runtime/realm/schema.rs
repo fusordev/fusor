@@ -40,6 +40,34 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     Math,
 }
 
+impl IntrinsicObjectId {
+    pub(in crate::runtime) const ALL: [Self; 23] = [
+        Self::ObjectPrototype,
+        Self::GlobalObject,
+        Self::ErrorPrototype(ErrorIntrinsicKind::Error),
+        Self::ErrorPrototype(ErrorIntrinsicKind::EvalError),
+        Self::ErrorPrototype(ErrorIntrinsicKind::RangeError),
+        Self::ErrorPrototype(ErrorIntrinsicKind::ReferenceError),
+        Self::ErrorPrototype(ErrorIntrinsicKind::SyntaxError),
+        Self::ErrorPrototype(ErrorIntrinsicKind::TypeError),
+        Self::ErrorPrototype(ErrorIntrinsicKind::UriError),
+        Self::ErrorPrototype(ErrorIntrinsicKind::InternalError),
+        Self::ErrorPrototype(ErrorIntrinsicKind::AggregateError),
+        Self::BooleanPrototype,
+        Self::NumberPrototype,
+        Self::BigIntPrototype,
+        Self::StringPrototype,
+        Self::ArrayPrototype,
+        Self::IteratorPrototype,
+        Self::ArrayIteratorPrototype,
+        Self::StringIteratorPrototype,
+        Self::SymbolPrototype,
+        Self::Reflect,
+        Self::Json,
+        Self::Math,
+    ];
+}
+
 /// Stable identity of a native function allocated by Realm bootstrap.
 ///
 /// [`NativeFunctionKind`] already gives repeated families semantic identities
