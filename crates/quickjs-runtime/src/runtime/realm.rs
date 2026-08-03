@@ -830,10 +830,10 @@ impl RealmRecords {
             throw_type_error: reserved_record(2)?,
             function_constructor: reserved_record(3)?,
             object_constructor: reserved_record(3 + OBJECT_STATIC_METHODS.len())?,
-            object_statics: object_static_records()?,
+            object_statics: reserved_function_records()?,
             object_to_string: reserved_record(2)?,
             object_value_of: reserved_record(2)?,
-            object_reflection: object_reflection_records()?,
+            object_reflection: reserved_function_records()?,
             function_to_string: reserved_record(2)?,
             function_call: reserved_record(2)?,
             function_apply: reserved_record(2)?,
@@ -871,9 +871,9 @@ impl RealmRecords {
                 + NUMBER_PREDICATE_STATICS.len()
                 + 2,
         )?;
-        let number_predicates = number_predicate_records()?;
-        let global_numeric_functions = global_numeric_function_records()?;
-        let uri_functions = uri_function_records()?;
+        let number_predicates = reserved_function_records()?;
+        let global_numeric_functions = reserved_function_records()?;
+        let uri_functions = reserved_function_records()?;
         let bigint = BigIntIntrinsicRecords::try_new()?;
         // `String.prototype` additionally carries `length`, its iterator, and
         // every installed method.
@@ -881,8 +881,8 @@ impl RealmRecords {
             5 + STRING_PROTOTYPE_METHODS.len(),
             3 + STRING_FROM_STATICS.len() + 1,
         )?;
-        let string_methods = string_method_records()?;
-        let string_from_statics = string_from_records()?;
+        let string_methods = reserved_function_records()?;
+        let string_from_statics = reserved_function_records()?;
         let mut array = ArrayIntrinsicRecords {
             prototype: reserved_record(
                 8 + ARRAY_SEARCH_METHODS.len()
@@ -936,7 +936,7 @@ impl RealmRecords {
         let reflect = ReflectRecords {
             // Thirteen methods plus @@toStringTag.
             object: reserved_record(ReflectMethod::ALL.len() + 1)?,
-            methods: reflect_method_records()?,
+            methods: reserved_function_records()?,
         };
         let json = JsonRecords {
             // Four methods plus @@toStringTag.
@@ -949,7 +949,7 @@ impl RealmRecords {
         let math = MathRecords {
             // Every method and numeric constant plus @@toStringTag.
             object: reserved_record(MathMethod::ALL.len() + MATH_CONSTANTS.len() + 1)?,
-            methods: math_method_records()?,
+            methods: reserved_function_records()?,
         };
         Ok(Self {
             base,
@@ -964,18 +964,18 @@ impl RealmRecords {
             uri_functions,
             string_from_statics,
             string_raw: reserved_record(2)?,
-            array_searches: array_search_records()?,
-            array_mutators: array_mutator_records()?,
-            array_copiers: array_copier_records()?,
-            array_sorts: array_sort_records()?,
-            array_flattens: array_flatten_records()?,
-            locale_strings: locale_string_records()?,
-            number_formats: number_format_records()?,
-            array_callbacks: array_callback_records()?,
-            array_reductions: array_reduction_records()?,
+            array_searches: reserved_function_records()?,
+            array_mutators: reserved_function_records()?,
+            array_copiers: reserved_function_records()?,
+            array_sorts: reserved_function_records()?,
+            array_flattens: reserved_function_records()?,
+            locale_strings: reserved_function_records()?,
+            number_formats: reserved_function_records()?,
+            array_callbacks: reserved_function_records()?,
+            array_reductions: reserved_function_records()?,
             array_splice: reserved_record(2)?,
             array_is_array: reserved_record(2)?,
-            array_statics: array_static_records()?,
+            array_statics: reserved_function_records()?,
             array,
             iterators,
             symbol,
@@ -3944,200 +3944,17 @@ fn reserved_record(capacity: usize) -> Result<ObjectRecord, RuntimeError> {
     Ok(record)
 }
 
-/// Reserves one record per `Object` static method.
+/// Reserves records for an ordinary native function family.
 ///
-/// Each static is an ordinary native function object carrying `length` and
-/// `name`, so every record reserves exactly two property slots.
-fn object_static_records() -> Result<[ObjectRecord; OBJECT_STATIC_METHODS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; OBJECT_STATIC_METHODS.len()] =
-        [const { None }; OBJECT_STATIC_METHODS.len()];
+/// Every ordinary Realm-native function starts with exactly the non-writable
+/// `length` and `name` own properties. Family-specific extra properties remain
+/// reserved with their holder's declaration.
+fn reserved_function_records<const N: usize>() -> Result<[ObjectRecord; N], RuntimeError> {
+    let mut records: [Option<ObjectRecord>; N] = [const { None }; N];
     for slot in &mut records {
         *slot = Some(reserved_record(2)?);
     }
-    Ok(records.map(|record| record.expect("every Object static record was reserved")))
-}
-
-fn array_static_records() -> Result<[ObjectRecord; ArrayStatic::ALL.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; ArrayStatic::ALL.len()] =
-        [const { None }; ArrayStatic::ALL.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every Array static record was reserved")))
-}
-
-/// Reserves one record per `Object.prototype` reflection method.
-fn object_reflection_records()
--> Result<[ObjectRecord; OBJECT_PROTOTYPE_REFLECTION.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; OBJECT_PROTOTYPE_REFLECTION.len()] =
-        [const { None }; OBJECT_PROTOTYPE_REFLECTION.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every Object reflection record was reserved")))
-}
-
-/// Reserves one native function record per `%Reflect%` method.
-fn reflect_method_records() -> Result<[ObjectRecord; ReflectMethod::ALL.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; ReflectMethod::ALL.len()] =
-        [const { None }; ReflectMethod::ALL.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every Reflect method record was reserved")))
-}
-
-/// Reserves one native function record per installed `%Math%` method.
-fn math_method_records() -> Result<[ObjectRecord; MathMethod::ALL.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; MathMethod::ALL.len()] =
-        [const { None }; MathMethod::ALL.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every Math method record was reserved")))
-}
-
-/// Reserves one record per `Array.prototype` reduction.
-fn array_reduction_records() -> Result<[ObjectRecord; ARRAY_REDUCTION_METHODS.len()], RuntimeError>
-{
-    let mut records: [Option<ObjectRecord>; ARRAY_REDUCTION_METHODS.len()] =
-        [const { None }; ARRAY_REDUCTION_METHODS.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every Array reduction record was reserved")))
-}
-
-/// Reserves one record per `Array.prototype` callback method.
-fn array_callback_records() -> Result<[ObjectRecord; ARRAY_CALLBACK_METHODS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; ARRAY_CALLBACK_METHODS.len()] =
-        [const { None }; ARRAY_CALLBACK_METHODS.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every Array callback record was reserved")))
-}
-
-/// Reserves one record per `Number.prototype` decimal rendering.
-fn number_format_records() -> Result<[ObjectRecord; NUMBER_FORMAT_METHODS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; NUMBER_FORMAT_METHODS.len()] =
-        [const { None }; NUMBER_FORMAT_METHODS.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every Number format record was reserved")))
-}
-
-/// Reserves one record per `Array.prototype` copying method.
-fn array_copier_records() -> Result<[ObjectRecord; ARRAY_COPIER_TOTAL], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; ARRAY_COPIER_TOTAL] =
-        [const { None }; ARRAY_COPIER_TOTAL];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every Array copier record was reserved")))
-}
-
-/// Reserves one record per stable Array sorting method.
-fn array_sort_records() -> Result<[ObjectRecord; ARRAY_SORT_METHODS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; ARRAY_SORT_METHODS.len()] =
-        [const { None }; ARRAY_SORT_METHODS.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every Array sort record was reserved")))
-}
-
-/// Reserves one record per `FlattenIntoArray` method.
-fn array_flatten_records() -> Result<[ObjectRecord; ARRAY_FLATTEN_METHODS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; ARRAY_FLATTEN_METHODS.len()] =
-        [const { None }; ARRAY_FLATTEN_METHODS.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every Array flatten record was reserved")))
-}
-
-/// Reserves one record per deterministic locale-string method.
-fn locale_string_records() -> Result<[ObjectRecord; LOCALE_STRING_METHODS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; LOCALE_STRING_METHODS.len()] =
-        [const { None }; LOCALE_STRING_METHODS.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every locale-string record was reserved")))
-}
-
-/// Reserves one record per `Array.prototype` mutator.
-fn array_mutator_records() -> Result<[ObjectRecord; ARRAY_MUTATOR_METHODS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; ARRAY_MUTATOR_METHODS.len()] =
-        [const { None }; ARRAY_MUTATOR_METHODS.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every Array mutator record was reserved")))
-}
-
-/// Reserves one record per `Array.prototype` search.
-fn array_search_records() -> Result<[ObjectRecord; ARRAY_SEARCH_METHODS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; ARRAY_SEARCH_METHODS.len()] =
-        [const { None }; ARRAY_SEARCH_METHODS.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every Array search record was reserved")))
-}
-
-/// Reserves one record per `String` code-unit factory.
-fn string_from_records() -> Result<[ObjectRecord; STRING_FROM_STATICS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; STRING_FROM_STATICS.len()] =
-        [const { None }; STRING_FROM_STATICS.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every String factory record was reserved")))
-}
-
-/// Reserves one record per `Number` predicate static.
-fn number_predicate_records() -> Result<[ObjectRecord; NUMBER_PREDICATE_STATICS.len()], RuntimeError>
-{
-    let mut records: [Option<ObjectRecord>; NUMBER_PREDICATE_STATICS.len()] =
-        [const { None }; NUMBER_PREDICATE_STATICS.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every Number predicate record was reserved")))
-}
-
-/// Reserves one record per coercing global numeric function.
-fn global_numeric_function_records()
--> Result<[ObjectRecord; GLOBAL_NUMERIC_FUNCTIONS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; GLOBAL_NUMERIC_FUNCTIONS.len()] =
-        [const { None }; GLOBAL_NUMERIC_FUNCTIONS.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every global numeric record was reserved")))
-}
-
-/// Reserves one record per global URI handling function.
-fn uri_function_records() -> Result<[ObjectRecord; URI_FUNCTIONS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; URI_FUNCTIONS.len()] =
-        [const { None }; URI_FUNCTIONS.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every URI function record was reserved")))
-}
-
-/// Reserves one record per installed `String.prototype` method.
-fn string_method_records() -> Result<[ObjectRecord; STRING_PROTOTYPE_METHODS.len()], RuntimeError> {
-    let mut records: [Option<ObjectRecord>; STRING_PROTOTYPE_METHODS.len()] =
-        [const { None }; STRING_PROTOTYPE_METHODS.len()];
-    for slot in &mut records {
-        *slot = Some(reserved_record(2)?);
-    }
-    Ok(records.map(|record| record.expect("every String method record was reserved")))
+    Ok(records.map(|record| record.expect("every native function record was reserved")))
 }
 
 const fn allocation_failed(resource: RuntimeResource, additional: usize) -> RuntimeError {
