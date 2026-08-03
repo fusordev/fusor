@@ -3791,25 +3791,25 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         };
         if arguments.next().is_some() {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "one synthesized arguments binding per function",
+                invariant: "one arguments-object binding per function",
                 span: binding.declaration_spans().first().copied(),
             });
         }
         let span = binding.declaration_spans().first().copied().ok_or(
             LeafCompilationError::SemanticInvariant {
-                invariant: "synthesized arguments binding has a source use",
+                invariant: "arguments-object binding has a source anchor",
                 span: None,
             },
         )?;
         let slot = layout
             .slot(binding.id())
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "synthesized arguments binding has a frame slot",
+                invariant: "arguments-object binding has a frame slot",
                 span: Some(span),
             })?;
         if !matches!(slot, FrameSlot::Local(_)) {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "synthesized arguments binding is function-local",
+                invariant: "arguments-object binding is function-local",
                 span: Some(span),
             });
         }

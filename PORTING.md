@@ -378,8 +378,8 @@ Known intentional runtime differences:
   shrink results at non-configurable indices, and install a requested
   non-writable final state even when that shrink returns `false`.
 - [ ] Remaining RegExp-dependent String method surface, shape sharing/transition
-  interning, explicit `arguments` binding collisions and Proxy exotics, dense
-  indexed storage, deterministic finalization, and diagnostics.
+  interning, non-simple parameter instantiation and Proxy exotics, dense indexed
+  storage, deterministic finalization, and diagnostics.
 
 ### Built-ins and asynchronous semantics
 
@@ -446,9 +446,18 @@ Known intentional runtime differences:
   slot while assigning source binding identity only to the last occurrence.
   The exact indexed/`length`/`@@iterator`/`callee` surface and all five arguments
   exotic internal methods preserve the earlier descriptor, receiver, deletion,
-  freeze, GC, and atomic-limit behavior. `var arguments` and named function
-  expression collision handling remain fail-closed for the next arguments
-  tranche.
+  freeze, GC, and atomic-limit behavior.
+- [x] Complete simple-parameter `argumentsObjectNeeded` collision semantics.
+  A body `var arguments` reuses the instantiated arguments binding, while a
+  named function expression keeps its outer immutable self-name binding and
+  receives a distinct inner arguments object that shadows it. Reference routing
+  now repairs Oxc's intentionally absent implicit-arguments symbols across
+  ordinary-function boundaries: implicit arguments shadow outer program,
+  function, and parameter bindings, but explicit arrow parameters, arrow vars,
+  block lexicals, and catch bindings remain nearer. Parameters, top-level
+  lexicals, and body function declarations named `arguments` suppress object
+  creation exactly as FunctionDeclarationInstantiation requires. Non-simple
+  parameter environments remain the next arguments/compiler tranche.
 - [x] Implement `JSON.parse` on a realm-owned `%JSON%` object: an iterative
   UTF-16 parser accepts exactly the ECMA-404 JSON grammar, preserves escapes,
   lone surrogates, duplicate-member evaluation, and `__proto__` as data, then

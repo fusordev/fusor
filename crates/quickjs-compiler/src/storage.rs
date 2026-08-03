@@ -687,10 +687,6 @@ pub enum UnsupportedFeature {
     AnnexBBlockFunction,
     /// Class-created functions, private names, and synthetic slots.
     ClassSyntheticSlots,
-    /// An `arguments` binding that collides with an explicit
-    /// ordinary-function declaration whose instantiation semantics are not
-    /// represented yet.
-    ArgumentsBinding,
     /// A synthesized `this`, `new.target`, or `super` binding.
     FunctionSyntheticBinding,
 }
@@ -787,6 +783,12 @@ struct BindingDraft {
     placement: StoragePlacement,
     policy: DeclarationPolicy,
     arguments_object: bool,
+}
+
+#[derive(Default)]
+struct ImplicitArgumentsPlan {
+    reference_owners: HashMap<ReferenceId, ExecutableId>,
+    first_references: HashMap<ExecutableId, Span>,
 }
 
 struct ResolvedDraft {
@@ -918,7 +920,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.reject_synthetic_binding_uses()?;
 
         let mut binding_drafts = self.binding_drafts()?;
-        self.add_arguments_bindings(&mut binding_drafts)?;
+        let implicit_arguments_references = self.add_arguments_bindings(&mut binding_drafts)?;
         self.add_synthetic_default_binding(&mut binding_drafts)?;
         binding_drafts.sort_by_key(|binding| {
             let first = binding
@@ -938,10 +940,14 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             freeze_bindings(binding_drafts, self.unit.semantic().scoping().symbols_len())?;
         let scope_by_binding = self.binding_scope_map(&symbol_bindings, &bindings)?;
 
-        let mut resolved_drafts = self.resolved_drafts(&symbol_bindings)?;
+        let mut resolved_drafts =
+            self.resolved_drafts(&symbol_bindings, &bindings, &implicit_arguments_references)?;
         let unresolved_drafts = self.unresolved_drafts()?;
-        let (arguments_references, mut unresolved_drafts) =
-            self.resolve_arguments_references(unresolved_drafts, &bindings)?;
+        let (arguments_references, mut unresolved_drafts) = Self::resolve_arguments_references(
+            unresolved_drafts,
+            &bindings,
+            &implicit_arguments_references,
+        )?;
         resolved_drafts.extend(arguments_references);
         resolved_drafts.sort_by_key(|reference| {
             (
@@ -1046,11 +1052,15 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         invariant: "arguments binding scope index is in range",
                         span: binding.declaration_spans.first().copied(),
                     })?;
-            if target.replace(scope).is_some() {
-                return Err(CompilerError::SemanticInvariant {
-                    invariant: "arguments binding has one compiler scope",
-                    span: binding.declaration_spans.first().copied(),
-                });
+            match *target {
+                None => *target = Some(scope),
+                Some(existing) if existing == scope => {}
+                Some(_) => {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "arguments binding has its function compiler scope",
+                        span: binding.declaration_spans.first().copied(),
+                    });
+                }
             }
         }
         Ok(scopes)
@@ -1373,15 +1383,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 Some(scoping.symbol_span(symbol_id)),
             )?;
             let name = scoping.symbol_name(symbol_id);
-            if name == "arguments"
-                && matches!(kind, DeclarationKind::Var | DeclarationKind::FunctionName)
-                && self.is_ordinary_function(owner, scoping.symbol_span(symbol_id))?
-            {
-                return unsupported(
-                    UnsupportedFeature::ArgumentsBinding,
-                    scoping.symbol_span(symbol_id),
-                );
-            }
             let placement = self.placement(symbol_id, owner, kind)?;
             let policy = self.declaration_policy(owner, kind, facts.function_scope_entry);
             let declaration_spans = declaration_spans(scoping, symbol_id);
@@ -1689,12 +1690,19 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn resolved_drafts(
         &self,
         symbol_bindings: &[Option<BindingId>],
+        bindings: &[BindingStorage],
+        implicit_arguments_references: &HashMap<ReferenceId, ExecutableId>,
     ) -> Result<Vec<ResolvedDraft>, CompilerError> {
         let semantic = self.unit.semantic();
         let scoping = semantic.scoping();
+        let arguments_bindings = bindings
+            .iter()
+            .filter(|binding| binding.arguments_object)
+            .map(|binding| (binding.executable, binding.id))
+            .collect::<HashMap<_, _>>();
         let mut drafts = Vec::with_capacity(scoping.references_len());
         for symbol_id in scoping.symbol_ids() {
-            let binding = symbol_bindings
+            let source_binding = symbol_bindings
                 .get(symbol_id.index())
                 .and_then(|binding| *binding)
                 .ok_or(CompilerError::SemanticInvariant {
@@ -1705,6 +1713,18 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 let reference = scoping.get_reference(reference_id);
                 let span = semantic.reference_span(reference);
                 let executable = self.scope_owner(reference.scope_id(), Some(span))?;
+                let binding = if let Some(owner) =
+                    implicit_arguments_references.get(&reference_id).copied()
+                {
+                    arguments_bindings.get(&owner).copied().ok_or(
+                        CompilerError::SemanticInvariant {
+                            invariant: "implicit arguments reference has an owned binding",
+                            span: Some(span),
+                        },
+                    )?
+                } else {
+                    source_binding
+                };
                 drafts.push(ResolvedDraft {
                     reference_id,
                     executable,
@@ -1753,34 +1773,34 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn add_arguments_bindings(
         &self,
         bindings: &mut Vec<BindingDraft>,
-    ) -> Result<(), CompilerError> {
-        let semantic = self.unit.semantic();
-        let scoping = semantic.scoping();
-        let mut first_references = HashMap::<ExecutableId, Span>::new();
-        for reference_id in scoping.root_unresolved_references_ids().flatten() {
-            let reference = scoping.get_reference(reference_id);
-            if semantic.reference_name(reference) != "arguments" {
-                continue;
-            }
-            let span = semantic.reference_span(reference);
-            let executable = self.scope_owner(reference.scope_id(), Some(span))?;
-            let Some(owner) = self.arguments_owner(executable, span)? else {
-                continue;
-            };
-            first_references
-                .entry(owner)
-                .and_modify(|first| {
-                    if (span.start, span.end) < (first.start, first.end) {
-                        *first = span;
-                    }
-                })
-                .or_insert(span);
-        }
-
+    ) -> Result<HashMap<ReferenceId, ExecutableId>, CompilerError> {
+        let ImplicitArgumentsPlan {
+            reference_owners,
+            first_references,
+        } = self.collect_implicit_arguments_references(bindings)?;
         let mut first_references = first_references.into_iter().collect::<Vec<_>>();
         first_references
             .sort_unstable_by_key(|(owner, span)| (owner.index(), span.start, span.end));
         for (owner, span) in first_references {
+            let mut reusable = bindings.iter_mut().filter(|binding| {
+                binding.executable == owner
+                    && binding.name.as_ref() == "arguments"
+                    && binding.policy.kind == DeclarationKind::Var
+            });
+            if let Some(binding) = reusable.next() {
+                if reusable.next().is_some()
+                    || binding.placement != StoragePlacement::Local
+                    || binding.policy.initialization
+                        != InitializationPolicy::UndefinedAtInstantiation
+                {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "arguments var is one ordinary function-local binding",
+                        span: binding.declaration_spans.first().copied(),
+                    });
+                }
+                binding.arguments_object = true;
+                continue;
+            }
             bindings.push(BindingDraft {
                 symbol_id: None,
                 executable: owner,
@@ -1791,13 +1811,152 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 arguments_object: true,
             });
         }
+        Ok(reference_owners)
+    }
+
+    fn collect_implicit_arguments_references(
+        &self,
+        bindings: &[BindingDraft],
+    ) -> Result<ImplicitArgumentsPlan, CompilerError> {
+        let semantic = self.unit.semantic();
+        let scoping = semantic.scoping();
+        let mut binding_by_symbol = vec![None; scoping.symbols_len()];
+        for (index, binding) in bindings.iter().enumerate() {
+            let Some(symbol) = binding.symbol_id else {
+                continue;
+            };
+            let target = binding_by_symbol.get_mut(symbol.index()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "arguments source symbol indexes its binding draft",
+                    span: binding.declaration_spans.first().copied(),
+                },
+            )?;
+            if target.replace(index).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one binding draft per arguments source symbol",
+                    span: binding.declaration_spans.first().copied(),
+                });
+            }
+        }
+        let mut implicit_references = HashMap::new();
+        let mut first_references = HashMap::<ExecutableId, Span>::new();
+        for symbol in scoping
+            .symbol_ids()
+            .filter(|symbol| scoping.symbol_name(*symbol) == "arguments")
+        {
+            let binding = binding_by_symbol
+                .get(symbol.index())
+                .and_then(|index| *index)
+                .and_then(|index| bindings.get(index))
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "arguments source symbol has a binding draft",
+                    span: Some(scoping.symbol_span(symbol)),
+                })?;
+            for &reference_id in scoping.get_resolved_reference_ids(symbol) {
+                let reference = scoping.get_reference(reference_id);
+                let span = semantic.reference_span(reference);
+                let executable = self.scope_owner(reference.scope_id(), Some(span))?;
+                let Some(owner) = self.arguments_owner(executable, span)? else {
+                    continue;
+                };
+                if self
+                    .reference_uses_explicit_arguments_binding(executable, owner, binding, span)?
+                {
+                    continue;
+                }
+                Self::record_implicit_arguments_reference(
+                    &mut implicit_references,
+                    &mut first_references,
+                    reference_id,
+                    owner,
+                    span,
+                )?;
+            }
+        }
+        for reference_id in scoping.root_unresolved_references_ids().flatten() {
+            let reference = scoping.get_reference(reference_id);
+            if semantic.reference_name(reference) != "arguments" {
+                continue;
+            }
+            let span = semantic.reference_span(reference);
+            let executable = self.scope_owner(reference.scope_id(), Some(span))?;
+            let Some(owner) = self.arguments_owner(executable, span)? else {
+                continue;
+            };
+            Self::record_implicit_arguments_reference(
+                &mut implicit_references,
+                &mut first_references,
+                reference_id,
+                owner,
+                span,
+            )?;
+        }
+        Ok(ImplicitArgumentsPlan {
+            reference_owners: implicit_references,
+            first_references,
+        })
+    }
+
+    fn reference_uses_explicit_arguments_binding(
+        &self,
+        reference_executable: ExecutableId,
+        arguments_owner: ExecutableId,
+        binding: &BindingDraft,
+        span: Span,
+    ) -> Result<bool, CompilerError> {
+        if binding.executable == arguments_owner {
+            return Ok(!matches!(
+                binding.policy.kind,
+                DeclarationKind::Var | DeclarationKind::FunctionName
+            ));
+        }
+        let mut executable = reference_executable;
+        while executable != arguments_owner {
+            if executable == binding.executable {
+                return Ok(true);
+            }
+            executable = self
+                .executable_drafts
+                .get(executable.index())
+                .and_then(|draft| draft.executable.parent)
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "arguments reference reaches its ordinary function owner",
+                    span: Some(span),
+                })?;
+        }
+        Ok(false)
+    }
+
+    fn record_implicit_arguments_reference(
+        references: &mut HashMap<ReferenceId, ExecutableId>,
+        first_references: &mut HashMap<ExecutableId, Span>,
+        reference: ReferenceId,
+        owner: ExecutableId,
+        span: Span,
+    ) -> Result<(), CompilerError> {
+        if let Some(previous) = references.insert(reference, owner)
+            && previous != owner
+        {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "arguments reference has one ordinary function owner",
+                span: Some(span),
+            });
+        }
+        first_references
+            .entry(owner)
+            .and_modify(|first| {
+                if (span.start, span.end) < (first.start, first.end) {
+                    *first = span;
+                }
+            })
+            .or_insert(span);
         Ok(())
     }
 
     fn resolve_arguments_references(
-        &self,
         unresolved: Vec<UnresolvedDraft>,
         bindings: &[BindingStorage],
+        implicit_arguments_references: &HashMap<ReferenceId, ExecutableId>,
     ) -> Result<(Vec<ResolvedDraft>, Vec<UnresolvedDraft>), CompilerError> {
         let arguments_bindings = bindings
             .iter()
@@ -1807,17 +1966,22 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let mut resolved = Vec::new();
         let mut remaining = Vec::new();
         for reference in unresolved {
-            if reference.name.as_ref() != "arguments" {
-                remaining.push(reference);
-                continue;
-            }
-            let Some(owner) = self.arguments_owner(reference.executable, reference.span)? else {
+            let Some(owner) = implicit_arguments_references
+                .get(&reference.reference_id)
+                .copied()
+            else {
                 remaining.push(reference);
                 continue;
             };
+            if reference.name.as_ref() != "arguments" {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "implicit arguments reference retains its source name",
+                    span: Some(reference.span),
+                });
+            }
             let binding = arguments_bindings.get(&owner).copied().ok_or(
                 CompilerError::SemanticInvariant {
-                    invariant: "arguments reference has a synthesized binding",
+                    invariant: "implicit arguments reference has an owned binding",
                     span: Some(reference.span),
                 },
             )?;
@@ -1861,23 +2025,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 ExecutableKind::Script { .. } | ExecutableKind::Module => return Ok(None),
             }
         }
-    }
-
-    fn is_ordinary_function(
-        &self,
-        executable: ExecutableId,
-        span: Span,
-    ) -> Result<bool, CompilerError> {
-        let executable = self.executable_drafts.get(executable.index()).ok_or(
-            CompilerError::SemanticInvariant {
-                invariant: "binding executable exists",
-                span: Some(span),
-            },
-        )?;
-        Ok(matches!(
-            executable.executable.kind,
-            ExecutableKind::Function { .. }
-        ))
     }
 
     fn scope_owner(

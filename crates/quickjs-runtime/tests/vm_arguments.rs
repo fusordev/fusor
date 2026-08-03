@@ -210,6 +210,73 @@ fn a_captured_duplicate_parameter_uses_the_last_mapped_position() {
 }
 
 #[test]
+fn a_var_arguments_declaration_reuses_the_instantiated_arguments_binding() {
+    let result = string_result(
+        "function inspect(){const before=arguments;var arguments;\
+            return Object.prototype.toString.call(arguments)+'|'+arguments.length+'|'+\
+                (before===arguments);}return inspect(1,2);",
+    );
+    assert_eq!(result, "[object Arguments]|2|true");
+
+    let result =
+        string_result("function inspect(){var arguments=9;return ''+arguments;}return inspect(1);");
+    assert_eq!(result, "9");
+}
+
+#[test]
+fn a_named_function_expression_has_a_shadowing_arguments_binding() {
+    let result = string_result(
+        "const inspect=function arguments(){return arguments.length+'|'+\
+            (arguments.callee===inspect)+'|'+typeof arguments;};return inspect(1);",
+    );
+    assert_eq!(result, "1|true|object");
+}
+
+#[test]
+fn implicit_arguments_shadow_outer_bindings_but_not_inner_explicit_bindings() {
+    let result = string_result(
+        "let arguments=9;function inspect(){return ''+arguments[0];}return inspect(4);",
+    );
+    assert_eq!(result, "4");
+
+    let result = string_result(
+        "let arguments=9;function inspect(){arguments=3;return arguments;}\
+            return inspect()+'|'+arguments;",
+    );
+    assert_eq!(result, "3|9");
+
+    let result = string_result(
+        "function outer(arguments){function inner(){return ''+arguments[0];}\
+            return inner(5);}return outer(9);",
+    );
+    assert_eq!(result, "5");
+
+    let result = string_result(
+        "function inspect(){let result;{let arguments=3;result=arguments;}\
+            return result+'|'+arguments[0];}\
+            return inspect(4);",
+    );
+    assert_eq!(result, "3|4");
+
+    let result = string_result(
+        "function inspect(){let result;try{throw 3;}catch(arguments){result=arguments;}\
+            return result+'|'+arguments[0];}return inspect(4);",
+    );
+    assert_eq!(result, "3|4");
+}
+
+#[test]
+fn parameter_lexical_and_function_declarations_suppress_arguments_instantiation() {
+    let result = string_result(
+        "function parameter(arguments){return arguments;}\
+            function lexical(){let arguments=2;return arguments;}\
+            function declaration(){function arguments(){return 3;}return arguments();}\
+            return parameter(1)+'|'+lexical(9)+'|'+declaration(9);",
+    );
+    assert_eq!(result, "1|2|3");
+}
+
+#[test]
 fn mapped_definitions_update_or_sever_parameter_aliases_exactly() {
     let result = string_result(
         "function inspect(a,b,c,d){a=10;const own=Object.getOwnPropertyDescriptor(arguments,'0').value;\
