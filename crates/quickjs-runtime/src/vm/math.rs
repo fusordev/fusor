@@ -85,6 +85,21 @@ pub(super) fn begin_math_method(
         );
     }
 
+    if method.is_binary() {
+        let left = arguments.take_first_or_undefined();
+        let right = arguments.take_first_or_undefined();
+        return begin_operator_primitive_conversion(
+            runtime,
+            left,
+            OperatorPrimitiveHint::Number,
+            OperatorPrimitiveTarget::MathBinaryRight { method, right },
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+
     begin_operator_primitive_conversion(
         runtime,
         arguments.take_first_or_undefined(),
@@ -213,9 +228,49 @@ pub(super) fn finish_math_unary(
         MathMethod::Acos => value.acos(),
         MathMethod::Asin => value.asin(),
         MathMethod::Atan => value.atan(),
-        MathMethod::Min | MathMethod::Max => {
+        MathMethod::Cos => value.cos(),
+        MathMethod::Exp => value.exp(),
+        MathMethod::Log => value.ln(),
+        MathMethod::Sin => value.sin(),
+        MathMethod::Tan => value.tan(),
+        MathMethod::Trunc => value.trunc(),
+        MathMethod::Sign => {
+            if value.is_nan() || value == 0.0 {
+                value
+            } else if value.is_sign_negative() {
+                -1.0
+            } else {
+                1.0
+            }
+        }
+        MathMethod::Min | MathMethod::Max | MathMethod::Atan2 | MathMethod::Pow => {
             return Err(EngineFault::RuntimeInvariant {
-                message: "a variadic Math method entered the unary continuation",
+                message: "a non-unary Math method entered the unary continuation",
+            }
+            .into());
+        }
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::Number(
+        JsNumber::from_f64(result),
+    )))
+}
+
+/// Applies one two-argument `%Math%` algorithm after both `ToNumber` steps.
+pub(super) fn finish_math_binary(
+    method: MathMethod,
+    left: JsNumber,
+    right: JsNumber,
+) -> Result<NativeDispatch, NativeFailure> {
+    let left = left.as_f64();
+    let right = right.as_f64();
+    let result = match method {
+        // `atan2`'s argument names are `(y, x)`; Rust deliberately uses the
+        // same receiver/argument order and preserves the specified zero signs.
+        MathMethod::Atan2 => left.atan2(right),
+        MathMethod::Pow => number_exponentiate(left, right),
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "a non-binary Math method entered the binary continuation",
             }
             .into());
         }

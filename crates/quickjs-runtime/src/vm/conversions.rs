@@ -1566,6 +1566,23 @@ fn finish_operator_primitive_target(
             let number = operator_to_number(value, realm, origin)?;
             finish_math_unary(method, number)
         }
+        OperatorPrimitiveTarget::MathBinaryRight { method, right } => {
+            let left = operator_to_number(value, realm, origin)?;
+            begin_operator_primitive_conversion(
+                runtime,
+                right,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::MathBinaryFinish { method, left },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::MathBinaryFinish { method, left } => {
+            let right = operator_to_number(value, realm, origin)?;
+            finish_math_binary(method, left, right)
+        }
         OperatorPrimitiveTarget::MathExtrema(state) => {
             let number = operator_to_number(value, realm, origin)?;
             advance_math_extrema(runtime, *state, Some(number), return_to, execution_budget)
@@ -2205,10 +2222,7 @@ fn apply_numeric_arithmetic(
         FinalOpcode::Div => left / right,
         FinalOpcode::Mod => left % right,
         FinalOpcode::Sub => left - right,
-        FinalOpcode::Pow if !right.is_finite() && left.abs().to_bits() == 1.0_f64.to_bits() => {
-            f64::NAN
-        }
-        FinalOpcode::Pow => left.powf(right),
+        FinalOpcode::Pow => number_exponentiate(left, right),
         _ => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "non-arithmetic opcode reached numeric arithmetic",
@@ -2219,6 +2233,16 @@ fn apply_numeric_arithmetic(
     Ok(NativeDispatch::Immediate(StoredValue::Number(
         JsNumber::from_f64(result),
     )))
+}
+
+/// Applies the ECMA-262 `Number::exponentiate` compatibility exception before
+/// delegating the implementation-approximated finite operation to binary64.
+pub(super) fn number_exponentiate(base: f64, exponent: f64) -> f64 {
+    if !exponent.is_finite() && base.abs().to_bits() == 1.0_f64.to_bits() {
+        f64::NAN
+    } else {
+        base.powf(exponent)
+    }
 }
 
 fn apply_numeric_bitwise(

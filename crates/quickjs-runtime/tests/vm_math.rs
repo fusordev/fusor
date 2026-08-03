@@ -112,7 +112,7 @@ fn math_is_an_ordinary_tagged_object_with_exact_prefix_order() {
         ("Object.prototype.toString.call(Math)", "[object Math]"),
         (
             "Object.getOwnPropertyNames(Math).join(',')",
-            "min,max,abs,floor,ceil,round,sqrt,acos,asin,atan",
+            "min,max,abs,floor,ceil,round,sqrt,acos,asin,atan,atan2,cos,exp,log,pow,sin,tan,trunc,sign",
         ),
         ("Object.getOwnPropertySymbols(Math).length", "1"),
         (
@@ -153,6 +153,9 @@ fn math_method_identities_and_descriptors_are_exact() {
         ("Math.max.length+'|'+Math.max.name", "2|max"),
         ("Math.abs.length+'|'+Math.abs.name", "1|abs"),
         ("Math.atan.length+'|'+Math.atan.name", "1|atan"),
+        ("Math.atan2.length+'|'+Math.atan2.name", "2|atan2"),
+        ("Math.pow.length+'|'+Math.pow.name", "2|pow"),
+        ("Math.sign.length+'|'+Math.sign.name", "1|sign"),
         (
             "Object.getOwnPropertyNames(Math.min).join(',')",
             "length,name",
@@ -233,6 +236,83 @@ fn unary_math_methods_match_special_values_and_signed_zero() {
         ("1/Math.atan(-0)", "-Infinity"),
         ("Math.atan(Infinity)>1.5", "true"),
         ("Math.atan(-Infinity)<-1.5", "true"),
+        ("Math.cos(-0)", "1"),
+        ("Number.isNaN(Math.cos(Infinity))", "true"),
+        ("Math.exp(-Infinity)", "0"),
+        ("Math.exp(Infinity)", "Infinity"),
+        ("Math.exp(-0)", "1"),
+        ("1/Math.log(1)", "Infinity"),
+        ("Math.log(-0)", "-Infinity"),
+        ("Number.isNaN(Math.log(-1))", "true"),
+        ("1/Math.sin(-0)", "-Infinity"),
+        ("Number.isNaN(Math.sin(Infinity))", "true"),
+        ("1/Math.tan(-0)", "-Infinity"),
+        ("Number.isNaN(Math.tan(-Infinity))", "true"),
+        ("Math.trunc(1.9)", "1"),
+        ("Math.trunc(-1.9)", "-1"),
+        ("1/Math.trunc(-0.9)", "-Infinity"),
+        ("Math.sign(Infinity)", "1"),
+        ("Math.sign(-Infinity)", "-1"),
+        ("1/Math.sign(-0)", "-Infinity"),
+        ("Number.isNaN(Math.sign(NaN))", "true"),
+    ]);
+}
+
+#[test]
+fn math_atan2_preserves_quadrants_infinities_and_zero_signs() {
+    assert_all(&[
+        ("1/Math.atan2(0,0)", "Infinity"),
+        ("Math.atan2(0,-0)", "3.141592653589793"),
+        ("1/Math.atan2(-0,0)", "-Infinity"),
+        ("Math.atan2(-0,-0)", "-3.141592653589793"),
+        ("Math.atan2(Infinity,Infinity)", "0.7853981633974483"),
+        ("Math.atan2(Infinity,-Infinity)", "2.356194490192345"),
+        ("Math.atan2(-Infinity,Infinity)", "-0.7853981633974483"),
+        ("Math.atan2(-Infinity,-Infinity)", "-2.356194490192345"),
+        ("1/Math.atan2(1,Infinity)", "Infinity"),
+        ("1/Math.atan2(-1,Infinity)", "-Infinity"),
+        ("Number.isNaN(Math.atan2(NaN,1))", "true"),
+        ("Number.isNaN(Math.atan2(1,NaN))", "true"),
+    ]);
+}
+
+#[test]
+fn math_pow_uses_number_exponentiation_edge_semantics() {
+    assert_all(&[
+        ("Math.pow(NaN,0)", "1"),
+        ("Number.isNaN(Math.pow(1,NaN))", "true"),
+        ("Number.isNaN(Math.pow(1,Infinity))", "true"),
+        ("Number.isNaN(Math.pow(-1,-Infinity))", "true"),
+        ("1/Math.pow(-0,3)", "-Infinity"),
+        ("Math.pow(-0,-3)", "-Infinity"),
+        ("1/Math.pow(-0,2)", "Infinity"),
+        ("Math.pow(-0,-2)", "Infinity"),
+        ("Number.isNaN(Math.pow(-2,0.5))", "true"),
+        ("Math.pow(2,10)", "1024"),
+        ("Math.pow(0,-1)", "Infinity"),
+        ("Math.pow(Infinity,-1)", "0"),
+    ]);
+}
+
+#[test]
+fn binary_math_converts_left_then_right_and_propagates_abruptions() {
+    assert_all(&[
+        (
+            "(function(){let log=[];const left={valueOf(){log.push('left');return 2}};const right={valueOf(){log.push('right');return 3}};const value=Math.pow(left,right);return log.join(',')+'|'+value})()",
+            "left,right|8",
+        ),
+        (
+            "(function(){try{Math.atan2(NaN,{valueOf(){throw 'right'}})}catch(e){return e}})()",
+            "right",
+        ),
+        (
+            "(function(){let touched=false;try{Math.pow(1n,{valueOf(){touched=true;return 2}})}catch(e){return (e instanceof TypeError)+'|'+touched}})()",
+            "true|false",
+        ),
+        (
+            "(function(){try{Math.atan2(1,Symbol())}catch(e){return e instanceof TypeError}})()",
+            "true",
+        ),
     ]);
 }
 

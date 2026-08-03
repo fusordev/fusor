@@ -790,10 +790,19 @@ pub(crate) enum MathMethod {
     Acos,
     Asin,
     Atan,
+    Atan2,
+    Cos,
+    Exp,
+    Log,
+    Pow,
+    Sin,
+    Tan,
+    Trunc,
+    Sign,
 }
 
 impl MathMethod {
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 19] = [
         Self::Min,
         Self::Max,
         Self::Abs,
@@ -804,6 +813,15 @@ impl MathMethod {
         Self::Acos,
         Self::Asin,
         Self::Atan,
+        Self::Atan2,
+        Self::Cos,
+        Self::Exp,
+        Self::Log,
+        Self::Pow,
+        Self::Sin,
+        Self::Tan,
+        Self::Trunc,
+        Self::Sign,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -818,12 +836,21 @@ impl MathMethod {
             Self::Acos => "acos",
             Self::Asin => "asin",
             Self::Atan => "atan",
+            Self::Atan2 => "atan2",
+            Self::Cos => "cos",
+            Self::Exp => "exp",
+            Self::Log => "log",
+            Self::Pow => "pow",
+            Self::Sin => "sin",
+            Self::Tan => "tan",
+            Self::Trunc => "trunc",
+            Self::Sign => "sign",
         }
     }
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Min | Self::Max => 2,
+            Self::Min | Self::Max | Self::Atan2 | Self::Pow => 2,
             Self::Abs
             | Self::Floor
             | Self::Ceil
@@ -831,12 +858,23 @@ impl MathMethod {
             | Self::Sqrt
             | Self::Acos
             | Self::Asin
-            | Self::Atan => 1,
+            | Self::Atan
+            | Self::Cos
+            | Self::Exp
+            | Self::Log
+            | Self::Sin
+            | Self::Tan
+            | Self::Trunc
+            | Self::Sign => 1,
         }
     }
 
     pub(crate) const fn is_extrema(self) -> bool {
         matches!(self, Self::Min | Self::Max)
+    }
+
+    pub(crate) const fn is_binary(self) -> bool {
+        matches!(self, Self::Atan2 | Self::Pow)
     }
 }
 

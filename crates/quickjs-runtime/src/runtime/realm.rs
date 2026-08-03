@@ -42,8 +42,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 23;
-const REALM_FUNCTION_COUNT: usize = 191;
-const REALM_PROPERTY_COUNT: u64 = 625;
+const REALM_FUNCTION_COUNT: usize = 200;
+const REALM_PROPERTY_COUNT: u64 = 652;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -1052,7 +1052,7 @@ impl RealmRecords {
             stringify: reserved_record(2)?,
         };
         let math = MathRecords {
-            // Ten methods plus @@toStringTag.
+            // Every installed method plus @@toStringTag.
             object: reserved_record(MathMethod::ALL.len() + 1)?,
             methods: math_method_records()?,
         };

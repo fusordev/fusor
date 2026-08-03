@@ -514,6 +514,16 @@ Known intentional runtime differences:
   toward positive infinity. The realm graph publishes exact property order,
   descriptors, names, arities, `@@toStringTag`, resource accounting, and
   failure-atomic rollback; remaining `%Math%` methods and constants stay open.
+- [x] Extend `%Math%` through the next contiguous specification-order tranche:
+  `atan2`, `cos`, `exp`, `log`, `pow`, `sin`, `tan`, `trunc`, and `sign`.
+  Binary methods convert both arguments left-to-right through resumable
+  `ToNumber`, retain the unconverted right operand across suspension, and
+  preserve abrupt-completion ordering. `pow` shares the VM's
+  `Number::exponentiate` implementation with `**`; `atan2` and every unary
+  method preserve the specified NaN, infinity, quadrant, and signed-zero edge
+  cases. Realm publication keeps the pinned own-key order, exact descriptors,
+  resource ceilings, tracing, and failure-atomic rollback; the remaining
+  `%Math%` methods and constants stay open.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,

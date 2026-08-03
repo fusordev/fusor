@@ -937,6 +937,16 @@ enum OperatorPrimitiveTarget {
     GlobalNumeric(GlobalNumericFunction),
     /// One unary `%Math%` argument, awaiting `ToNumber`.
     MathUnary(MathMethod),
+    /// A binary `%Math%` method's left argument, retaining the right argument.
+    MathBinaryRight {
+        method: MathMethod,
+        right: StoredValue,
+    },
+    /// A binary `%Math%` method's right argument, retaining the converted left.
+    MathBinaryFinish {
+        method: MathMethod,
+        left: JsNumber,
+    },
     /// One variadic `%Math.min%` or `%Math.max%` conversion.
     MathExtrema(Box<MathExtremaContinuation>),
     /// One URI function's argument, awaiting `ToString`.
@@ -1040,7 +1050,9 @@ impl OperatorPrimitiveTarget {
             }
             | Self::StringIntrinsic {
                 new_target: Some(_),
-            } => 1,
+            }
+            | Self::MathBinaryRight { .. }
+            | Self::MathBinaryFinish { .. } => 1,
             Self::ErrorConstructorMessage(state) => state.retained_values(),
             Self::JsonParseText(state) => state.retained_values(),
             Self::JsonStringifyReplacerItem(state)
@@ -1226,7 +1238,8 @@ fn trace_operator_primitive_target_roots(
     mark: &mut dyn FnMut(CollectionRoot),
 ) {
     match target {
-        // A `BigInt` payload is not a heap node, so these carry no roots.
+        // Primitive continuation payloads carry no heap roots; in particular,
+        // a `BigInt` payload is not a heap node.
         OperatorPrimitiveTarget::Unary { .. }
         | OperatorPrimitiveTarget::NumberToString { .. }
         | OperatorPrimitiveTarget::NumberFormatDigits { .. }
@@ -1238,14 +1251,17 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::StringIteratorIntrinsic
         | OperatorPrimitiveTarget::JsonRawJsonText
         | OperatorPrimitiveTarget::BigIntToString { .. }
-        | OperatorPrimitiveTarget::BigIntTruncationValue { .. } => {}
+        | OperatorPrimitiveTarget::BigIntTruncationValue { .. }
+        // The converted left Number carries no heap edge.
+        | OperatorPrimitiveTarget::MathBinaryFinish { .. } => {}
         OperatorPrimitiveTarget::JsonParseText(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonStringifyReplacerItem(state)
         | OperatorPrimitiveTarget::JsonStringifySpaceNumber(state)
         | OperatorPrimitiveTarget::JsonStringifySpaceString(state)
         | OperatorPrimitiveTarget::JsonStringifyBoxedNumber(state)
         | OperatorPrimitiveTarget::JsonStringifyBoxedString(state) => state.trace_roots(mark),
-        OperatorPrimitiveTarget::BinaryRight { right, .. } => {
+        OperatorPrimitiveTarget::BinaryRight { right, .. }
+        | OperatorPrimitiveTarget::MathBinaryRight { right, .. } => {
             trace_stored_value_root(right, mark);
         }
         OperatorPrimitiveTarget::BinaryFinish { left, .. } => {
