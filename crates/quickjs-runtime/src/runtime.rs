@@ -825,6 +825,13 @@ pub(crate) enum NativeFunctionKind {
     ObjectDefineProperty,
     ObjectGetOwnPropertyDescriptor,
     ObjectCreate,
+    /// `Object.is`, which is `SameValue` rather than strict equality.
+    ObjectIs,
+    /// `Object.hasOwn`, which is `hasOwnProperty` with the target as its first
+    /// argument rather than as its receiver.
+    ObjectHasOwn,
+    /// `Object.getOwnPropertySymbols`, the symbol-only own-key listing.
+    ObjectGetOwnPropertySymbols,
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
     ObjectPrototypeHasOwnProperty,

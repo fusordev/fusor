@@ -1072,6 +1072,48 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::ObjectCreate => {
             object_create(runtime, native.realm, inputs.arguments, origin.as_ref())
         }
+        // `Object.is` is `SameValue`, which differs from `===` on `NaN` and on
+        // the signed zeros; both operands are already values, so nothing
+        // converts and nothing can suspend.
+        NativeFunctionKind::ObjectIs => {
+            let mut arguments = inputs.arguments;
+            let left = arguments.take_first_or_undefined();
+            let right = arguments.take_first_or_undefined();
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(
+                left.same_value(&right),
+            )))
+        }
+        // `Object.hasOwn(target, key)` is `Object.prototype.hasOwnProperty`
+        // with the target moved from the receiver into the first argument, so it
+        // shares the same own-property resolution and the same `ToObject`
+        // failure for a nullish target (`quickjs.c:40402-40430`).
+        NativeFunctionKind::ObjectHasOwn => {
+            let mut arguments = inputs.arguments;
+            let target = arguments.take_first_or_undefined();
+            let key = arguments.take_first_or_undefined();
+            begin_property_key_conversion(
+                runtime,
+                key,
+                PropertyKeyTarget::HasOwnProperty {
+                    target,
+                    realm: native.realm,
+                },
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectGetOwnPropertySymbols => {
+            let mut arguments = inputs.arguments;
+            own_property_symbols(
+                runtime,
+                native.realm,
+                arguments.take_first(),
+                origin.as_ref(),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::ObjectSetPrototypeOf => {
             set_prototype_of(runtime, native.realm, inputs.arguments, origin.as_ref())
         }

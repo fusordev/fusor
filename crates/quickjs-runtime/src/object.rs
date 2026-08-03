@@ -86,6 +86,14 @@ impl KeyPhases {
         strings: true,
         symbols: true,
     };
+
+    /// The symbol phase alone, which is what `Object.getOwnPropertySymbols`
+    /// observes (`JS_GPN_SYMBOL_MASK`, `quickjs.c:40270-40276`).
+    pub(crate) const SYMBOL_KEYS: Self = Self {
+        indices: false,
+        strings: false,
+        symbols: true,
+    };
 }
 
 /// Which atom-keyed phase `push_atom_keys` appends.

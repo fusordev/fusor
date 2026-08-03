@@ -567,6 +567,59 @@ pub(super) fn own_property_names(
     Ok(NativeDispatch::Immediate(StoredValue::Object(array)))
 }
 
+/// `Object.getOwnPropertySymbols(target)`.
+///
+/// This is the symbol-only half of `[[OwnPropertyKeys]]`, so it shares the same
+/// snapshot as `Object.keys` with only the symbol phase enabled
+/// (`JS_GPN_SYMBOL_MASK`, `quickjs.c:40270-40276`). A primitive other than
+/// `null` and `undefined` answers empty rather than throwing, because a boxed
+/// wrapper never carries a symbol key, and a nullish target reports the
+/// `ToObject` failure the way `Object.keys` does.
+pub(super) fn own_property_symbols(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    argument: Option<StoredValue>,
+    origin: Option<&JsStackFrame>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let target = argument.unwrap_or(StoredValue::Undefined);
+    let Some(reference) = reflection_target(
+        runtime,
+        realm,
+        &target,
+        PrimitivePolicy::NoKeys,
+        origin,
+        "getOwnPropertySymbols",
+    )?
+    else {
+        let array = runtime.allocate_array(realm, Vec::new())?;
+        return Ok(NativeDispatch::Immediate(StoredValue::Object(array)));
+    };
+    let (snapshot, work) = runtime.try_own_key_snapshot(reference, 0, KeyPhases::SYMBOL_KEYS)?;
+    execution_budget.charge_instructions(work)?;
+    let mut elements = Vec::new();
+    elements
+        .try_reserve_exact(snapshot.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: snapshot.len(),
+        })?;
+    for index in 0..snapshot.len() {
+        let candidate = snapshot.get(index).ok_or(EngineFault::RuntimeInvariant {
+            message: "own-key snapshot shrank during a symbol listing",
+        })?;
+        let atom = candidate
+            .key()
+            .as_atom()
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "symbol-phase own key is not an atom",
+            })?;
+        elements.push(StoredValue::Symbol(atom.clone()));
+    }
+    let array = runtime.allocate_array(realm, elements)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(array)))
+}
+
 /// Builds the own key list of a primitive string.
 ///
 /// The index keys are enumerable; `length` is not, so it appears only in the

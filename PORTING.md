@@ -418,19 +418,33 @@ Known intentional write-path differences:
   `RangeError: invalid array length` outranks the boolean answer, which the
   shared write path now reports through three modes — silent, throwing, and
   boolean — rather than one strict flag.
+- [x] The `Object` value and key statics `is`, `hasOwn`, and
+  `getOwnPropertySymbols`. `Object.is` is `SameValue`, which differs from `===`
+  on exactly two inputs — `Object.is(NaN, NaN)` is `true` and
+  `Object.is(0, -0)` is `false` — and converts nothing, so a `valueOf` on either
+  operand never runs. `Object.hasOwn(target, key)` is
+  `Object.prototype.hasOwnProperty` with the target moved out of the receiver,
+  so it shares the same own-property resolution, including a primitive
+  `String`'s exotic indices and `length`, and the same `cannot convert to
+  object` for a nullish target (`quickjs.c:40402-40430`).
+  `Object.getOwnPropertySymbols` is the symbol-only half of
+  `[[OwnPropertyKeys]]`, sharing `Object.keys`' snapshot with the string and
+  index phases disabled (`JS_GPN_SYMBOL_MASK`, `quickjs.c:40270-40276`); it
+  reports each Symbol itself in creation order, includes a non-enumerable
+  symbol-keyed property, and answers empty for a non-nullish primitive because a
+  boxed wrapper never carries one.
 - [ ] Remaining String/Number/Array method surface (`String.prototype` case
   conversions and `localeCompare`, the RegExp-dependent `match`, `matchAll`,
   `replace`, `search`, and `split`, `normalize`, `String.raw`, and the
   locale-dependent renderings), shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
-- [ ] Complete the `Object` surface (`is`, `assign`, `hasOwn`, `values`,
-  `entries`, `fromEntries`, `getOwnPropertyDescriptors`, `defineProperties`,
-  `getOwnPropertySymbols`, `groupBy`, `Object.create`'s descriptors argument,
-  `Object.prototype.toLocaleString`, and the `__proto__` accessor pair), then
-  Proxy, remaining built-ins, RegExp/Date/JSON, collections, binary data,
-  Atomics, Unicode tables, promises, async functions/generators, weak
-  references, and finalization registries.
+- [ ] Complete the `Object` surface (`assign`, `values`, `entries`,
+  `fromEntries`, `getOwnPropertyDescriptors`, `defineProperties`, `groupBy`,
+  `Object.create`'s descriptors argument, `Object.prototype.toLocaleString`, and
+  the `__proto__` accessor pair), then Proxy, remaining built-ins,
+  RegExp/Date/JSON, collections, binary data, Atomics, Unicode tables, promises,
+  async functions/generators, weak references, and finalization registries.
 - [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide
   host I/O, timers, cancellation, and wakeups, but never Promise-job ordering.
 
