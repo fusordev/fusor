@@ -35,6 +35,13 @@ use super::{
     usize_to_u64,
 };
 
+#[derive(Clone, Copy)]
+struct ArgumentsIntrinsics {
+    object_prototype: ObjectId,
+    array_values: FunctionId,
+    throw_type_error: FunctionId,
+}
+
 impl Runtime {
     pub(crate) fn validate_owner(
         &self,
@@ -1266,6 +1273,158 @@ impl Runtime {
         Ok(())
     }
 
+    /// Creates the ordinary arguments object used by strict functions.
+    ///
+    /// The object carries the `[[ParameterMap]]` brand for
+    /// `Object.prototype.toString`, but uses ordinary property internal
+    /// methods because its parameter map is `undefined`.
+    pub(crate) fn allocate_unmapped_arguments_object(
+        &mut self,
+        realm: RealmId,
+        values: Vec<StoredValue>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let property_count =
+            values
+                .len()
+                .checked_add(3)
+                .ok_or(crate::ExecutionError::LimitExceeded {
+                    resource: RuntimeResource::ObjectProperties,
+                    limit: self.limits.max_object_properties,
+                    observed: u64::MAX,
+                })?;
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties
+                .saturating_add(usize_to_u64(property_count)),
+        )?;
+        let length =
+            u32::try_from(values.len()).map_err(|_| crate::ExecutionError::LimitExceeded {
+                resource: RuntimeResource::ObjectProperties,
+                limit: u64::from(u32::MAX - 1),
+                observed: usize_to_u64(values.len()),
+            })?;
+        let intrinsics = self.arguments_intrinsics(realm)?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let record =
+            self.build_unmapped_arguments_record(intrinsics, values, length, property_count)?;
+
+        let object = self
+            .objects
+            .try_insert(HeapObject::arguments(record))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.object_properties = self
+            .object_properties
+            .saturating_add(usize_to_u64(property_count));
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    fn arguments_intrinsics(
+        &self,
+        realm: RealmId,
+    ) -> Result<ArgumentsIntrinsics, crate::ExecutionError> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready {
+            throw_type_error,
+            iterators,
+            ..
+        } = state.intrinsics
+        else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm arguments intrinsics are not initialized",
+            }
+            .into());
+        };
+        for function in [throw_type_error, iterators.array_values] {
+            if !self.functions.contains(function) {
+                return Err(stale_heap_reference(HeapReference::Function(function)).into());
+            }
+        }
+        Ok(ArgumentsIntrinsics {
+            object_prototype: state.object_prototype,
+            array_values: iterators.array_values,
+            throw_type_error,
+        })
+    }
+
+    fn build_unmapped_arguments_record(
+        &self,
+        intrinsics: ArgumentsIntrinsics,
+        values: Vec<StoredValue>,
+        length: u32,
+        property_count: usize,
+    ) -> Result<ObjectRecord, crate::ExecutionError> {
+        let mut record =
+            ObjectRecord::empty(Some(HeapReference::Object(intrinsics.object_prototype)));
+        record
+            .try_reserve_data(property_count)
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        let length_key = self.predefined_property_key(PredefinedAtom::Length);
+        let iterator_key = self.predefined_symbol_property_key(PredefinedAtom::SymbolIterator);
+        let callee_key = self.predefined_property_key(PredefinedAtom::Callee);
+        let ordinary = PropertyLayout::data(true, false, true);
+        record
+            .append_data(
+                length_key,
+                ordinary,
+                StoredValue::Number(JsNumber::from_u32(length)),
+            )
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        for (index, value) in values.into_iter().enumerate() {
+            let index = u32::try_from(index).map_err(|_| crate::EngineFault::RuntimeInvariant {
+                message: "preflighted arguments index fits u32",
+            })?;
+            let index =
+                crate::ArrayIndex::new(index).ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "arguments index does not use the array-length sentinel",
+                })?;
+            record
+                .append_data(
+                    PropertyKey::from_index(index),
+                    PropertyLayout::data(true, true, true),
+                    value,
+                )
+                .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        }
+        record
+            .append_data(
+                iterator_key,
+                ordinary,
+                StoredValue::Function(intrinsics.array_values),
+            )
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        record
+            .append_accessor(
+                callee_key,
+                PropertyLayout::accessor(false, false),
+                Some(intrinsics.throw_type_error),
+                Some(intrinsics.throw_type_error),
+            )
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        Ok(record)
+    }
+
     /// Appends one own property described by a completed descriptor decision.
     ///
     /// This is the insertion half of `OrdinaryDefineOwnProperty`: the caller
@@ -1327,5 +1486,12 @@ impl Runtime {
         self.object_properties += 1;
         self.collection_pending = true;
         Ok(())
+    }
+}
+
+fn arguments_property_allocation_failed(additional: usize) -> crate::ExecutionError {
+    crate::ExecutionError::AllocationFailed {
+        resource: RuntimeResource::ObjectProperties,
+        additional,
     }
 }

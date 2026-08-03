@@ -234,6 +234,7 @@ struct IteratorIntrinsics {
     iterator_prototype: ObjectId,
     array_iterator_prototype: ObjectId,
     string_iterator_prototype: ObjectId,
+    array_values: FunctionId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1659,6 +1660,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushFalse
             | FinalOpcode::PushTrue
             | FinalOpcode::Object
+            | FinalOpcode::SpecialObject
             | FinalOpcode::ArrayFrom
             | FinalOpcode::Append
             | FinalOpcode::Catch

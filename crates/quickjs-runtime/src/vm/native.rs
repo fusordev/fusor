@@ -697,8 +697,15 @@ fn resolve_native_dispatch_inner(
             continue;
         }
 
-        let plan = plan_frame(runtime, call.function, suspended_frames, suspended_values)
-            .map_err(NativeFailure::Execution)?;
+        let supplied_argument_count = call.arguments.remaining().len();
+        let plan = plan_frame(
+            runtime,
+            call.function,
+            suspended_frames,
+            suspended_values,
+            supplied_argument_count,
+        )
+        .map_err(NativeFailure::Execution)?;
         let construction = call.new_target;
         let mut frame = create_frame(
             runtime,

@@ -428,6 +428,15 @@ Known intentional runtime differences:
   realm-owned `%ThrowTypeError%`: `Function.prototype.caller` and `arguments`
   share it as getter and setter, remain configurable and non-enumerable, and
   expose frozen empty-name/zero-length thrower identity properties.
+- [x] Implement strict ordinary-function `arguments` bindings and unmapped
+  arguments objects. Storage planning synthesizes one function-local binding
+  on demand and forwards it through enclosed arrows; verified bytecode admits
+  only the strict `special_object 0` form. Execution retains the complete
+  supplied argument list under the frame-value ceiling and atomically creates
+  the `[[ParameterMap]]`-branded ordinary object with exact indexed, `length`,
+  `@@iterator`, and restricted `callee` properties. Sloppy mapped arguments
+  and explicit collision cases remain fail-closed for the remaining arguments
+  exotic tranche.
 - [x] Implement `JSON.parse` on a realm-owned `%JSON%` object: an iterative
   UTF-16 parser accepts exactly the ECMA-404 JSON grammar, preserves escapes,
   lone surrogates, duplicate-member evaluation, and `__proto__` as data, then

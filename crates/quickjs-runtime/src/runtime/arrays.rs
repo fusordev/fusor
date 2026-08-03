@@ -185,6 +185,17 @@ impl Runtime {
             })
     }
 
+    pub(crate) fn is_arguments_object(&self, object: ObjectId) -> Result<bool, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .map(HeapObject::is_arguments)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+    }
+
     pub(crate) fn array_length(&self, object: ObjectId) -> Result<Option<u32>, crate::EngineFault> {
         self.objects
             .get(object)

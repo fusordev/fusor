@@ -138,6 +138,7 @@ pub(super) fn finish_ordinary_function_constructor(
         installed.function,
         active_frames,
         active_frame_values.saturating_add(dynamic_return_values),
+        0,
     ) {
         Ok(plan) => plan,
         Err(error) => {
@@ -231,7 +232,9 @@ pub(super) fn begin_object_prototype_to_string(
         ),
         StoredValue::Object(object) => (
             HeapReference::Object(*object),
-            if runtime.is_array_object(*object)? {
+            if runtime.is_arguments_object(*object)? {
+                ObjectPrototypeTag::Arguments
+            } else if runtime.is_array_object(*object)? {
                 ObjectPrototypeTag::Array
             } else if runtime.boxed_boolean(*object)?.is_some() {
                 ObjectPrototypeTag::Boolean

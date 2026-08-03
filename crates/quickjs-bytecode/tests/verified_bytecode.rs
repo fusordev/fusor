@@ -5322,6 +5322,72 @@ fn dynamic_function_script_profile_is_forbidden_on_child_templates() {
 }
 
 #[test]
+fn strict_arguments_object_authority_is_single_site_and_kind_exact() {
+    let text = "function f(){\"use strict\";return arguments}";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let source_for = |mappings: &[(u32, SourceByteSpan)]| {
+        source(
+            text,
+            function_span,
+            Some(SourceByteSpan::new(9, 10)),
+            mappings,
+        )
+    };
+    let single = shaped_input_with_strict(
+        &[
+            (FinalOpcode::SpecialObject, Operands::U8(0)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("f")],
+        &[],
+        0,
+        0,
+        &[],
+        source_for(&[(0, function_span), (2, function_span)]),
+        true,
+    );
+    let verified =
+        verify_compiler_bytecode_graph(single, BytecodeGraphVerificationLimits::default())
+            .expect("one strict unmapped arguments object is admitted");
+    assert!(
+        verified
+            .requirements()
+            .contains(&ExecutionRequirement::OrdinaryObjects)
+    );
+
+    let duplicate = shaped_input_with_strict(
+        &[
+            (FinalOpcode::SpecialObject, Operands::U8(0)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::SpecialObject, Operands::U8(0)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("f")],
+        &[],
+        0,
+        0,
+        &[],
+        source_for(&[
+            (0, function_span),
+            (2, function_span),
+            (3, function_span),
+            (5, function_span),
+        ]),
+        true,
+    );
+    let error =
+        verify_compiler_bytecode_graph(duplicate, BytecodeGraphVerificationLimits::default())
+            .expect_err("a second arguments object site is not executable authority");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::new(3)
+    ));
+}
+
+#[test]
 fn dynamic_function_authority_carries_verified_constructor_realm_global_references() {
     let input = dynamic_realm_global_input(
         &[

@@ -257,6 +257,7 @@ struct Frame {
     ordinary_constructor: bool,
     native_caller: Option<SyntheticNativeFrame>,
     reserved_values: u64,
+    arguments_snapshot: Option<Vec<StoredValue>>,
     arguments: Vec<FrameBinding>,
     locals: Vec<FrameBinding>,
     own_cells: Vec<Option<BindingCellId>>,
@@ -425,6 +426,7 @@ impl IntrinsicGetContinuation {
 
 #[derive(Clone, Copy)]
 enum ObjectPrototypeTag {
+    Arguments,
     Array,
     BigInt,
     Boolean,
@@ -439,6 +441,7 @@ enum ObjectPrototypeTag {
 impl ObjectPrototypeTag {
     const fn name(self) -> &'static str {
         match self {
+            Self::Arguments => "Arguments",
             Self::Array => "Array",
             Self::BigInt => "BigInt",
             Self::Boolean => "Boolean",
@@ -1164,7 +1167,6 @@ impl CallArguments {
         self.values
     }
 
-    #[cfg(test)]
     fn remaining(&self) -> &[StoredValue] {
         self.values.get(self.next..).unwrap_or_default()
     }
@@ -1496,6 +1498,11 @@ fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRoot)) {
         frame.function,
     )));
     trace_stored_value_root(&frame.receiver, mark);
+    if let Some(arguments) = &frame.arguments_snapshot {
+        for value in arguments {
+            trace_stored_value_root(value, mark);
+        }
+    }
     for binding in frame.arguments.iter().chain(&frame.locals) {
         trace_frame_binding_root(binding, mark);
     }
@@ -1627,6 +1634,7 @@ struct FramePlan {
     local_count: usize,
     stack_capacity: usize,
     reserved_values: u64,
+    needs_arguments_snapshot: bool,
     strict: bool,
     receiver_access: ReceiverAccess,
     instruction: InstructionIndex,
@@ -1720,6 +1728,13 @@ impl CallInputSource {
         match self {
             Self::Frame { kind, .. } => matches!(kind, CallKind::Constructor),
             Self::Prepared(inputs) => inputs.new_target.is_some(),
+        }
+    }
+
+    fn argument_count(&self) -> usize {
+        match self {
+            Self::Frame { argument_count, .. } => *argument_count,
+            Self::Prepared(inputs) => inputs.arguments.remaining().len(),
         }
     }
 }
@@ -1982,7 +1997,8 @@ impl Context<'_> {
             function_id = bound.target;
         }
 
-        let plan = plan_frame(self.runtime, function_id, 0, 0)?;
+        let supplied_argument_count = owned_arguments.as_ref().map_or(arguments.len(), Vec::len);
+        let plan = plan_frame(self.runtime, function_id, 0, 0, supplied_argument_count)?;
         let frame = create_frame(
             self.runtime,
             plan,
@@ -2031,7 +2047,7 @@ impl Context<'_> {
         limits: ExecutionLimits,
         compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     ) -> Result<StoredValue, ExecutionError> {
-        let plan = plan_frame(self.runtime, root.function, 0, 0)?;
+        let plan = plan_frame(self.runtime, root.function, 0, 0, 0)?;
         let frame = create_frame(
             self.runtime,
             plan,
@@ -2410,11 +2426,13 @@ fn execute_frame_loop(
                     )?;
                     continue;
                 }
+                let supplied_argument_count = inputs.argument_count();
                 let plan = plan_frame(
                     runtime,
                     function,
                     active_execution_frames(frames),
                     *active_frame_values,
+                    supplied_argument_count,
                 )?;
                 frames
                     .try_reserve(1)

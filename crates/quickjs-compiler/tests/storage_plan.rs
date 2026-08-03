@@ -705,6 +705,33 @@ fn arrow_nested_in_function_rejects_the_inherited_arguments_binding() {
 }
 
 #[test]
+fn strict_arguments_is_synthesized_once_and_captured_by_an_arrow() {
+    let plan = script("function outer() {'use strict'; arguments; return () => arguments;}");
+    let outer = plan.executables()[1].id();
+    let arrow = plan.executables()[2].id();
+    let binding = plan
+        .bindings_for(outer)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.is_arguments_object())
+        .expect("arguments binding");
+
+    assert_eq!(binding.name(), "arguments");
+    assert!(binding.is_frame_captured());
+    assert!(plan.unresolved_globals_for(outer).unwrap().is_empty());
+    assert!(plan.unresolved_globals_for(arrow).unwrap().is_empty());
+    assert_eq!(plan.resolved_references_for(outer).unwrap().len(), 1);
+    assert_eq!(plan.resolved_references_for(arrow).unwrap().len(), 1);
+    let captures = plan.frame_captures_for(arrow).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].binding(), binding.id());
+    assert_eq!(
+        captures[0].source(),
+        CaptureSource::ParentBinding(binding.id())
+    );
+}
+
+#[test]
 fn oxc_resolved_arguments_collisions_fail_closed() {
     let cases = [
         "function f() { var arguments; return arguments; }",

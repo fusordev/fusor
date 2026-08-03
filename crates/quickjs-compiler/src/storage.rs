@@ -310,6 +310,7 @@ pub struct BindingStorage {
     placement: StoragePlacement,
     policy: DeclarationPolicy,
     frame_captured: bool,
+    arguments_object: bool,
 }
 
 impl BindingStorage {
@@ -356,6 +357,12 @@ impl BindingStorage {
     #[must_use]
     pub const fn is_frame_captured(&self) -> bool {
         self.frame_captured
+    }
+
+    /// Returns whether this is the compiler-synthesized `arguments` binding.
+    #[must_use]
+    pub const fn is_arguments_object(&self) -> bool {
+        self.arguments_object
     }
 }
 
@@ -666,7 +673,8 @@ pub enum UnsupportedFeature {
     AnnexBBlockFunction,
     /// Class-created functions, private names, and synthetic slots.
     ClassSyntheticSlots,
-    /// A synthesized `arguments` binding in a function or an enclosed arrow.
+    /// An `arguments` binding that requires sloppy mapped aliasing or collides
+    /// with an explicit ordinary-function declaration.
     ArgumentsBinding,
     /// A synthesized `this`, `new.target`, or `super` binding.
     FunctionSyntheticBinding,
@@ -746,6 +754,7 @@ struct ParameterStorage {
 struct ExecutableDraft {
     executable: Executable,
     node_id: NodeId,
+    scope_id: ScopeId,
 }
 
 struct BindingDraft {
@@ -755,6 +764,7 @@ struct BindingDraft {
     declaration_spans: Arc<[Span]>,
     placement: StoragePlacement,
     policy: DeclarationPolicy,
+    arguments_object: bool,
 }
 
 struct ResolvedDraft {
@@ -886,6 +896,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.reject_synthetic_binding_uses()?;
 
         let mut binding_drafts = self.binding_drafts()?;
+        self.add_strict_arguments_bindings(&mut binding_drafts)?;
         self.add_synthetic_default_binding(&mut binding_drafts)?;
         binding_drafts.sort_by_key(|binding| {
             let first = binding
@@ -903,9 +914,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         });
         let (mut bindings, symbol_bindings) =
             freeze_bindings(binding_drafts, self.unit.semantic().scoping().symbols_len())?;
-        let scope_by_binding = self.binding_scope_map(&symbol_bindings, bindings.len())?;
+        let scope_by_binding = self.binding_scope_map(&symbol_bindings, &bindings)?;
 
         let mut resolved_drafts = self.resolved_drafts(&symbol_bindings)?;
+        let unresolved_drafts = self.unresolved_drafts()?;
+        let (arguments_references, mut unresolved_drafts) =
+            self.resolve_strict_arguments_references(unresolved_drafts, &bindings)?;
+        resolved_drafts.extend(arguments_references);
         resolved_drafts.sort_by_key(|reference| {
             (
                 reference.executable.index(),
@@ -918,7 +933,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let frame_captures =
             plan_frame_captures(&self.executable_drafts, &mut bindings, &resolved_drafts)?;
 
-        let mut unresolved_drafts = self.unresolved_drafts()?;
         unresolved_drafts.sort_by_key(|reference| {
             (
                 reference.executable.index(),
@@ -979,12 +993,12 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn binding_scope_map(
         &self,
         symbol_bindings: &[Option<BindingId>],
-        binding_count: usize,
+        bindings: &[BindingStorage],
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
         let scoping = self.unit.semantic().scoping();
-        reverse_binding_scopes(
+        let mut scopes = reverse_binding_scopes(
             symbol_bindings,
-            binding_count,
+            bindings.len(),
             scoping.scopes_len(),
             scoping.symbol_ids().map(|symbol| {
                 (
@@ -993,7 +1007,31 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     scoping.symbol_span(symbol),
                 )
             }),
-        )
+        )?;
+        for binding in bindings.iter().filter(|binding| binding.arguments_object) {
+            let scope = self
+                .executable_drafts
+                .get(binding.executable.index())
+                .map(|draft| draft.scope_id)
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "arguments binding executable has a scope",
+                    span: binding.declaration_spans.first().copied(),
+                })?;
+            let target =
+                scopes
+                    .get_mut(binding.id.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "arguments binding scope index is in range",
+                        span: binding.declaration_spans.first().copied(),
+                    })?;
+            if target.replace(scope).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "arguments binding has one compiler scope",
+                    span: binding.declaration_spans.first().copied(),
+                });
+            }
+        }
+        Ok(scopes)
     }
 
     fn reject_preflight_features(&self) -> Result<(), CompilerError> {
@@ -1140,6 +1178,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             self.executable_drafts.push(ExecutableDraft {
                 executable,
                 node_id,
+                scope_id,
             });
         }
 
@@ -1289,6 +1328,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 declaration_spans,
                 placement,
                 policy,
+                arguments_object: false,
             });
         }
         Ok(drafts)
@@ -1517,6 +1557,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             declaration_spans: synthetic_spans.into(),
             placement: StoragePlacement::ModuleLocal,
             policy,
+            arguments_object: false,
         });
         Ok(())
     }
@@ -1631,9 +1672,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             let span = semantic.reference_span(reference);
             let executable = self.scope_owner(reference.scope_id(), Some(span))?;
             let name = semantic.reference_name(reference);
-            if name == "arguments" && self.has_ordinary_function_ancestor(executable, span)? {
-                return unsupported(UnsupportedFeature::ArgumentsBinding, span);
-            }
             drafts.push(UnresolvedDraft {
                 reference_id,
                 executable,
@@ -1646,6 +1684,123 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             });
         }
         Ok(drafts)
+    }
+
+    fn add_strict_arguments_bindings(
+        &self,
+        bindings: &mut Vec<BindingDraft>,
+    ) -> Result<(), CompilerError> {
+        let semantic = self.unit.semantic();
+        let scoping = semantic.scoping();
+        let mut first_references = HashMap::<ExecutableId, Span>::new();
+        for reference_id in scoping.root_unresolved_references_ids().flatten() {
+            let reference = scoping.get_reference(reference_id);
+            if semantic.reference_name(reference) != "arguments" {
+                continue;
+            }
+            let span = semantic.reference_span(reference);
+            let executable = self.scope_owner(reference.scope_id(), Some(span))?;
+            let Some(owner) = self.strict_arguments_owner(executable, span)? else {
+                continue;
+            };
+            first_references
+                .entry(owner)
+                .and_modify(|first| {
+                    if (span.start, span.end) < (first.start, first.end) {
+                        *first = span;
+                    }
+                })
+                .or_insert(span);
+        }
+
+        let mut first_references = first_references.into_iter().collect::<Vec<_>>();
+        first_references
+            .sort_unstable_by_key(|(owner, span)| (owner.index(), span.start, span.end));
+        for (owner, span) in first_references {
+            bindings.push(BindingDraft {
+                symbol_id: None,
+                executable: owner,
+                name: Arc::from("arguments"),
+                declaration_spans: Arc::from([span]),
+                placement: StoragePlacement::Local,
+                policy: self.declaration_policy(owner, DeclarationKind::Var, false),
+                arguments_object: true,
+            });
+        }
+        Ok(())
+    }
+
+    fn resolve_strict_arguments_references(
+        &self,
+        unresolved: Vec<UnresolvedDraft>,
+        bindings: &[BindingStorage],
+    ) -> Result<(Vec<ResolvedDraft>, Vec<UnresolvedDraft>), CompilerError> {
+        let arguments_bindings = bindings
+            .iter()
+            .filter(|binding| binding.arguments_object)
+            .map(|binding| (binding.executable, binding.id))
+            .collect::<HashMap<_, _>>();
+        let mut resolved = Vec::new();
+        let mut remaining = Vec::new();
+        for reference in unresolved {
+            if reference.name.as_ref() != "arguments" {
+                remaining.push(reference);
+                continue;
+            }
+            let Some(owner) = self.strict_arguments_owner(reference.executable, reference.span)?
+            else {
+                remaining.push(reference);
+                continue;
+            };
+            let binding = arguments_bindings.get(&owner).copied().ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "strict arguments reference has a synthesized binding",
+                    span: Some(reference.span),
+                },
+            )?;
+            resolved.push(ResolvedDraft {
+                reference_id: reference.reference_id,
+                executable: reference.executable,
+                binding,
+                span: reference.span,
+                access: reference.access,
+            });
+        }
+        Ok((resolved, remaining))
+    }
+
+    fn strict_arguments_owner(
+        &self,
+        mut executable: ExecutableId,
+        span: Span,
+    ) -> Result<Option<ExecutableId>, CompilerError> {
+        loop {
+            let draft = self.executable_drafts.get(executable.index()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "arguments reference executable exists",
+                    span: Some(span),
+                },
+            )?;
+            match draft.executable.kind {
+                ExecutableKind::Function { .. } => {
+                    if !draft.executable.strict {
+                        return unsupported(UnsupportedFeature::ArgumentsBinding, span);
+                    }
+                    return Ok(Some(executable));
+                }
+                ExecutableKind::Arrow { .. } => {
+                    executable =
+                        draft
+                            .executable
+                            .parent
+                            .ok_or(CompilerError::SemanticInvariant {
+                                invariant: "arrow arguments reference has an executable parent",
+                                span: Some(span),
+                            })?;
+                }
+                ExecutableKind::Script { .. } | ExecutableKind::Module => return Ok(None),
+            }
+        }
     }
 
     fn is_ordinary_function(
@@ -1663,28 +1818,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             executable.executable.kind,
             ExecutableKind::Function { .. }
         ))
-    }
-
-    fn has_ordinary_function_ancestor(
-        &self,
-        executable: ExecutableId,
-        span: Span,
-    ) -> Result<bool, CompilerError> {
-        let mut current = Some(executable);
-        while let Some(id) = current {
-            let executable =
-                self.executable_drafts
-                    .get(id.index())
-                    .ok_or(CompilerError::SemanticInvariant {
-                        invariant: "unresolved reference executable exists",
-                        span: Some(span),
-                    })?;
-            if matches!(executable.executable.kind, ExecutableKind::Function { .. }) {
-                return Ok(true);
-            }
-            current = executable.executable.parent;
-        }
-        Ok(false)
     }
 
     fn scope_owner(
@@ -1822,6 +1955,7 @@ fn freeze_bindings(
             placement: draft.placement,
             policy: draft.policy,
             frame_captured: false,
+            arguments_object: draft.arguments_object,
         });
     }
     if symbol_bindings.iter().any(Option::is_none) {

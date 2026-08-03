@@ -3685,6 +3685,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         )?;
         entries.sort_unstable_by_key(ScopeEntryInitialization::order_key);
         if function_scope {
+            self.emit_arguments_object_initializer(executable, planning.layout, flow)?;
             self.emit_realm_global_function_initializers(
                 executable,
                 planning.tree_layout,
@@ -3769,6 +3770,55 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
         }
         Ok(())
+    }
+
+    fn emit_arguments_object_initializer(
+        &self,
+        executable: ExecutableId,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let bindings = self
+            .planned
+            .plan
+            .bindings_for(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let mut arguments = bindings
+            .iter()
+            .filter(|binding| binding.is_arguments_object());
+        let Some(binding) = arguments.next() else {
+            return Ok(());
+        };
+        if arguments.next().is_some() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "one synthesized arguments binding per function",
+                span: binding.declaration_spans().first().copied(),
+            });
+        }
+        let span = binding.declaration_spans().first().copied().ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "synthesized arguments binding has a source use",
+                span: None,
+            },
+        )?;
+        let slot = layout
+            .slot(binding.id())
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "synthesized arguments binding has a frame slot",
+                span: Some(span),
+            })?;
+        if !matches!(slot, FrameSlot::Local(_)) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "synthesized arguments binding is function-local",
+                span: Some(span),
+            });
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::SpecialObject,
+            Operands::U8(0),
+            span,
+        ))?;
+        flow.emit(plan_put_slot(slot, span))
     }
 
     fn scope_entry_initializations(

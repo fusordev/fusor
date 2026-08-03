@@ -4966,15 +4966,27 @@ fn verify_supported_opcodes(
     executable_kind: CompilerExecutableKind,
     authority_kind: CompilerExecutableKind,
 ) -> Result<(), BytecodeVerificationError> {
+    let mut arguments_object_count = 0_u8;
     for instruction in flow.instructions() {
         let decoded = instruction.decoded();
         let instruction = decoded.instruction();
         let opcode = instruction.opcode();
+        if opcode == FinalOpcode::SpecialObject {
+            arguments_object_count = arguments_object_count.saturating_add(1);
+        }
         if !supported_compiler_opcode(opcode)
             || (opcode == FinalOpcode::PushThis
                 && !flow.function_header().mode().is_strict()
                 && executable_kind != CompilerExecutableKind::OrdinaryMethod
                 && authority_kind != CompilerExecutableKind::DynamicFunctionScript)
+            || matches!(
+                (opcode, instruction.operands()),
+                (FinalOpcode::SpecialObject, operands)
+                    if operands != Operands::U8(0)
+                        || executable_kind != CompilerExecutableKind::OrdinaryFunction
+                        || !flow.function_header().mode().is_strict()
+                        || arguments_object_count != 1
+            )
             || matches!(
                 (opcode, instruction.operands()),
                 (FinalOpcode::DefineMethod, Operands::AtomU8 { value, .. })
@@ -5008,6 +5020,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushFalse
             | FinalOpcode::PushTrue
             | FinalOpcode::Object
+            | FinalOpcode::SpecialObject
             | FinalOpcode::Drop
             | FinalOpcode::Nip
             | FinalOpcode::Dup
@@ -8324,6 +8337,7 @@ fn collect_requirements(
                 push_requirement(requirements, ExecutionRequirement::Iterators);
             }
             FinalOpcode::Object
+            | FinalOpcode::SpecialObject
             | FinalOpcode::GetField
             | FinalOpcode::GetField2
             | FinalOpcode::PutField

@@ -1504,6 +1504,7 @@ impl Runtime {
                 iterator_prototype: graph.iterators.iterator_prototype,
                 array_iterator_prototype: graph.iterators.array_iterator_prototype,
                 string_iterator_prototype: graph.iterators.string_iterator_prototype,
+                array_values: graph.iterators.array_values,
             },
         };
         self.object_properties += REALM_PROPERTY_COUNT;

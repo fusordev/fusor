@@ -1006,6 +1006,8 @@ impl ArrayState {
 
 pub(crate) enum HeapObjectKind {
     Ordinary,
+    /// An unmapped arguments object with the `[[ParameterMap]]` brand.
+    Arguments,
     /// An ordinary null-prototype object with the `[[IsRawJSON]]` slot.
     RawJson,
     Array(ArrayState),
@@ -1021,6 +1023,7 @@ impl HeapObjectKind {
     pub(crate) const fn boxed_primitive(&self) -> Option<&BoxedPrimitive> {
         match self {
             Self::Ordinary
+            | Self::Arguments
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1035,6 +1038,7 @@ impl HeapObjectKind {
         match self {
             Self::Array(state) => Some(state),
             Self::Ordinary
+            | Self::Arguments
             | Self::RawJson
             | Self::Error
             | Self::BoxedPrimitive(_)
@@ -1048,6 +1052,7 @@ impl HeapObjectKind {
         match self {
             Self::Array(state) => Some(state),
             Self::Ordinary
+            | Self::Arguments
             | Self::RawJson
             | Self::Error
             | Self::BoxedPrimitive(_)
@@ -1061,6 +1066,7 @@ impl HeapObjectKind {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::Arguments
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1074,6 +1080,7 @@ impl HeapObjectKind {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::Arguments
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1087,6 +1094,7 @@ impl HeapObjectKind {
         match self {
             Self::ArrayIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::Arguments
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1100,6 +1108,7 @@ impl HeapObjectKind {
         match self {
             Self::ArrayIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::Arguments
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1113,6 +1122,7 @@ impl HeapObjectKind {
         match self {
             Self::StringIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::Arguments
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1126,6 +1136,7 @@ impl HeapObjectKind {
         match self {
             Self::StringIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::Arguments
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
@@ -1147,6 +1158,15 @@ impl HeapObject {
     pub(crate) const fn ordinary(record: ObjectRecord) -> Self {
         Self {
             kind: HeapObjectKind::Ordinary,
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn arguments(record: ObjectRecord) -> Self {
+        Self {
+            kind: HeapObjectKind::Arguments,
             record,
             public_roots: 0,
         }
@@ -1227,6 +1247,11 @@ impl HeapObject {
     #[must_use]
     pub(crate) const fn is_error(&self) -> bool {
         matches!(self.kind, HeapObjectKind::Error)
+    }
+
+    #[must_use]
+    pub(crate) const fn is_arguments(&self) -> bool {
+        matches!(self.kind, HeapObjectKind::Arguments)
     }
 
     #[must_use]

@@ -42,6 +42,7 @@ pub(super) fn plan_frame(
     function_id: FunctionId,
     active_frames: usize,
     active_frame_values: u64,
+    supplied_argument_count: usize,
 ) -> Result<FramePlan, ExecutionError> {
     let observed_frames = usize_to_u64(active_frames).saturating_add(1);
     check_execution_limit(
@@ -138,10 +139,26 @@ pub(super) fn plan_frame(
     let argument_count = domains.argument_count() as usize;
     let local_count = domains.local_count() as usize;
     let stack_capacity = control_flow.computed_stack_size() as usize;
+    let needs_arguments_snapshot = control_flow.instructions().iter().any(|instruction| {
+        matches!(
+            (
+                instruction.decoded().instruction().opcode(),
+                instruction.decoded().instruction().operands()
+            ),
+            (FinalOpcode::SpecialObject, Operands::U8(0))
+        )
+    });
     let frame_values = argument_count
         .checked_add(local_count)
         .and_then(|value| value.checked_add(stack_capacity))
         .and_then(|value| value.checked_add(1))
+        .and_then(|value| {
+            value.checked_add(if needs_arguments_snapshot {
+                supplied_argument_count
+            } else {
+                0
+            })
+        })
         .map_or(u64::MAX, usize_to_u64);
     let observed_frame_values = active_frame_values.saturating_add(frame_values);
     check_execution_limit(
@@ -175,6 +192,7 @@ pub(super) fn plan_frame(
         local_count,
         stack_capacity,
         reserved_values: frame_values,
+        needs_arguments_snapshot,
         strict,
         receiver_access,
         instruction,
@@ -264,7 +282,27 @@ pub(super) fn create_frame(
             resource: RuntimeResource::FrameValues,
             additional: plan.argument_count,
         })?;
+    let mut arguments_snapshot = None;
     match supplied {
+        FrameArguments::Public(supplied) if plan.needs_arguments_snapshot => {
+            let mut snapshot = Vec::new();
+            snapshot.try_reserve_exact(supplied.len()).map_err(|_| {
+                ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::FrameValues,
+                    additional: supplied.len(),
+                }
+            })?;
+            for value in supplied {
+                snapshot.push(value.stored()?.duplicate());
+            }
+            for index in 0..plan.argument_count {
+                let value = snapshot
+                    .get(index)
+                    .map_or(StoredValue::Undefined, StoredValue::duplicate);
+                arguments.push(FrameBinding::Direct(SlotValue::Value(value)));
+            }
+            arguments_snapshot = Some(snapshot);
+        }
         FrameArguments::Public(supplied) => {
             for index in 0..plan.argument_count {
                 let value = supplied
@@ -274,6 +312,16 @@ pub(super) fn create_frame(
                     .map_or(StoredValue::Undefined, StoredValue::duplicate);
                 arguments.push(FrameBinding::Direct(SlotValue::Value(value)));
             }
+        }
+        FrameArguments::Owned(supplied) if plan.needs_arguments_snapshot => {
+            let snapshot = supplied.into_remaining_values();
+            for index in 0..plan.argument_count {
+                let value = snapshot
+                    .get(index)
+                    .map_or(StoredValue::Undefined, StoredValue::duplicate);
+                arguments.push(FrameBinding::Direct(SlotValue::Value(value)));
+            }
+            arguments_snapshot = Some(snapshot);
         }
         FrameArguments::Owned(supplied) => {
             let mut supplied = supplied.into_remaining_iter();
@@ -376,6 +424,7 @@ pub(super) fn create_frame(
         ordinary_constructor: false,
         native_caller: None,
         reserved_values: plan.reserved_values,
+        arguments_snapshot,
         arguments,
         locals,
         own_cells,
@@ -524,6 +573,21 @@ pub(super) fn execute_one(
                 Ok(object) => push(frame, object),
                 Err(pending) => return Ok(Step::Abrupt(pending)),
             }
+        }
+        FinalOpcode::SpecialObject => {
+            let Operands::U8(0) = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let arguments =
+                frame
+                    .arguments_snapshot
+                    .take()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "arguments object was initialized more than once",
+                    })?;
+            let realm = code(runtime, frame.code)?.realm;
+            let object = runtime.allocate_unmapped_arguments_object(realm, arguments)?;
+            push(frame, StoredValue::Object(object));
         }
         FinalOpcode::Object => {
             let realm = code(runtime, frame.code)?.realm;
