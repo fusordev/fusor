@@ -162,6 +162,26 @@ fn global_function_call_compiles_executes_and_calls_the_result() {
 }
 
 #[test]
+fn generated_function_accepts_a_formal_rest_fragment() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let f=Function('fixed','...rest',\
+            'return arguments.length*100+rest.length*10+rest[1];');\
+            return f.length*1000+f(1,2,3);",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function rest parameter");
+
+    assert_number(&result, 1_323);
+}
+
+#[test]
 fn function_prototype_call_forwards_the_dynamic_function_compiler_service() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

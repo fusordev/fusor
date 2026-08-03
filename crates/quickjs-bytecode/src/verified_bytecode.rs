@@ -4967,6 +4967,7 @@ fn verify_supported_opcodes(
     authority_kind: CompilerExecutableKind,
 ) -> Result<(), BytecodeVerificationError> {
     let mut arguments_object_count = 0_u8;
+    let mut rest_parameter_count = 0_u8;
     let mapped_arguments_authority = flow
         .compiler_capture_layout()
         .and_then(CompilerCaptureLayout::mapped_arguments)
@@ -4978,6 +4979,8 @@ fn verify_supported_opcodes(
         let opcode = instruction.opcode();
         if opcode == FinalOpcode::SpecialObject {
             arguments_object_count = arguments_object_count.saturating_add(1);
+        } else if opcode == FinalOpcode::Rest {
+            rest_parameter_count = rest_parameter_count.saturating_add(1);
         }
         if !supported_compiler_opcode(opcode)
             || (opcode == FinalOpcode::PushThis
@@ -5002,7 +5005,20 @@ fn verify_supported_opcodes(
                             | CompilerExecutableKind::OrdinaryMethod
                     )
                         || arguments_object_count != 1
+                        || rest_parameter_count != 0
                         || matches!(operands, Operands::U8(kind) if (kind == 1) != mapped_arguments_authority)
+            )
+            || matches!(
+                (opcode, instruction.operands()),
+                (FinalOpcode::Rest, Operands::U16(first_argument))
+                    if u32::from(first_argument) != flow.domains().argument_count()
+                        || simple_parameter_list
+                        || !matches!(
+                            executable_kind,
+                            CompilerExecutableKind::OrdinaryFunction
+                                | CompilerExecutableKind::OrdinaryMethod
+                        )
+                        || rest_parameter_count != 1
             )
             || matches!(
                 (opcode, instruction.operands()),
@@ -5047,6 +5063,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushTrue
             | FinalOpcode::Object
             | FinalOpcode::SpecialObject
+            | FinalOpcode::Rest
             | FinalOpcode::Drop
             | FinalOpcode::Nip
             | FinalOpcode::Dup
@@ -8352,7 +8369,7 @@ fn collect_requirements(
             | FinalOpcode::PushThis => {
                 push_requirement(requirements, ExecutionRequirement::Calls);
             }
-            FinalOpcode::ArrayFrom => {
+            FinalOpcode::ArrayFrom | FinalOpcode::Rest => {
                 push_requirement(requirements, ExecutionRequirement::Arrays);
             }
             FinalOpcode::Append => {

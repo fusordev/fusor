@@ -930,6 +930,52 @@ fn expression_free_destructured_parameters_use_raw_positions_and_local_bindings(
 }
 
 #[test]
+fn formal_rest_parameters_start_after_fixed_arguments_and_bind_locally() {
+    let plan = script(
+        "function f(keep,...[head,{value},...tail]){\
+            return keep+head+value+tail.length+arguments.length;}",
+    );
+    let function = plan.executables()[1].id();
+    let executable = &plan.executables()[1];
+    assert_eq!(executable.parameter_count(), 1);
+    assert!(!executable.has_simple_parameter_list());
+    assert!(executable.parameter_binding_indices().is_empty());
+    assert!(executable.mapped_parameter_indices().is_empty());
+
+    let bindings = plan.bindings_for(function).unwrap();
+    let keep = bindings
+        .iter()
+        .find(|binding| binding.name() == "keep")
+        .expect("fixed parameter binding");
+    assert_eq!(
+        keep.placement(),
+        StoragePlacement::Argument { parameter_index: 0 }
+    );
+    for name in ["head", "value", "tail"] {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.name() == name)
+            .unwrap_or_else(|| panic!("missing rest parameter binding {name}"));
+        assert_eq!(binding.placement(), StoragePlacement::Local, "{name}");
+        assert_eq!(
+            binding.policy().kind(),
+            DeclarationKind::Parameter,
+            "{name}"
+        );
+        assert_eq!(
+            binding.policy().initialization(),
+            InitializationPolicy::Argument,
+            "{name}"
+        );
+    }
+    assert!(
+        bindings
+            .iter()
+            .any(quickjs_compiler::BindingStorage::is_arguments_object)
+    );
+}
+
+#[test]
 fn non_simple_body_functions_activate_after_parameter_initialization() {
     let plan = script(
         "function f({value}){function value(){return 1;}function other(){return 2;}\
@@ -1022,8 +1068,8 @@ fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
             UnsupportedFeature::ParameterExpressions,
         ),
         (
-            "function f(...rest) {}",
-            UnsupportedFeature::NonSimpleParameters,
+            "function f(...[value = 1]) {}",
+            UnsupportedFeature::ParameterExpressions,
         ),
         ("with (object) value;", UnsupportedFeature::WithStatement),
         ("class Box {}", UnsupportedFeature::ClassSyntheticSlots),

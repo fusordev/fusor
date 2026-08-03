@@ -1662,6 +1662,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushTrue
             | FinalOpcode::Object
             | FinalOpcode::SpecialObject
+            | FinalOpcode::Rest
             | FinalOpcode::ArrayFrom
             | FinalOpcode::Append
             | FinalOpcode::Catch

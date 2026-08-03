@@ -5526,6 +5526,180 @@ fn arguments_object_authority_is_single_site_mode_and_kind_exact() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one certificate test covers the complete rest-site authority matrix"
+)]
+fn rest_parameter_authority_is_single_site_non_simple_and_after_arguments() {
+    let text = "function f(fixed,...rest){return rest}";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let source_for = |mappings: &[(u32, SourceByteSpan)]| {
+        source(
+            text,
+            function_span,
+            Some(SourceByteSpan::new(9, 10)),
+            mappings,
+        )
+    };
+    let fixed = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        parameter_policy(),
+        false,
+        None,
+    );
+
+    let valid = shaped_input_with_parameter_profile(
+        &[
+            (FinalOpcode::SpecialObject, Operands::U8(0)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Rest, Operands::U16(1)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        &[atom("fixed")],
+        std::slice::from_ref(&fixed),
+        1,
+        0,
+        &[],
+        source_for(&[
+            (0, function_span),
+            (2, function_span),
+            (3, function_span),
+            (6, function_span),
+            (7, function_span),
+        ]),
+        false,
+        false,
+    );
+    let verified =
+        verify_compiler_bytecode_graph(valid, BytecodeGraphVerificationLimits::default())
+            .expect("one exact rest allocation after the arguments object is admitted");
+    assert!(
+        verified
+            .requirements()
+            .contains(&ExecutionRequirement::Arrays)
+    );
+
+    let wrong_first = shaped_input_with_parameter_profile(
+        &[
+            (FinalOpcode::Rest, Operands::U16(0)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        &[atom("fixed")],
+        std::slice::from_ref(&fixed),
+        1,
+        0,
+        &[],
+        source_for(&[(0, function_span), (3, function_span), (4, function_span)]),
+        false,
+        false,
+    );
+    let error =
+        verify_compiler_bytecode_graph(wrong_first, BytecodeGraphVerificationLimits::default())
+            .expect_err("rest must begin exactly after the fixed argument domain");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::Rest,
+        } if *pc == BytecodePc::ZERO
+    ));
+
+    let simple = shaped_input_with_parameter_profile(
+        &[
+            (FinalOpcode::Rest, Operands::U16(1)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        &[atom("fixed")],
+        std::slice::from_ref(&fixed),
+        1,
+        0,
+        &[],
+        source_for(&[(0, function_span), (3, function_span), (4, function_span)]),
+        false,
+        true,
+    );
+    let error = verify_compiler_bytecode_graph(simple, BytecodeGraphVerificationLimits::default())
+        .expect_err("a simple-parameter header cannot authorize rest allocation");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::Rest,
+        } if *pc == BytecodePc::ZERO
+    ));
+
+    let duplicate = shaped_input_with_parameter_profile(
+        &[
+            (FinalOpcode::Rest, Operands::U16(1)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Rest, Operands::U16(1)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        &[atom("fixed")],
+        std::slice::from_ref(&fixed),
+        1,
+        0,
+        &[],
+        source_for(&[
+            (0, function_span),
+            (3, function_span),
+            (4, function_span),
+            (7, function_span),
+            (8, function_span),
+        ]),
+        false,
+        false,
+    );
+    let error =
+        verify_compiler_bytecode_graph(duplicate, BytecodeGraphVerificationLimits::default())
+            .expect_err("a second rest allocation site is not executable authority");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::Rest,
+        } if *pc == BytecodePc::new(4)
+    ));
+
+    let late_arguments = shaped_input_with_parameter_profile(
+        &[
+            (FinalOpcode::Rest, Operands::U16(1)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::SpecialObject, Operands::U8(0)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("fixed")],
+        &[fixed],
+        1,
+        0,
+        &[],
+        source_for(&[
+            (0, function_span),
+            (3, function_span),
+            (4, function_span),
+            (6, function_span),
+        ]),
+        false,
+        false,
+    );
+    let error =
+        verify_compiler_bytecode_graph(late_arguments, BytecodeGraphVerificationLimits::default())
+            .expect_err("arguments-object creation must precede rest snapshot consumption");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::new(4)
+    ));
+}
+
+#[test]
 fn sloppy_arguments_kind_matches_the_simple_parameter_header_bit() {
     let text = "function f(){return arguments}";
     let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));

@@ -378,8 +378,8 @@ Known intentional runtime differences:
   shrink results at non-configurable indices, and install a requested
   non-writable final state even when that shrink returns `false`.
 - [ ] Remaining RegExp-dependent String method surface, shape sharing/transition
-  interning, parameter-expression and formal-rest instantiation and Proxy
-  exotics, dense indexed storage, deterministic finalization, and diagnostics.
+  interning, parameter-expression instantiation and Proxy exotics, dense
+  indexed storage, deterministic finalization, and diagnostics.
 
 ### Built-ins and asynchronous semantics
 
@@ -466,8 +466,19 @@ Known intentional runtime differences:
   header bit is cleared, sloppy functions and object methods receive an
   unmapped arguments object, and a destructured binding named `arguments`
   suppresses that object. Default initializers, computed parameter keys, formal
-  rest, and parameter expressions still fail closed until their separate
-  parameter-environment certificates land.
+  parameter expressions, and expression-bearing rest patterns still fail closed
+  until their separate parameter-environment certificates land.
+- [x] Implement formal rest parameters through the pinned `rest firstArgument`
+  entry operation. The fixed argument domain and observable function `length`
+  stop before the rest binding; exactly one non-simple rest site snapshots the
+  remaining supplied values into a fresh realm Array before body declarations.
+  Identifier and expression-free nested binding-pattern rests use local
+  parameter bindings, suppress `arguments` when named accordingly, and compose
+  with body-function merges and closure capture. When an unmapped arguments
+  object is also needed it is created first from an independent copy, so writes
+  never alias the rest Array. Verification requires the exact fixed-argument
+  boundary and ordering, tail work consumes shared fuel, and allocation-limit
+  failure leaves runtime usage unchanged.
 - [x] Instantiate body function declarations after non-simple parameter
   initialization. Every body function in an expression-free non-simple
   function now uses the existing scoped-entry activation certificate: the

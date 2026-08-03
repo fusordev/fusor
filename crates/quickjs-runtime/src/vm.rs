@@ -257,6 +257,7 @@ struct Frame {
     ordinary_constructor: bool,
     native_caller: Option<SyntheticNativeFrame>,
     reserved_values: u64,
+    arguments_snapshot_use: ArgumentsSnapshotUse,
     arguments_snapshot: Option<Vec<StoredValue>>,
     arguments: Vec<FrameBinding>,
     locals: Vec<FrameBinding>,
@@ -1634,10 +1635,31 @@ struct FramePlan {
     local_count: usize,
     stack_capacity: usize,
     reserved_values: u64,
-    needs_arguments_snapshot: bool,
+    arguments_snapshot_use: ArgumentsSnapshotUse,
     strict: bool,
     receiver_access: ReceiverAccess,
     instruction: InstructionIndex,
+}
+
+#[derive(Clone, Copy)]
+enum ArgumentsSnapshotUse {
+    None,
+    ArgumentsObject,
+    RestParameter,
+    ArgumentsObjectAndRestParameter,
+}
+
+impl ArgumentsSnapshotUse {
+    const fn is_needed(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    const fn has_rest_parameter(self) -> bool {
+        matches!(
+            self,
+            Self::RestParameter | Self::ArgumentsObjectAndRestParameter
+        )
+    }
 }
 
 #[derive(Clone, Copy)]

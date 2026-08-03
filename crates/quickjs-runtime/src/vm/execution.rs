@@ -139,7 +139,7 @@ pub(super) fn plan_frame(
     let argument_count = domains.argument_count() as usize;
     let local_count = domains.local_count() as usize;
     let stack_capacity = control_flow.computed_stack_size() as usize;
-    let needs_arguments_snapshot = control_flow.instructions().iter().any(|instruction| {
+    let has_arguments_object = control_flow.instructions().iter().any(|instruction| {
         matches!(
             (
                 instruction.decoded().instruction().opcode(),
@@ -148,12 +148,22 @@ pub(super) fn plan_frame(
             (FinalOpcode::SpecialObject, Operands::U8(0 | 1))
         )
     });
+    let has_rest_parameter = control_flow
+        .instructions()
+        .iter()
+        .any(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::Rest);
+    let arguments_snapshot_use = match (has_arguments_object, has_rest_parameter) {
+        (false, false) => ArgumentsSnapshotUse::None,
+        (true, false) => ArgumentsSnapshotUse::ArgumentsObject,
+        (false, true) => ArgumentsSnapshotUse::RestParameter,
+        (true, true) => ArgumentsSnapshotUse::ArgumentsObjectAndRestParameter,
+    };
     let frame_values = argument_count
         .checked_add(local_count)
         .and_then(|value| value.checked_add(stack_capacity))
         .and_then(|value| value.checked_add(1))
         .and_then(|value| {
-            value.checked_add(if needs_arguments_snapshot {
+            value.checked_add(if arguments_snapshot_use.is_needed() {
                 supplied_argument_count
             } else {
                 0
@@ -192,7 +202,7 @@ pub(super) fn plan_frame(
         local_count,
         stack_capacity,
         reserved_values: frame_values,
-        needs_arguments_snapshot,
+        arguments_snapshot_use,
         strict,
         receiver_access,
         instruction,
@@ -242,6 +252,24 @@ pub(super) fn to_object_value(
     }
 }
 
+fn duplicate_arguments_snapshot(frame: &Frame) -> Result<Vec<StoredValue>, ExecutionError> {
+    let snapshot = frame
+        .arguments_snapshot
+        .as_ref()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "arguments object was initialized more than once",
+        })?;
+    let mut duplicate = Vec::new();
+    duplicate
+        .try_reserve_exact(snapshot.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::ObjectProperties,
+            additional: snapshot.len(),
+        })?;
+    duplicate.extend(snapshot.iter().map(StoredValue::duplicate));
+    Ok(duplicate)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "failure-atomic frame allocation and initialization remain one transaction"
@@ -284,7 +312,7 @@ pub(super) fn create_frame(
         })?;
     let mut arguments_snapshot = None;
     match supplied {
-        FrameArguments::Public(supplied) if plan.needs_arguments_snapshot => {
+        FrameArguments::Public(supplied) if plan.arguments_snapshot_use.is_needed() => {
             let mut snapshot = Vec::new();
             snapshot.try_reserve_exact(supplied.len()).map_err(|_| {
                 ExecutionError::AllocationFailed {
@@ -313,7 +341,7 @@ pub(super) fn create_frame(
                 arguments.push(FrameBinding::Direct(SlotValue::Value(value)));
             }
         }
-        FrameArguments::Owned(supplied) if plan.needs_arguments_snapshot => {
+        FrameArguments::Owned(supplied) if plan.arguments_snapshot_use.is_needed() => {
             let snapshot = supplied.into_remaining_values();
             for index in 0..plan.argument_count {
                 let value = snapshot
@@ -424,6 +452,7 @@ pub(super) fn create_frame(
         ordinary_constructor: false,
         native_caller: None,
         reserved_values: plan.reserved_values,
+        arguments_snapshot_use: plan.arguments_snapshot_use,
         arguments_snapshot,
         arguments,
         locals,
@@ -574,17 +603,55 @@ pub(super) fn execute_one(
                 Err(pending) => return Ok(Step::Abrupt(pending)),
             }
         }
+        FinalOpcode::Rest => {
+            let Operands::U16(first_argument) = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let first_argument = usize::from(first_argument);
+            let argument_count = frame
+                .arguments_snapshot
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "rest parameter was initialized more than once",
+                })?
+                .len();
+            let first_argument = first_argument.min(argument_count);
+            let element_count = argument_count - first_argument;
+            execution_budget.charge_instructions(usize_to_u64(element_count))?;
+            let mut elements =
+                frame
+                    .arguments_snapshot
+                    .take()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "rest parameter was initialized more than once",
+                    })?;
+            elements.drain(..first_argument);
+            let realm = code(runtime, frame.code)?.realm;
+            let array = runtime.allocate_array(realm, elements)?;
+            push(frame, StoredValue::Object(array));
+        }
         FinalOpcode::SpecialObject => {
             let Operands::U8(arguments_kind @ (0 | 1)) = operands else {
                 return unsupported_dispatch(opcode);
             };
-            let arguments =
+            let arguments = if frame.arguments_snapshot_use.has_rest_parameter() {
+                let argument_count = frame
+                    .arguments_snapshot
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "arguments object was initialized more than once",
+                    })?
+                    .len();
+                execution_budget.charge_instructions(usize_to_u64(argument_count))?;
+                duplicate_arguments_snapshot(frame)?
+            } else {
                 frame
                     .arguments_snapshot
                     .take()
                     .ok_or(EngineFault::RuntimeInvariant {
                         message: "arguments object was initialized more than once",
-                    })?;
+                    })?
+            };
             let realm = code(runtime, frame.code)?.realm;
             let object = if arguments_kind == 0 {
                 runtime.allocate_unmapped_arguments_object(realm, arguments)?

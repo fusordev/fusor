@@ -175,6 +175,42 @@ fn expression_free_parameter_patterns_have_an_unmapped_entry_prologue() {
 }
 
 #[test]
+fn formal_rest_starts_after_fixed_arguments_and_uses_the_unmapped_prologue() {
+    let compiled = compile(
+        "function f(keep,...[head,...tail]){\
+            return keep+head+tail.length+arguments.length;}",
+        "f",
+    );
+    let flow = compiled.control_flow();
+    assert_eq!(flow.domains().argument_count(), 1);
+    assert_eq!(flow.function_header().defined_argument_count(), 1);
+    assert!(!flow.function_header().flags().has_simple_parameter_list());
+
+    let instructions = flow
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+    let arguments_site = instructions
+        .iter()
+        .position(|instruction| *instruction == (FinalOpcode::SpecialObject, Operands::U8(0)))
+        .expect("unmapped arguments object");
+    let rest_site = instructions
+        .iter()
+        .position(|instruction| *instruction == (FinalOpcode::Rest, Operands::U16(1)))
+        .expect("formal rest allocation");
+    assert!(arguments_site < rest_site);
+    assert!(
+        instructions[rest_site + 1..]
+            .iter()
+            .any(|(opcode, _)| *opcode == FinalOpcode::ForOfStart)
+    );
+}
+
+#[test]
 fn deepest_leaf_reads_forwarded_parent_cells_through_capture_slots() {
     let compiled = compile(
         "function outer(arg){ let local=1; function middle(){ function inner(){ return arg+local; } } }",

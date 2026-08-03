@@ -3922,9 +3922,6 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 return unsupported(UnsupportedLeafFeature::NonOrdinaryFunction, metadata.span());
             }
         };
-        if let Some(rest) = &function.params.rest {
-            return unsupported(UnsupportedLeafFeature::UnsupportedBinding, rest.span);
-        }
         for (index, parameter) in function.params.items.iter().enumerate() {
             if parameter.initializer.is_some() {
                 return unsupported(UnsupportedLeafFeature::UnsupportedBinding, parameter.span);
@@ -3940,6 +3937,26 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             flow.emit(PlannedInstruction::new(opcode, operands, parameter.span))?;
             self.plan_destructuring_pattern_value(
                 &parameter.pattern,
+                DestructuringBindingInitialization::Parameter,
+                planning.layout,
+                planning.tree_layout,
+                planning.constants,
+                flow,
+            )?;
+        }
+        if let Some(rest) = &function.params.rest {
+            let first_argument = u16::try_from(function.params.items.len()).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "formal rest first argument",
+                }
+            })?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Rest,
+                Operands::U16(first_argument),
+                rest.span,
+            ))?;
+            self.plan_destructuring_pattern_value(
+                &rest.rest.argument,
                 DestructuringBindingInitialization::Parameter,
                 planning.layout,
                 planning.tree_layout,

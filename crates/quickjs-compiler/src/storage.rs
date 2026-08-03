@@ -690,8 +690,6 @@ pub enum UnsupportedFeature {
     WithStatement,
     /// A parameter initializer, destructuring default, or computed pattern key.
     ParameterExpressions,
-    /// A formal rest parameter.
-    NonSimpleParameters,
     /// Annex B's paired block-lexical and var-like function binding.
     AnnexBBlockFunction,
     /// Class-created functions, private names, and synthetic slots.
@@ -1254,14 +1252,17 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         &mut self,
         parameters: &oxc_ast::ast::FormalParameters<'arena>,
     ) -> Result<ParameterLayout, CompilerError> {
-        if let Some(rest) = &parameters.rest {
-            return unsupported(UnsupportedFeature::NonSimpleParameters, rest.span);
+        if let Some(rest) = &parameters.rest
+            && let Some(span) = binding_pattern_expression_span(&rest.rest.argument)
+        {
+            return unsupported(UnsupportedFeature::ParameterExpressions, span);
         }
         let executable = executable_id(self.executable_drafts.len())?;
-        let simple = parameters.items.iter().all(|parameter| {
-            parameter.initializer.is_none()
-                && matches!(parameter.pattern, BindingPattern::BindingIdentifier(_))
-        });
+        let simple = parameters.rest.is_none()
+            && parameters.items.iter().all(|parameter| {
+                parameter.initializer.is_none()
+                    && matches!(parameter.pattern, BindingPattern::BindingIdentifier(_))
+            });
         for (index, parameter) in parameters.items.iter().enumerate() {
             if parameter.initializer.is_some() {
                 return unsupported(UnsupportedFeature::ParameterExpressions, parameter.span);

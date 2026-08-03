@@ -332,6 +332,49 @@ fn expression_free_destructured_formals_initialize_left_to_right() {
 }
 
 #[test]
+fn formal_rest_parameters_snapshot_an_independent_supplied_tail() {
+    let result = string_result(
+        "function inspect(fixed,...rest){const before=rest[0]+'|'+arguments[1];\
+            arguments[1]=9;rest[0]=7;\
+            return inspect.length+'|'+arguments.length+'|'+rest.length+'|'+before+'|'+\
+                arguments[1]+'|'+rest[0];}\
+            return inspect(1,2,3,4);",
+    );
+    assert_eq!(result, "1|4|3|2|2|9|7");
+
+    let result = string_result(
+        "function patterned(...[first,{value},...tail]){\
+            return first+'|'+value+'|'+tail.length+'|'+tail[1]+'|'+arguments.length;}\
+            return patterned(1,{value:2},3,4);",
+    );
+    assert_eq!(result, "1|2|2|4|4");
+
+    let result = string_result(
+        "function suppressed(...arguments){return arguments.length+'|'+arguments[0];}\
+            return suppressed(5,6);",
+    );
+    assert_eq!(result, "2|5");
+
+    let result = string_result(
+        "function merged(...rest){function rest(){return 6;}return ''+rest();}\
+            return merged(1,2);",
+    );
+    assert_eq!(result, "6");
+
+    let result = string_result(
+        "function capture(...rest){return function(){return rest[1];};}\
+            return ''+capture(7,8)();",
+    );
+    assert_eq!(result, "8");
+
+    let result = string_result(
+        "const holder={inspect(fixed,...rest){return this===holder?'yes|'+rest[1]:'no';}};\
+            return holder.inspect(1,2,3);",
+    );
+    assert_eq!(result, "yes|3");
+}
+
+#[test]
 fn destructured_formals_use_unmapped_arguments_and_can_suppress_the_binding() {
     let result = string_result(
         "function inspect({value}){let before=value;arguments[0]={value:9};value=7;\
@@ -485,6 +528,103 @@ fn arguments_property_limit_failure_is_atomic() {
         }) if limit == property_limit && observed == property_limit + 3
     ));
     assert_eq!(context.runtime_usage(), before);
+}
+
+#[test]
+fn rest_array_property_limit_failure_is_atomic() {
+    let authority = TestCompiler
+        .compile(OrdinaryDynamicFunctionSource::new(
+            Arc::from([]),
+            JsString::from_utf8(
+                "function inspect(...arguments){return arguments.length;}return inspect;",
+            )
+            .expect("body"),
+        ))
+        .expect("dynamic Function authority");
+
+    let property_limit = {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("probe runtime");
+        let realm = runtime.create_realm().expect("probe realm");
+        let mut context = runtime.context(&realm).expect("probe context");
+        let outer = context
+            .execute_dynamic_function_script(Arc::clone(&authority), ExecutionLimits::default())
+            .expect("probe dynamic Function")
+            .into_function()
+            .expect("probe outer function");
+        let function = context
+            .call(&outer, &[], ExecutionLimits::default())
+            .expect("probe inspect creation")
+            .into_function()
+            .expect("probe inspect function");
+        let limit = context.runtime_usage().object_properties();
+        drop(function);
+        limit
+    };
+
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(property_limit))
+            .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let outer = context
+        .execute_dynamic_function_script(authority, ExecutionLimits::default())
+        .expect("dynamic Function")
+        .into_function()
+        .expect("outer function");
+    let function = context
+        .call(&outer, &[], ExecutionLimits::default())
+        .expect("inspect creation")
+        .into_function()
+        .expect("inspect function");
+    let before = context.runtime_usage();
+    let first = context.number(JsNumber::from_i32(1));
+    let second = context.number(JsNumber::from_i32(2));
+    assert!(matches!(
+        context.call(&function, &[first, second], ExecutionLimits::default()),
+        Err(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::ObjectProperties,
+            limit,
+            observed,
+        }) if limit == property_limit && observed == property_limit + 3
+    ));
+    assert_eq!(context.runtime_usage(), before);
+}
+
+#[test]
+fn rest_tail_copy_consumes_shared_instruction_fuel() {
+    let authority = TestCompiler
+        .compile(OrdinaryDynamicFunctionSource::new(
+            Arc::from([]),
+            JsString::from_utf8(
+                "function inspect(...arguments){return arguments.length;}return inspect;",
+            )
+            .expect("body"),
+        ))
+        .expect("dynamic Function authority");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let outer = context
+        .execute_dynamic_function_script(authority, ExecutionLimits::default())
+        .expect("dynamic Function")
+        .into_function()
+        .expect("outer function");
+    let function = context
+        .call(&outer, &[], ExecutionLimits::default())
+        .expect("inspect creation")
+        .into_function()
+        .expect("inspect function");
+    let arguments = (0..1_000)
+        .map(|value| context.number(JsNumber::from_i32(value)))
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        context.call(
+            &function,
+            &arguments,
+            ExecutionLimits::default().with_instruction_fuel(100),
+        ),
+        Err(ExecutionError::InstructionLimitExceeded { limit: 100, .. })
+    ));
 }
 
 #[test]
