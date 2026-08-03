@@ -70,6 +70,22 @@ impl RealmBuildTransaction<'_> {
             .filter(|property| property_batch(**property) == batch)
         {
             self.publish_intrinsic_property(property, atoms)?;
+            let deferred_identity = match property.holder {
+                IntrinsicIdentity::Function(id)
+                    if property.key
+                        == IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype) =>
+                {
+                    schema.specs().iter().find(|function| {
+                        function.id == id
+                            && function.identity_publication
+                                == IntrinsicIdentityPublication::AutomaticAfterPrototype
+                    })
+                }
+                IntrinsicIdentity::Object(_) | IntrinsicIdentity::Function(_) => None,
+            };
+            if let Some(function) = deferred_identity {
+                self.publish_intrinsic_function_identity(function, atoms)?;
+            }
         }
         Ok(())
     }

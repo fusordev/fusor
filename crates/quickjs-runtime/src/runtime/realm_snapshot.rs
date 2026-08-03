@@ -1,6 +1,6 @@
 //! Normalized installed-Realm snapshots for bootstrap regression tests.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use crate::{
     Atom, AtomKind, JsBigInt, JsString, PredefinedAtom, PropertyKey, PropertyLayout,
@@ -19,8 +19,9 @@ pub(super) struct RealmSnapshot {
 
 #[derive(Debug, Eq, PartialEq)]
 struct NodeSnapshot {
+    identity: String,
     kind: NodeKindSnapshot,
-    prototype: Option<usize>,
+    prototype: Option<String>,
     extensible: bool,
     properties: Vec<PropertySnapshot>,
 }
@@ -56,8 +57,8 @@ struct PropertySnapshot {
 enum PropertyValueSnapshot {
     Data(ValueSnapshot),
     Accessor {
-        getter: Option<usize>,
-        setter: Option<usize>,
+        getter: Option<String>,
+        setter: Option<String>,
     },
 }
 
@@ -70,7 +71,7 @@ enum ValueSnapshot {
     BigInt(String),
     String(Vec<u16>),
     Symbol(AtomSnapshot),
-    Reference(usize),
+    Reference(String),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -89,22 +90,7 @@ struct AtomSnapshot {
 impl RealmSnapshot {
     pub(super) fn capture(runtime: &Runtime, realm: RealmId) -> Self {
         let state = runtime.realms.get(realm).expect("snapshot Realm is live");
-        let mut indices = HashMap::new();
-        let mut pending = VecDeque::new();
-        register_reference(
-            HeapReference::Object(state.global_object),
-            &mut indices,
-            &mut pending,
-        );
-        register_reference(
-            HeapReference::Object(state.object_prototype),
-            &mut indices,
-            &mut pending,
-        );
         let RealmIntrinsics::Ready {
-            function_prototype,
-            throw_type_error,
-            function_constructor,
             errors,
             boolean,
             number,
@@ -113,69 +99,83 @@ impl RealmSnapshot {
             array,
             symbol,
             iterators,
+            ..
         } = state.intrinsics
         else {
             panic!("snapshot Realm intrinsics are ready");
         };
-        for function in [
-            function_prototype,
-            throw_type_error,
-            function_constructor,
-            errors.to_string,
-            errors.is_error,
-            boolean.constructor,
-            number.constructor,
-            bigint.constructor,
-            string.constructor,
-            array.constructor,
-            symbol.constructor,
-            iterators.array_values,
+        let mut identities = HashMap::new();
+        register_identity(
+            HeapReference::Object(state.global_object),
+            "%global%",
+            &mut identities,
+        );
+        register_identity(
+            HeapReference::Object(state.object_prototype),
+            "%Object.prototype%",
+            &mut identities,
+        );
+        for (object, identity) in [
+            (boolean.prototype, "%Boolean.prototype%"),
+            (number.prototype, "%Number.prototype%"),
+            (bigint.prototype, "%BigInt.prototype%"),
+            (string.prototype, "%String.prototype%"),
+            (array.prototype, "%Array.prototype%"),
+            (symbol.prototype, "%Symbol.prototype%"),
+            (iterators.iterator_prototype, "%Iterator.prototype%"),
+            (
+                iterators.array_iterator_prototype,
+                "%ArrayIterator.prototype%",
+            ),
+            (
+                iterators.string_iterator_prototype,
+                "%StringIterator.prototype%",
+            ),
         ] {
-            register_reference(
-                HeapReference::Function(function),
-                &mut indices,
-                &mut pending,
-            );
-        }
-        for object in [
-            boolean.prototype,
-            number.prototype,
-            bigint.prototype,
-            string.prototype,
-            array.prototype,
-            symbol.prototype,
-            iterators.iterator_prototype,
-            iterators.array_iterator_prototype,
-            iterators.string_iterator_prototype,
-        ] {
-            register_reference(HeapReference::Object(object), &mut indices, &mut pending);
+            register_identity(HeapReference::Object(object), identity, &mut identities);
         }
         for kind in ErrorIntrinsicKind::ALL {
             let intrinsic = errors.intrinsic(kind);
-            register_reference(
+            register_identity(
                 HeapReference::Object(intrinsic.prototype),
-                &mut indices,
-                &mut pending,
-            );
-            register_reference(
-                HeapReference::Function(intrinsic.constructor),
-                &mut indices,
-                &mut pending,
+                format!("%{}.prototype%", kind.name()),
+                &mut identities,
             );
         }
-        let mut nodes = Vec::new();
-
-        while let Some(reference) = pending.pop_front() {
-            let expected_index = nodes.len();
-            assert_eq!(indices.get(&reference), Some(&expected_index));
-            nodes.push(snapshot_node(
-                runtime,
-                realm,
-                reference,
-                &mut indices,
-                &mut pending,
-            ));
+        let global = runtime
+            .objects
+            .get(state.global_object)
+            .expect("snapshot global is live");
+        for name in ["Reflect", "JSON", "Math"] {
+            register_identity(
+                HeapReference::Object(global_object_property(&global.record, name)),
+                format!("%{name}%"),
+                &mut identities,
+            );
         }
+        for (id, function) in runtime.functions.iter() {
+            let FunctionImplementation::Native(native) = &function.implementation else {
+                continue;
+            };
+            if native.realm == realm {
+                register_identity(
+                    HeapReference::Function(id),
+                    format!("%{:?}%", native.kind),
+                    &mut identities,
+                );
+            }
+        }
+        let mut references = identities.keys().copied().collect::<Vec<_>>();
+        references.sort_unstable_by(|left, right| {
+            identities
+                .get(left)
+                .expect("left identity")
+                .cmp(identities.get(right).expect("right identity"))
+        });
+        let nodes = references
+            .into_iter()
+            .map(|reference| snapshot_node(runtime, realm, reference, &identities))
+            .collect();
 
         Self { nodes }
     }
@@ -201,8 +201,7 @@ fn snapshot_node(
     runtime: &Runtime,
     realm: RealmId,
     reference: HeapReference,
-    indices: &mut HashMap<HeapReference, usize>,
-    pending: &mut VecDeque<HeapReference>,
+    identities: &HashMap<HeapReference, String>,
 ) -> NodeSnapshot {
     let (kind, record) = match reference {
         HeapReference::Object(id) => {
@@ -230,9 +229,10 @@ fn snapshot_node(
     };
     let prototype = record
         .prototype()
-        .map(|prototype| register_reference(prototype, indices, pending));
-    let properties = snapshot_properties(record, indices, pending);
+        .map(|prototype| reference_identity(prototype, identities));
+    let properties = snapshot_properties(record, identities);
     NodeSnapshot {
+        identity: reference_identity(reference, identities),
         kind,
         prototype,
         extensible: record.is_extensible(),
@@ -265,8 +265,7 @@ fn snapshot_object_kind(object: &super::HeapObject) -> NodeKindSnapshot {
 
 fn snapshot_properties(
     record: &ObjectRecord,
-    indices: &mut HashMap<HeapReference, usize>,
-    pending: &mut VecDeque<HeapReference>,
+    identities: &HashMap<HeapReference, String>,
 ) -> Vec<PropertySnapshot> {
     let keys = record
         .try_own_key_snapshot(None, KeyPhases::ALL)
@@ -280,15 +279,13 @@ fn snapshot_properties(
             let layout = property.layout();
             let value = match property {
                 OwnProperty::Data { value, .. } => {
-                    PropertyValueSnapshot::Data(snapshot_value(&value, indices, pending))
+                    PropertyValueSnapshot::Data(snapshot_value(&value, identities))
                 }
                 OwnProperty::Accessor { getter, setter, .. } => PropertyValueSnapshot::Accessor {
-                    getter: getter.map(|id| {
-                        register_reference(HeapReference::Function(id), indices, pending)
-                    }),
-                    setter: setter.map(|id| {
-                        register_reference(HeapReference::Function(id), indices, pending)
-                    }),
+                    getter: getter
+                        .map(|id| reference_identity(HeapReference::Function(id), identities)),
+                    setter: setter
+                        .map(|id| reference_identity(HeapReference::Function(id), identities)),
                 },
             };
             PropertySnapshot {
@@ -302,8 +299,7 @@ fn snapshot_properties(
 
 fn snapshot_value(
     value: &StoredValue,
-    indices: &mut HashMap<HeapReference, usize>,
-    pending: &mut VecDeque<HeapReference>,
+    identities: &HashMap<HeapReference, String>,
 ) -> ValueSnapshot {
     match value {
         StoredValue::Undefined => ValueSnapshot::Undefined,
@@ -313,16 +309,12 @@ fn snapshot_value(
         StoredValue::BigInt(value) => ValueSnapshot::BigInt(bigint_decimal(value)),
         StoredValue::String(value) => ValueSnapshot::String(string_code_units(value)),
         StoredValue::Symbol(value) => ValueSnapshot::Symbol(snapshot_atom(value)),
-        StoredValue::Function(id) => ValueSnapshot::Reference(register_reference(
-            HeapReference::Function(*id),
-            indices,
-            pending,
-        )),
-        StoredValue::Object(id) => ValueSnapshot::Reference(register_reference(
-            HeapReference::Object(*id),
-            indices,
-            pending,
-        )),
+        StoredValue::Function(id) => {
+            ValueSnapshot::Reference(reference_identity(HeapReference::Function(*id), identities))
+        }
+        StoredValue::Object(id) => {
+            ValueSnapshot::Reference(reference_identity(HeapReference::Object(*id), identities))
+        }
     }
 }
 
@@ -355,18 +347,50 @@ fn bigint_decimal(value: &JsBigInt) -> String {
         .expect("Realm snapshot BigInt rendering")
 }
 
-fn register_reference(
+fn register_identity(
     reference: HeapReference,
-    indices: &mut HashMap<HeapReference, usize>,
-    pending: &mut VecDeque<HeapReference>,
-) -> usize {
-    if let Some(index) = indices.get(&reference) {
-        return *index;
+    identity: impl Into<String>,
+    identities: &mut HashMap<HeapReference, String>,
+) {
+    assert!(
+        identities.insert(reference, identity.into()).is_none(),
+        "every intrinsic identity is registered once"
+    );
+}
+
+fn reference_identity(
+    reference: HeapReference,
+    identities: &HashMap<HeapReference, String>,
+) -> String {
+    identities
+        .get(&reference)
+        .unwrap_or_else(|| panic!("missing intrinsic identity for {reference:?}"))
+        .clone()
+}
+
+fn global_object_property(record: &ObjectRecord, name: &str) -> super::ObjectId {
+    let expected = name.encode_utf16().collect::<Vec<_>>();
+    let keys = record
+        .try_own_key_snapshot(None, KeyPhases::ALL)
+        .expect("global key snapshot allocation");
+    for index in 0..keys.len() {
+        let key = keys.get(index).expect("global key index").key();
+        let Some(atom) = key.as_atom() else {
+            continue;
+        };
+        if atom.description().map(string_code_units).as_ref() != Some(&expected) {
+            continue;
+        }
+        let Some(OwnProperty::Data {
+            value: StoredValue::Object(object),
+            ..
+        }) = record.own_property(key)
+        else {
+            panic!("global {name} is an intrinsic object data property");
+        };
+        return object;
     }
-    let index = indices.len();
-    indices.insert(reference, index);
-    pending.push_back(reference);
-    index
+    panic!("global {name} intrinsic exists")
 }
 
 #[cfg(test)]
@@ -381,7 +405,7 @@ mod tests {
 
     const REALM_NODES: usize = 242;
     const REALM_PROPERTIES: u64 = 757;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 8_747_040_734_372_787_780;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 9_672_580_622_966_685_507;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {

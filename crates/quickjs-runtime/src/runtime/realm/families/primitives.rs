@@ -8,9 +8,9 @@ use crate::runtime::realm::{
     NUMBER_FORMAT_METHODS, NUMBER_PREDEFINED_VALUE_STATICS, NUMBER_PREDICATE_STATICS,
     NUMBER_VALUE_STATICS, NativeFunctionKind, PredefinedAtom,
     schema::{
-        IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec,
-        IntrinsicObjectId, IntrinsicObjectKind, IntrinsicStringSpec, IntrinsicValueSpec,
-        RealmNameId,
+        IntrinsicFunctionId, IntrinsicIdentity, IntrinsicIdentityPublication, IntrinsicKeySpec,
+        IntrinsicNameSpec, IntrinsicObjectId, IntrinsicObjectKind, IntrinsicStringSpec,
+        IntrinsicValueSpec, RealmNameId,
     },
 };
 
@@ -61,11 +61,15 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             NativeFunctionKind::StringPrototypeValueOf,
         ),
     ] {
-        visit(ordinary(
+        let mut constructor_spec = ordinary(constructor, IntrinsicNameSpec::Predefined(name), 1);
+        if matches!(
             constructor,
-            IntrinsicNameSpec::Predefined(name),
-            1,
-        ));
+            NativeFunctionKind::BooleanConstructor | NativeFunctionKind::NumberConstructor
+        ) {
+            constructor_spec.identity_publication =
+                IntrinsicIdentityPublication::AutomaticAfterPrototype;
+        }
+        visit(constructor_spec);
         visit(ordinary(
             to_string,
             IntrinsicNameSpec::Predefined(PredefinedAtom::ToString),
@@ -109,7 +113,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             2,
         ),
     ] {
-        visit(ordinary(kind, name, length));
+        let mut spec = ordinary(kind, name, length);
+        if kind == NativeFunctionKind::BigIntConstructor {
+            spec.identity_publication = IntrinsicIdentityPublication::AutomaticAfterPrototype;
+        }
+        visit(spec);
     }
 }
 

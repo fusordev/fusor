@@ -55,7 +55,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             1,
         ),
     ] {
-        visit(ordinary(kind, name, length));
+        let mut spec = ordinary(kind, name, length);
+        if kind == NativeFunctionKind::OrdinaryFunctionConstructor {
+            spec.identity_publication = IntrinsicIdentityPublication::AutomaticAfterPrototype;
+        }
+        visit(spec);
     }
     for method in OBJECT_STATIC_METHODS {
         let name = method.predefined_name.map_or_else(

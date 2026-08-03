@@ -2,7 +2,7 @@
 
 use super::{
     Runtime, RuntimeError, RuntimeResource, allocation_failed, atoms::RealmAtomPlan, check_limit,
-    families::RealmIntrinsicSchema, schema::IntrinsicIdentityPublication, usize_to_u64,
+    families::RealmIntrinsicSchema, usize_to_u64,
 };
 
 const REALMS_PER_REALM: usize = 1;
@@ -31,9 +31,7 @@ impl RealmReservationPlan {
         let automatic_identity_properties = schema
             .specs()
             .iter()
-            .filter(|function| {
-                function.identity_publication == IntrinsicIdentityPublication::Automatic
-            })
+            .filter(|function| function.identity_publication.is_automatic())
             .count()
             .checked_mul(2)
             .ok_or_else(|| allocation_failed(RuntimeResource::ObjectProperties, usize::MAX))?;

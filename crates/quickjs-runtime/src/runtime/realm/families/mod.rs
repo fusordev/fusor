@@ -244,6 +244,9 @@ pub(super) enum DeclarativeBatch {
 }
 
 pub(super) fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatch {
+    if is_global_namespace_property(property) {
+        return DeclarativeBatch::NamespaceObjects;
+    }
     let referenced_function = match property.descriptor {
         IntrinsicDescriptorSpec::Data {
             value: IntrinsicValueSpec::Function(id),
@@ -309,6 +312,19 @@ pub(super) fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatc
         return DeclarativeBatch::Kernel;
     }
     DeclarativeBatch::NamespaceObjects
+}
+
+fn is_global_namespace_property(property: IntrinsicPropertySpec) -> bool {
+    property.holder == IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject)
+        && matches!(
+            property.descriptor,
+            IntrinsicDescriptorSpec::Data {
+                value: IntrinsicValueSpec::Object(
+                    IntrinsicObjectId::Reflect | IntrinsicObjectId::Json | IntrinsicObjectId::Math
+                ),
+                ..
+            }
+        )
 }
 
 fn is_global_value_property(property: IntrinsicPropertySpec) -> bool {

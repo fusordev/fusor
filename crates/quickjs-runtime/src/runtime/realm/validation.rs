@@ -39,6 +39,7 @@ pub(in crate::runtime) enum SchemaValidationError {
         function: IntrinsicFunctionId,
         key: PredefinedAtom,
     },
+    MissingIdentityPublicationAnchor(IntrinsicFunctionId),
     ConstructorPrototypeMismatch(ConstructorPrototypeSpec),
     FamilyCardinality {
         family: &'static str,
@@ -106,6 +107,17 @@ fn validate_functions(schema: IntrinsicSchema<'_>) -> Result<(), SchemaValidatio
         }
         if function.identity_publication == IntrinsicIdentityPublication::Declared {
             validate_declared_function_identity(schema, function)?;
+        } else if function.identity_publication
+            == IntrinsicIdentityPublication::AutomaticAfterPrototype
+            && !schema.properties.iter().any(|property| {
+                property.holder == IntrinsicIdentity::Function(function.id)
+                    && property.key == IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype)
+                    && intrinsic_descriptor_target(property.descriptor).is_some()
+            })
+        {
+            return Err(SchemaValidationError::MissingIdentityPublicationAnchor(
+                function.id,
+            ));
         }
     }
     Ok(())
@@ -563,6 +575,20 @@ mod tests {
                 function: FUNCTION,
                 key: PredefinedAtom::Name,
             })
+        );
+    }
+
+    #[test]
+    fn rejects_a_deferred_function_identity_without_a_prototype_anchor() {
+        let function = IntrinsicFunctionSpec {
+            identity_publication: IntrinsicIdentityPublication::AutomaticAfterPrototype,
+            ..FUNCTION_SPEC
+        };
+        assert_eq!(
+            validate_intrinsic_schema(schema(&[OBJECT_SPEC], &[function], &[])).err(),
+            Some(SchemaValidationError::MissingIdentityPublicationAnchor(
+                FUNCTION
+            ))
         );
     }
 

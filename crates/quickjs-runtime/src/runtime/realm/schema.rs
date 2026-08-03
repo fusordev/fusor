@@ -165,12 +165,22 @@ pub(in crate::runtime) enum IntrinsicNameSpec {
     Literal(&'static str),
 }
 
-/// Whether ordinary `length` and `name` are derived before family properties
-/// or appear explicitly in the ordered property declaration.
+/// Where derived ordinary `length` and `name` descriptors participate in the
+/// function's observable own-key order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::runtime) enum IntrinsicIdentityPublication {
+    /// Publish `length` and `name` before every declared family property.
     Automatic,
+    /// Publish a constructor's declared `prototype`, then `length` and `name`.
+    AutomaticAfterPrototype,
+    /// Both descriptors appear explicitly in the property declaration.
     Declared,
+}
+
+impl IntrinsicIdentityPublication {
+    pub(in crate::runtime) const fn is_automatic(self) -> bool {
+        matches!(self, Self::Automatic | Self::AutomaticAfterPrototype)
+    }
 }
 
 /// One Realm-owned native function identity.

@@ -7,8 +7,8 @@ use super::{
     families::{RealmIntrinsicSchema, is_declarative_function, is_declarative_object},
     reserved_record,
     schema::{
-        IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicIdentity,
-        IntrinsicIdentityPublication, IntrinsicObjectId, IntrinsicObjectKind, PrototypeSpec,
+        IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicIdentity, IntrinsicObjectId,
+        IntrinsicObjectKind, PrototypeSpec,
     },
 };
 use crate::runtime::BoxedPrimitive;
@@ -38,10 +38,8 @@ impl IntrinsicRecords {
         }
         for function in schema.specs() {
             let identity = IntrinsicIdentity::Function(function.id);
-            let identity_properties = match function.identity_publication {
-                IntrinsicIdentityPublication::Automatic => 2,
-                IntrinsicIdentityPublication::Declared => 0,
-            };
+            let identity_properties =
+                usize::from(function.identity_publication.is_automatic()).saturating_mul(2);
             let capacity = property_count(schema, identity)
                 .checked_add(identity_properties)
                 .ok_or_else(|| allocation_failed(RuntimeResource::ObjectProperties, usize::MAX))?;
