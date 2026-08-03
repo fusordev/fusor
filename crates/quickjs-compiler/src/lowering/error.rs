@@ -8,6 +8,13 @@ use quickjs_frontend::{OxcStringDecodeError, Span};
 
 use crate::storage::ExecutableId;
 
+pub(in crate::lowering) fn unsupported<T>(
+    feature: UnsupportedLeafFeature,
+    span: Span,
+) -> Result<T, LeafCompilationError> {
+    Err(LeafCompilationError::Unsupported { feature, span })
+}
+
 /// Syntax or storage behavior outside the currently executable compiler slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedLeafFeature {

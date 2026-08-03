@@ -3,23 +3,138 @@ use std::{collections::HashMap, sync::Arc};
 use oxc_semantic::ScopeId;
 use quickjs_bytecode::{
     ClosureVariableDefinition as VerifiedClosureVariableDefinition,
-    CompilerBindingKind as VerifiedBindingKind, CompilerCaptureLayout, CompilerCapturedBinding,
-    CompilerClosureSource as CompilerGraphClosureSource, CompilerConstant as CompilerGraphConstant,
-    FunctionGraphVerificationLimits, FunctionTemplateId, ScopeLink, UnverifiedCompilerFunction,
-    UnverifiedCompilerFunctionGraph, VariableDefinition, VerifiedCompilerFunctionGraph,
-    verify_compiler_function_graph,
+    CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
+    CompilerCapturedBinding, CompilerClosureSource as CompilerGraphClosureSource,
+    CompilerConstant as CompilerGraphConstant,
+    CompilerInitializationPolicy as VerifiedInitializationPolicy,
+    CompilerWritePolicy as VerifiedWritePolicy, FunctionGraphVerificationLimits,
+    FunctionTemplateId, ScopeLink, UnverifiedCompilerFunction, UnverifiedCompilerFunctionGraph,
+    VariableDefinition, VerifiedCompilerFunctionGraph, verify_compiler_function_graph,
 };
 use quickjs_frontend::{CompilationGoal, DynamicFunctionKind};
 
-use crate::storage::{BindingId, CaptureSource, Executable, ExecutableId, StoragePlacement};
+use crate::storage::{
+    BindingId, CaptureSource, DeclarationKind, DeclarationPolicy, Executable, ExecutableId,
+    InitializationPolicy, StoragePlacement, WritePolicy,
+};
 
 use super::{
     CompilationContext, CompiledClosureSource, CompiledClosureVariable, CompiledConstant,
     CompiledConstantPool, CompiledFunction, CompiledMetadataAtomKey, CompiledRealmGlobal,
     CompiledRealmGlobalSource, FrameLayout, FrameSlot, FunctionTreeLayout, LeafCompilationError,
-    LogicalCompilerScope, binding_has_scope, checked_function_index, raw_parameter_definition,
-    verified_storage_policy,
+    LogicalCompilerScope, checked_function_index,
 };
+
+fn verified_binding_policy(
+    policy: DeclarationPolicy,
+) -> Result<CompilerBindingPolicy, LeafCompilationError> {
+    let kind = match policy.kind() {
+        DeclarationKind::Parameter => VerifiedBindingKind::Parameter,
+        DeclarationKind::Var => VerifiedBindingKind::Var,
+        DeclarationKind::Let => VerifiedBindingKind::Let,
+        DeclarationKind::Const => VerifiedBindingKind::Const,
+        DeclarationKind::Function => VerifiedBindingKind::Function,
+        DeclarationKind::FunctionName => VerifiedBindingKind::FunctionName,
+        DeclarationKind::Catch => VerifiedBindingKind::Catch,
+        DeclarationKind::Import
+        | DeclarationKind::NamespaceImport
+        | DeclarationKind::SyntheticDefault => {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "ordinary function metadata excludes module bindings",
+                span: None,
+            });
+        }
+    };
+    let initialization = match policy.initialization() {
+        InitializationPolicy::Argument => VerifiedInitializationPolicy::Argument,
+        InitializationPolicy::UndefinedAtInstantiation => {
+            VerifiedInitializationPolicy::UndefinedAtInstantiation
+        }
+        InitializationPolicy::AtDeclaration => VerifiedInitializationPolicy::AtDeclaration,
+        InitializationPolicy::FunctionAtInstantiation => {
+            VerifiedInitializationPolicy::FunctionAtInstantiation
+        }
+        InitializationPolicy::FunctionAtScopeEntry => {
+            VerifiedInitializationPolicy::FunctionAtScopeEntry
+        }
+        InitializationPolicy::FunctionName => VerifiedInitializationPolicy::FunctionName,
+        InitializationPolicy::Catch => VerifiedInitializationPolicy::Catch,
+        InitializationPolicy::ModuleImport | InitializationPolicy::ModuleNamespace => {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "ordinary function metadata excludes module initialization",
+                span: None,
+            });
+        }
+    };
+    let writes = match policy.writes() {
+        WritePolicy::Mutable => VerifiedWritePolicy::Mutable,
+        WritePolicy::Immutable => VerifiedWritePolicy::Immutable,
+        WritePolicy::ImmutableInStrictCode => VerifiedWritePolicy::ImmutableInStrictCode,
+        WritePolicy::Internal => {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "ordinary function metadata excludes internal module cells",
+                span: None,
+            });
+        }
+    };
+    Ok(CompilerBindingPolicy::new(
+        kind,
+        initialization,
+        writes,
+        policy.has_temporal_dead_zone(),
+    ))
+}
+
+pub(in crate::lowering) fn verified_storage_policy(
+    binding: &crate::storage::BindingStorage,
+) -> Result<CompilerBindingPolicy, LeafCompilationError> {
+    if matches!(binding.placement(), StoragePlacement::Argument { .. }) {
+        return Ok(CompilerBindingPolicy::new(
+            VerifiedBindingKind::Parameter,
+            VerifiedInitializationPolicy::Argument,
+            VerifiedWritePolicy::Mutable,
+            false,
+        ));
+    }
+    verified_binding_policy(binding.policy())
+}
+
+pub(in crate::lowering) const fn constructor_realm_lookup_policy() -> CompilerBindingPolicy {
+    CompilerBindingPolicy::new(
+        VerifiedBindingKind::GlobalReference,
+        VerifiedInitializationPolicy::ConstructorRealmLookup,
+        VerifiedWritePolicy::Mutable,
+        false,
+    )
+}
+
+fn raw_parameter_definition(
+    constants: &CompiledConstantPool,
+    index: u32,
+) -> Result<VariableDefinition, LeafCompilationError> {
+    Ok(VariableDefinition::new(
+        Some(constants.metadata_atom_index(CompiledMetadataAtomKey::RawParameter(index))?),
+        ScopeLink::End,
+        CompilerBindingPolicy::new(
+            VerifiedBindingKind::Parameter,
+            VerifiedInitializationPolicy::Argument,
+            VerifiedWritePolicy::Mutable,
+            false,
+        ),
+        false,
+        None,
+    ))
+}
+
+const fn binding_has_scope(policy: DeclarationPolicy) -> bool {
+    matches!(
+        policy.kind(),
+        DeclarationKind::Let | DeclarationKind::Const | DeclarationKind::Catch
+    ) || matches!(
+        policy.initialization(),
+        InitializationPolicy::FunctionAtScopeEntry
+    )
+}
 
 pub(in crate::lowering) fn verify_compiled_function_graph(
     root: ExecutableId,

@@ -3,9 +3,12 @@ use std::sync::Arc;
 use oxc_ast::ast::{Function, FunctionBody, Program};
 use quickjs_bytecode::{
     AtomPoolIndex, ClosureVariableDefinition as VerifiedClosureVariableDefinition, CompilerAtom,
-    CompilerCaptureLayout, CompilerConstantLayout, CompilerExecutableKind, CompilerSource,
-    FunctionIndexDomains, PcSourceSpan, SourceByteSpan, UnverifiedFunctionHeader,
-    UnverifiedFunctionMetadata, VariableDefinition, VerificationLimits,
+    CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
+    CompilerConstantLayout, CompilerExecutableKind,
+    CompilerInitializationPolicy as VerifiedInitializationPolicy, CompilerSource,
+    CompilerWritePolicy as VerifiedWritePolicy, FunctionIndexDomains, PcSourceSpan, ScopeLink,
+    SourceByteSpan, UnverifiedFunctionHeader, UnverifiedFunctionMetadata, VariableDefinition,
+    VerificationLimits,
 };
 use quickjs_frontend::Span;
 
@@ -15,9 +18,29 @@ use super::{
     FunctionTreeLayout, LeafCompilationError, LocalSlot, LoweredLocal, OrdinaryFunctionForm,
     PlannedControlFlow, StatementCompletion, StatementControlStack, StatementPlanningState,
     StatementWork, UnsupportedLeafFeature, checked_function_entry_count,
-    script_completion_variable_definition, source_byte_span,
 };
 use crate::storage::{ExecutableId, ExecutableKind};
+
+fn script_completion_variable_definition(
+    constants: &CompiledConstantPool,
+) -> Result<VariableDefinition, LeafCompilationError> {
+    Ok(VariableDefinition::new(
+        Some(constants.metadata_atom_index(CompiledMetadataAtomKey::ScriptCompletion)?),
+        ScopeLink::End,
+        CompilerBindingPolicy::new(
+            VerifiedBindingKind::Var,
+            VerifiedInitializationPolicy::UndefinedAtInstantiation,
+            VerifiedWritePolicy::Mutable,
+            false,
+        ),
+        false,
+        None,
+    ))
+}
+
+const fn source_byte_span(span: Span) -> SourceByteSpan {
+    SourceByteSpan::new(span.start, span.end)
+}
 
 #[derive(Clone, Copy)]
 pub(in crate::lowering) struct FunctionPlanningContext<'layout> {

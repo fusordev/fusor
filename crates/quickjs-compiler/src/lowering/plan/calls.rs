@@ -1,8 +1,8 @@
 use super::super::{
     Argument, AssignmentExpression, AssignmentOperator, CallExpression, CompiledConstantPool,
     ComputedMemberExpression, Expression, FinalOpcode, GetSpan, LeafCompilationError,
-    NewExpression, Operands, PlannedInstruction, StaticMemberExpression, UnsupportedLeafFeature,
-    plan_direct_call, plan_push_integer, unsupported,
+    NewExpression, Operands, PlannedInstruction, Span, StaticMemberExpression,
+    UnsupportedLeafFeature, plan_push_integer, unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -10,6 +10,17 @@ use super::expressions::{ExpressionPlanner, ExpressionWork};
 pub(in crate::lowering) enum MemberCallee<'expression, 'arena> {
     Static(&'expression StaticMemberExpression<'arena>),
     Computed(&'expression ComputedMemberExpression<'arena>),
+}
+
+pub(in crate::lowering) fn plan_direct_call(argument_count: u16, span: Span) -> PlannedInstruction {
+    let (opcode, operands) = match argument_count {
+        0 => (FinalOpcode::Call0, Operands::NPopX),
+        1 => (FinalOpcode::Call1, Operands::NPopX),
+        2 => (FinalOpcode::Call2, Operands::NPopX),
+        3 => (FinalOpcode::Call3, Operands::NPopX),
+        argument_count => (FinalOpcode::Call, Operands::NPop { argument_count }),
+    };
+    PlannedInstruction::new(opcode, operands, span)
 }
 
 impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {

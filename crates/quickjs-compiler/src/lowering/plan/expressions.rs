@@ -1,17 +1,193 @@
 use super::super::{
     ArrayExpression, ArrayExpressionElement, AssignmentExpression, AssignmentOperator,
-    AssignmentTarget, AtomPoolIndex, BranchKind, CompilationContext, CompilationGoal,
-    CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel, ConditionalExpression,
-    DynamicFunctionKind, ExecutableId, Expression, FinalOpcode, FrameLayout, Function,
-    FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError, LogicalExpression,
-    LogicalOperator, LoweredReference, ObjectExpression, ObjectProperty, ObjectPropertyKind,
-    Operands, PlannedControlFlow, PlannedInstruction, PropertyKind, SequenceExpression,
-    SimpleAssignmentTarget, Span, UnaryExpression, UnaryOperator, UnsupportedLeafFeature,
-    UpdateExpression, UpdateOperator, anonymous_named_evaluation_span,
-    anonymous_ordinary_function_span, binary_opcode, compiled_static_property_key,
-    exact_negated_i32, object_method_or_accessor_span, plan_literal, plan_push_integer,
-    unary_opcode, unsupported,
+    AssignmentTarget, AtomPoolIndex, BinaryOperator, BranchKind, CompilationContext,
+    CompilationGoal, CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel,
+    ConditionalExpression, DynamicFunctionKind, ExecutableId, Expression, FinalOpcode, FrameLayout,
+    Function, FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError,
+    LogicalExpression, LogicalOperator, LoweredReference, ObjectExpression, ObjectProperty,
+    ObjectPropertyKind, Operands, PlannedControlFlow, PlannedInstruction, PropertyKind,
+    SequenceExpression, SimpleAssignmentTarget, Span, UnaryExpression, UnaryOperator,
+    UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
+    object_method_or_accessor_span, unsupported,
 };
+
+pub(in crate::lowering) fn anonymous_named_evaluation_span(
+    mut expression: &Expression<'_>,
+) -> Option<Span> {
+    while let Expression::ParenthesizedExpression(parenthesized) = expression {
+        expression = &parenthesized.expression;
+    }
+    match expression {
+        Expression::FunctionExpression(function) if function.id.is_none() => Some(function.span),
+        Expression::ClassExpression(class) if class.id.is_none() => Some(class.span),
+        _ => None,
+    }
+}
+
+pub(in crate::lowering) fn anonymous_ordinary_function_span(
+    mut expression: &Expression<'_>,
+) -> Option<Span> {
+    while let Expression::ParenthesizedExpression(parenthesized) = expression {
+        expression = &parenthesized.expression;
+    }
+    match expression {
+        Expression::FunctionExpression(function) if function.id.is_none() => Some(function.span),
+        _ => None,
+    }
+}
+
+pub(in crate::lowering) fn plan_literal(
+    expression: &Expression<'_>,
+    constants: &CompiledConstantPool,
+) -> Option<Result<PlannedInstruction, LeafCompilationError>> {
+    let planned = match expression {
+        Expression::BooleanLiteral(literal) => Ok(PlannedInstruction::new(
+            if literal.value {
+                FinalOpcode::PushTrue
+            } else {
+                FinalOpcode::PushFalse
+            },
+            Operands::None,
+            literal.span,
+        )),
+        Expression::NullLiteral(literal) => Ok(PlannedInstruction::new(
+            FinalOpcode::Null,
+            Operands::None,
+            literal.span,
+        )),
+        Expression::NumericLiteral(literal) => match exact_i32(literal.value) {
+            Some(value) => Ok(plan_push_integer(value, literal.span)),
+            None => constants.plan_number(literal.value, literal.span),
+        },
+        Expression::BigIntLiteral(literal) => literal
+            .value
+            .parse::<i32>()
+            .map(|value| {
+                PlannedInstruction::new(
+                    FinalOpcode::PushBigIntI32,
+                    Operands::I32(value),
+                    literal.span,
+                )
+            })
+            .map_err(|_| LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedLiteral,
+                span: literal.span,
+            }),
+        Expression::StringLiteral(literal) if literal.value.is_empty() => Ok(
+            PlannedInstruction::new(FinalOpcode::PushEmptyString, Operands::None, literal.span),
+        ),
+        Expression::StringLiteral(literal) => constants.plan_string(literal.span),
+        Expression::RegExpLiteral(literal) => {
+            unsupported(UnsupportedLeafFeature::UnsupportedLiteral, literal.span)
+        }
+        Expression::TemplateLiteral(template)
+            if template.expressions.is_empty() && template.quasis.len() == 1 =>
+        {
+            let quasi = &template.quasis[0];
+            if quasi.tail {
+                match quasi.value.cooked.as_ref() {
+                    None => Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "untagged no-substitution template has a cooked value",
+                        span: Some(template.span),
+                    }),
+                    Some(cooked) if cooked.is_empty() => Ok(PlannedInstruction::new(
+                        FinalOpcode::PushEmptyString,
+                        Operands::None,
+                        template.span,
+                    )),
+                    Some(_) => constants.plan_string(template.span),
+                }
+            } else {
+                Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "no-substitution template has one tail quasi",
+                    span: Some(template.span),
+                })
+            }
+        }
+        Expression::TemplateLiteral(template) => {
+            unsupported(UnsupportedLeafFeature::UnsupportedLiteral, template.span)
+        }
+        _ => return None,
+    };
+    Some(planned)
+}
+
+#[allow(clippy::cast_possible_truncation)]
+pub(in crate::lowering) fn exact_i32(value: f64) -> Option<i32> {
+    if value.is_finite()
+        && value.fract() == 0.0
+        && value >= f64::from(i32::MIN)
+        && value <= f64::from(i32::MAX)
+    {
+        Some(value as i32)
+    } else {
+        None
+    }
+}
+
+pub(in crate::lowering) fn exact_negated_i32(value: f64) -> Option<i32> {
+    exact_i32(-value)
+}
+
+pub(in crate::lowering) fn plan_push_integer(value: i32, span: Span) -> PlannedInstruction {
+    let (opcode, operands) = match value {
+        -1 => (FinalOpcode::PushMinus1, Operands::NoneInt),
+        0 => (FinalOpcode::Push0, Operands::NoneInt),
+        1 => (FinalOpcode::Push1, Operands::NoneInt),
+        2 => (FinalOpcode::Push2, Operands::NoneInt),
+        3 => (FinalOpcode::Push3, Operands::NoneInt),
+        4 => (FinalOpcode::Push4, Operands::NoneInt),
+        5 => (FinalOpcode::Push5, Operands::NoneInt),
+        6 => (FinalOpcode::Push6, Operands::NoneInt),
+        7 => (FinalOpcode::Push7, Operands::NoneInt),
+        value => match i8::try_from(value) {
+            Ok(value) => (FinalOpcode::PushI8, Operands::I8(value)),
+            Err(_) => match i16::try_from(value) {
+                Ok(value) => (FinalOpcode::PushI16, Operands::I16(value)),
+                Err(_) => (FinalOpcode::PushI32, Operands::I32(value)),
+            },
+        },
+    };
+    PlannedInstruction::new(opcode, operands, span)
+}
+
+pub(in crate::lowering) const fn unary_opcode(operator: UnaryOperator) -> Option<FinalOpcode> {
+    match operator {
+        UnaryOperator::UnaryPlus => Some(FinalOpcode::Plus),
+        UnaryOperator::UnaryNegation => Some(FinalOpcode::Neg),
+        UnaryOperator::LogicalNot => Some(FinalOpcode::Lnot),
+        UnaryOperator::BitwiseNot => Some(FinalOpcode::Not),
+        UnaryOperator::Typeof => Some(FinalOpcode::Typeof),
+        UnaryOperator::Void | UnaryOperator::Delete => None,
+    }
+}
+
+pub(in crate::lowering) const fn binary_opcode(operator: BinaryOperator) -> FinalOpcode {
+    match operator {
+        BinaryOperator::Equality => FinalOpcode::Eq,
+        BinaryOperator::Inequality => FinalOpcode::Neq,
+        BinaryOperator::StrictEquality => FinalOpcode::StrictEq,
+        BinaryOperator::StrictInequality => FinalOpcode::StrictNeq,
+        BinaryOperator::LessThan => FinalOpcode::Lt,
+        BinaryOperator::LessEqualThan => FinalOpcode::Lte,
+        BinaryOperator::GreaterThan => FinalOpcode::Gt,
+        BinaryOperator::GreaterEqualThan => FinalOpcode::Gte,
+        BinaryOperator::Addition => FinalOpcode::Add,
+        BinaryOperator::Subtraction => FinalOpcode::Sub,
+        BinaryOperator::Multiplication => FinalOpcode::Mul,
+        BinaryOperator::Division => FinalOpcode::Div,
+        BinaryOperator::Remainder => FinalOpcode::Mod,
+        BinaryOperator::Exponential => FinalOpcode::Pow,
+        BinaryOperator::ShiftLeft => FinalOpcode::Shl,
+        BinaryOperator::ShiftRight => FinalOpcode::Sar,
+        BinaryOperator::ShiftRightZeroFill => FinalOpcode::Shr,
+        BinaryOperator::BitwiseOR => FinalOpcode::Or,
+        BinaryOperator::BitwiseXOR => FinalOpcode::Xor,
+        BinaryOperator::BitwiseAnd => FinalOpcode::And,
+        BinaryOperator::In => FinalOpcode::In,
+        BinaryOperator::Instanceof => FinalOpcode::InstanceOf,
+    }
+}
 
 pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
     Visit(&'expression Expression<'arena>),

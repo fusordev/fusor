@@ -1,15 +1,13 @@
 use super::super::{
-    AssignmentExpression, AssignmentOperator, AssignmentTarget, BindingId, BindingIdentifier,
-    BindingPattern, BranchKind, CompilationContext, CompilationGoal, CompiledConstantPool,
-    DestructuringBindingInitialization, DynamicFunctionKind, ExecutableId, Expression, FinalOpcode,
-    ForStatementLeft, FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan, IdentifierReference,
-    LeafCompilationError, LocalSlot, NativeReferenceId, Operands, PlannedControlFlow,
-    PlannedInstruction, RealmGlobalId, ReferenceAccess, ReferenceId, Span, StoragePlacement,
-    SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature, VariableDeclaration,
+    ArgumentSlot, AssignmentExpression, AssignmentOperator, AssignmentTarget, BindingId,
+    BindingIdentifier, BindingPattern, BranchKind, CompilationContext, CompilationGoal,
+    CompiledConstantPool, DestructuringBindingInitialization, DynamicFunctionKind, ExecutableId,
+    Expression, FinalOpcode, ForStatementLeft, FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan,
+    IdentifierReference, LeafCompilationError, LocalSlot, NativeReferenceId, Operands,
+    PlannedControlFlow, PlannedInstruction, RealmGlobalId, ReferenceAccess, ReferenceId, Span,
+    StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature, VariableDeclaration,
     VariableDeclarationKind, VariableDeclarator, WritePolicy, anonymous_named_evaluation_span,
-    binary_opcode, compact_get_argument, compact_get_capture, compact_get_local,
-    compact_put_argument, compact_put_capture, compact_put_local, compact_set_argument,
-    compact_set_capture, compact_set_local, plan_put_slot, unsupported,
+    binary_opcode, unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -25,6 +23,114 @@ pub(in crate::lowering) enum LoweredReference {
         slot: u16,
         access: ReferenceAccess,
     },
+}
+
+pub(in crate::lowering) fn compact_get_argument(slot: ArgumentSlot) -> (FinalOpcode, Operands) {
+    match slot.0 {
+        0 => (FinalOpcode::GetArg0, Operands::NoneArg),
+        1 => (FinalOpcode::GetArg1, Operands::NoneArg),
+        2 => (FinalOpcode::GetArg2, Operands::NoneArg),
+        3 => (FinalOpcode::GetArg3, Operands::NoneArg),
+        index => (FinalOpcode::GetArg, Operands::Arg(index)),
+    }
+}
+
+pub(in crate::lowering) fn compact_put_argument(slot: ArgumentSlot) -> (FinalOpcode, Operands) {
+    match slot.0 {
+        0 => (FinalOpcode::PutArg0, Operands::NoneArg),
+        1 => (FinalOpcode::PutArg1, Operands::NoneArg),
+        2 => (FinalOpcode::PutArg2, Operands::NoneArg),
+        3 => (FinalOpcode::PutArg3, Operands::NoneArg),
+        index => (FinalOpcode::PutArg, Operands::Arg(index)),
+    }
+}
+
+pub(in crate::lowering) fn compact_set_argument(slot: ArgumentSlot) -> (FinalOpcode, Operands) {
+    match slot.0 {
+        0 => (FinalOpcode::SetArg0, Operands::NoneArg),
+        1 => (FinalOpcode::SetArg1, Operands::NoneArg),
+        2 => (FinalOpcode::SetArg2, Operands::NoneArg),
+        3 => (FinalOpcode::SetArg3, Operands::NoneArg),
+        index => (FinalOpcode::SetArg, Operands::Arg(index)),
+    }
+}
+
+pub(in crate::lowering) fn compact_get_local(slot: LocalSlot) -> (FinalOpcode, Operands) {
+    match slot.0 {
+        0 => (FinalOpcode::GetLoc0, Operands::NoneLoc),
+        1 => (FinalOpcode::GetLoc1, Operands::NoneLoc),
+        2 => (FinalOpcode::GetLoc2, Operands::NoneLoc),
+        3 => (FinalOpcode::GetLoc3, Operands::NoneLoc),
+        index => match u8::try_from(index) {
+            Ok(short) => (FinalOpcode::GetLoc8, Operands::Loc8(short)),
+            Err(_) => (FinalOpcode::GetLoc, Operands::Loc(index)),
+        },
+    }
+}
+
+pub(in crate::lowering) fn compact_put_local(slot: LocalSlot) -> (FinalOpcode, Operands) {
+    match slot.0 {
+        0 => (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        1 => (FinalOpcode::PutLoc1, Operands::NoneLoc),
+        2 => (FinalOpcode::PutLoc2, Operands::NoneLoc),
+        3 => (FinalOpcode::PutLoc3, Operands::NoneLoc),
+        index => match u8::try_from(index) {
+            Ok(short) => (FinalOpcode::PutLoc8, Operands::Loc8(short)),
+            Err(_) => (FinalOpcode::PutLoc, Operands::Loc(index)),
+        },
+    }
+}
+
+pub(in crate::lowering) fn compact_set_local(slot: LocalSlot) -> (FinalOpcode, Operands) {
+    match slot.0 {
+        0 => (FinalOpcode::SetLoc0, Operands::NoneLoc),
+        1 => (FinalOpcode::SetLoc1, Operands::NoneLoc),
+        2 => (FinalOpcode::SetLoc2, Operands::NoneLoc),
+        3 => (FinalOpcode::SetLoc3, Operands::NoneLoc),
+        index => match u8::try_from(index) {
+            Ok(short) => (FinalOpcode::SetLoc8, Operands::Loc8(short)),
+            Err(_) => (FinalOpcode::SetLoc, Operands::Loc(index)),
+        },
+    }
+}
+
+pub(in crate::lowering) fn compact_get_capture(slot: u16) -> (FinalOpcode, Operands) {
+    match slot {
+        0 => (FinalOpcode::GetVarRef0, Operands::NoneVarRef),
+        1 => (FinalOpcode::GetVarRef1, Operands::NoneVarRef),
+        2 => (FinalOpcode::GetVarRef2, Operands::NoneVarRef),
+        3 => (FinalOpcode::GetVarRef3, Operands::NoneVarRef),
+        index => (FinalOpcode::GetVarRef, Operands::VarRef(index)),
+    }
+}
+
+pub(in crate::lowering) fn compact_put_capture(slot: u16) -> (FinalOpcode, Operands) {
+    match slot {
+        0 => (FinalOpcode::PutVarRef0, Operands::NoneVarRef),
+        1 => (FinalOpcode::PutVarRef1, Operands::NoneVarRef),
+        2 => (FinalOpcode::PutVarRef2, Operands::NoneVarRef),
+        3 => (FinalOpcode::PutVarRef3, Operands::NoneVarRef),
+        index => (FinalOpcode::PutVarRef, Operands::VarRef(index)),
+    }
+}
+
+pub(in crate::lowering) fn compact_set_capture(slot: u16) -> (FinalOpcode, Operands) {
+    match slot {
+        0 => (FinalOpcode::SetVarRef0, Operands::NoneVarRef),
+        1 => (FinalOpcode::SetVarRef1, Operands::NoneVarRef),
+        2 => (FinalOpcode::SetVarRef2, Operands::NoneVarRef),
+        3 => (FinalOpcode::SetVarRef3, Operands::NoneVarRef),
+        index => (FinalOpcode::SetVarRef, Operands::VarRef(index)),
+    }
+}
+
+pub(in crate::lowering) fn plan_put_slot(slot: FrameSlot, span: Span) -> PlannedInstruction {
+    let (opcode, operands) = match slot {
+        FrameSlot::Argument(slot) => compact_put_argument(slot),
+        FrameSlot::Local(slot) => compact_put_local(slot),
+        FrameSlot::Capture(slot) => compact_put_capture(slot),
+    };
+    PlannedInstruction::new(opcode, operands, span)
 }
 
 impl LoweredReference {
