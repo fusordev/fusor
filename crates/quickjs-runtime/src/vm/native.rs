@@ -418,6 +418,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::ObjectAssign(state) => advance_object_assign(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             // `Reflect.set` discards a setter's completion and answers `true`.
             NativeContinuation::ReflectTrue => {
                 NativeDispatch::Immediate(StoredValue::Boolean(true))
@@ -1133,6 +1140,14 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::ObjectAssign => begin_object_assign(
+            runtime,
+            native.realm,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::ObjectGetOwnPropertyDescriptors => {
             let mut arguments = inputs.arguments;
             own_property_descriptors(

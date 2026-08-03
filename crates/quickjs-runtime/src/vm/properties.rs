@@ -1373,7 +1373,12 @@ pub(super) fn advance_copy_data_properties(
                 };
                 state.next = state.next.saturating_add(1);
                 execution_budget.charge_instructions(1)?;
-                if !candidate.enumerable() {
+                // The enumerable attribute is re-tested against the live source
+                // rather than trusted from the snapshot, so a getter that
+                // deletes or hides a later key removes it from the copy. The
+                // pinned oracle caches the snapshot's flag here and so still
+                // copies a hidden key; `CopyDataProperties` re-reads it.
+                if !own_key_is_enumerable_on(runtime, &state.source, candidate.key())? {
                     continue;
                 }
                 if let Some(excluded) = &state.excluded {

@@ -164,7 +164,7 @@ pub(super) fn advance_object_listing(
         execution_budget.charge_instructions(1)?;
         // The attribute is re-tested against the live object, so a getter that
         // deleted or hid a later key removes it from the result.
-        if !own_key_is_enumerable(runtime, &state.target, candidate.key())? {
+        if !own_key_is_enumerable_on(runtime, &state.target, candidate.key())? {
             continue;
         }
         charge_heap_property_lookup(runtime, &state.target, execution_budget)?;
@@ -200,7 +200,7 @@ fn push_listing_element(
     value: StoredValue,
 ) -> Result<(), NativeFailure> {
     let element = if state.listing.is_paired() {
-        let name = StoredValue::String(listing_key_string(key)?);
+        let name = StoredValue::String(own_key_name(key)?);
         StoredValue::Object(build_entry_pair(runtime, state.realm, name, value)?)
     } else {
         value
@@ -364,8 +364,11 @@ fn append_descriptor_entry(
     Ok(())
 }
 
-/// Returns whether one own key is currently enumerable on the live target.
-fn own_key_is_enumerable(
+/// Returns whether one own key is currently enumerable on the live object.
+///
+/// Every walk that copies or lists own properties re-tests this rather than
+/// trusting its key snapshot, so a getter's own mutations are observable.
+pub(super) fn own_key_is_enumerable_on(
     runtime: &Runtime,
     target: &StoredValue,
     key: &PropertyKey,
@@ -381,7 +384,7 @@ fn own_key_is_enumerable(
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             return Err(EngineFault::RuntimeInvariant {
-                message: "Object listing target is not an object",
+                message: "own-key enumerability test received a non-object",
             }
             .into());
         }
@@ -478,18 +481,76 @@ fn build_entry_pair(
     Ok(runtime.allocate_array(realm, pair)?)
 }
 
-/// Renders one own string key as the value `Object.entries` reports.
-fn listing_key_string(key: &PropertyKey) -> Result<JsString, NativeFailure> {
+/// Renders one own key as the string a listing or a failure message reports.
+pub(super) fn own_key_name(key: &PropertyKey) -> Result<JsString, NativeFailure> {
     if let Some(index) = key.as_index() {
         return Ok(JsNumber::from_u32(index.get()).to_radix_string(10)?);
     }
     let atom = key.as_atom().ok_or(EngineFault::RuntimeInvariant {
         message: "listing own key is neither an index nor an atom",
     })?;
-    atom.description()
-        .cloned()
-        .ok_or(EngineFault::RuntimeInvariant {
-            message: "listing own string key atom has no description",
-        })
-        .map_err(NativeFailure::from)
+    // A symbol without a description renders as the empty string, which only a
+    // failure message can observe: no listing reports a symbol key.
+    Ok(atom.description().cloned().unwrap_or_else(JsString::empty))
+}
+
+/// Applies ECMAScript `ToObject`.
+///
+/// A primitive is boxed into its wrapper and a nullish value reports
+/// `cannot convert to object`, which is the failure every `Object` static that
+/// converts its argument shares.
+pub(super) fn to_object(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    value: StoredValue,
+    origin: &JsStackFrame,
+) -> Result<StoredValue, NativeFailure> {
+    match value {
+        value @ (StoredValue::Function(_) | StoredValue::Object(_)) => Ok(value),
+        StoredValue::Undefined | StoredValue::Null => {
+            Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: JsString::from_utf8("cannot convert to object")?,
+                },
+                origin: origin.clone(),
+            }))
+        }
+        StoredValue::Boolean(value) => Ok(StoredValue::Object(
+            runtime.allocate_boxed_boolean(realm, value)?,
+        )),
+        StoredValue::BigInt(value) => Ok(StoredValue::Object(
+            runtime.allocate_boxed_bigint(realm, value)?,
+        )),
+        StoredValue::Number(value) => Ok(StoredValue::Object(
+            runtime.allocate_boxed_number(realm, value)?,
+        )),
+        StoredValue::String(value) => Ok(StoredValue::Object(
+            runtime.allocate_boxed_string(realm, value)?,
+        )),
+        StoredValue::Symbol(value) => Ok(StoredValue::Object(
+            runtime.allocate_boxed_symbol(realm, value)?,
+        )),
+    }
+}
+
+/// Resolves a heap reference from a value already known to be an object.
+pub(super) fn heap_reference_of_object(
+    value: &StoredValue,
+) -> Result<HeapReference, NativeFailure> {
+    match value {
+        StoredValue::Function(function) => Ok(HeapReference::Function(*function)),
+        StoredValue::Object(object) => Ok(HeapReference::Object(*object)),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => Err(EngineFault::RuntimeInvariant {
+            message: "converted value is not an object",
+        }
+        .into()),
+    }
 }

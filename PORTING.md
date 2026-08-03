@@ -452,14 +452,35 @@ Known intentional write-path differences:
   realm's already-interned `entries` atom rather than interning a duplicate,
   which the atom table's rollback invariant forbids; the reuse is declared on the
   static itself so the interning order stays auditable.
+- [x] `Object.assign` as a resumable walk over several sources, because both
+  halves of each copied property can run user code. The pinned order interleaves
+  them per key rather than reading a whole source first, so
+  `Object.assign({set a(v){}, set b(v){}}, {get a(){}, get b(){}})` observes
+  `get a`, `set a`, `get b`, `set b` (`quickjs.c:40449-40470`). The target
+  converts with `ToObject`, so a primitive is boxed and the wrapper is the
+  result while a nullish one throws even with no source to copy; a nullish
+  *source* is skipped instead. Symbol keys are copied and non-enumerable ones
+  are not, and each write is a strict `Set`, so a read-only target property or a
+  non-extensible target throws rather than silently dropping the value, a target
+  setter runs with the target as its `this`, and an array target's `length`
+  keeps the resumable conversion whose `RangeError` outranks the write.
+- [x] Corrected the enumerable re-test shared by `Object.assign`, the
+  `Object.values`/`entries` listings, and object spread's
+  `CopyDataProperties`. All four capture their key set up front, but the
+  attribute is a live property: ECMAScript re-reads it per key, so a getter that
+  hides a later key removes it from the result. The pinned oracle instead caches
+  the flag its snapshot recorded and still copies a hidden key, which is an
+  upstream divergence from the specification rather than a behavior to
+  reproduce, so the specification's order is implemented and the divergence is
+  recorded here.
 - [ ] Remaining String/Number/Array method surface (`String.prototype` case
   conversions and `localeCompare`, the RegExp-dependent `match`, `matchAll`,
   `replace`, `search`, and `split`, `normalize`, `String.raw`, and the
   locale-dependent renderings), shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
-- [ ] Complete the `Object` surface (`assign`, `fromEntries`,
-  `defineProperties`, `groupBy`, `Object.create`'s descriptors argument,
+- [ ] Complete the `Object` surface (`fromEntries`, `defineProperties`,
+  `groupBy`, `Object.create`'s descriptors argument,
   `Object.prototype.toLocaleString`, and the `__proto__` accessor pair), then
   Proxy, remaining built-ins, RegExp/Date/JSON, collections, binary data,
   Atomics, Unicode tables, promises, async functions/generators, weak

@@ -865,6 +865,9 @@ pub(crate) enum NativeFunctionKind {
     /// `Object.getOwnPropertyDescriptors`, which reads no value and so never
     /// suspends.
     ObjectGetOwnPropertyDescriptors,
+    /// `Object.assign`, which interleaves a source read with a target write per
+    /// key across several sources.
+    ObjectAssign,
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
     ObjectPrototypeHasOwnProperty,

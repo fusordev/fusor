@@ -85,6 +85,7 @@ mod execution;
 mod instanceof;
 mod iterators;
 mod native;
+mod object_assign;
 mod object_intrinsics;
 mod object_listings;
 mod properties;
@@ -100,8 +101,9 @@ use {
     aggregate_error::*, array_by_copy::*, array_callbacks::*, array_copiers::*, array_flatten::*,
     array_join::*, array_mutators::*, array_search::*, array_sort::*, bigint_intrinsics::*,
     bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*,
-    errors::*, exceptions::*, execution::*, iterators::*, native::*, object_intrinsics::*,
-    object_listings::*, properties::*, reflect::*, stack::*, string_methods::*,
+    errors::*, exceptions::*, execution::*, iterators::*, native::*, object_assign::*,
+    object_intrinsics::*, object_listings::*, properties::*, reflect::*, stack::*,
+    string_methods::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -308,6 +310,7 @@ enum NativeContinuation {
     ArraySort(Box<ArraySortContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     ObjectListing(Box<ObjectListingContinuation>),
+    ObjectAssign(Box<ObjectAssignContinuation>),
     InstanceOf(InstanceOfContinuation),
     /// A `Reflect.set` setter call whose completion is discarded in favor of
     /// the operation's own `true` answer.
@@ -348,6 +351,7 @@ impl NativeContinuation {
             Self::ArraySort(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::ObjectListing(state) => state.retained_values(),
+            Self::ObjectAssign(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
             Self::ReflectTrue | Self::FunctionCall => 0,
         }
@@ -1383,6 +1387,7 @@ fn trace_native_continuation_roots(
             }
         }
         NativeContinuation::ObjectListing(state) => state.trace_roots(mark),
+        NativeContinuation::ObjectAssign(state) => state.trace_roots(mark),
         NativeContinuation::InstanceOf(state) => {
             trace_instance_of_roots(state, mark);
         }
