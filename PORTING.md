@@ -466,9 +466,17 @@ Known intentional runtime differences:
   header bit is cleared, sloppy functions and object methods receive an
   unmapped arguments object, and a destructured binding named `arguments`
   suppresses that object. Default initializers, computed parameter keys, formal
-  rest, and destructured
-  parameter/body-function binding merges still fail closed until the separate
-  parameter-environment and post-parameter-instantiation certificates land.
+  rest, and parameter expressions still fail closed until their separate
+  parameter-environment certificates land.
+- [x] Instantiate body function declarations after non-simple parameter
+  initialization. Every body function in an expression-free non-simple
+  function now uses the existing scoped-entry activation certificate: the
+  parameter prologue completes first, exact local bindings are activated, and
+  closures are installed before body execution. A destructured parameter
+  merged with a same-name function still performs its iterator and property
+  effects before the closure overwrites the binding, while a later `var`
+  initializer may overwrite that closure normally. Simple-parameter functions
+  retain their instantiation-time function initialization path.
 - [x] Implement `JSON.parse` on a realm-owned `%JSON%` object: an iterative
   UTF-16 parser accepts exactly the ECMA-404 JSON grammar, preserves escapes,
   lone surrogates, duplicate-member evaluation, and `__proto__` as data, then

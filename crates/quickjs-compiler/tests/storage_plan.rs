@@ -930,6 +930,28 @@ fn expression_free_destructured_parameters_use_raw_positions_and_local_bindings(
 }
 
 #[test]
+fn non_simple_body_functions_activate_after_parameter_initialization() {
+    let plan = script(
+        "function f({value}){function value(){return 1;}function other(){return 2;}\
+            return value()+other();}",
+    );
+    let bindings = plan.bindings_for(plan.executables()[1].id()).unwrap();
+    for name in ["value", "other"] {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.name() == name)
+            .unwrap_or_else(|| panic!("missing body function {name}"));
+        assert_eq!(binding.placement(), StoragePlacement::Local, "{name}");
+        assert_eq!(binding.policy().kind(), DeclarationKind::Function, "{name}");
+        assert_eq!(
+            binding.policy().initialization(),
+            InitializationPolicy::FunctionAtScopeEntry,
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn duplicate_parameters_share_the_last_formal_argument_slot() {
     let plan = script("function f(a, a) { return a + arguments[0] + arguments[1]; }");
     let function = plan.executables()[1].id();
@@ -1002,10 +1024,6 @@ fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
         (
             "function f(...rest) {}",
             UnsupportedFeature::NonSimpleParameters,
-        ),
-        (
-            "function f({ value }) { function value() {} }",
-            UnsupportedFeature::ParameterFunctionRedeclaration,
         ),
         ("with (object) value;", UnsupportedFeature::WithStatement),
         ("class Box {}", UnsupportedFeature::ClassSyntheticSlots),

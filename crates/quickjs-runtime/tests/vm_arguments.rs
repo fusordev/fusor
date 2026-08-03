@@ -293,8 +293,27 @@ fn expression_free_destructured_formals_initialize_left_to_right() {
     assert_eq!(result, "9");
 
     let result = string_result(
+        "let log='';const source={get value(){log+='g';return 1;}};\
+            function merged({value}){function value(){return 5;}return log+'|'+value();}\
+            return merged(source);",
+    );
+    assert_eq!(result, "g|5");
+
+    let result = string_result(
+        "function declared({value}){function other(){return 2;}return ''+(value+other());}\
+            return declared({value:3});",
+    );
+    assert_eq!(result, "5");
+
+    let result = string_result(
         "function assigned({value}){var value=7;return ''+value;}\
             return assigned({value:1});",
+    );
+    assert_eq!(result, "7");
+
+    let result = string_result(
+        "function overwritten({value}){function value(){return 5;}var value=7;return ''+value;}\
+            return overwritten({value:1});",
     );
     assert_eq!(result, "7");
 

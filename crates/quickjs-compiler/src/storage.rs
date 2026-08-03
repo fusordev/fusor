@@ -692,8 +692,6 @@ pub enum UnsupportedFeature {
     ParameterExpressions,
     /// A formal rest parameter.
     NonSimpleParameters,
-    /// A non-simple parameter binding merged with a body function declaration.
-    ParameterFunctionRedeclaration,
     /// Annex B's paired block-lexical and var-like function binding.
     AnnexBBlockFunction,
     /// Class-created functions, private names, and synthetic slots.
@@ -1408,23 +1406,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 scoping.symbol_scope_id(symbol_id),
                 Some(scoping.symbol_span(symbol_id)),
             )?;
-            if facts.contains(DeclarationFacts::PARAMETER)
-                && facts.contains(DeclarationFacts::FUNCTION)
-                && !self
-                    .executable_drafts
-                    .get(owner.index())
-                    .ok_or(CompilerError::SemanticInvariant {
-                        invariant: "parameter binding owner exists",
-                        span: Some(scoping.symbol_span(symbol_id)),
-                    })?
-                    .executable
-                    .has_simple_parameter_list()
-            {
-                return unsupported(
-                    UnsupportedFeature::ParameterFunctionRedeclaration,
-                    scoping.symbol_span(symbol_id),
-                );
-            }
             let name = scoping.symbol_name(symbol_id);
             let placement = self.placement(symbol_id, owner, kind)?;
             let policy = self.declaration_policy(owner, kind, facts.function_scope_entry);
@@ -1593,7 +1574,14 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 true,
             ),
             DeclarationKind::Function => (
-                if function_scope_entry {
+                if function_scope_entry
+                    || (matches!(
+                        self.executable_drafts[owner.index()].executable.kind,
+                        ExecutableKind::Function { .. }
+                    ) && !self.executable_drafts[owner.index()]
+                        .executable
+                        .simple_parameter_list)
+                {
                     InitializationPolicy::FunctionAtScopeEntry
                 } else {
                     InitializationPolicy::FunctionAtInstantiation

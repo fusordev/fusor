@@ -3762,6 +3762,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     flow,
                 )?;
             }
+            Self::emit_scoped_function_activations(&entries, flow)?;
             for entry in entries
                 .iter()
                 .copied()
@@ -3776,27 +3777,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 )?;
             }
         } else {
-            for entry in entries
-                .iter()
-                .rev()
-                .copied()
-                .filter(|entry| matches!(entry, ScopeEntryInitialization::Function { .. }))
-            {
-                let ScopeEntryInitialization::Function { slot, span, .. } = entry else {
-                    unreachable!("filtered above");
-                };
-                let FrameSlot::Local(slot) = slot else {
-                    return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "block function declaration uses a local slot",
-                        span: Some(span),
-                    });
-                };
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::SetLocUninitialized,
-                    Operands::Loc(slot.index()),
-                    span,
-                ))?;
-            }
+            Self::emit_scoped_function_activations(&entries, flow)?;
             for entry in entries
                 .iter()
                 .rev()
@@ -3824,6 +3805,35 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     flow,
                 )?;
             }
+        }
+        Ok(())
+    }
+
+    fn emit_scoped_function_activations(
+        entries: &[ScopeEntryInitialization],
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        for entry in entries.iter().rev().copied() {
+            let ScopeEntryInitialization::Function {
+                slot,
+                span,
+                scoped: true,
+                ..
+            } = entry
+            else {
+                continue;
+            };
+            let FrameSlot::Local(slot) = slot else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "scoped function declaration uses a local slot",
+                    span: Some(span),
+                });
+            };
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::SetLocUninitialized,
+                Operands::Loc(slot.index()),
+                span,
+            ))?;
         }
         Ok(())
     }
@@ -4021,6 +4031,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         slot: frame_slot,
                         child,
                         span: child_span,
+                        scoped: storage.policy().initialization()
+                            == InitializationPolicy::FunctionAtScopeEntry,
                     });
                 }
                 InitializationPolicy::AtDeclaration => {
@@ -4161,7 +4173,9 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     span,
                 ))?;
             }
-            ScopeEntryInitialization::Function { slot, child, span } => {
+            ScopeEntryInitialization::Function {
+                slot, child, span, ..
+            } => {
                 flow.emit(self.plan_child_function_closure(
                     child,
                     executable,
@@ -5451,8 +5465,6 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             }
             DestructuringBindingInitialization::Parameter => {
                 if storage.placement() != StoragePlacement::Local
-                    || storage.policy().kind() != DeclarationKind::Parameter
-                    || storage.policy().initialization() != InitializationPolicy::Argument
                     || storage.policy().writes() != WritePolicy::Mutable
                     || storage.policy().has_temporal_dead_zone()
                 {
@@ -5461,7 +5473,18 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                         identifier.span,
                     );
                 }
-                flow.emit(plan_put_slot(frame_slot, identifier.span))
+                match (storage.policy().kind(), storage.policy().initialization()) {
+                    (DeclarationKind::Parameter, InitializationPolicy::Argument) => {
+                        flow.emit(plan_put_slot(frame_slot, identifier.span))
+                    }
+                    (DeclarationKind::Function, InitializationPolicy::FunctionAtScopeEntry) => flow
+                        .emit(PlannedInstruction::new(
+                            FinalOpcode::Drop,
+                            Operands::None,
+                            identifier.span,
+                        )),
+                    _ => unsupported(UnsupportedLeafFeature::UnsupportedBinding, identifier.span),
+                }
             }
         }
     }
@@ -6316,7 +6339,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             VariableDeclarationKind::Var => {
                 matches!(
                     storage.policy().kind(),
-                    DeclarationKind::Var | DeclarationKind::Parameter
+                    DeclarationKind::Var | DeclarationKind::Parameter | DeclarationKind::Function
                 ) && !storage.policy().has_temporal_dead_zone()
             }
             VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing => false,
@@ -9977,6 +10000,7 @@ enum ScopeEntryInitialization {
         slot: FrameSlot,
         child: ExecutableId,
         span: Span,
+        scoped: bool,
     },
 }
 
