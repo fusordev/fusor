@@ -690,6 +690,12 @@ pub(crate) enum StringMethod {
     TrimStart,
     IsWellFormed,
     ToWellFormed,
+    LocaleCompare,
+    Normalize,
+    ToLocaleLowerCase,
+    ToLocaleUpperCase,
+    ToLowerCase,
+    ToUpperCase,
     /// `String.fromCharCode`, which is a static rather than a prototype method.
     FromCharCode,
     /// `String.fromCodePoint`, likewise a static.
@@ -710,6 +716,10 @@ impl StringMethod {
             | Self::TrimStart
             | Self::IsWellFormed
             | Self::ToWellFormed
+            | Self::ToLocaleLowerCase
+            | Self::ToLocaleUpperCase
+            | Self::ToLowerCase
+            | Self::ToUpperCase
             | Self::Concat
             | Self::FromCharCode
             | Self::FromCodePoint => &[],
@@ -732,6 +742,8 @@ impl StringMethod {
             Self::Slice | Self::Substring | Self::Substr => {
                 &[StringArgument::Integer, StringArgument::OptionalInteger]
             }
+            Self::LocaleCompare => &[StringArgument::String],
+            Self::Normalize => &[StringArgument::OptionalString],
         }
     }
 

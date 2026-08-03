@@ -377,6 +377,99 @@ fn the_well_formed_methods_handle_unpaired_surrogates() {
     ]);
 }
 
+/// Default case conversion uses full, context-sensitive Unicode mappings.
+#[test]
+fn unicode_case_conversion_handles_context_expansion_and_surrogates() {
+    assert_all(&[
+        // Final sigma is context-sensitive and cannot be implemented by
+        // lowercasing one Rust `char` at a time.
+        ("'ΟΣ'.toLowerCase()", "ος"),
+        // Full uppercasing can expand one code point into several.
+        ("'Straße'.toUpperCase()", "STRASSE"),
+        ("'\\u0130'.toLowerCase()", "i̇"),
+        // Locale-named methods use the deterministic root locale in this
+        // no-Intl profile and ignore their reserved arguments.
+        ("'I'.toLocaleLowerCase('tr')", "i"),
+        ("'i'.toLocaleUpperCase('tr')", "I"),
+        (
+            "(function(){let used=false;const locale={toString(){used=true;return 'tr';}};'I'.toLocaleLowerCase(locale);return used;})()",
+            "false",
+        ),
+        // Unicode transforms must preserve an ECMAScript lone surrogate.
+        (
+            "'\\uD800A'.toLowerCase().charCodeAt(0).toString(16)+'|'+ '\\uD800A'.toLowerCase().charAt(1)",
+            "d800|a",
+        ),
+    ]);
+}
+
+/// All four Unicode normalization forms are exact and preserve lone
+/// surrogates rather than replacing them with `U+FFFD`.
+#[test]
+fn normalization_supports_all_forms_and_exact_conversion_order() {
+    assert_all(&[
+        ("'\\u212B'.normalize().charCodeAt(0).toString(16)", "c5"),
+        (
+            "'\\u212B'.normalize(undefined).charCodeAt(0).toString(16)",
+            "c5",
+        ),
+        (
+            "'\\u212B'.normalize('NFD').charCodeAt(0).toString(16)+'|'+ '\\u212B'.normalize('NFD').charCodeAt(1).toString(16)",
+            "41|30a",
+        ),
+        ("'\\uFB00'.normalize('NFC')==='\\uFB00'", "true"),
+        ("'\\uFB00'.normalize('NFKC')", "ff"),
+        ("'\\uFB00'.normalize('NFKD')", "ff"),
+        ("'\\uD800'.normalize().charCodeAt(0).toString(16)", "d800"),
+        (
+            "(function(){let log='';const recv={toString(){log+='recv,';return '\\u212B';}};const form={toString(){log+='form';return 'NFD';}};String.prototype.normalize.call(recv,form);return log;})()",
+            "recv,form",
+        ),
+    ]);
+    assert_throws(
+        "return 'x'.normalize('bad');",
+        ExceptionKind::RangeError,
+        "bad normalization form",
+    );
+}
+
+/// The deterministic no-Intl comparator orders NFC representatives, making
+/// every canonically equivalent pair compare equal without folding
+/// compatibility equivalents together.
+#[test]
+fn locale_compare_honours_canonical_equivalence_and_total_order() {
+    assert_all(&[
+        ("'\\u212B'.localeCompare('A\\u030A')", "0"),
+        ("'\\u2126'.localeCompare('\\u03A9')", "0"),
+        ("'\\u1E69'.localeCompare('s\\u0307\\u0323')", "0"),
+        ("'\\u1E0B\\u0323'.localeCompare('\\u1E0D\\u0307')", "0"),
+        ("'\\u1100\\u1161'.localeCompare('\\uAC00')", "0"),
+        ("'a'.localeCompare('b') < 0", "true"),
+        ("'b'.localeCompare('a') > 0", "true"),
+        ("'\\uFB00'.localeCompare('ff') !== 0", "true"),
+        (
+            "(function(){let log='';const recv={toString(){log+='recv,';return 'a';}};const that={toString(){log+='that';return 'b';}};const ignored={toString(){log+=',ignored';return 'x';}};String.prototype.localeCompare.call(recv,that,ignored);return log;})()",
+            "recv,that",
+        ),
+    ]);
+}
+
+#[test]
+fn unicode_transforms_consume_shared_instruction_fuel() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(&mut context, "return 'A'.repeat(1000).toLowerCase();");
+    assert!(matches!(
+        context.call(
+            &run,
+            &[],
+            ExecutionLimits::default().with_instruction_fuel(100),
+        ),
+        Err(ExecutionError::InstructionLimitExceeded { limit: 100, .. })
+    ));
+}
+
 /// A nullish receiver throws before any argument is converted.
 #[test]
 fn a_nullish_receiver_is_rejected_before_any_conversion() {
@@ -460,6 +553,13 @@ fn the_installed_methods_have_the_pinned_shape() {
         ("String.prototype.trim.length", "0"),
         ("String.prototype.trim.name", "trim"),
         ("String.prototype.isWellFormed.length", "0"),
+        ("String.prototype.localeCompare.length", "1"),
+        ("String.prototype.normalize.length", "0"),
+        ("String.prototype.toLocaleLowerCase.length", "0"),
+        ("String.prototype.toLocaleUpperCase.length", "0"),
+        ("String.prototype.toLowerCase.length", "0"),
+        ("String.prototype.toUpperCase.length", "0"),
+        ("String.prototype.localeCompare.name", "localeCompare"),
         ("typeof String.prototype.indexOf", "function"),
         // Each method is writable and configurable but not enumerable.
         (

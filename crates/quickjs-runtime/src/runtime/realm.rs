@@ -42,8 +42,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 22;
-const REALM_FUNCTION_COUNT: usize = 172;
-const REALM_PROPERTY_COUNT: u64 = 566;
+const REALM_FUNCTION_COUNT: usize = 178;
+const REALM_PROPERTY_COUNT: u64 = 584;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -73,14 +73,12 @@ const STRING_METHOD_ATOM_START: usize = BIGINT_STATIC_ATOM_START + BIGINT_INTERN
 ///
 /// The set is deliberately narrower than the pinned oracle's: it omits every
 /// method needing `RegExp` (`match`, `matchAll`, `replace`, `replaceAll`,
-/// `search`, `split`), Unicode case or collation tables (`toLowerCase`,
-/// `toUpperCase`, their locale forms, `localeCompare`, `normalize`), and the
-/// Annex B HTML wrappers. An absent method therefore fails closed as a missing
-/// property rather than behaving incorrectly.
+/// `search`, `split`) and the Annex B HTML wrappers. An absent method therefore
+/// fails closed as a missing property rather than behaving incorrectly.
 ///
 /// Each `length` matches the pinned oracle, which reports `1` for most methods
 /// and `2` for `slice`, `substr`, and `substring`.
-const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 21] = [
+const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 27] = [
     StringPrototypeMethod::interned("at", StringMethod::At, 1),
     StringPrototypeMethod::interned("charAt", StringMethod::CharAt, 1),
     StringPrototypeMethod::interned("charCodeAt", StringMethod::CharCodeAt, 1),
@@ -102,6 +100,12 @@ const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 21] = [
     StringPrototypeMethod::interned("trimStart", StringMethod::TrimStart, 0),
     StringPrototypeMethod::interned("isWellFormed", StringMethod::IsWellFormed, 0),
     StringPrototypeMethod::interned("toWellFormed", StringMethod::ToWellFormed, 0),
+    StringPrototypeMethod::interned("toLowerCase", StringMethod::ToLowerCase, 0),
+    StringPrototypeMethod::interned("toUpperCase", StringMethod::ToUpperCase, 0),
+    StringPrototypeMethod::interned("toLocaleLowerCase", StringMethod::ToLocaleLowerCase, 0),
+    StringPrototypeMethod::interned("toLocaleUpperCase", StringMethod::ToLocaleUpperCase, 0),
+    StringPrototypeMethod::interned("normalize", StringMethod::Normalize, 0),
+    StringPrototypeMethod::interned("localeCompare", StringMethod::LocaleCompare, 1),
 ];
 
 /// The number of `String.prototype` method names that must be interned.

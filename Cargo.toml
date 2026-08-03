@@ -16,6 +16,9 @@ rust-version = "1.97"
 license = "MIT"
 
 [workspace.dependencies]
+icu_casemap = "=2.2.0"
+icu_locale_core = "=2.2.0"
+icu_normalizer = { version = "=2.2.0", default-features = false, features = ["compiled_data"] }
 miette = { version = "=7.6.0", default-features = false, features = ["fancy-no-syscall"] }
 oxc_allocator = "=0.142.0"
 oxc_ast = "=0.142.0"
@@ -26,6 +29,7 @@ oxc_span = "=0.142.0"
 oxc_syntax = "=0.142.0"
 serde_json = "=1.0.151"
 sourcemap = { version = "=9.3.2", default-features = false }
+writeable = "=0.6.3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

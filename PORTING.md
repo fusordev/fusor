@@ -196,6 +196,19 @@ Known intentional runtime differences:
   steps can re-enter the interpreter. The pinned oracle fixes that order, logging
   `recv,arg,pos` for `indexOf` with side-effecting conversions. Indices remain
   UTF-16 code-unit indices, so a lone surrogate stays observable.
+- [x] Unicode-backed `String.prototype.toLowerCase`, `toUpperCase`, their
+  no-`Intl` locale-named forms, `normalize`, and `localeCompare`, using pinned
+  pure-Rust ICU4X 2.2.0 data. Default casing applies the full, context-sensitive
+  Unicode mappings, including final sigma and multi-code-point expansions; the
+  locale-named forms select the deterministic root locale and ignore their
+  ECMA-402-reserved arguments. Normalization supports NFC, NFD, NFKC, and NFKD.
+  Scalar runs are transformed independently around lone surrogates so exact
+  ECMAScript UTF-16 is preserved. The no-`Intl` comparator orders NFC
+  representatives lexically by UTF-16, giving a deterministic total order,
+  returning zero for every canonically equivalent pair, and keeping
+  compatibility-only equivalents distinct. Receiver/form/comparison coercions
+  reuse the resumable String machine, while Unicode input and output scans
+  consume shared instruction fuel.
 - [x] `Number` statics and `Array.isArray`: the value properties
   (`MAX_VALUE`, `MIN_VALUE`, `EPSILON`, `MAX_SAFE_INTEGER`, `MIN_SAFE_INTEGER`,
   `POSITIVE_INFINITY`, `NEGATIVE_INFINITY`, `NaN`) are stored as exact binary64
@@ -364,8 +377,7 @@ Known intentional runtime differences:
   definitions run their two observable numeric conversions, preserve partial
   shrink results at non-configurable indices, and install a requested
   non-writable final state even when that shrink returns `false`.
-- [ ] Remaining String Unicode/collation/case/normalization and RegExp-dependent
-  method surface, shape sharing/transition
+- [ ] Remaining RegExp-dependent String method surface, shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
 
@@ -459,10 +471,16 @@ Known intentional runtime differences:
   the specified generic length/index walk, nullish empty fields, dynamic
   element invocation, and result coercion with explicit suspension, tracing,
   and fuel boundaries.
+- [x] Implement the remaining non-RegExp Unicode String built-ins with ICU4X
+  compiled data: full context-sensitive default/root-locale case conversion,
+  all four normalization forms, and a deterministic no-`Intl` `localeCompare`
+  that compares NFC representatives and therefore honours canonical
+  equivalence. Lone UTF-16 surrogates remain unchanged, ECMA-402-reserved
+  arguments remain unused, and every observable coercion stays resumable.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,
-  Atomics, Unicode tables, promises, async functions/generators, weak
+  Atomics, RegExp Unicode tables, promises, async functions/generators, weak
   references, and finalization registries.
 - [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide
   host I/O, timers, cancellation, and wakeups, but never Promise-job ordering.
