@@ -51,7 +51,7 @@ pub(super) enum DescriptorField {
 
 impl DescriptorField {
     /// The read order `ToPropertyDescriptor` fixes.
-    const ORDER: [Self; 6] = [
+    pub(super) const ORDER: [Self; 6] = [
         Self::Enumerable,
         Self::Configurable,
         Self::Value,
@@ -61,7 +61,7 @@ impl DescriptorField {
     ];
 
     /// Returns the predefined atom naming this field.
-    const fn predefined_atom(self) -> PredefinedAtom {
+    pub(super) const fn predefined_atom(self) -> PredefinedAtom {
         match self {
             Self::Enumerable => PredefinedAtom::Enumerable,
             Self::Configurable => PredefinedAtom::Configurable,
@@ -114,13 +114,28 @@ pub(super) struct DefinePropertyContinuation {
 /// distinction the descriptor validation needs: a present `undefined` differs
 /// from an absent field.
 #[derive(Default)]
-struct CollectedFields {
+pub(super) struct CollectedFields {
     value: Option<StoredValue>,
     writable: Option<bool>,
     get: Option<StoredValue>,
     set: Option<StoredValue>,
     enumerable: Option<bool>,
     configurable: Option<bool>,
+}
+
+impl CollectedFields {
+    /// Reports every value-carrying field as a collection root.
+    ///
+    /// The flags are primitives, so only `value`, `get`, and `set` can hold a
+    /// heap edge.
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        for value in [self.value.as_ref(), self.get.as_ref(), self.set.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            trace_stored_value_root(value, mark);
+        }
+    }
 }
 
 impl DefinePropertyContinuation {
@@ -274,7 +289,11 @@ fn origin_of(continuations: &[NativeContinuation]) -> JsStackFrame {
 }
 
 /// Records one read field.
-fn record_field(fields: &mut CollectedFields, field: DescriptorField, value: StoredValue) {
+pub(super) fn record_field(
+    fields: &mut CollectedFields,
+    field: DescriptorField,
+    value: StoredValue,
+) {
     match field {
         DescriptorField::Enumerable => fields.enumerable = Some(value.is_truthy()),
         DescriptorField::Configurable => fields.configurable = Some(value.is_truthy()),
@@ -286,7 +305,7 @@ fn record_field(fields: &mut CollectedFields, field: DescriptorField, value: Sto
 }
 
 /// Returns whether the descriptor object has the field, including inherited.
-fn has_descriptor_field(
+pub(super) fn has_descriptor_field(
     runtime: &Runtime,
     descriptor: &StoredValue,
     key: &PropertyKey,
@@ -320,39 +339,7 @@ fn apply_collected_descriptor(
         origin,
         ..
     } = state;
-
-    let has_accessor = fields.get.is_some() || fields.set.is_some();
-    let has_data = fields.value.is_some() || fields.writable.is_some();
-    if has_accessor && has_data {
-        return Err(NativeFailure::Abrupt(descriptor_type_error(
-            realm,
-            &origin,
-            "cannot have setter/getter and value or writable",
-        )?));
-    }
-
-    let definition = if has_accessor {
-        let getter = accessor_function(fields.get.as_ref(), realm, &origin, "getter")?;
-        let setter = accessor_function(fields.set.as_ref(), realm, &origin, "setter")?;
-        PropertyDefinition::accessor(
-            requested(fields.get.is_some(), getter),
-            requested(fields.set.is_some(), setter),
-        )
-    } else if has_data {
-        PropertyDefinition::data(
-            match fields.value {
-                Some(value) => Requested::Present(value),
-                None => Requested::Absent,
-            },
-            requested_flag(fields.writable),
-        )
-    } else {
-        PropertyDefinition::generic()
-    };
-    let definition = definition
-        .with_enumerable(requested_flag(fields.enumerable))
-        .with_configurable(requested_flag(fields.configurable));
-
+    let definition = validate_collected_fields(fields, realm, &origin)?;
     let outcome = define_own_property(runtime, &target, key, &definition, execution_budget)?;
     match (outcome, report) {
         (PropertyDefinitionOutcome::Complete, DefinitionReport::ThrowingTarget) => {
@@ -368,6 +355,49 @@ fn apply_collected_descriptor(
             NativeFailure::Abrupt(property_exception_at(realm, origin, Some(&name), failure)?),
         ),
     }
+}
+
+/// Turns one descriptor object's read fields into a validated definition.
+///
+/// This is `ToPropertyDescriptor`'s validation half, separated from the
+/// definition so `Object.defineProperties` can validate every descriptor before
+/// applying any of them.
+pub(super) fn validate_collected_fields(
+    fields: CollectedFields,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<PropertyDefinition, NativeFailure> {
+    let has_accessor = fields.get.is_some() || fields.set.is_some();
+    let has_data = fields.value.is_some() || fields.writable.is_some();
+    if has_accessor && has_data {
+        return Err(NativeFailure::Abrupt(descriptor_type_error(
+            realm,
+            origin,
+            "cannot have setter/getter and value or writable",
+        )?));
+    }
+
+    let definition = if has_accessor {
+        let getter = accessor_function(fields.get.as_ref(), realm, origin, "getter")?;
+        let setter = accessor_function(fields.set.as_ref(), realm, origin, "setter")?;
+        PropertyDefinition::accessor(
+            requested(fields.get.is_some(), getter),
+            requested(fields.set.is_some(), setter),
+        )
+    } else if has_data {
+        PropertyDefinition::data(
+            match fields.value {
+                Some(value) => Requested::Present(value),
+                None => Requested::Absent,
+            },
+            requested_flag(fields.writable),
+        )
+    } else {
+        PropertyDefinition::generic()
+    };
+    Ok(definition
+        .with_enumerable(requested_flag(fields.enumerable))
+        .with_configurable(requested_flag(fields.configurable)))
 }
 
 /// Wraps a present-or-absent flag into a descriptor request.
@@ -411,7 +441,7 @@ fn accessor_function(
 }
 
 /// Builds an engine `TypeError` for a descriptor failure.
-fn descriptor_type_error(
+pub(super) fn descriptor_type_error(
     realm: RealmId,
     origin: &JsStackFrame,
     message: &str,

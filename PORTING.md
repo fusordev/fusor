@@ -89,17 +89,24 @@ Known intentional runtime differences:
   `18446744073709551615n` and `1267650600228229401496703205375n`. Because the
   specification is the authority where the two disagree, this port follows
   ECMAScript. Widths below 64 agree with both engines.
-
-Known intentional profile narrowings. These are not behavior differences: the
-narrowed surface fails closed with a structured error rather than answering
-incorrectly, so no script can observe a wrong result.
-
-- `QJS-CREATE-001`: `Object.create` admits only its prototype argument. Honoring
-  `propertyDescriptors` means running `ToPropertyDescriptor` for each key, which
-  is resumable work this entry point cannot perform, so a present second
-  argument reports `TypeError: property descriptors are not supported` instead of
-  being silently ignored. The reported `length` stays `2` to match the pinned
-  oracle, because arity is part of the observable shape.
+- `QJS-ENUM-001`: the walks that copy or list own properties — `Object.assign`,
+  `Object.values`, `Object.entries`, and object spread's `CopyDataProperties` —
+  capture their key set up front, but the enumerable attribute stays live.
+  ECMAScript re-reads it per key, so a getter that redefines a later key as
+  non-enumerable removes it from the result. The pinned oracle caches the flag
+  its snapshot recorded for spread and `assign`, and so still copies the hidden
+  key, while agreeing with the specification for `values`; it is therefore
+  internally inconsistent rather than deliberately divergent. This port re-tests
+  the attribute in all four walks.
+- `QJS-DEFPROPS-001`: `Object.defineProperties` and `Object.create`'s
+  descriptors argument read and validate *every* descriptor before applying any
+  (`ObjectDefineProperties` steps 3-5), so a descriptor that throws while being
+  read leaves the target untouched. Upstream's `JS_ObjectDefineProperties`
+  interleaves the phases, so the pinned oracle keeps the definitions it already
+  applied: `Object.defineProperties(t, {a:{value:1}, get b(){throw 0}})` leaves
+  `t.a` as `1` there and `undefined` here, which is what V8 reports. A refused
+  *definition* still leaves the earlier ones in both, because by then the
+  validation phase is over.
 
 Known intentional write-path differences:
 
@@ -232,7 +239,8 @@ Known intentional write-path differences:
   distinction `Array.prototype.indexOf` relies on. `isPrototypeOf` starts its
   walk at the candidate's prototype, so nothing precedes itself, and charges the
   shared budget per link. `Object.create` represents a null prototype rather than
-  substituting one; see `QJS-CREATE-001` for its narrowed descriptors argument.
+  substituting one; its descriptors argument now runs the same
+  `ObjectDefineProperties` that `Object.defineProperties` does.
 - [x] `Array.prototype.push`, `pop`, `shift`, `unshift`, `reverse`, and `fill` as
   one resumable driver. Each reads `length` once with `ToLength`, performs a
   planned sequence of element steps, and writes `length` back; every read, write,
@@ -465,22 +473,27 @@ Known intentional write-path differences:
   setter runs with the target as its `this`, and an array target's `length`
   keeps the resumable conversion whose `RangeError` outranks the write.
 - [x] Corrected the enumerable re-test shared by `Object.assign`, the
-  `Object.values`/`entries` listings, and object spread's
-  `CopyDataProperties`. All four capture their key set up front, but the
-  attribute is a live property: ECMAScript re-reads it per key, so a getter that
-  hides a later key removes it from the result. The pinned oracle instead caches
-  the flag its snapshot recorded and still copies a hidden key, which is an
-  upstream divergence from the specification rather than a behavior to
-  reproduce, so the specification's order is implemented and the divergence is
-  recorded here.
+  `Object.values`/`entries` listings, and object spread's `CopyDataProperties`;
+  see `QJS-ENUM-001`.
+- [x] `Object.defineProperties` and `Object.create`'s descriptors argument,
+  which share one `ObjectDefineProperties`. The walk has two nested suspension
+  points per key: the descriptors object's own property is read first, which can
+  enter an accessor and yields the descriptor, and that descriptor's fields are
+  then read in `ToPropertyDescriptor` order with the same resumable reads
+  `Object.defineProperty` uses. Only the descriptors object's own *enumerable*
+  keys are visited, string and symbol alike, and a non-object descriptor reports
+  `not an object`. The operation is two-phase: every descriptor is validated
+  before any is applied, so a read that throws leaves the target untouched while
+  a refused *definition* leaves the earlier ones — see `QJS-DEFPROPS-001` for the
+  divergence this closes. `Object.create`'s argument therefore stopped being a
+  profile narrowing, retiring `QJS-CREATE-001`.
 - [ ] Remaining String/Number/Array method surface (`String.prototype` case
   conversions and `localeCompare`, the RegExp-dependent `match`, `matchAll`,
   `replace`, `search`, and `split`, `normalize`, `String.raw`, and the
   locale-dependent renderings), shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
-- [ ] Complete the `Object` surface (`fromEntries`, `defineProperties`,
-  `groupBy`, `Object.create`'s descriptors argument,
+- [ ] Complete the `Object` surface (`fromEntries`, `groupBy`,
   `Object.prototype.toLocaleString`, and the `__proto__` accessor pair), then
   Proxy, remaining built-ins, RegExp/Date/JSON, collections, binary data,
   Atomics, Unicode tables, promises, async functions/generators, weak

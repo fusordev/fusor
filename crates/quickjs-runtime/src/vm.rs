@@ -76,6 +76,7 @@ mod array_sort;
 mod bigint_intrinsics;
 mod bindings;
 mod conversions;
+mod define_properties;
 mod define_property_intrinsics;
 mod dynamic;
 mod error_stack;
@@ -100,10 +101,10 @@ mod string_methods;
 use {
     aggregate_error::*, array_by_copy::*, array_callbacks::*, array_copiers::*, array_flatten::*,
     array_join::*, array_mutators::*, array_search::*, array_sort::*, bigint_intrinsics::*,
-    bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*,
-    errors::*, exceptions::*, execution::*, iterators::*, native::*, object_assign::*,
-    object_intrinsics::*, object_listings::*, properties::*, reflect::*, stack::*,
-    string_methods::*,
+    bindings::*, conversions::*, define_properties::*, define_property_intrinsics::*, dynamic::*,
+    error_stack::*, errors::*, exceptions::*, execution::*, iterators::*, native::*,
+    object_assign::*, object_intrinsics::*, object_listings::*, properties::*, reflect::*,
+    stack::*, string_methods::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -309,6 +310,7 @@ enum NativeContinuation {
     ArrayFlatten(Box<ArrayFlattenContinuation>),
     ArraySort(Box<ArraySortContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
+    DefineProperties(Box<DefinePropertiesContinuation>),
     ObjectListing(Box<ObjectListingContinuation>),
     ObjectAssign(Box<ObjectAssignContinuation>),
     InstanceOf(InstanceOfContinuation),
@@ -350,6 +352,7 @@ impl NativeContinuation {
             Self::ArrayFlatten(state) => state.retained_values(),
             Self::ArraySort(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
+            Self::DefineProperties(state) => state.retained_values(),
             Self::ObjectListing(state) => state.retained_values(),
             Self::ObjectAssign(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
@@ -1386,6 +1389,7 @@ fn trace_native_continuation_roots(
                 trace_stored_value_root(excluded, mark);
             }
         }
+        NativeContinuation::DefineProperties(state) => state.trace_roots(mark),
         NativeContinuation::ObjectListing(state) => state.trace_roots(mark),
         NativeContinuation::ObjectAssign(state) => state.trace_roots(mark),
         NativeContinuation::InstanceOf(state) => {

@@ -385,27 +385,20 @@ fn object_create_rejects_a_non_prototype() {
     }
 }
 
-/// The descriptors argument is refused rather than silently ignored.
+/// The descriptors argument runs `ObjectDefineProperties`.
 ///
-/// Honoring it means running `ToPropertyDescriptor` per key, which this entry
-/// point cannot do resumably, so it fails closed. This is a deliberate profile
-/// narrowing rather than a behavior difference: the pinned oracle accepts the
-/// argument, so the divergence is recorded as `QJS-CREATE-001` in `PORTING.md`.
+/// The full behavior lives in `vm_object_define_properties.rs`, which pins the
+/// read order and the two-phase validation; this only checks that `create`
+/// reaches it.
 #[test]
-fn object_create_refuses_property_descriptors() {
-    assert_throws(
-        "return Object.create({}, {x:{value:1}});",
-        ExceptionKind::TypeError,
-        "property descriptors are not supported",
-    );
+fn object_create_admits_property_descriptors() {
+    assert_all(&[("Object.create({},{x:{value:1}}).x", "1")]);
 }
 
 /// `Object.create` carries the pinned `name`, `length`, and descriptors.
 #[test]
 fn object_create_has_the_pinned_shape() {
     assert_all(&[
-        // Arity 2 matches the oracle even though the second argument is
-        // refused, because `length` is part of the observable shape.
         ("Object.create.length", "2"),
         ("Object.create.name", "create"),
         (

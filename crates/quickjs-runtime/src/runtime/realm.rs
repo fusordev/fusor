@@ -42,8 +42,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 21;
-const REALM_FUNCTION_COUNT: usize = 151;
-const REALM_PROPERTY_COUNT: u64 = 499;
+const REALM_FUNCTION_COUNT: usize = 152;
+const REALM_PROPERTY_COUNT: u64 = 502;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -380,7 +380,7 @@ const ARRAY_SEARCH_ATOM_START: usize = STRING_FROM_ATOM_START + STRING_FROM_STAT
 /// operations the current profile can honor completely are installed, so an
 /// absent method fails closed as a missing property rather than behaving
 /// incorrectly.
-const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 20] = [
+const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 21] = [
     ObjectStaticMethod::predefined(
         PredefinedAtom::GetPrototypeOf,
         NativeFunctionKind::ObjectGetPrototypeOf,
@@ -449,6 +449,11 @@ const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 20] = [
         1,
     ),
     ObjectStaticMethod::interned("assign", NativeFunctionKind::ObjectAssign, 2),
+    ObjectStaticMethod::predefined(
+        PredefinedAtom::DefineProperties,
+        NativeFunctionKind::ObjectDefineProperties,
+        2,
+    ),
 ];
 
 /// The number of `Object` statics whose names must be interned at realm

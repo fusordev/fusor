@@ -418,6 +418,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::DefineProperties(state) => advance_define_properties(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::ObjectAssign(state) => advance_object_assign(
                 runtime,
                 *state,
@@ -1083,8 +1090,27 @@ pub(super) fn dispatch_native_call_with_frames(
                 origin.as_ref(),
             )
         }
-        NativeFunctionKind::ObjectCreate => {
-            object_create(runtime, native.realm, inputs.arguments, origin.as_ref())
+        NativeFunctionKind::ObjectCreate => object_create(
+            runtime,
+            native.realm,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::ObjectDefineProperties => {
+            let mut arguments = inputs.arguments;
+            let target = arguments.take_first_or_undefined();
+            let descriptors = arguments.take_first_or_undefined();
+            begin_define_properties(
+                runtime,
+                native.realm,
+                target,
+                descriptors,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
         }
         // `Object.is` is `SameValue`, which differs from `===` on `NaN` and on
         // the signed zeros; both operands are already values, so nothing

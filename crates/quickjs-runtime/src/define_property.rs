@@ -97,6 +97,41 @@ enum DefinitionFields {
     reason = "the generic and accessor constructors are required by Object.defineProperty, whose resumable descriptor read is a separate milestone"
 )]
 impl PropertyDefinition {
+    /// Returns the requested data value, when the descriptor carries one.
+    ///
+    /// A validated definition can outlive the read that produced it —
+    /// `Object.defineProperties` validates every descriptor before applying any
+    /// — so a collection while one is queued has to trace this value.
+    pub(crate) const fn requested_value(&self) -> Option<&StoredValue> {
+        match &self.fields {
+            DefinitionFields::Data {
+                value: Requested::Present(value),
+                ..
+            } => Some(value),
+            DefinitionFields::Generic
+            | DefinitionFields::Data { .. }
+            | DefinitionFields::Accessor { .. } => None,
+        }
+    }
+
+    /// Returns the requested accessor functions, when the descriptor carries
+    /// them, for the same reason `requested_value` exists.
+    pub(crate) const fn requested_accessors(&self) -> (Option<FunctionId>, Option<FunctionId>) {
+        match &self.fields {
+            DefinitionFields::Accessor { getter, setter } => (
+                match getter {
+                    Requested::Present(function) => *function,
+                    Requested::Absent => None,
+                },
+                match setter {
+                    Requested::Present(function) => *function,
+                    Requested::Absent => None,
+                },
+            ),
+            DefinitionFields::Generic | DefinitionFields::Data { .. } => (None, None),
+        }
+    }
+
     /// Creates a descriptor carrying neither data nor accessor fields.
     pub(crate) const fn generic() -> Self {
         Self {

@@ -206,17 +206,24 @@ pub(super) fn get_prototype_of(
     Ok(NativeDispatch::Immediate(heap_reference_value(prototype)))
 }
 
-/// Applies `Object.create` for the one-argument form.
+/// Applies `Object.create(prototype, descriptors)`.
 ///
-/// The second `propertyDescriptors` argument is not admitted: honoring it means
-/// running `ToPropertyDescriptor` per key, which is resumable work this entry
-/// point cannot perform, so it fails closed rather than silently ignoring the
-/// descriptors.
+/// The descriptors argument runs the same `ObjectDefineProperties` that
+/// `Object.defineProperties` does, on the freshly created object, so a
+/// descriptor read can enter an accessor and the whole operation is resumable
+/// (`quickjs.c:40095-40110`). An absent or `undefined` argument creates the
+/// object with no own property.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "object creation carries the same runtime, realm, operand, resume, origin, and budget authority as every other resumable native operation"
+)]
 pub(super) fn object_create(
     runtime: &mut Runtime,
     realm: RealmId,
     mut arguments: CallArguments,
-    origin: Option<&JsStackFrame>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let requested = arguments.take_first_or_undefined();
     // Only `null` and an object are prototypes; the oracle reports every other
@@ -233,22 +240,26 @@ pub(super) fn object_create(
         | StoredValue::Symbol(_) => {
             return Err(NativeFailure::Abrupt(type_error(
                 realm,
-                origin,
+                Some(&origin),
                 "create",
                 "not a prototype",
             )?));
         }
     };
-    if !matches!(arguments.take_first_or_undefined(), StoredValue::Undefined) {
-        return Err(NativeFailure::Abrupt(type_error(
-            realm,
-            origin,
-            "create",
-            "property descriptors are not supported",
-        )?));
-    }
     let object = runtime.allocate_ordinary_object_with_optional_prototype(prototype)?;
-    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+    let descriptors = arguments.take_first_or_undefined();
+    if matches!(descriptors, StoredValue::Undefined) {
+        return Ok(NativeDispatch::Immediate(StoredValue::Object(object)));
+    }
+    begin_define_properties(
+        runtime,
+        realm,
+        StoredValue::Object(object),
+        descriptors,
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 /// Applies `Object.prototype.isPrototypeOf`.

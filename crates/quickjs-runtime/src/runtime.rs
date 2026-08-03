@@ -868,6 +868,9 @@ pub(crate) enum NativeFunctionKind {
     /// `Object.assign`, which interleaves a source read with a target write per
     /// key across several sources.
     ObjectAssign,
+    /// `Object.defineProperties`, which validates every descriptor before
+    /// applying any of them.
+    ObjectDefineProperties,
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
     ObjectPrototypeHasOwnProperty,
