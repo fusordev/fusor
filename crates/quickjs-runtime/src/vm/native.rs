@@ -1181,6 +1181,20 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::ObjectGroupBy => {
+            let mut arguments = inputs.arguments;
+            let items = arguments.take_first_or_undefined();
+            let callback = arguments.take_first_or_undefined();
+            begin_object_group_by(
+                runtime,
+                native.realm,
+                items,
+                &callback,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::ObjectAssign => begin_object_assign(
             runtime,
             native.realm,

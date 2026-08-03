@@ -2492,6 +2492,9 @@ fn finish_property_key_target(
             role,
             realm,
         } => finish_legacy_accessor_lookup(runtime, realm, role, &target, &property),
+        PropertyKeyTarget::GroupKey { drain, item } => {
+            finish_group_key(runtime, *drain, item, property, return_to, execution_budget)
+        }
         PropertyKeyTarget::EntryKey { drain, value } => finish_entry_key(
             runtime,
             *drain,

@@ -98,6 +98,14 @@ Known intentional runtime differences:
   key, while agreeing with the specification for `values`; it is therefore
   internally inconsistent rather than deliberately divergent. This port re-tests
   the attribute in all four walks.
+- `QJS-GROUPBY-001`: `Object.groupBy` calls its callback with an `undefined`
+  receiver, so a *strict* callback observes `this === undefined`. The pinned
+  oracle passes the global object instead, even under `"use strict"`, while its
+  own `Array.prototype.forEach` and `map` correctly pass `undefined`; it is
+  therefore internally inconsistent rather than deliberately divergent. V8 agrees
+  with the specification, and so does this port. A sloppy callback still observes
+  the global through the ordinary sloppy-mode substitution, which both engines
+  share.
 - `QJS-DEFPROPS-001`: `Object.defineProperties` and `Object.create`'s
   descriptors argument read and validate *every* descriptor before applying any
   (`ObjectDefineProperties` steps 3-5), so a descriptor that throws while being
@@ -518,15 +526,25 @@ Known intentional write-path differences:
   non-callable second argument never runs the key's `toString`. The two lookups
   walk the whole prototype chain and report only the addressed half, so a data
   property answers `undefined` rather than its value.
+- [x] `Object.groupBy`, which completes the `Object` surface. It reuses the
+  shared iterator drain with a third destination: each drained value is passed to
+  the callback with its index, and the returned key — converted with
+  `ToPropertyKey`, so an object key runs its `toString` — names the group array
+  the value joins. The result has a *null* prototype, which is what keeps a group
+  key from colliding with an inherited property, and each group is a fresh base
+  Array behind a fully mutable property, created on first use so groups appear in
+  first-use order. The callback is validated before `Symbol.iterator` is probed,
+  and a throwing callback closes the iterator. See `QJS-GROUPBY-001` for the
+  callback receiver.
 - [ ] Remaining String/Number/Array method surface (`String.prototype` case
   conversions and `localeCompare`, the RegExp-dependent `match`, `matchAll`,
   `replace`, `search`, and `split`, `normalize`, `String.raw`, and the
   locale-dependent renderings), shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
-- [ ] `Object.groupBy`, then Proxy, remaining built-ins, RegExp/Date/JSON,
-  collections, binary data, Atomics, Unicode tables, promises, async
-  functions/generators, weak references, and finalization registries.
+- [ ] Proxy, remaining built-ins, RegExp/Date/JSON, collections, binary data,
+  Atomics, Unicode tables, promises, async functions/generators, weak
+  references, and finalization registries.
 - [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide
   host I/O, timers, cancellation, and wakeups, but never Promise-job ordering.
 

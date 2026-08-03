@@ -902,6 +902,8 @@ pub(crate) enum NativeFunctionKind {
     ObjectDefineProperties,
     /// `Object.fromEntries`, which drains an iterable of `[key, value]` pairs.
     ObjectFromEntries,
+    /// `Object.groupBy`, which drains an iterable through a key callback.
+    ObjectGroupBy,
     ObjectPrototypeToString,
     /// `Object.prototype.toLocaleString`, which forwards to the receiver's own
     /// `toString` and passes no argument along.

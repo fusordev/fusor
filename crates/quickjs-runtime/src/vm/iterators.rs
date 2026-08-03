@@ -912,6 +912,47 @@ pub(super) fn begin_object_from_entries(
     )
 }
 
+/// Starts `Object.groupBy(items, callback)`.
+///
+/// The result has a *null* prototype, so a group key can never collide with an
+/// inherited property, which is what separates it from `Object.fromEntries`
+/// (`quickjs.c:40700-40740`). The callback is validated before the iterable is
+/// touched, so a non-callable one reports `not a function` without probing
+/// `Symbol.iterator`.
+pub(super) fn begin_object_group_by(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    items: StoredValue,
+    callback: &StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(callback) = *callback else {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "not a function",
+        )?);
+    };
+    let target = runtime.allocate_ordinary_object_with_optional_prototype(None)?;
+    begin_iterator_drain(
+        runtime,
+        IteratorDrain::GroupIntoObject {
+            target,
+            callback,
+            next_index: 0,
+            item: None,
+        },
+        items,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
 /// Starts draining one iterable into the requested destination.
 ///
 /// Everything before the destination's own step is the iterator protocol:
@@ -1066,7 +1107,8 @@ pub(super) fn advance_iterator_append(
                         StoredValue::Object(array),
                         StoredValue::Number(JsNumber::from_u32(next_index)),
                     ),
-                    IteratorDrain::EntriesIntoObject { target, .. } => {
+                    IteratorDrain::EntriesIntoObject { target, .. }
+                    | IteratorDrain::GroupIntoObject { target, .. } => {
                         NativeDispatch::Immediate(StoredValue::Object(target))
                     }
                 });
@@ -1086,6 +1128,9 @@ pub(super) fn advance_iterator_append(
             }
             // An entry must be an object before either of its two indices is
             // read, and a rejected one closes the iterator.
+            IteratorDrain::GroupIntoObject { .. } => {
+                call_group_callback(state, completion, return_to)
+            }
             IteratorDrain::EntriesIntoObject { .. } => {
                 if !matches!(
                     completion,
@@ -1146,7 +1191,177 @@ pub(super) fn advance_iterator_append(
         IteratorAppendStage::AwaitEntryValue => {
             define_drained_entry(runtime, state, completion, return_to, execution_budget)
         }
+        IteratorAppendStage::AwaitGroupKey => {
+            group_drained_item(runtime, state, completion, return_to, execution_budget)
+        }
     }
+}
+
+/// Calls `Object.groupBy`'s callback with one drained item and its index.
+///
+/// The callback receives exactly `(item, index)` and an `undefined` receiver,
+/// and its result becomes the group key (`quickjs.c:40700-40740`).
+fn call_group_callback(
+    mut state: IteratorAppendContinuation,
+    item: StoredValue,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let IteratorDrain::GroupIntoObject {
+        callback,
+        next_index,
+        item: held,
+        ..
+    } = &mut state.drain
+    else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "group callback reached a non-grouping drain",
+        }
+        .into());
+    };
+    let callback = *callback;
+    let index = *next_index;
+    *next_index = index.saturating_add(1);
+    *held = Some(item.duplicate());
+    let mut arguments = Vec::new();
+    arguments
+        .try_reserve_exact(2)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: 2,
+        })?;
+    arguments.push(item);
+    arguments.push(StoredValue::Number(JsNumber::from_u32(index)));
+    state.stage = IteratorAppendStage::AwaitGroupKey;
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::IteratorAppend(state));
+    Ok(NativeDispatch::Call(NativeCall {
+        function: callback,
+        receiver: StoredValue::Undefined,
+        arguments: CallArguments::from_values(arguments),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    }))
+}
+
+/// Converts the callback's result into a group key.
+fn group_drained_item(
+    runtime: &mut Runtime,
+    mut state: IteratorAppendContinuation,
+    key: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let IteratorDrain::GroupIntoObject { item, .. } = &mut state.drain else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "group key reached a non-grouping drain",
+        }
+        .into());
+    };
+    let item = item.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "group key has no pending item",
+    })?;
+    // The key converts with `ToPropertyKey`, which can run a user `toString`.
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_property_key_conversion(
+        runtime,
+        key,
+        PropertyKeyTarget::GroupKey {
+            drain: Box::new(state),
+            item,
+        },
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+/// Appends one item to its group once the key has been converted.
+///
+/// A group is created on first use as a fresh base Array, and the property is
+/// fully mutable, so the result reads like an ordinary object even though its
+/// prototype is `null`.
+pub(super) fn finish_group_key(
+    runtime: &mut Runtime,
+    mut state: IteratorAppendContinuation,
+    item: StoredValue,
+    property: StaticPropertyOperand,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let IteratorDrain::GroupIntoObject { target, .. } = &state.drain else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "group append reached a non-grouping drain",
+        }
+        .into());
+    };
+    let target = *target;
+    let group = match runtime
+        .object_record(HeapReference::Object(target))?
+        .own_property(&property.key)
+    {
+        Some(OwnProperty::Data {
+            value: StoredValue::Object(group),
+            ..
+        }) => group,
+        // A group's own property is only ever the Array this creates, so any
+        // other shape means the result object was tampered with, which is
+        // impossible: it is unreachable until the drain completes.
+        Some(_) => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "group property is not a group array",
+            }
+            .into());
+        }
+        None => {
+            let group = runtime.allocate_array(state.realm, Vec::new())?;
+            runtime.append_data_property(
+                HeapReference::Object(target),
+                property.key,
+                PropertyLayout::data(true, true, true),
+                StoredValue::Object(group),
+            )?;
+            group
+        }
+    };
+    let length = runtime
+        .array_length(group)?
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "group array lost its array state",
+        })?;
+    let index = ArrayIndex::new(length).ok_or(EngineFault::RuntimeInvariant {
+        message: "group array index exceeds the array-index domain",
+    })?;
+    let work = runtime.preview_array_define_data_property_work(group)?;
+    execution_budget.charge_instructions(work)?;
+    match runtime.define_array_data_property(
+        group,
+        PropertyKey::from_index(index),
+        PropertyLayout::data(true, true, true),
+        item,
+    )? {
+        ArrayDefineOutcome::Complete => {}
+        ArrayDefineOutcome::ReadOnlyLength | ArrayDefineOutcome::NonExtensible => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "fresh group array refused an append",
+            }
+            .into());
+        }
+    }
+    state.result = None;
+    call_append_next(state, return_to, execution_budget)
 }
 
 /// Appends one drained value to the destination array.
@@ -1329,15 +1544,17 @@ fn read_append_property(
                         message: "entry index lookup has no entry object",
                     })?
                 }
-                IteratorDrain::AppendToArray { .. } => {
+                IteratorDrain::AppendToArray { .. } | IteratorDrain::GroupIntoObject { .. } => {
                     return Err(EngineFault::RuntimeInvariant {
-                        message: "array drain reached an entry index lookup",
+                        message: "non-entries drain reached an entry index lookup",
                     }
                     .into());
                 }
             }
         }
-        IteratorAppendStage::AwaitIterator | IteratorAppendStage::AwaitNextResult => {
+        IteratorAppendStage::AwaitIterator
+        | IteratorAppendStage::AwaitNextResult
+        | IteratorAppendStage::AwaitGroupKey => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "iterator call stage attempted a property read",
             }

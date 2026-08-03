@@ -544,6 +544,8 @@ enum IteratorAppendStage {
     AwaitEntryKey,
     /// `Object.fromEntries` only: the entry's `1` property, its value.
     AwaitEntryValue,
+    /// `Object.groupBy` only: the callback's returned key.
+    AwaitGroupKey,
 }
 
 /// Where a drained iterator's values land.
@@ -561,6 +563,14 @@ enum IteratorDrain {
         target: ObjectId,
         entry: Option<StoredValue>,
         key: Option<StoredValue>,
+    },
+    /// `Object.groupBy`: each value is passed to `callback` with its index, and
+    /// appended to the group array named by the returned key.
+    GroupIntoObject {
+        target: ObjectId,
+        callback: FunctionId,
+        next_index: u32,
+        item: Option<StoredValue>,
     },
 }
 
@@ -608,6 +618,7 @@ impl IteratorDrain {
             Self::EntriesIntoObject { entry, key, .. } => {
                 (entry.is_some() as u64).saturating_add(key.is_some() as u64)
             }
+            Self::GroupIntoObject { item, .. } => item.is_some() as u64,
         }
     }
 
@@ -620,6 +631,18 @@ impl IteratorDrain {
                 mark(CollectionRoot::Heap(HeapReference::Object(*target)));
                 for value in [entry.as_ref(), key.as_ref()].into_iter().flatten() {
                     trace_stored_value_root(value, mark);
+                }
+            }
+            Self::GroupIntoObject {
+                target,
+                callback,
+                item,
+                ..
+            } => {
+                mark(CollectionRoot::Heap(HeapReference::Object(*target)));
+                mark(CollectionRoot::Heap(HeapReference::Function(*callback)));
+                if let Some(item) = item {
+                    trace_stored_value_root(item, mark);
                 }
             }
         }
@@ -782,6 +805,15 @@ enum PropertyKeyTarget {
         strict: bool,
         realm: RealmId,
     },
+    /// `Object.groupBy`'s group key, awaiting `ToPropertyKey`.
+    ///
+    /// The callback has already returned, so the conversion is the last step
+    /// before the item joins its group; a conversion that throws closes the
+    /// iterator, which is why the whole drain rides along.
+    GroupKey {
+        drain: Box<IteratorAppendContinuation>,
+        item: StoredValue,
+    },
     /// A legacy `__defineGetter__`/`__defineSetter__` key, awaiting
     /// `ToPropertyKey`.
     LegacyAccessorDefinition {
@@ -831,7 +863,9 @@ impl PropertyKeyTarget {
             | Self::DefineMethod { .. }
             | Self::DefineProperty { .. }
             | Self::LegacyAccessorDefinition { .. } => 2,
-            Self::EntryKey { drain, .. } => 1_u64.saturating_add(drain.retained_values()),
+            Self::EntryKey { drain, .. } | Self::GroupKey { drain, .. } => {
+                1_u64.saturating_add(drain.retained_values())
+            }
             Self::Reflect { target, .. } => target.retained_values(),
         }
     }
@@ -1263,9 +1297,10 @@ fn trace_property_key_target_roots(
         PropertyKeyTarget::LegacyAccessorLookup { target, .. } => {
             trace_stored_value_root(target, mark);
         }
-        PropertyKeyTarget::EntryKey { drain, value } => {
+        PropertyKeyTarget::EntryKey { drain, value: held }
+        | PropertyKeyTarget::GroupKey { drain, item: held } => {
             drain.trace_roots(mark);
-            trace_stored_value_root(value, mark);
+            trace_stored_value_root(held, mark);
         }
         PropertyKeyTarget::Reflect { target, .. } => target.trace_roots(mark),
     }
