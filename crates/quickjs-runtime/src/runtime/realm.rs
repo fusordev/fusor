@@ -25,6 +25,9 @@
 
 //! Runtime construction and failure-atomic realm intrinsic graph publication.
 
+mod schema;
+mod validation;
+
 use std::collections::TryReserveError;
 
 use super::{

@@ -1,0 +1,229 @@
+//! Typed, allocation-order-independent declarations for Realm intrinsics.
+//!
+//! The declarations in this module deliberately contain no arena indices and
+//! have no access to mutable [`Runtime`](super::Runtime) state.  They are the
+//! vocabulary consumed by Realm schema validation, atom planning, identity
+//! allocation, and descriptor publication.
+
+#![allow(
+    dead_code,
+    reason = "the typed schema is introduced before the existing bootstrap families migrate to it"
+)]
+
+use super::{
+    ArrayCallback, ArrayCopier, ArrayFlatten, ArrayMutator, ArrayReduction, ArraySearch, ArraySort,
+    ArrayStatic, ErrorIntrinsicKind, GlobalNumericFunction, LocaleStringMethod, MathMethod,
+    NativeFunctionKind, NumberFormat, NumberPredicate, PredefinedAtom, PropertyLayout,
+    ReflectMethod, StringMethod, UriFunction,
+};
+
+/// Stable identity of an object allocated by Realm bootstrap.
+///
+/// These values describe ECMA-262 intrinsic identities.  They never contain a
+/// generational arena index and therefore remain valid before allocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) enum IntrinsicObjectId {
+    ObjectPrototype,
+    GlobalObject,
+    ErrorPrototype(ErrorIntrinsicKind),
+    BooleanPrototype,
+    NumberPrototype,
+    BigIntPrototype,
+    StringPrototype,
+    ArrayPrototype,
+    IteratorPrototype,
+    ArrayIteratorPrototype,
+    StringIteratorPrototype,
+    SymbolPrototype,
+    Reflect,
+    Json,
+    Math,
+}
+
+/// Stable identity of a native function allocated by Realm bootstrap.
+///
+/// [`NativeFunctionKind`] already gives repeated families semantic identities
+/// such as [`MathMethod`], [`ArrayCallback`], and [`ErrorIntrinsicKind`].  The
+/// wrapper keeps schema identity distinct from implementation dispatch while
+/// retaining those family types instead of introducing anonymous slot numbers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) struct IntrinsicFunctionId(pub(in crate::runtime) NativeFunctionKind);
+
+/// Stable identity of a Realm-created JavaScript name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) enum RealmNameId {
+    Call,
+    Entries,
+    KeyFor,
+    Description,
+    IsError,
+    Bind,
+    Reflect,
+    JsonIsRawJson,
+    JsonParse,
+    JsonStringify,
+    ParseFloat,
+    ParseInt,
+    Uri(UriFunction),
+    ObjectStatic(NativeFunctionKind),
+    BigIntStatic(NativeFunctionKind),
+    StringMethod(StringMethod),
+    NumberValue(&'static str),
+    NumberPredicate(NumberPredicate),
+    StringStatic(StringMethod),
+    ArraySearch(ArraySearch),
+    ObjectPrototypeMethod(NativeFunctionKind),
+    ArrayMutator(ArrayMutator),
+    ArrayCopier(ArrayCopier),
+    NumberFormat(NumberFormat),
+    ArrayCallback(ArrayCallback),
+    ArrayReduction(ArrayReduction),
+    ArraySplice,
+    ArraySort(ArraySort),
+    ArrayFlatten(ArrayFlatten),
+    MathMethod(MathMethod),
+    MathConstant(&'static str),
+}
+
+/// A reference to an intrinsic identity before arena allocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) enum IntrinsicIdentity {
+    Object(IntrinsicObjectId),
+    Function(IntrinsicFunctionId),
+}
+
+/// An intrinsic property's key without a runtime-local [`super::Atom`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) enum IntrinsicKeySpec {
+    /// A predefined atom whose namespace is String.
+    PredefinedString(PredefinedAtom),
+    /// A string name interned by this Realm transaction.
+    RealmName(RealmNameId),
+    /// A predefined atom whose namespace is Symbol.
+    WellKnownSymbol(PredefinedAtom),
+    /// An integer-indexed own property.
+    ArrayIndex(u32),
+}
+
+/// One intrinsic identity's `[[Prototype]]` declaration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) enum PrototypeSpec {
+    Null,
+    Intrinsic(IntrinsicIdentity),
+}
+
+/// Special object storage required by a small set of intrinsic prototypes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) enum IntrinsicObjectKind {
+    Ordinary,
+    BooleanPrototype,
+    NumberPrototype,
+    BigIntPrototype,
+    StringPrototype,
+    ArrayPrototype,
+}
+
+/// One object identity and its allocation-time internal slots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) struct IntrinsicObjectSpec {
+    pub(in crate::runtime) id: IntrinsicObjectId,
+    pub(in crate::runtime) prototype: PrototypeSpec,
+    pub(in crate::runtime) kind: IntrinsicObjectKind,
+}
+
+/// How a function's observable `name` value is obtained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) enum IntrinsicNameSpec {
+    Predefined(PredefinedAtom),
+    RealmName(RealmNameId),
+    Literal(&'static str),
+}
+
+/// One Realm-owned native function identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) struct IntrinsicFunctionSpec {
+    pub(in crate::runtime) id: IntrinsicFunctionId,
+    pub(in crate::runtime) implementation: NativeFunctionKind,
+    pub(in crate::runtime) prototype: PrototypeSpec,
+    pub(in crate::runtime) name: IntrinsicNameSpec,
+    pub(in crate::runtime) length: i32,
+    pub(in crate::runtime) constructable: bool,
+}
+
+/// A string value used by an intrinsic data descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) enum IntrinsicStringSpec {
+    Predefined(PredefinedAtom),
+    RealmName(RealmNameId),
+    Literal(&'static str),
+}
+
+/// A descriptor value whose Realm-local references are not allocated yet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) enum IntrinsicValueSpec {
+    Undefined,
+    Null,
+    Boolean(bool),
+    NumberBits(u64),
+    String(IntrinsicStringSpec),
+    Object(IntrinsicObjectId),
+    Function(IntrinsicFunctionId),
+    WellKnownSymbol(PredefinedAtom),
+}
+
+/// Complete data or accessor descriptor for one intrinsic property.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) enum IntrinsicDescriptorSpec {
+    Data {
+        layout: PropertyLayout,
+        value: IntrinsicValueSpec,
+    },
+    Accessor {
+        layout: PropertyLayout,
+        getter: Option<IntrinsicFunctionId>,
+        setter: Option<IntrinsicFunctionId>,
+    },
+}
+
+/// One property in specification declaration order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) struct IntrinsicPropertySpec {
+    pub(in crate::runtime) holder: IntrinsicIdentity,
+    pub(in crate::runtime) key: IntrinsicKeySpec,
+    pub(in crate::runtime) descriptor: IntrinsicDescriptorSpec,
+}
+
+/// A required constructor/prototype pair used by graph validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) struct ConstructorPrototypeSpec {
+    pub(in crate::runtime) constructor: IntrinsicFunctionId,
+    pub(in crate::runtime) prototype: IntrinsicObjectId,
+}
+
+/// Expected size of one semantic family before it is materialized as an array.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) struct FamilyCardinality {
+    pub(in crate::runtime) family: &'static str,
+    pub(in crate::runtime) actual: usize,
+    pub(in crate::runtime) expected: usize,
+}
+
+/// Ordered intrinsic declaration graph supplied to Realm construction.
+#[derive(Clone, Copy)]
+pub(in crate::runtime) struct IntrinsicSchema<'a> {
+    pub(in crate::runtime) objects: &'a [IntrinsicObjectSpec],
+    pub(in crate::runtime) functions: &'a [IntrinsicFunctionSpec],
+    pub(in crate::runtime) properties: &'a [IntrinsicPropertySpec],
+    pub(in crate::runtime) mandatory_objects: &'a [IntrinsicObjectId],
+    pub(in crate::runtime) mandatory_functions: &'a [IntrinsicFunctionId],
+    pub(in crate::runtime) constructor_prototypes: &'a [ConstructorPrototypeSpec],
+    pub(in crate::runtime) family_cardinalities: &'a [FamilyCardinality],
+}
+
+// Keep the semantic family types visible in rustdoc for the schema contract.
+const _: Option<(
+    ArrayStatic,
+    GlobalNumericFunction,
+    LocaleStringMethod,
+    ReflectMethod,
+)> = None;
