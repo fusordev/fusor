@@ -2,7 +2,7 @@ use std::{fmt, sync::Arc};
 
 use crate::{BytecodePc, DecodedInstruction, function::UnverifiedFunctionHeader};
 
-use super::{instruction_index_at, predecode::is_instruction_start};
+use super::{predecode::is_instruction_start, targets::instruction_index_at};
 
 /// Function-local index-domain lengths needed for body verification.
 ///
