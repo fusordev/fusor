@@ -627,6 +627,56 @@ internal `Object.prototype` root used by its object literals. Runtime, context,
 realm, and value handles are `!Send + !Sync`, and separate runtimes cannot
 exchange JavaScript values.
 
+### Realm construction
+
+Standard intrinsic construction is an ordered, typed transaction. Family
+modules declare `IntrinsicObjectSpec`, `IntrinsicFunctionSpec`, and
+`IntrinsicPropertySpec` entries; their declaration order is semantic because
+it contributes to observable string and Symbol own-key order. The immutable
+`RealmIntrinsicSchema` validates unique and mandatory identities, all graph
+references, descriptor keys, native metadata, constructor/prototype pairs,
+and fixed family cardinalities before any Runtime heap node is allocated.
+Committed intrinsic lookup remains direct and typed; construction does not
+leave a runtime string-keyed registry behind.
+
+The validated schema feeds two complete plans. `RealmAtomPlan` derives the
+ordered Realm-local string atoms while retaining the pinned legacy interning
+order, and `RealmReservationPlan` derives atoms, Realms, objects, functions,
+global bindings, property slots, and undo-journal capacity with checked
+arithmetic. Ordinary native `name` and `length` slots are automatic. The
+property charge is the schema property count plus those automatic identity
+slots, and therefore matches the 757 installed object/function record slots;
+there is no separately maintained per-Realm property constant.
+
+`RealmBuildTransaction` pre-reserves its entire undo journal before mutation.
+It then interns atoms, allocates transaction-private object and function
+shells by typed identity, publishes generic data/accessor descriptors in
+declaration order, converts the complete table into `RealmIntrinsics`, and
+commits. No public `Realm` or `Context` handle can observe an initializing
+shell. The Realm-visible `%Math.random%` seed and logical property charge
+advance only after commit.
+
+Dropping an uncommitted transaction removes recorded atoms, bindings,
+functions, objects, and the Realm in strict reverse order. Journal recording
+after each mutation is allocation-free, and rollback never executes
+JavaScript, invokes GC, or runs a callback/finalizer. Standard intrinsic
+bootstrap remains separate from dynamic host-function installation and future
+module namespaces.
+
+Only relationships that ordinary property declarations cannot establish
+safely use narrow hooks: `%Function.prototype%` receives its callable shell
+during kernel allocation, `%Array.prototype%` receives its exotic `length`
+slot before materialization, and `%ThrowTypeError%` is made non-extensible
+after its frozen identity descriptors are published. Constructor/prototype
+links and all other ordinary descriptors remain explicit schema entries.
+
+A normalized test snapshot walks all 242 Realm-local intrinsic identities and
+pins prototypes, brands, extensibility, ordered keys, complete descriptors,
+exact primitive/reference values, and native call/construct metadata. A
+separate maintenance regression removes and restores `Error.isError` to prove
+that atom and reservation changes are derived from the schema without atom
+offsets, record arrays, insertion/publication mirrors, or rollback lists.
+
 Runtime-local nodes use generational typed IDs:
 
 ```text

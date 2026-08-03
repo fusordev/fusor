@@ -136,6 +136,14 @@ Known intentional runtime differences:
   non-writable, non-configurable `Function.prototype[Symbol.hasInstance]`
   (`quickjs.c:39511-39523`), so inherited `instanceof` behavior cannot be
   replaced by assignment.
+- [x] Refactor Realm bootstrap into validated, specification-ordered intrinsic
+  declarations; schema-derived atom/resource plans; transaction-private typed
+  shell allocation; generic descriptor publication; and allocation-free
+  reverse-journal rollback. A normalized complete-graph snapshot preserves the
+  installed JavaScript surface and cross-Realm isolation. Property admission
+  now charges the actual 757 installed slots instead of the obsolete
+  hand-maintained 718-slot estimate. This is an architecture/accounting repair,
+  not an additional ECMAScript feature claim.
 - [x] First ordinary-object slice: object literals; data/accessor properties;
   ordinary reads/writes; receiver-aware calls; computed keys; and resumable
   getter/setter dispatch.
