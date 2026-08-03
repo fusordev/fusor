@@ -680,3 +680,370 @@ fn index_string(index: u32) -> Result<JsString, NativeFailure> {
         .to_radix_string(10)
         .map_err(NativeFailure::from)
 }
+
+/// Applies `Object.prototype.toLocaleString`.
+///
+/// This is a bare forward to the receiver's own `toString`, resolved through the
+/// prototype chain, with *no* argument passed along: the locale arguments the
+/// name suggests belong to the `Intl` layer, and the base implementation ignores
+/// them (`quickjs.c:40470-40480`). A nullish receiver therefore fails on the
+/// `toString` lookup rather than on a `ToObject` of its own.
+pub(super) fn begin_object_prototype_to_locale_string(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    receiver: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let key = runtime.predefined_property_key(PredefinedAtom::ToString);
+    charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
+    let method = match read_static_property(runtime, realm, &receiver, &key)? {
+        PropertyReadOutcome::Value(value) => value,
+        // The lookup itself can enter an accessor, whose result is the method
+        // to call, so the forward suspends on it.
+        PropertyReadOutcome::Getter {
+            function,
+            receiver: getter_receiver,
+        } => {
+            let mut continuations = Vec::new();
+            continuations
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::Frames,
+                    additional: 1,
+                })?;
+            continuations.push(NativeContinuation::ToLocaleString(
+                ToLocaleStringContinuation {
+                    receiver,
+                    realm,
+                    origin: origin.clone(),
+                },
+            ));
+            return Ok(NativeDispatch::Call(NativeCall {
+                function,
+                receiver: getter_receiver,
+                arguments: CallArguments::empty(),
+                return_to,
+                origin,
+                continuations,
+                pre_call: None,
+                new_target: None,
+                native_caller: None,
+            }));
+        }
+        PropertyReadOutcome::Failed(failure) => {
+            return Err(NativeFailure::Abrupt(property_exception_at(
+                realm,
+                origin,
+                Some(&JsString::from_utf8("toString")?),
+                failure,
+            )?));
+        }
+    };
+    call_object_prototype_to_locale_string(
+        ToLocaleStringContinuation {
+            receiver,
+            realm,
+            origin,
+        },
+        &method,
+        return_to,
+    )
+}
+
+/// Calls the resolved `toString`, which must be callable.
+pub(super) fn call_object_prototype_to_locale_string(
+    state: ToLocaleStringContinuation,
+    method: &StoredValue,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let ToLocaleStringContinuation {
+        receiver,
+        realm,
+        origin,
+    } = state;
+    let StoredValue::Function(function) = method else {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("not a function")?,
+            },
+            origin,
+        }));
+    };
+    let function = *function;
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::empty(),
+        return_to,
+        origin,
+        continuations: Vec::new(),
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    }))
+}
+
+/// Applies the `Object.prototype.__proto__` getter.
+///
+/// The getter is `Object.getPrototypeOf` with the receiver in place of the
+/// argument, so a primitive answers with its wrapper's prototype and a nullish
+/// receiver throws (`quickjs.c:40640-40650`).
+pub(super) fn object_prototype_proto_getter(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    receiver: StoredValue,
+    origin: Option<&JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
+    get_prototype_of(runtime, realm, Some(receiver), origin)
+}
+
+/// Applies the `Object.prototype.__proto__` setter.
+///
+/// Unlike `Object.setPrototypeOf`, a non-object prototype is *ignored* rather
+/// than rejected, because the setter's argument is not a validated operand:
+/// `({}).__proto__ = 5` leaves the prototype untouched and completes normally
+/// (`quickjs.c:40652-40666`). A refused change still throws, since the setter
+/// runs as an ordinary strict `Set`.
+pub(super) fn object_prototype_proto_setter(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    origin: Option<&JsStackFrame>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let requested = arguments.take_first_or_undefined();
+    let prototype = match requested {
+        StoredValue::Null => None,
+        StoredValue::Function(function) => Some(HeapReference::Function(function)),
+        StoredValue::Object(object) => Some(HeapReference::Object(object)),
+        // Any other value is silently ignored.
+        StoredValue::Undefined
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+        }
+    };
+    // A primitive receiver has no prototype slot to write, and completes
+    // without throwing.
+    let Some(reference) = reflection_target(
+        runtime,
+        realm,
+        receiver,
+        PrimitivePolicy::ReturnArgument,
+        origin,
+        "__proto__",
+    )?
+    else {
+        return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+    };
+    match runtime.set_prototype_of(reference, prototype)? {
+        SetPrototypeOutcome::Complete => Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
+        SetPrototypeOutcome::NonExtensible => Err(NativeFailure::Abrupt(type_error(
+            realm,
+            origin,
+            "__proto__",
+            "object is not extensible",
+        )?)),
+        SetPrototypeOutcome::CyclicPrototype => Err(NativeFailure::Abrupt(type_error(
+            realm,
+            origin,
+            "__proto__",
+            "circular prototype chain",
+        )?)),
+    }
+}
+
+/// Starts `Object.prototype.__defineGetter__` or `__defineSetter__`.
+///
+/// The accessor is validated as callable *before* the key converts, so a
+/// non-callable second argument reports `not a function` without running the
+/// key's `toString` (`quickjs.c:40530-40560`). The receiver then converts with
+/// `ToObject`, which is why a nullish one throws while any other primitive
+/// completes without defining anything.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a legacy accessor definer carries the same runtime, realm, operand, resume, origin, and budget authority as every other resumable native operation"
+)]
+pub(super) fn begin_legacy_accessor_definition(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    role: AccessorRole,
+    receiver: StoredValue,
+    key: StoredValue,
+    accessor: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if !matches!(accessor, StoredValue::Function(_)) {
+        return Err(NativeFailure::Abrupt(type_error(
+            realm,
+            Some(&origin),
+            role.define_name(),
+            "not a function",
+        )?));
+    }
+    let target = match receiver {
+        value @ (StoredValue::Function(_) | StoredValue::Object(_)) => value,
+        StoredValue::Undefined | StoredValue::Null => {
+            return Err(NativeFailure::Abrupt(type_error(
+                realm,
+                Some(&origin),
+                role.define_name(),
+                "cannot convert to object",
+            )?));
+        }
+        StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+        }
+    };
+    begin_property_key_conversion(
+        runtime,
+        key,
+        PropertyKeyTarget::LegacyAccessorDefinition {
+            target,
+            accessor,
+            role,
+            realm,
+        },
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+/// Defines one legacy accessor once its key has been converted.
+///
+/// The property is enumerable and configurable, which is what separates this
+/// from `Object.defineProperty`'s all-`false` defaults, and only the addressed
+/// half is supplied so the other stays absent.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the definition needs the runtime, realm, role, target, accessor, key, origin, and budget together"
+)]
+pub(super) fn finish_legacy_accessor_definition(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    role: AccessorRole,
+    target: &StoredValue,
+    accessor: &StoredValue,
+    property: StaticPropertyOperand,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(function) = accessor else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "validated legacy accessor is not a function",
+        }
+        .into());
+    };
+    let requested = Requested::Present(Some(*function));
+    let definition = match role {
+        AccessorRole::Getter => PropertyDefinition::accessor(requested, Requested::Absent),
+        AccessorRole::Setter => PropertyDefinition::accessor(Requested::Absent, requested),
+    }
+    .with_enumerable(Requested::Present(true))
+    .with_configurable(Requested::Present(true));
+    match define_own_property(runtime, target, property.key, &definition, execution_budget)? {
+        PropertyDefinitionOutcome::Complete => {
+            Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+        }
+        PropertyDefinitionOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
+            property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
+        )),
+    }
+}
+
+/// Starts `Object.prototype.__lookupGetter__` or `__lookupSetter__`.
+///
+/// The receiver converts with `ToObject`, so a nullish one throws while any
+/// other primitive answers through its wrapper prototype's chain
+/// (`quickjs.c:40580-40620`).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a legacy accessor lookup carries the same runtime, realm, operand, resume, origin, and budget authority as every other resumable native operation"
+)]
+pub(super) fn begin_legacy_accessor_lookup(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    role: AccessorRole,
+    receiver: StoredValue,
+    key: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
+        return Err(NativeFailure::Abrupt(type_error(
+            realm,
+            Some(&origin),
+            role.lookup_name(),
+            "cannot convert to object",
+        )?));
+    }
+    begin_property_key_conversion(
+        runtime,
+        key,
+        PropertyKeyTarget::LegacyAccessorLookup {
+            target: receiver,
+            role,
+            realm,
+        },
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+/// Answers one legacy accessor lookup once its key has been converted.
+///
+/// The whole prototype chain is walked, and a data property answers `undefined`
+/// rather than its value, because only an accessor's addressed half is reported.
+pub(super) fn finish_legacy_accessor_lookup(
+    runtime: &Runtime,
+    realm: RealmId,
+    role: AccessorRole,
+    target: &StoredValue,
+    property: &StaticPropertyOperand,
+) -> Result<NativeDispatch, NativeFailure> {
+    let start = match target {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        // A primitive's own chain starts at its wrapper prototype.
+        StoredValue::Boolean(_) => HeapReference::Object(runtime.realm_boolean_prototype(realm)?),
+        StoredValue::Number(_) => HeapReference::Object(runtime.realm_number_prototype(realm)?),
+        StoredValue::BigInt(_) => HeapReference::Object(runtime.realm_bigint_prototype(realm)?),
+        StoredValue::String(_) => HeapReference::Object(runtime.realm_string_prototype(realm)?),
+        StoredValue::Symbol(_) => HeapReference::Object(runtime.realm_symbol_prototype(realm)?),
+        StoredValue::Undefined | StoredValue::Null => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "legacy accessor lookup kept a nullish receiver",
+            }
+            .into());
+        }
+    };
+    let answer = match lookup_heap_property(runtime, Some(start), &property.key)? {
+        Some(OwnProperty::Accessor { getter, setter, .. }) => match role {
+            AccessorRole::Getter => getter,
+            AccessorRole::Setter => setter,
+        },
+        Some(OwnProperty::Data { .. }) | None => None,
+    };
+    Ok(NativeDispatch::Immediate(match answer {
+        Some(function) => StoredValue::Function(function),
+        None => StoredValue::Undefined,
+    }))
+}

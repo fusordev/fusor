@@ -70,7 +70,14 @@ const MAX_CANDIDATE_WORKER_STREAM_BYTES: usize = MAX_ORACLE_RESULT_JSON_BYTES + 
 const MAX_REPORTED_MISMATCHES: usize = 32;
 const MAX_ERROR_PREVIEW_BYTES: usize = 512;
 const MAX_TEMP_DIRECTORY_ATTEMPTS: usize = 128;
-const CANDIDATE_INSTRUCTION_FUEL: u64 = 1_000_000;
+/// Interpreter fuel for one candidate case.
+///
+/// This is a harness bound, not pinned behavior: a fixture that walks the
+/// 65,534-argument `apply` limit performs that many property lookups, and each
+/// one charges a prototype-chain shape scan, so the cost grows whenever an
+/// intrinsic prototype gains a property. The ceiling is therefore generous
+/// enough to absorb that growth while still bounding a runaway case.
+const CANDIDATE_INSTRUCTION_FUEL: u64 = 8_000_000;
 const CANDIDATE_SOURCE_BYTES: usize = 32 * 1024;
 
 static TEMP_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);

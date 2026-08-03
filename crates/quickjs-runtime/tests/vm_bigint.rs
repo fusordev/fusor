@@ -501,7 +501,9 @@ fn the_constructor_is_not_constructable() {
 /// `BigInt own names => [length,name,asUintN,asIntN,prototype]`,
 /// `BigInt.prototype own => [toString,valueOf,constructor]`.
 ///
-/// The prototype deliberately has no `toLocaleString`.
+/// `BigInt.prototype` has no *own* `toLocaleString`: the locale-aware override
+/// belongs to the `Intl` layer, so the only one reachable is
+/// `Object.prototype`'s, which the oracle confirms it inherits.
 #[test]
 fn the_constructor_has_the_pinned_shape() {
     assert_eq!(text("return String(BigInt.length);"), "1");
@@ -511,10 +513,12 @@ fn the_constructor_has_the_pinned_shape() {
     assert_eq!(text("return typeof BigInt.asUintN;"), "function");
     assert_eq!(text("return String(BigInt.asIntN.length);"), "2");
     assert_eq!(text("return String(BigInt.asUintN.length);"), "2");
-    assert_eq!(
-        text("return typeof BigInt.prototype.toLocaleString;"),
-        "undefined"
-    );
+    assert!(!boolean(
+        "return Object.prototype.hasOwnProperty.call(BigInt.prototype,'toLocaleString');"
+    ));
+    assert!(boolean(
+        "return BigInt.prototype.toLocaleString===Object.prototype.toLocaleString;"
+    ));
 }
 
 /// Oracle: `Object(1n) typeof => [object|true]`.

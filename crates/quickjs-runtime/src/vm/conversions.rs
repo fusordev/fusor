@@ -2472,6 +2472,26 @@ fn finish_property_key_target(
                 property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
             )),
         },
+        PropertyKeyTarget::LegacyAccessorDefinition {
+            target,
+            accessor,
+            role,
+            realm,
+        } => finish_legacy_accessor_definition(
+            runtime,
+            realm,
+            role,
+            &target,
+            &accessor,
+            property,
+            origin,
+            execution_budget,
+        ),
+        PropertyKeyTarget::LegacyAccessorLookup {
+            target,
+            role,
+            realm,
+        } => finish_legacy_accessor_lookup(runtime, realm, role, &target, &property),
         PropertyKeyTarget::EntryKey { drain, value } => finish_entry_key(
             runtime,
             *drain,

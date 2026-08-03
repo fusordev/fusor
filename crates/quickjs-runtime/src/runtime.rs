@@ -541,6 +541,35 @@ impl ObjectListing {
     }
 }
 
+/// Which half of an accessor a legacy `Object.prototype` helper addresses.
+///
+/// `__defineGetter__`/`__defineSetter__` and
+/// `__lookupGetter__`/`__lookupSetter__` are each one implementation
+/// parameterized by this role (`quickjs.c:40530-40620`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AccessorRole {
+    Getter,
+    Setter,
+}
+
+impl AccessorRole {
+    /// Returns the `__defineGetter__`-family name for this role.
+    pub(crate) const fn define_name(self) -> &'static str {
+        match self {
+            Self::Getter => "__defineGetter__",
+            Self::Setter => "__defineSetter__",
+        }
+    }
+
+    /// Returns the `__lookupGetter__`-family name for this role.
+    pub(crate) const fn lookup_name(self) -> &'static str {
+        match self {
+            Self::Getter => "__lookupGetter__",
+            Self::Setter => "__lookupSetter__",
+        }
+    }
+}
+
 /// Which reduction a continuation is performing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArrayReduction {
@@ -874,6 +903,17 @@ pub(crate) enum NativeFunctionKind {
     /// `Object.fromEntries`, which drains an iterable of `[key, value]` pairs.
     ObjectFromEntries,
     ObjectPrototypeToString,
+    /// `Object.prototype.toLocaleString`, which forwards to the receiver's own
+    /// `toString` and passes no argument along.
+    ObjectPrototypeToLocaleString,
+    /// The `Object.prototype.__proto__` getter.
+    ObjectPrototypeProtoGetter,
+    /// The `Object.prototype.__proto__` setter.
+    ObjectPrototypeProtoSetter,
+    /// One legacy `__defineGetter__`/`__defineSetter__` accessor definer.
+    ObjectPrototypeDefineAccessor(AccessorRole),
+    /// One legacy `__lookupGetter__`/`__lookupSetter__` accessor lookup.
+    ObjectPrototypeLookupAccessor(AccessorRole),
     ObjectPrototypeValueOf,
     ObjectPrototypeHasOwnProperty,
     ObjectPrototypeIsPrototypeOf,

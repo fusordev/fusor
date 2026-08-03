@@ -28,11 +28,11 @@
 use std::collections::TryReserveError;
 
 use super::{
-    Arc, Arena, ArrayByCopy, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics,
-    ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayState, Atom, AtomError, AtomTable,
-    BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic,
-    ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation, HandleError,
-    HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
+    AccessorRole, Arc, Arena, ArrayByCopy, ArrayCallback, ArrayCopier, ArrayFlatten,
+    ArrayIntrinsics, ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayState, Atom,
+    AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context,
+    ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation,
+    HandleError, HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
     IteratorIntrinsics, JsNumber, JsString, NativeFunction, NativeFunctionKind, NumberFormat,
     NumberIntrinsics, NumberPredicate, ObjectId, ObjectListing, ObjectRecord, PredefinedAtom,
     PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState,
@@ -42,8 +42,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 21;
-const REALM_FUNCTION_COUNT: usize = 153;
-const REALM_PROPERTY_COUNT: u64 = 505;
+const REALM_FUNCTION_COUNT: usize = 160;
+const REALM_PROPERTY_COUNT: u64 = 524;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -338,7 +338,7 @@ const ARRAY_MUTATOR_ATOM_START: usize =
 /// Each entry pairs the interned name with its implementation and reported
 /// `length`, all of which the pinned oracle reports as 1. These are the methods
 /// the Error corpus reaches through `Object.prototype.hasOwnProperty.call`.
-const OBJECT_PROTOTYPE_REFLECTION: [(&str, NativeFunctionKind, i32); 3] = [
+const OBJECT_PROTOTYPE_REFLECTION: [(&str, NativeFunctionKind, i32); 7] = [
     (
         "hasOwnProperty",
         NativeFunctionKind::ObjectPrototypeHasOwnProperty,
@@ -352,6 +352,29 @@ const OBJECT_PROTOTYPE_REFLECTION: [(&str, NativeFunctionKind, i32); 3] = [
     (
         "propertyIsEnumerable",
         NativeFunctionKind::ObjectPrototypePropertyIsEnumerable,
+        1,
+    ),
+    // The legacy accessor helpers, which predate `Object.defineProperty` and
+    // survive in Annex B. `__defineGetter__` and `__defineSetter__` report
+    // arity 2; the two lookups report 1.
+    (
+        "__defineGetter__",
+        NativeFunctionKind::ObjectPrototypeDefineAccessor(AccessorRole::Getter),
+        2,
+    ),
+    (
+        "__defineSetter__",
+        NativeFunctionKind::ObjectPrototypeDefineAccessor(AccessorRole::Setter),
+        2,
+    ),
+    (
+        "__lookupGetter__",
+        NativeFunctionKind::ObjectPrototypeLookupAccessor(AccessorRole::Getter),
+        1,
+    ),
+    (
+        "__lookupSetter__",
+        NativeFunctionKind::ObjectPrototypeLookupAccessor(AccessorRole::Setter),
         1,
     ),
 ];
@@ -562,6 +585,8 @@ struct RealmKeys {
     name: PropertyKey,
     message: PropertyKey,
     to_string: PropertyKey,
+    to_locale_string: PropertyKey,
+    proto: PropertyKey,
     value_of: PropertyKey,
     apply: PropertyKey,
     construct: PropertyKey,
@@ -596,6 +621,8 @@ impl RealmKeys {
             name: key(PredefinedAtom::Name),
             message: key(PredefinedAtom::Message),
             to_string: key(PredefinedAtom::ToString),
+            to_locale_string: key(PredefinedAtom::ToLocaleString),
+            proto: key(PredefinedAtom::Proto),
             value_of: key(PredefinedAtom::ValueOf),
             apply: key(PredefinedAtom::Apply),
             construct: key(PredefinedAtom::Construct),
@@ -655,6 +682,9 @@ struct RealmNames {
     symbol_iterator_name: JsString,
     symbol_to_primitive_name: JsString,
     get_description: JsString,
+    to_locale_string: JsString,
+    get_proto: JsString,
+    set_proto: JsString,
 }
 
 impl RealmNames {
@@ -697,6 +727,9 @@ impl RealmNames {
             symbol_to_primitive_name: JsString::from_utf8("[Symbol.toPrimitive]")
                 .map_err(AtomError::from)?,
             get_description: JsString::from_utf8("get description").map_err(AtomError::from)?,
+            to_locale_string: predefined_string(atoms, PredefinedAtom::ToLocaleString),
+            get_proto: JsString::from_utf8("get __proto__").map_err(AtomError::from)?,
+            set_proto: JsString::from_utf8("set __proto__").map_err(AtomError::from)?,
         })
     }
 }
@@ -709,6 +742,9 @@ struct RealmBaseRecords {
     object_constructor: ObjectRecord,
     object_statics: [ObjectRecord; OBJECT_STATIC_METHODS.len()],
     object_to_string: ObjectRecord,
+    object_to_locale_string: ObjectRecord,
+    object_proto_getter: ObjectRecord,
+    object_proto_setter: ObjectRecord,
     object_value_of: ObjectRecord,
     object_reflection: [ObjectRecord; OBJECT_PROTOTYPE_REFLECTION.len()],
     function_to_string: ObjectRecord,
@@ -886,6 +922,9 @@ impl RealmRecords {
             object_constructor: reserved_record(3 + OBJECT_STATIC_METHODS.len())?,
             object_statics: object_static_records()?,
             object_to_string: reserved_record(2)?,
+            object_to_locale_string: reserved_record(2)?,
+            object_proto_getter: reserved_record(2)?,
+            object_proto_setter: reserved_record(2)?,
             object_value_of: reserved_record(2)?,
             object_reflection: object_reflection_records()?,
             function_to_string: reserved_record(2)?,
@@ -1022,6 +1061,9 @@ struct RealmBase {
     object_constructor: FunctionId,
     object_statics: [FunctionId; OBJECT_STATIC_METHODS.len()],
     object_to_string: FunctionId,
+    object_to_locale_string: FunctionId,
+    object_proto_getter: FunctionId,
+    object_proto_setter: FunctionId,
     object_value_of: FunctionId,
     object_reflection: [FunctionId; OBJECT_PROTOTYPE_REFLECTION.len()],
     function_to_string: FunctionId,
@@ -1108,6 +1150,9 @@ impl RealmBase {
             self.function_call,
             self.function_to_string,
             self.object_value_of,
+            self.object_proto_setter,
+            self.object_proto_getter,
+            self.object_to_locale_string,
             self.object_to_string,
             self.object_constructor,
             self.function_constructor,
@@ -1698,6 +1743,24 @@ impl Runtime {
             NativeFunctionKind::ObjectPrototypeToString,
             records.object_to_string,
         );
+        let object_to_locale_string = self.insert_reserved_native(
+            realm,
+            HeapReference::Function(function_prototype),
+            NativeFunctionKind::ObjectPrototypeToLocaleString,
+            records.object_to_locale_string,
+        );
+        let read_proto = self.insert_reserved_native(
+            realm,
+            HeapReference::Function(function_prototype),
+            NativeFunctionKind::ObjectPrototypeProtoGetter,
+            records.object_proto_getter,
+        );
+        let write_proto = self.insert_reserved_native(
+            realm,
+            HeapReference::Function(function_prototype),
+            NativeFunctionKind::ObjectPrototypeProtoSetter,
+            records.object_proto_setter,
+        );
         let object_value_of = self.insert_reserved_native(
             realm,
             HeapReference::Function(function_prototype),
@@ -1758,6 +1821,9 @@ impl Runtime {
             object_constructor,
             object_statics,
             object_to_string,
+            object_to_locale_string,
+            object_proto_getter: read_proto,
+            object_proto_setter: write_proto,
             object_value_of,
             object_reflection,
             function_to_string,
@@ -2513,9 +2579,25 @@ impl Runtime {
             graph.base.object_prototype,
             [
                 (&keys.to_string, graph.base.object_to_string),
+                (&keys.to_locale_string, graph.base.object_to_locale_string),
                 (&keys.value_of, graph.base.object_value_of),
             ],
         )?;
+        {
+            // `__proto__` is an accessor pair, not a method, and it is
+            // non-enumerable but configurable (`quickjs.c:40668-40672`).
+            let record = &mut self
+                .objects
+                .get_mut(graph.base.object_prototype)
+                .expect("new Object.prototype remains live")
+                .record;
+            record.append_accessor(
+                keys.proto.clone(),
+                PropertyLayout::accessor(false, true),
+                Some(graph.base.object_proto_getter),
+                Some(graph.base.object_proto_setter),
+            )?;
+        }
         self.publish_object_reflection_methods(graph, keys)?;
         self.publish_error_intrinsic_properties(graph, keys, names)?;
         self.publish_function_intrinsic_properties(graph, keys, names)?;
@@ -2815,6 +2897,15 @@ impl Runtime {
         )?;
         for (function, name, length) in [
             (graph.base.object_to_string, &names.to_string, 0),
+            (
+                graph.base.object_to_locale_string,
+                &names.to_locale_string,
+                0,
+            ),
+            // An accessor's own `name` carries the `get `/`set ` prefix the
+            // specification requires, which the oracle reports too.
+            (graph.base.object_proto_getter, &names.get_proto, 0),
+            (graph.base.object_proto_setter, &names.set_proto, 1),
             (graph.base.object_value_of, &names.value_of, 0),
             (graph.base.function_to_string, &names.to_string, 0),
             (graph.base.function_call, &names.call, 1),

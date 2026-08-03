@@ -503,17 +503,30 @@ Known intentional write-path differences:
   `"undefined"`. A rejected entry, a throwing index read, and a throwing key
   conversion all close the iterator with `return` before the throw propagates,
   while an iterator that finishes on its own is never closed.
+- [x] The rest of `Object.prototype`: `toLocaleString`, the `__proto__`
+  accessor pair, and the Annex B `__defineGetter__`/`__defineSetter__` and
+  `__lookupGetter__`/`__lookupSetter__` families. `toLocaleString` is a bare
+  forward to the receiver's own `toString` that passes *no* argument along, since
+  the locale parameters belong to the `Intl` layer; the lookup can itself enter
+  an accessor, so the forward is resumable. `__proto__` is an accessor pair, not
+  a method: the getter is `Object.getPrototypeOf` on the receiver, and the setter
+  *ignores* a non-object, non-null value rather than rejecting it, so
+  `({}).__proto__ = 5` completes with the prototype untouched while a frozen
+  receiver still throws. The two definers install an enumerable, configurable
+  accessor — the opposite of `Object.defineProperty`'s all-`false` defaults —
+  and validate the accessor as callable before the key converts, so a
+  non-callable second argument never runs the key's `toString`. The two lookups
+  walk the whole prototype chain and report only the addressed half, so a data
+  property answers `undefined` rather than its value.
 - [ ] Remaining String/Number/Array method surface (`String.prototype` case
   conversions and `localeCompare`, the RegExp-dependent `match`, `matchAll`,
   `replace`, `search`, and `split`, `normalize`, `String.raw`, and the
   locale-dependent renderings), shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
-- [ ] Complete the `Object` surface (`groupBy`,
-  `Object.prototype.toLocaleString`, and the `__proto__` accessor pair), then
-  Proxy, remaining built-ins, RegExp/Date/JSON, collections, binary data,
-  Atomics, Unicode tables, promises, async functions/generators, weak
-  references, and finalization registries.
+- [ ] `Object.groupBy`, then Proxy, remaining built-ins, RegExp/Date/JSON,
+  collections, binary data, Atomics, Unicode tables, promises, async
+  functions/generators, weak references, and finalization registries.
 - [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide
   host I/O, timers, cancellation, and wakeups, but never Promise-job ordering.
 

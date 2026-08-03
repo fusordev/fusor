@@ -52,7 +52,7 @@ use crate::{
     number::decimal::{DecimalDigits, exact_fixed, exact_significant},
     object::{ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty, PropertyDeletion},
     runtime::{
-        ArrayByCopy, ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayFlatten,
+        AccessorRole, ArrayByCopy, ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayFlatten,
         ArrayLengthWriteOutcome, ArrayMutator, ArrayReduction, ArraySearch, ArraySort, BindingCell,
         BoundFunction, BytecodeFunction, CollectionRoot, EnvironmentBinding, ForInAdvance,
         FrameBindingAddress, FunctionImplementation, HeapFunction, InstalledCode,
@@ -312,6 +312,7 @@ enum NativeContinuation {
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
     ObjectListing(Box<ObjectListingContinuation>),
+    ToLocaleString(ToLocaleStringContinuation),
     ObjectAssign(Box<ObjectAssignContinuation>),
     InstanceOf(InstanceOfContinuation),
     /// A `Reflect.set` setter call whose completion is discarded in favor of
@@ -354,6 +355,7 @@ impl NativeContinuation {
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
             Self::ObjectListing(state) => state.retained_values(),
+            Self::ToLocaleString(_) => 1,
             Self::ObjectAssign(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
             Self::ReflectTrue | Self::FunctionCall => 0,
@@ -630,6 +632,14 @@ enum CopyDataPropertiesStage {
     ReadValue,
 }
 
+/// One in-progress `Object.prototype.toLocaleString`, suspended on the accessor
+/// that produces the receiver's `toString`.
+pub(crate) struct ToLocaleStringContinuation {
+    pub(crate) receiver: StoredValue,
+    pub(crate) realm: RealmId,
+    pub(crate) origin: JsStackFrame,
+}
+
 struct CopyDataPropertiesContinuation {
     target: StoredValue,
     source: StoredValue,
@@ -772,6 +782,21 @@ enum PropertyKeyTarget {
         strict: bool,
         realm: RealmId,
     },
+    /// A legacy `__defineGetter__`/`__defineSetter__` key, awaiting
+    /// `ToPropertyKey`.
+    LegacyAccessorDefinition {
+        target: StoredValue,
+        accessor: StoredValue,
+        role: AccessorRole,
+        realm: RealmId,
+    },
+    /// A legacy `__lookupGetter__`/`__lookupSetter__` key, awaiting
+    /// `ToPropertyKey`.
+    LegacyAccessorLookup {
+        target: StoredValue,
+        role: AccessorRole,
+        realm: RealmId,
+    },
     /// `Object.fromEntries`' entry key, awaiting `ToPropertyKey`.
     ///
     /// The value is already read, so the conversion is the last step before the
@@ -800,8 +825,12 @@ impl PropertyKeyTarget {
             | Self::Delete { .. }
             | Self::OwnPropertyDescriptor { .. }
             | Self::HasOwnProperty { .. }
-            | Self::PropertyIsEnumerable { .. } => 1,
-            Self::Write { .. } | Self::DefineMethod { .. } | Self::DefineProperty { .. } => 2,
+            | Self::PropertyIsEnumerable { .. }
+            | Self::LegacyAccessorLookup { .. } => 1,
+            Self::Write { .. }
+            | Self::DefineMethod { .. }
+            | Self::DefineProperty { .. }
+            | Self::LegacyAccessorDefinition { .. } => 2,
             Self::EntryKey { drain, .. } => 1_u64.saturating_add(drain.retained_values()),
             Self::Reflect { target, .. } => target.retained_values(),
         }
@@ -1225,6 +1254,15 @@ fn trace_property_key_target_roots(
             trace_stored_value_root(base, mark);
             trace_stored_value_root(function, mark);
         }
+        PropertyKeyTarget::LegacyAccessorDefinition {
+            target, accessor, ..
+        } => {
+            trace_stored_value_root(target, mark);
+            trace_stored_value_root(accessor, mark);
+        }
+        PropertyKeyTarget::LegacyAccessorLookup { target, .. } => {
+            trace_stored_value_root(target, mark);
+        }
         PropertyKeyTarget::EntryKey { drain, value } => {
             drain.trace_roots(mark);
             trace_stored_value_root(value, mark);
@@ -1455,6 +1493,7 @@ fn trace_native_continuation_roots(
         }
         NativeContinuation::DefineProperties(state) => state.trace_roots(mark),
         NativeContinuation::ObjectListing(state) => state.trace_roots(mark),
+        NativeContinuation::ToLocaleString(state) => trace_stored_value_root(&state.receiver, mark),
         NativeContinuation::ObjectAssign(state) => state.trace_roots(mark),
         NativeContinuation::InstanceOf(state) => {
             trace_instance_of_roots(state, mark);

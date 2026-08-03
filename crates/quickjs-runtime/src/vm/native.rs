@@ -425,6 +425,9 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::ToLocaleString(state) => {
+                call_object_prototype_to_locale_string(state, &value, return_to)?
+            }
             NativeContinuation::ObjectAssign(state) => advance_object_assign(
                 runtime,
                 *state,
@@ -1343,6 +1346,56 @@ pub(super) fn dispatch_native_call_with_frames(
                 &inputs.receiver,
                 &candidate,
                 &origin,
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectPrototypeToLocaleString => {
+            begin_object_prototype_to_locale_string(
+                runtime,
+                native.realm,
+                inputs.receiver,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectPrototypeProtoGetter => {
+            object_prototype_proto_getter(runtime, native.realm, inputs.receiver, origin.as_ref())
+        }
+        NativeFunctionKind::ObjectPrototypeProtoSetter => object_prototype_proto_setter(
+            runtime,
+            native.realm,
+            &inputs.receiver,
+            inputs.arguments,
+            origin.as_ref(),
+        ),
+        NativeFunctionKind::ObjectPrototypeDefineAccessor(role) => {
+            let mut arguments = inputs.arguments;
+            let key = arguments.take_first_or_undefined();
+            let accessor = arguments.take_first_or_undefined();
+            begin_legacy_accessor_definition(
+                runtime,
+                native.realm,
+                role,
+                inputs.receiver,
+                key,
+                accessor,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectPrototypeLookupAccessor(role) => {
+            let mut arguments = inputs.arguments;
+            let key = arguments.take_first_or_undefined();
+            begin_legacy_accessor_lookup(
+                runtime,
+                native.realm,
+                role,
+                inputs.receiver,
+                key,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
                 execution_budget,
             )
         }
