@@ -542,7 +542,26 @@ Known intentional write-path differences:
   locale-dependent renderings), shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
-- [ ] Proxy, remaining built-ins, RegExp/Date/JSON, collections, binary data,
+- [ ] `JSON`, the next surface. The pinned oracle installs `parse`, `stringify`,
+  `rawJSON`, and `isRawJSON` behind a `JSON[Symbol.toStringTag]` namespace, with
+  arities 2 and 3 for the first two. `stringify` is the harder half: its
+  `SerializeJSONProperty` is recursive in the specification, but each value can
+  reach user code three ways — a `toJSON` method, the replacer function, and any
+  getter met while reading a property — so it needs an explicit worklist over
+  continuation state rather than Rust stack frames. The order per value is
+  pinned: `toJSON` first, its result then passed to the replacer with the holder
+  as `this`, and only then expanded. The root is wrapped in a synthetic holder
+  under the empty-string key, which is why a replacer's first call receives
+  `("", value)`. Object members use the same own-key snapshot `Object.keys` does,
+  so index keys precede string keys and symbol keys never appear; a value that
+  serializes to nothing is omitted from an object but becomes `null` in an array;
+  `NaN` and the infinities become `null`; a cycle reports
+  `TypeError: circular reference` and a `BigInt` reports
+  `TypeError: Do not know how to serialize a BigInt`. The `space` argument
+  truncates toward zero and clamps to ten spaces or ten code units, and an Array
+  replacer's allow-list admits Strings, Numbers, and their wrappers once each.
+  Oracle and specification agree on every case probed so far, messages aside.
+- [ ] Proxy, remaining built-ins, RegExp/Date, collections, binary data,
   Atomics, Unicode tables, promises, async functions/generators, weak
   references, and finalization registries.
 - [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide
