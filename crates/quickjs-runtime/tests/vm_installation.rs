@@ -214,10 +214,10 @@ fn public_root_metadata_preflight_is_failure_atomic() {
             24,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(717),
+            RuntimeLimits::default().with_max_object_properties(718),
             RuntimeResource::ObjectProperties,
-            717,
             718,
+            719,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");

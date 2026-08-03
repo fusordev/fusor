@@ -139,6 +139,22 @@ fn assert_all(cases: &[(&str, &str)]) {
     }
 }
 
+#[test]
+fn global_this_is_the_mutable_realm_global_binding() {
+    assert_all(&[
+        ("globalThis.globalThis===globalThis", "true"),
+        (
+            "(function(){const d=Object.getOwnPropertyDescriptor(globalThis,'globalThis');return d.writable+'|'+d.enumerable+'|'+d.configurable})()",
+            "true|false|true",
+        ),
+        (
+            "(function(){const replacement={};globalThis.globalThis=replacement;return globalThis===replacement})()",
+            "true",
+        ),
+        ("Reflect.deleteProperty(globalThis,'globalThis')", "true"),
+    ]);
+}
+
 /// The `Number` value statics carry the exact pinned binary64 values.
 #[test]
 fn the_number_value_statics_are_exact() {

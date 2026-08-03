@@ -570,6 +570,10 @@ Known intentional runtime differences:
   Own-key order, strict and sloppy mutation behavior, dynamic atom usage,
   property ceilings, and failure-atomic rollback are covered; the `%Math%`
   intrinsic surface is complete for the pinned profile.
+- [x] Install `globalThis` as the realm global object's self-reference with the
+  specification's writable, non-enumerable, configurable descriptor. Reads,
+  replacement, deletion, self-cycle tracing, exact property accounting, and
+  failure-atomic realm construction are covered.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,

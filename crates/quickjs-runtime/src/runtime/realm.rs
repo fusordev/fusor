@@ -43,7 +43,7 @@ use super::{
 
 const REALM_OBJECT_COUNT: usize = 23;
 const REALM_FUNCTION_COUNT: usize = 218;
-const REALM_PROPERTY_COUNT: u64 = 714;
+const REALM_PROPERTY_COUNT: u64 = 715;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -948,7 +948,7 @@ impl RealmRecords {
         // Keep these reservations in the original transaction order so a
         // recoverable allocation failure reports the same `additional` value.
         let base = RealmBaseRecords {
-            global: reserved_record(30)?,
+            global: reserved_record(31)?,
             object_prototype: reserved_record(4 + OBJECT_PROTOTYPE_REFLECTION.len())?,
             function_prototype: reserved_record(10)?,
             throw_type_error: reserved_record(2)?,
@@ -3047,12 +3047,13 @@ impl Runtime {
             )
     }
 
-    /// Installs the pinned global value properties `undefined`, `NaN`, and
-    /// `Infinity` as non-writable, non-enumerable, non-configurable data
-    /// properties on the realm's global object, matching `QuickJS`'s
-    /// `js_global_data` entries. The compiler lowers these names as
-    /// constructor-realm global references, so the reads resolve through the
-    /// global object exactly like any other realm-global binding.
+    /// Installs the pinned global value properties and `globalThis`.
+    ///
+    /// `undefined`, `NaN`, and `Infinity` are frozen data properties.
+    /// `globalThis` is writable and configurable, and its value is the realm's
+    /// actual global object. The compiler lowers these names as constructor-
+    /// realm global references, so reads resolve through the global object
+    /// exactly like any other realm-global binding.
     fn publish_global_value_properties(
         &mut self,
         graph: &RealmGraph,
@@ -3060,6 +3061,7 @@ impl Runtime {
         let undefined_key = self.predefined_property_key(PredefinedAtom::Undefined);
         let nan_key = self.predefined_property_key(PredefinedAtom::Nan);
         let infinity_key = self.predefined_property_key(PredefinedAtom::Infinity);
+        let global_this_key = self.predefined_property_key(PredefinedAtom::GlobalThis);
         let record = &mut self
             .objects
             .get_mut(graph.base.global_object)
@@ -3076,6 +3078,11 @@ impl Runtime {
             infinity_key,
             frozen,
             StoredValue::Number(JsNumber::from_f64(f64::INFINITY)),
+        )?;
+        record.append_data(
+            global_this_key,
+            METHOD_PROPERTY,
+            StoredValue::Object(graph.base.global_object),
         )
     }
 
