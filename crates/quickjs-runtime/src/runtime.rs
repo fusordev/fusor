@@ -1503,6 +1503,8 @@ pub(crate) use gc::CollectionRoot;
 mod heap;
 mod installation;
 mod realm;
+#[cfg(test)]
+mod realm_snapshot;
 
 /// An exclusive runtime mutator bound to one active realm.
 ///
