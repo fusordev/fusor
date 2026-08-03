@@ -949,6 +949,8 @@ enum OperatorPrimitiveTarget {
     },
     /// One variadic `%Math.min%` or `%Math.max%` conversion.
     MathExtrema(Box<MathExtremaContinuation>),
+    /// One variadic `%Math.hypot%` conversion.
+    MathHypot(Box<MathHypotContinuation>),
     /// One URI function's argument, awaiting `ToString`.
     GlobalUri(UriFunction),
     /// `parseInt`'s input, awaiting `ToString` while retaining its radix.
@@ -1084,6 +1086,7 @@ impl OperatorPrimitiveTarget {
             Self::StringRawValue(state) => state.retained_values(),
             Self::LocaleStringValue(state) => state.retained_values(),
             Self::MathExtrema(state) => state.retained_values(),
+            Self::MathHypot(state) => state.retained_values(),
         }
     }
 }
@@ -1301,6 +1304,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::StringRawValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::LocaleStringValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::MathExtrema(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::MathHypot(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayJoinSeparator(state)
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
             trace_stored_value_root(state.target(), mark);

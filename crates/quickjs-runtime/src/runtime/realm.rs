@@ -42,8 +42,8 @@ use super::{
 };
 
 const REALM_OBJECT_COUNT: usize = 23;
-const REALM_FUNCTION_COUNT: usize = 211;
-const REALM_PROPERTY_COUNT: u64 = 685;
+const REALM_FUNCTION_COUNT: usize = 213;
+const REALM_PROPERTY_COUNT: u64 = 691;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -1416,6 +1416,7 @@ impl Runtime {
             public_roots: 0,
             collection_pending: false,
             interrupts: InterruptState::default(),
+            next_math_random_seed: 1,
         })
     }
 
@@ -1447,10 +1448,11 @@ impl Runtime {
         }
 
         let id = graph.base.realm;
-        self.realms
-            .get_mut(id)
-            .expect("new realm remains live")
-            .intrinsics = RealmIntrinsics::Ready {
+        let math_random_seed = self.next_math_random_seed;
+        self.next_math_random_seed = self.next_math_random_seed.wrapping_add(1).max(1);
+        let state = self.realms.get_mut(id).expect("new realm remains live");
+        state.math_random_state = math_random_seed;
+        state.intrinsics = RealmIntrinsics::Ready {
             function_prototype: graph.base.function_prototype,
             throw_type_error: graph.base.throw_type_error,
             function_constructor: graph.base.function_constructor,
@@ -1490,6 +1492,31 @@ impl Runtime {
             owner: Arc::downgrade(&self.mailbox),
             id,
         })))
+    }
+
+    /// Advances the realm-local xorshift64* stream and maps its high 52 bits
+    /// onto the uniformly spaced binary64 values in `[0, 1)`.
+    pub(crate) fn math_random_number(
+        &mut self,
+        realm: RealmId,
+    ) -> Result<JsNumber, crate::EngineFault> {
+        let state = &mut self
+            .realms
+            .get_mut(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?
+            .math_random_state;
+        let mut value = *state;
+        value ^= value >> 12;
+        value ^= value << 25;
+        value ^= value >> 27;
+        *state = value;
+        let output = value.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        let bits = (0x3ff_u64 << 52) | (output >> 12);
+        Ok(JsNumber::from_f64(f64::from_bits(bits) - 1.0))
     }
 
     fn preflight_and_reserve_realm(&mut self) -> Result<(), RuntimeError> {
@@ -1838,6 +1865,7 @@ impl Runtime {
                 global_object,
                 intrinsics: RealmIntrinsics::Initializing,
                 global_bindings: HashMap::new(),
+                math_random_state: 1,
             })
             .expect("the realm transaction reserved its realm slot");
 

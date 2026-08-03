@@ -41,6 +41,29 @@ pub(crate) struct MathExtremaContinuation {
     origin: JsStackFrame,
 }
 
+/// One suspended variadic `Math.hypot` operation.
+pub(crate) struct MathHypotContinuation {
+    arguments: Vec<StoredValue>,
+    next: usize,
+    result: f64,
+    saw_nan: bool,
+    saw_infinity: bool,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl MathHypotContinuation {
+    pub(crate) fn retained_values(&self) -> u64 {
+        usize_to_u64(self.arguments.len())
+    }
+
+    pub(crate) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        for argument in &self.arguments {
+            trace_stored_value_root(argument, mark);
+        }
+    }
+}
+
 impl MathExtremaContinuation {
     pub(crate) fn retained_values(&self) -> u64 {
         usize_to_u64(self.arguments.len())
@@ -83,6 +106,30 @@ pub(super) fn begin_math_method(
             return_to,
             execution_budget,
         );
+    }
+
+    if method == MathMethod::Hypot {
+        return advance_math_hypot(
+            runtime,
+            MathHypotContinuation {
+                arguments: arguments.into_remaining_values(),
+                next: 0,
+                result: 0.0,
+                saw_nan: false,
+                saw_infinity: false,
+                realm,
+                origin,
+            },
+            None,
+            return_to,
+            execution_budget,
+        );
+    }
+
+    if method == MathMethod::Random {
+        return Ok(NativeDispatch::Immediate(StoredValue::Number(
+            runtime.math_random_number(realm)?,
+        )));
     }
 
     if method.is_binary() {
@@ -213,6 +260,77 @@ fn update_math_extrema(
     Ok(())
 }
 
+/// Accepts one converted `hypot` argument and advances to the next conversion.
+///
+/// All conversions complete before the recorded boundary cases are examined,
+/// so a later abrupt conversion wins and infinity wins over an earlier NaN.
+pub(super) fn advance_math_hypot(
+    runtime: &mut Runtime,
+    mut state: MathHypotContinuation,
+    completion: Option<JsNumber>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(number) = completion {
+        update_math_hypot(&mut state, number);
+    }
+
+    loop {
+        if state.next == state.arguments.len() {
+            let result = if state.saw_infinity {
+                f64::INFINITY
+            } else if state.saw_nan {
+                f64::NAN
+            } else {
+                state.result
+            };
+            return Ok(NativeDispatch::Immediate(StoredValue::Number(
+                JsNumber::from_f64(result),
+            )));
+        }
+
+        execution_budget.charge_instructions(1)?;
+        let argument = state
+            .arguments
+            .get_mut(state.next)
+            .map(|argument| std::mem::replace(argument, StoredValue::Undefined))
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "Math.hypot argument cursor exceeded its retained values",
+            })?;
+        state.next = state.next.saturating_add(1);
+
+        if argument.heap_reference().is_none() {
+            let number = operator_to_number(argument, state.realm, &state.origin)?;
+            update_math_hypot(&mut state, number);
+            continue;
+        }
+
+        let realm = state.realm;
+        let origin = state.origin.clone();
+        return begin_operator_primitive_conversion(
+            runtime,
+            argument,
+            OperatorPrimitiveHint::Number,
+            OperatorPrimitiveTarget::MathHypot(Box::new(state)),
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+}
+
+fn update_math_hypot(state: &mut MathHypotContinuation, number: JsNumber) {
+    let value = number.as_f64();
+    if value.is_infinite() {
+        state.saw_infinity = true;
+    } else if value.is_nan() {
+        state.saw_nan = true;
+    } else {
+        state.result = state.result.hypot(value);
+    }
+}
+
 /// Applies an installed one-argument `%Math%` algorithm after `ToNumber`.
 pub(super) fn finish_math_unary(
     method: MathMethod,
@@ -254,7 +372,12 @@ pub(super) fn finish_math_unary(
         MathMethod::Log2 => value.log2(),
         MathMethod::Log10 => value.log10(),
         MathMethod::Cbrt => value.cbrt(),
-        MathMethod::Min | MathMethod::Max | MathMethod::Atan2 | MathMethod::Pow => {
+        MathMethod::Min
+        | MathMethod::Max
+        | MathMethod::Atan2
+        | MathMethod::Pow
+        | MathMethod::Hypot
+        | MathMethod::Random => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "a non-unary Math method entered the unary continuation",
             }

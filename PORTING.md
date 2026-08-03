@@ -533,6 +533,15 @@ Known intentional runtime differences:
   the pinned own-key order, exact function metadata, atom/property ceilings,
   and failure-atomic realm construction; the remaining `%Math%` surface starts
   at `hypot`.
+- [x] Implement `Math.hypot` and realm-local `Math.random`. `hypot` converts
+  every argument left-to-right before resolving its result, so later abrupt
+  completions remain observable and infinity wins over NaN only after all
+  coercions; pairwise binary64 `hypot` avoids naive intermediate overflow and
+  underflow. `random` uses a non-zero realm-owned xorshift64* stream, returns
+  uniformly spaced values in `[0, 1)`, ignores arguments without coercion, and
+  assigns a distinct sequence only after realm construction commits. Both
+  methods preserve pinned metadata/order, tracing, exact resource ceilings,
+  and rollback invariants; the remaining `%Math%` methods start at `f16round`.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,

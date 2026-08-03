@@ -112,7 +112,7 @@ fn math_is_an_ordinary_tagged_object_with_exact_prefix_order() {
         ("Object.prototype.toString.call(Math)", "[object Math]"),
         (
             "Object.getOwnPropertyNames(Math).join(',')",
-            "min,max,abs,floor,ceil,round,sqrt,acos,asin,atan,atan2,cos,exp,log,pow,sin,tan,trunc,sign,cosh,sinh,tanh,acosh,asinh,atanh,expm1,log1p,log2,log10,cbrt",
+            "min,max,abs,floor,ceil,round,sqrt,acos,asin,atan,atan2,cos,exp,log,pow,sin,tan,trunc,sign,cosh,sinh,tanh,acosh,asinh,atanh,expm1,log1p,log2,log10,cbrt,hypot,random",
         ),
         ("Object.getOwnPropertySymbols(Math).length", "1"),
         (
@@ -158,6 +158,8 @@ fn math_method_identities_and_descriptors_are_exact() {
         ("Math.sign.length+'|'+Math.sign.name", "1|sign"),
         ("Math.cosh.length+'|'+Math.cosh.name", "1|cosh"),
         ("Math.cbrt.length+'|'+Math.cbrt.name", "1|cbrt"),
+        ("Math.hypot.length+'|'+Math.hypot.name", "2|hypot"),
+        ("Math.random.length+'|'+Math.random.name", "0|random"),
         (
             "Object.getOwnPropertyNames(Math.min).join(',')",
             "length,name",
@@ -350,6 +352,81 @@ fn binary_math_converts_left_then_right_and_propagates_abruptions() {
             "true",
         ),
     ]);
+}
+
+#[test]
+fn math_hypot_converts_all_arguments_and_avoids_intermediate_overflow() {
+    assert_all(&[
+        ("1/Math.hypot()", "Infinity"),
+        ("1/Math.hypot(-0)", "Infinity"),
+        ("Math.hypot(-3)", "3"),
+        ("Math.hypot(3,4)", "5"),
+        (
+            "Number.isFinite(Math.hypot(3e200,4e200))&&Math.hypot(3e200,4e200)>4.9e200",
+            "true",
+        ),
+        ("Math.hypot(Number.MIN_VALUE,Number.MIN_VALUE)>0", "true"),
+        ("Math.hypot(NaN,Infinity)", "Infinity"),
+        ("Math.hypot(-Infinity,NaN)", "Infinity"),
+        (
+            "(function(){let log=[];const a={valueOf(){log.push('a');return 3}};const b={valueOf(){log.push('b');return 4}};const value=Math.hypot(a,b);return log.join(',')+'|'+value})()",
+            "a,b|5",
+        ),
+        (
+            "(function(){try{Math.hypot(Infinity,{valueOf(){throw 'later'}})}catch(e){return e}})()",
+            "later",
+        ),
+        (
+            "(function(){try{Math.hypot(NaN,1n)}catch(e){return e instanceof TypeError}})()",
+            "true",
+        ),
+    ]);
+}
+
+#[test]
+fn math_random_is_bounded_stateful_and_ignores_arguments() {
+    assert_all(&[
+        (
+            "(function(){const a=Math.random();const b=Math.random();return a>=0&&a<1&&b>=0&&b<1&&a!==b})()",
+            "true",
+        ),
+        (
+            "(function(){let touched=false;const value=Math.random({valueOf(){touched=true;throw 1}});return (value>=0&&value<1)+'|'+touched})()",
+            "true|false",
+        ),
+    ]);
+}
+
+#[test]
+fn math_random_sequences_are_distinct_across_realms() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let first_realm = runtime.create_realm().expect("first realm");
+    let second_realm = runtime.create_realm().expect("second realm");
+
+    let first = {
+        let mut context = runtime.context(&first_realm).expect("first context");
+        let run = dynamic_function(&mut context, "return Math.random();");
+        context
+            .call(&run, &[], ExecutionLimits::default())
+            .expect("first random result")
+            .as_number()
+            .expect("live value")
+            .expect("Number")
+            .as_f64()
+    };
+    let second = {
+        let mut context = runtime.context(&second_realm).expect("second context");
+        let run = dynamic_function(&mut context, "return Math.random();");
+        context
+            .call(&run, &[], ExecutionLimits::default())
+            .expect("second random result")
+            .as_number()
+            .expect("live value")
+            .expect("Number")
+            .as_f64()
+    };
+
+    assert_ne!(first.to_bits(), second.to_bits());
 }
 
 #[test]

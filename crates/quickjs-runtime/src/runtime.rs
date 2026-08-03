@@ -61,6 +61,9 @@ struct RealmState {
     global_object: ObjectId,
     intrinsics: RealmIntrinsics,
     global_bindings: HashMap<Atom, RealmGlobalBindingId>,
+    /// Realm-local state for the implementation-defined `%Math.random%`
+    /// pseudorandom sequence. Xorshift64* requires a non-zero state.
+    math_random_state: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -810,10 +813,12 @@ pub(crate) enum MathMethod {
     Log2,
     Log10,
     Cbrt,
+    Hypot,
+    Random,
 }
 
 impl MathMethod {
-    pub(crate) const ALL: [Self; 30] = [
+    pub(crate) const ALL: [Self; 32] = [
         Self::Min,
         Self::Max,
         Self::Abs,
@@ -844,6 +849,8 @@ impl MathMethod {
         Self::Log2,
         Self::Log10,
         Self::Cbrt,
+        Self::Hypot,
+        Self::Random,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -878,12 +885,15 @@ impl MathMethod {
             Self::Log2 => "log2",
             Self::Log10 => "log10",
             Self::Cbrt => "cbrt",
+            Self::Hypot => "hypot",
+            Self::Random => "random",
         }
     }
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Min | Self::Max | Self::Atan2 | Self::Pow => 2,
+            Self::Min | Self::Max | Self::Atan2 | Self::Pow | Self::Hypot => 2,
+            Self::Random => 0,
             Self::Abs
             | Self::Floor
             | Self::Ceil
@@ -1429,6 +1439,8 @@ pub struct Runtime {
     public_roots: u64,
     pub(crate) collection_pending: bool,
     pub(crate) interrupts: InterruptState,
+    /// Next non-zero seed assigned after a realm transaction commits.
+    next_math_random_seed: u64,
 }
 
 impl Runtime {
