@@ -563,6 +563,13 @@ Known intentional runtime differences:
   stack for the original engine-created error. Shared fuel, tracing, exact
   metadata/order, resource ceilings, and realm rollback remain covered; only
   the `%Math%` constants remain open.
+- [x] Complete `%Math%` with `E`, `LN10`, `LN2`, `LOG2E`, `LOG10E`, `PI`,
+  `SQRT1_2`, and `SQRT2` in specification order. Realm construction publishes
+  their exact binary64 payloads from audited bit patterns as non-writable,
+  non-enumerable, non-configurable data properties before `@@toStringTag`.
+  Own-key order, strict and sloppy mutation behavior, dynamic atom usage,
+  property ceilings, and failure-atomic rollback are covered; the `%Math%`
+  intrinsic surface is complete for the pinned profile.
 - [ ] Complete remaining QuickJS legacy Function metadata and exotic
   reflection semantics (including Proxy), then remaining built-ins,
   RegExp/Date, collections, binary data,

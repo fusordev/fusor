@@ -43,7 +43,7 @@ use super::{
 
 const REALM_OBJECT_COUNT: usize = 23;
 const REALM_FUNCTION_COUNT: usize = 218;
-const REALM_PROPERTY_COUNT: u64 = 706;
+const REALM_PROPERTY_COUNT: u64 = 714;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -278,6 +278,24 @@ const ARRAY_FLATTEN_METHODS: [ArrayFlatten; 2] = [ArrayFlatten::Flat, ArrayFlatt
 /// Index of the first `%Math%` method name in the realm's dynamic atoms.
 const MATH_METHOD_ATOM_START: usize = ARRAY_FLATTEN_ATOM_START + ARRAY_FLATTEN_METHODS.len();
 
+/// Index of the first `%Math%` numeric constant name in the realm's atoms.
+const MATH_CONSTANT_ATOM_START: usize = MATH_METHOD_ATOM_START + MathMethod::ALL.len();
+
+/// The `%Math%` numeric constants in specification and pinned-oracle order.
+///
+/// Exact binary64 payloads avoid depending on host decimal parsing or libm
+/// definitions during realm construction.
+const MATH_CONSTANTS: [(&str, u64); 8] = [
+    ("E", 0x4005_bf0a_8b14_5769),
+    ("LN10", 0x4002_6bb1_bbb5_5516),
+    ("LN2", 0x3fe6_2e42_fefa_39ef),
+    ("LOG2E", 0x3ff7_1547_652b_82fe),
+    ("LOG10E", 0x3fdb_cb7b_1526_e50e),
+    ("PI", 0x4009_21fb_5444_2d18),
+    ("SQRT1_2", 0x3fe6_a09e_667f_3bcd),
+    ("SQRT2", 0x3ff6_a09e_667f_3bcd),
+];
+
 /// Locale-string methods installed for the deterministic no-`Intl` profile.
 const LOCALE_STRING_METHODS: [LocaleStringMethod; 4] = [
     LocaleStringMethod::Object,
@@ -306,6 +324,7 @@ const REALM_DYNAMIC_ATOM_COUNT: usize = SYMBOL_STATIC_ATOM_START
     + ARRAY_SORT_METHODS.len()
     + ARRAY_FLATTEN_METHODS.len()
     + MathMethod::ALL.len()
+    + MATH_CONSTANTS.len()
     + 11;
 
 /// The `Array.prototype` reductions this profile installs.
@@ -1052,8 +1071,8 @@ impl RealmRecords {
             stringify: reserved_record(2)?,
         };
         let math = MathRecords {
-            // Every installed method plus @@toStringTag.
-            object: reserved_record(MathMethod::ALL.len() + 1)?,
+            // Every method and numeric constant plus @@toStringTag.
+            object: reserved_record(MathMethod::ALL.len() + MATH_CONSTANTS.len() + 1)?,
             methods: math_method_records()?,
         };
         Ok(Self {
@@ -1793,6 +1812,9 @@ impl Runtime {
             }
             for method in MathMethod::ALL {
                 interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
+            }
+            for (name, _) in MATH_CONSTANTS {
+                interned(&mut self.atoms, &mut dynamic_atoms, name)?;
             }
             Ok(())
         })();
@@ -2965,7 +2987,7 @@ impl Runtime {
             )
     }
 
-    /// Publishes the ordinary `%Math%` shape and the installed method prefix.
+    /// Publishes the complete ordinary `%Math%` shape.
     fn publish_math_intrinsic_properties(
         &mut self,
         graph: &RealmGraph,
@@ -2985,6 +3007,15 @@ impl Runtime {
                     PropertyKey::from_validated_atom(atom),
                     METHOD_PROPERTY,
                     StoredValue::Function(function),
+                )?;
+            }
+            let constant_atoms = &graph.dynamic_atoms
+                [MATH_CONSTANT_ATOM_START..MATH_CONSTANT_ATOM_START + MATH_CONSTANTS.len()];
+            for (atom, (_, bits)) in constant_atoms.iter().cloned().zip(MATH_CONSTANTS) {
+                record.append_data(
+                    PropertyKey::from_validated_atom(atom),
+                    FROZEN_PROPERTY,
+                    StoredValue::Number(JsNumber::from_f64(f64::from_bits(bits))),
                 )?;
             }
             record.append_data(

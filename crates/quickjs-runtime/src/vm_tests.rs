@@ -4828,7 +4828,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(712))
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(720))
         .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
@@ -4850,8 +4850,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 712,
-            observed: 713,
+            limit: 720,
+            observed: 721,
         }
     ));
     let failed = runtime.usage();

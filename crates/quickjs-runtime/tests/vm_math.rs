@@ -112,7 +112,7 @@ fn math_is_an_ordinary_tagged_object_with_exact_prefix_order() {
         ("Object.prototype.toString.call(Math)", "[object Math]"),
         (
             "Object.getOwnPropertyNames(Math).join(',')",
-            "min,max,abs,floor,ceil,round,sqrt,acos,asin,atan,atan2,cos,exp,log,pow,sin,tan,trunc,sign,cosh,sinh,tanh,acosh,asinh,atanh,expm1,log1p,log2,log10,cbrt,hypot,random,f16round,fround,imul,clz32,sumPrecise",
+            "min,max,abs,floor,ceil,round,sqrt,acos,asin,atan,atan2,cos,exp,log,pow,sin,tan,trunc,sign,cosh,sinh,tanh,acosh,asinh,atanh,expm1,log1p,log2,log10,cbrt,hypot,random,f16round,fround,imul,clz32,sumPrecise,E,LN10,LN2,LOG2E,LOG10E,PI,SQRT1_2,SQRT2",
         ),
         ("Object.getOwnPropertySymbols(Math).length", "1"),
         (
@@ -143,6 +143,33 @@ fn math_is_an_ordinary_tagged_object_with_exact_prefix_order() {
             "(function(){try{Reflect.construct(Math,[])}catch(e){return e instanceof TypeError}})()",
             "true",
         ),
+    ]);
+}
+
+#[test]
+fn math_constants_have_exact_values_order_and_frozen_descriptors() {
+    assert_all(&[
+        ("Math.E", "2.718281828459045"),
+        ("Math.LN10", "2.302585092994046"),
+        ("Math.LN2", "0.6931471805599453"),
+        ("Math.LOG2E", "1.4426950408889634"),
+        ("Math.LOG10E", "0.4342944819032518"),
+        ("Math.PI", "3.141592653589793"),
+        ("Math.SQRT1_2", "0.7071067811865476"),
+        ("Math.SQRT2", "1.4142135623730951"),
+        (
+            "(function(){const d=Object.getOwnPropertyDescriptor(Math,'E');return d.writable+'|'+d.enumerable+'|'+d.configurable})()",
+            "false|false|false",
+        ),
+        (
+            "(function(){Math.E=1;return Math.E})()",
+            "2.718281828459045",
+        ),
+        (
+            "(function(){'use strict';try{Math.E=1}catch(e){return e instanceof TypeError}})()",
+            "true",
+        ),
+        ("Reflect.deleteProperty(Math,'E')", "false"),
     ]);
 }
 

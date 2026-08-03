@@ -63,9 +63,9 @@ fn atom_failure_rolls_back_the_complete_installation() {
         "fail",
     );
     let atom_limits = AtomLimits::new(
-        PREDEFINED_ATOM_COUNT + 151,
-        PREDEFINED_DESCRIPTION_CODE_UNITS + 1_199,
-        PREDEFINED_INTERNER_SLOTS + 151,
+        PREDEFINED_ATOM_COUNT + 159,
+        PREDEFINED_DESCRIPTION_CODE_UNITS + 1_232,
+        PREDEFINED_INTERNER_SLOTS + 159,
     );
     let mut runtime =
         Runtime::try_new(RuntimeLimits::default().with_atom_limits(atom_limits)).expect("runtime");
@@ -214,10 +214,10 @@ fn public_root_metadata_preflight_is_failure_atomic() {
             24,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(709),
+            RuntimeLimits::default().with_max_object_properties(717),
             RuntimeResource::ObjectProperties,
-            709,
-            710,
+            717,
+            718,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");
