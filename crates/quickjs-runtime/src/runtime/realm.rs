@@ -40,9 +40,9 @@ use super::{
     StringIntrinsics, StringMethod, SymbolIntrinsics, check_limit, predefined_string, usize_to_u64,
 };
 
-const REALM_OBJECT_COUNT: usize = 20;
-const REALM_FUNCTION_COUNT: usize = 131;
-const REALM_PROPERTY_COUNT: u64 = 437;
+const REALM_OBJECT_COUNT: usize = 21;
+const REALM_FUNCTION_COUNT: usize = 133;
+const REALM_PROPERTY_COUNT: u64 = 445;
 const CALL_ATOM_INDEX: usize = 0;
 const ENTRIES_ATOM_INDEX: usize = 1;
 const KEY_FOR_ATOM_INDEX: usize = 2;
@@ -249,6 +249,9 @@ const ARRAY_SORT_ATOM_START: usize = ARRAY_FLATTEN_ATOM_START + ARRAY_FLATTEN_ME
 ///
 /// Both report arity 1, which the pinned oracle confirms.
 const ARRAY_SORT_METHODS: [ArraySort; 2] = [ArraySort::Sort, ArraySort::ToSorted];
+
+/// Index of the `Reflect` name in the dynamic atoms.
+const REFLECT_ATOM_START: usize = ARRAY_SORT_ATOM_START + ARRAY_SORT_METHODS.len();
 
 /// The `Array.prototype` reductions this profile installs.
 const ARRAY_REDUCTION_METHODS: [ArrayReduction; 2] =
@@ -491,6 +494,7 @@ struct RealmKeys {
     to_string: PropertyKey,
     value_of: PropertyKey,
     apply: PropertyKey,
+    construct: PropertyKey,
     values: PropertyKey,
     keys: PropertyKey,
     next: PropertyKey,
@@ -524,6 +528,7 @@ impl RealmKeys {
             to_string: key(PredefinedAtom::ToString),
             value_of: key(PredefinedAtom::ValueOf),
             apply: key(PredefinedAtom::Apply),
+            construct: key(PredefinedAtom::Construct),
             values: key(PredefinedAtom::Values),
             keys: key(PredefinedAtom::Keys),
             next: key(PredefinedAtom::Next),
@@ -562,6 +567,8 @@ struct RealmNames {
     to_string: JsString,
     value_of: JsString,
     apply: JsString,
+    construct: JsString,
+    reflect: JsString,
     call: JsString,
     bind: JsString,
     has_instance: JsString,
@@ -600,6 +607,8 @@ impl RealmNames {
             to_string: predefined_string(atoms, PredefinedAtom::ToString),
             value_of: predefined_string(atoms, PredefinedAtom::ValueOf),
             apply: predefined_string(atoms, PredefinedAtom::Apply),
+            construct: predefined_string(atoms, PredefinedAtom::Construct),
+            reflect: JsString::from_utf8("Reflect").map_err(AtomError::from)?,
             call: JsString::from_utf8("call").map_err(AtomError::from)?,
             bind: JsString::from_utf8("bind").map_err(AtomError::from)?,
             has_instance: JsString::from_utf8("[Symbol.hasInstance]").map_err(AtomError::from)?,
@@ -760,9 +769,19 @@ struct RealmRecords {
     array_flattens: [ObjectRecord; ARRAY_FLATTEN_METHODS.len()],
     array_sorts: [ObjectRecord; ARRAY_SORT_METHODS.len()],
     array_is_array: ObjectRecord,
+    reflect: ObjectRecord,
+    reflect_apply: ObjectRecord,
+    reflect_construct: ObjectRecord,
     array: ArrayIntrinsicRecords,
     iterators: IteratorIntrinsicRecords,
     symbol: SymbolIntrinsicRecords,
+}
+
+/// The reserved records behind the `Reflect` namespace and its methods.
+struct ReflectRecords {
+    namespace: ObjectRecord,
+    apply: ObjectRecord,
+    construct: ObjectRecord,
 }
 
 impl RealmRecords {
@@ -774,7 +793,7 @@ impl RealmRecords {
         // Keep these reservations in the original transaction order so a
         // recoverable allocation failure reports the same `additional` value.
         let base = RealmBaseRecords {
-            global: reserved_record(20)?,
+            global: reserved_record(21)?,
             object_prototype: reserved_record(3 + OBJECT_PROTOTYPE_REFLECTION.len())?,
             function_prototype: reserved_record(6)?,
             function_constructor: reserved_record(3)?,
@@ -897,6 +916,9 @@ impl RealmRecords {
             array_flattens: array_flatten_records()?,
             array_sorts: array_sort_records()?,
             array_is_array: reserved_record(2)?,
+            reflect: reserved_record(3)?,
+            reflect_apply: reserved_record(2)?,
+            reflect_construct: reserved_record(2)?,
             array,
             iterators,
             symbol,
@@ -1034,6 +1056,9 @@ struct RealmGraph {
     array_flattens: [FunctionId; ARRAY_FLATTEN_METHODS.len()],
     array_sorts: [FunctionId; ARRAY_SORT_METHODS.len()],
     array_is_array: FunctionId,
+    reflect: ObjectId,
+    reflect_apply: FunctionId,
+    reflect_construct: FunctionId,
     array: ArrayIntrinsicGraph,
     iterators: IteratorIntrinsicGraph,
     symbol: SymbolIntrinsicGraph,
@@ -1047,6 +1072,8 @@ impl RealmGraph {
         for function in [self.errors.is_error, self.errors.to_string] {
             debug_assert!(runtime.functions.remove(function).is_some());
         }
+        debug_assert!(runtime.functions.remove(self.reflect_construct).is_some());
+        debug_assert!(runtime.functions.remove(self.reflect_apply).is_some());
         debug_assert!(runtime.functions.remove(self.array_is_array).is_some());
         for function in self.array_sorts.into_iter().rev() {
             debug_assert!(runtime.functions.remove(function).is_some());
@@ -1117,6 +1144,7 @@ impl RealmGraph {
             debug_assert!(runtime.objects.remove(intrinsic.prototype).is_some());
         }
         for object in [
+            self.reflect,
             self.symbol.prototype,
             self.iterators.string_iterator_prototype,
             self.iterators.array_iterator_prototype,
@@ -1343,6 +1371,14 @@ impl Runtime {
             NativeFunctionKind::ArrayIsArray,
             records.array_is_array,
         );
+        let (reflect, reflect_apply, reflect_construct) = self.insert_reflect_intrinsics(
+            &base,
+            ReflectRecords {
+                namespace: records.reflect,
+                apply: records.reflect_apply,
+                construct: records.reflect_construct,
+            },
+        );
 
         Ok(RealmGraph {
             base,
@@ -1366,6 +1402,9 @@ impl Runtime {
             array_flattens,
             array_sorts,
             array_is_array,
+            reflect,
+            reflect_apply,
+            reflect_construct,
             array,
             iterators,
             symbol,
@@ -1501,6 +1540,7 @@ impl Runtime {
             for method in ARRAY_SORT_METHODS {
                 interned(&mut self.atoms, &mut dynamic_atoms, method.name())?;
             }
+            interned(&mut self.atoms, &mut dynamic_atoms, "Reflect")?;
             Ok(())
         })();
         if let Err(error) = outcome {
@@ -1793,6 +1833,34 @@ impl Runtime {
             ));
         }
         inserted.map(|slot| slot.expect("every Array sort function was inserted"))
+    }
+
+    /// Inserts the `Reflect` namespace object and its methods.
+    ///
+    /// The namespace is an ordinary object inheriting `Object.prototype`; it is
+    /// not a constructor and has no `prototype` property of its own, which is
+    /// why it is inserted as a plain heap object rather than as a function.
+    fn insert_reflect_intrinsics(
+        &mut self,
+        base: &RealmBase,
+        records: ReflectRecords,
+    ) -> (ObjectId, FunctionId, FunctionId) {
+        let mut namespace = records.namespace;
+        namespace.replace_prototype(Some(HeapReference::Object(base.object_prototype)));
+        let namespace = self.insert_reserved_object(HeapObject::ordinary(namespace));
+        let apply = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ReflectApply,
+            records.apply,
+        );
+        let construct = self.insert_reserved_native(
+            base.realm,
+            HeapReference::Function(base.function_prototype),
+            NativeFunctionKind::ReflectConstruct,
+            records.construct,
+        );
+        (namespace, apply, construct)
     }
 
     /// Inserts one native function per `Array.prototype` flattening method.
@@ -2346,6 +2414,7 @@ impl Runtime {
         self.publish_bigint_intrinsic_properties(&graph.bigint, &graph.dynamic_atoms, keys, names)?;
         self.publish_array_intrinsic_properties(&graph.array, keys, names)?;
         self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
+        self.publish_reflect_properties(graph, keys, names)?;
         self.publish_global_value_properties(graph)?;
         self.publish_symbol_intrinsic_properties(&graph.symbol, graph, keys, names)?;
         self.append_object_methods(
@@ -2360,6 +2429,55 @@ impl Runtime {
                 (&keys.array, graph.array.constructor),
                 (&keys.symbol, graph.symbol.constructor),
             ],
+        )
+    }
+
+    /// Installs the `Reflect` namespace object with its `apply` and
+    /// `construct` methods, its pinned `Symbol.toStringTag`, and the writable,
+    /// non-enumerable, configurable global property (`quickjs.c:50330-50348`).
+    fn publish_reflect_properties(
+        &mut self,
+        graph: &RealmGraph,
+        keys: &RealmKeys,
+        names: &RealmNames,
+    ) -> Result<(), TryReserveError> {
+        {
+            let record = &mut self
+                .objects
+                .get_mut(graph.reflect)
+                .expect("new Reflect object remains live")
+                .record;
+            record.append_data(
+                keys.apply.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.reflect_apply),
+            )?;
+            record.append_data(
+                keys.construct.clone(),
+                METHOD_PROPERTY,
+                StoredValue::Function(graph.reflect_construct),
+            )?;
+            record.append_data(
+                keys.symbol_to_string_tag.clone(),
+                // The tag is non-writable and non-enumerable but configurable,
+                // which is the specification's descriptor for it.
+                IDENTITY_PROPERTY,
+                StoredValue::String(names.reflect.clone()),
+            )?;
+        }
+        self.append_function_identity(graph.reflect_apply, &names.apply, 3, keys)?;
+        self.append_function_identity(graph.reflect_construct, &names.construct, 2, keys)?;
+        let reflect_key =
+            PropertyKey::from_validated_atom(graph.dynamic_atoms[REFLECT_ATOM_START].clone());
+        let record = &mut self
+            .objects
+            .get_mut(graph.base.global_object)
+            .expect("new realm global object remains live")
+            .record;
+        record.append_data(
+            reflect_key,
+            METHOD_PROPERTY,
+            StoredValue::Object(graph.reflect),
         )
     }
 

@@ -824,6 +824,11 @@ pub(crate) enum NativeFunctionKind {
     SymbolFor,
     SymbolKeyFor,
     IteratorPrototypeIterator,
+    /// `Reflect.apply`, which shares the `Function.prototype.apply` machinery.
+    ReflectApply,
+    /// `Reflect.construct`, which validates `newTarget` before the argument
+    /// list and its target after it.
+    ReflectConstruct,
     ArrayPrototypeJoin,
     ArrayPrototypeToString,
     ArrayPrototypeValues,

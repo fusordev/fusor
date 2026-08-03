@@ -279,6 +279,7 @@ struct DynamicFunctionReturn {
 enum NativeContinuation {
     FunctionSource(FunctionSourceContinuation),
     FunctionApply(FunctionApplyContinuation),
+    ReflectConstruct(ReflectConstructContinuation),
     FunctionBind(FunctionBindContinuation),
     PropertyKey(PropertyKeyContinuation),
     OperatorPrimitive(OperatorPrimitiveContinuation),
@@ -314,6 +315,7 @@ impl NativeContinuation {
             Self::FunctionSource(state) => usize_to_u64(state.arguments.len())
                 .saturating_add(u64::from(state.construction.is_some())),
             Self::FunctionApply(state) => state.retained_values(),
+            Self::ReflectConstruct(state) => state.retained_values(),
             Self::FunctionBind(state) => state.retained_values(),
             Self::PropertyKey(state) => state.retained_values(),
             Self::OperatorPrimitive(state) => state.retained_values(),
@@ -768,6 +770,32 @@ struct FunctionApplyContinuation {
     native_caller: Option<SyntheticNativeFrame>,
 }
 
+#[derive(Clone, Copy)]
+enum ReflectConstructStage {
+    AwaitLength,
+    AwaitIndex,
+}
+
+/// One in-progress `Reflect.construct`.
+///
+/// Unlike `Function.prototype.apply`, the target stays unvalidated until the
+/// argument list is fully read, because `JS_CallConstructor2` is reached only
+/// after `build_arg_list` (`quickjs.c:50201-50206`).
+struct ReflectConstructContinuation {
+    target: StoredValue,
+    /// `None` only when `newTarget` defaulted to a non-function target, which
+    /// the target check at the end of the scan reports as `not a function`.
+    new_target: Option<FunctionId>,
+    array_like: StoredValue,
+    realm: RealmId,
+    length: Option<u32>,
+    next_index: u32,
+    arguments: Vec<StoredValue>,
+    stage: ReflectConstructStage,
+    active_frame_values: u64,
+    origin: JsStackFrame,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FunctionBindStage {
     AwaitLengthValue,
@@ -808,6 +836,12 @@ struct ArrayLengthWriteState {
 }
 
 impl FunctionApplyContinuation {
+    fn retained_values(&self) -> u64 {
+        3_u64.saturating_add(usize_to_u64(self.arguments.len()))
+    }
+}
+
+impl ReflectConstructContinuation {
     fn retained_values(&self) -> u64 {
         3_u64.saturating_add(usize_to_u64(self.arguments.len()))
     }
@@ -870,6 +904,8 @@ enum OperatorPrimitiveTarget {
     ErrorToStringMessage(ErrorToStringContinuation),
     ArrayIteratorLength(ArrayIteratorNextContinuation),
     FunctionApplyLength(FunctionApplyContinuation),
+    /// A `Reflect.construct` argument-list length, awaiting `ToNumber`.
+    ReflectConstructLength(ReflectConstructContinuation),
     /// `BigInt.prototype.toString`'s radix, awaiting `ToNumber`.
     BigIntToString {
         value: Arc<JsBigInt>,
@@ -937,6 +973,7 @@ impl OperatorPrimitiveTarget {
             }
             Self::ArrayIteratorLength(state) => state.retained_values(),
             Self::FunctionApplyLength(state) => state.retained_values(),
+            Self::ReflectConstructLength(state) => state.retained_values(),
             Self::ArrayJoinSeparator(_) | Self::ArrayJoinElement(_) => {
                 ArrayJoinContinuation::retained_values()
             }
@@ -1119,6 +1156,9 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             trace_function_apply_roots(state, mark);
         }
+        OperatorPrimitiveTarget::ReflectConstructLength(state) => {
+            trace_reflect_construct_roots(state, mark);
+        }
         OperatorPrimitiveTarget::StringMethodSubject(state)
         | OperatorPrimitiveTarget::StringMethodArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArraySearchPosition(state) => state.trace_roots(mark),
@@ -1160,6 +1200,20 @@ fn trace_function_apply_roots(
     }
 }
 
+fn trace_reflect_construct_roots(
+    state: &ReflectConstructContinuation,
+    mark: &mut dyn FnMut(CollectionRoot),
+) {
+    if let Some(new_target) = state.new_target {
+        mark(CollectionRoot::Heap(HeapReference::Function(new_target)));
+    }
+    trace_stored_value_root(&state.target, mark);
+    trace_stored_value_root(&state.array_like, mark);
+    for argument in &state.arguments {
+        trace_stored_value_root(argument, mark);
+    }
+}
+
 fn trace_function_bind_roots(
     state: &FunctionBindContinuation,
     mark: &mut dyn FnMut(CollectionRoot),
@@ -1195,6 +1249,9 @@ fn trace_native_continuation_roots(
         }
         NativeContinuation::FunctionApply(state) => {
             trace_function_apply_roots(state, mark);
+        }
+        NativeContinuation::ReflectConstruct(state) => {
+            trace_reflect_construct_roots(state, mark);
         }
         NativeContinuation::ArrayJoin(state) => {
             trace_stored_value_root(state.target(), mark);

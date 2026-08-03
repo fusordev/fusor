@@ -12,12 +12,12 @@ use quickjs_runtime::{
     ValueKind,
 };
 
-const REALM_ERROR_GRAPH_OBJECTS: u64 = 20;
-const REALM_ERROR_GRAPH_FUNCTIONS: u64 = 131;
-const REALM_ERROR_GRAPH_PROPERTIES: u64 = 437;
-const REALM_DYNAMIC_ATOMS: u32 = 91;
-const REALM_DYNAMIC_ATOM_CODE_UNITS: u64 = 776;
-const REALM_DYNAMIC_INTERNER_SLOTS: u32 = 91;
+const REALM_ERROR_GRAPH_OBJECTS: u64 = 21;
+const REALM_ERROR_GRAPH_FUNCTIONS: u64 = 133;
+const REALM_ERROR_GRAPH_PROPERTIES: u64 = 445;
+const REALM_DYNAMIC_ATOMS: u32 = 92;
+const REALM_DYNAMIC_ATOM_CODE_UNITS: u64 = 783;
+const REALM_DYNAMIC_INTERNER_SLOTS: u32 = 92;
 
 fn compile_dynamic(body: &str) -> Arc<VerifiedBytecode> {
     let parameters = [];
@@ -105,22 +105,22 @@ fn complete_error_realm_graph_has_exact_public_resource_usage() {
 fn error_realm_graph_limit_failures_are_atomic_and_runtime_is_reusable() {
     for (limits, expected_resource, limit, observed) in [
         (
-            RuntimeLimits::default().with_max_heap_objects(39),
+            RuntimeLimits::default().with_max_heap_objects(41),
             RuntimeResource::HeapObjects,
-            39,
-            40,
+            41,
+            42,
         ),
         (
-            RuntimeLimits::default().with_max_heap_functions(245),
+            RuntimeLimits::default().with_max_heap_functions(265),
             RuntimeResource::HeapFunctions,
-            245,
-            262,
+            265,
+            266,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(825),
+            RuntimeLimits::default().with_max_object_properties(889),
             RuntimeResource::ObjectProperties,
-            825,
-            874,
+            889,
+            890,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");

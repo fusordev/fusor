@@ -260,6 +260,9 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::FunctionApply(state) => {
                 advance_function_apply(runtime, state, Some(value), return_to, execution_budget)?
             }
+            NativeContinuation::ReflectConstruct(state) => {
+                advance_reflect_construct(runtime, state, Some(value), return_to, execution_budget)?
+            }
             NativeContinuation::FunctionBind(state) => {
                 advance_function_bind(runtime, state, Some(value), return_to, execution_budget)?
             }
@@ -864,6 +867,68 @@ pub(super) fn dispatch_native_call_with_frames(
             execution_budget,
             None,
             Some(SyntheticNativeFrame::Apply),
+        ),
+        NativeFunctionKind::ReflectApply => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            let mut supplied = inputs.arguments;
+            let target = supplied.take_first_or_undefined();
+            let this_argument = supplied.take_first_or_undefined();
+            let array_like = supplied.take_first_or_undefined();
+            // `Reflect.apply` checks its target before the argument list
+            // (`quickjs.c:41100`) and rejects a nullish list, which
+            // `Function.prototype.apply` would treat as empty
+            // (`quickjs.c:41103-41107` with magic 2).
+            if !matches!(target, StoredValue::Function(_)) {
+                return Err(function_apply_exception(
+                    native.realm,
+                    ExceptionKind::TypeError,
+                    "not a function",
+                    origin,
+                )?);
+            }
+            if matches!(array_like, StoredValue::Undefined | StoredValue::Null) {
+                return Err(function_apply_exception(
+                    native.realm,
+                    ExceptionKind::TypeError,
+                    "not a object",
+                    origin,
+                )?);
+            }
+            let mut adjusted = Vec::new();
+            adjusted
+                .try_reserve_exact(2)
+                .map_err(|_| ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::Frames,
+                    additional: 2,
+                })?;
+            adjusted.push(this_argument);
+            adjusted.push(array_like);
+            begin_function_apply(
+                runtime,
+                native.realm,
+                CallInputs {
+                    receiver: target,
+                    arguments: CallArguments::from_values(adjusted),
+                    new_target: None,
+                },
+                return_to,
+                origin,
+                active_frames,
+                active_frame_values,
+                execution_budget,
+                None,
+                None,
+            )
+        }
+        NativeFunctionKind::ReflectConstruct => begin_reflect_construct(
+            runtime,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            active_frames,
+            active_frame_values,
+            execution_budget,
         ),
         NativeFunctionKind::FunctionPrototypeCall => {
             let origin = origin.unwrap_or_else(native_function_host_origin);
@@ -2074,6 +2139,320 @@ fn function_apply_getter_call(
         pre_call: None,
         new_target: None,
         native_caller,
+    }))
+}
+
+/// Starts `Reflect.construct`.
+///
+/// A supplied `newTarget` is validated before the argument list is read, and
+/// the target is validated only after the whole list is read, because
+/// `JS_CallConstructor2` runs after `build_arg_list` (`quickjs.c:50195-50206`).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "construction shares the same receiver, arguments, limits, and resumption context every native dispatch takes"
+)]
+pub(super) fn begin_reflect_construct(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    active_frames: usize,
+    active_frame_values: u64,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut supplied = inputs.arguments;
+    let target = supplied.take_first_or_undefined();
+    let array_like = supplied.take_first_or_undefined();
+    // `newTarget` is validated only when supplied: an omitted one defaults to
+    // the target and is checked later as part of the target's own constructor
+    // test (`quickjs.c:50195-50203`).
+    let new_target = match supplied.take_first() {
+        Some(value) => {
+            let StoredValue::Function(new_target) = value else {
+                return Err(function_apply_exception(
+                    realm,
+                    ExceptionKind::TypeError,
+                    "not a constructor",
+                    origin,
+                )?);
+            };
+            // A function that is not a constructor is reported with its name
+            // (`JS_ThrowTypeErrorNotAConstructor`, `quickjs.c:7799-7810`).
+            if !runtime.function_is_constructor(new_target)? {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: function_not_constructor_message(runtime, new_target)?,
+                    },
+                    origin,
+                }));
+            }
+            Some(new_target)
+        }
+        None => match target {
+            StoredValue::Function(new_target) => Some(new_target),
+            _ => None,
+        },
+    };
+    // A nullish or primitive argument list reports `not a object`; unlike
+    // `Function.prototype.apply` there is no empty-list special case.
+    if !matches!(
+        array_like,
+        StoredValue::Function(_) | StoredValue::Object(_)
+    ) {
+        return Err(function_apply_exception(
+            realm,
+            ExceptionKind::TypeError,
+            "not a object",
+            origin,
+        )?);
+    }
+
+    check_execution_limit(
+        RuntimeResource::Frames,
+        u64::from(runtime.limits.max_active_frames),
+        usize_to_u64(active_frames).saturating_add(1),
+    )?;
+    // The fourth retained slot covers an object-valued length while its
+    // Number-hint ToPrimitive state is suspended.
+    check_execution_limit(
+        RuntimeResource::FrameValues,
+        runtime.limits.max_active_frame_values,
+        active_frame_values.saturating_add(4),
+    )?;
+    let state = ReflectConstructContinuation {
+        target,
+        new_target,
+        array_like,
+        realm,
+        length: None,
+        next_index: 0,
+        arguments: Vec::new(),
+        stage: ReflectConstructStage::AwaitLength,
+        active_frame_values,
+        origin,
+    };
+    let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
+    charge_heap_property_lookup(runtime, &state.array_like, execution_budget)?;
+    match read_static_property(runtime, realm, &state.array_like, &length_key)? {
+        PropertyReadOutcome::Value(value) => begin_reflect_construct_length_conversion(
+            runtime,
+            state,
+            value,
+            return_to,
+            execution_budget,
+        ),
+        PropertyReadOutcome::Getter { function, receiver } => {
+            reflect_construct_getter_call(state, function, receiver, return_to)
+        }
+        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
+            message: "object-valued construct argument list failed its length read",
+        }
+        .into()),
+    }
+}
+
+fn advance_reflect_construct(
+    runtime: &mut Runtime,
+    mut state: ReflectConstructContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(value) = completion else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "construct continuation resumed without a getter completion",
+        }
+        .into());
+    };
+    match state.stage {
+        ReflectConstructStage::AwaitLength => begin_reflect_construct_length_conversion(
+            runtime,
+            state,
+            value,
+            return_to,
+            execution_budget,
+        ),
+        ReflectConstructStage::AwaitIndex => {
+            let length = state.length.ok_or(EngineFault::RuntimeInvariant {
+                message: "construct index continuation has no fixed length",
+            })?;
+            if state.next_index >= length {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "construct index continuation resumed after its fixed length",
+                }
+                .into());
+            }
+            state.arguments.push(value);
+            state.next_index = state.next_index.saturating_add(1);
+            advance_reflect_construct_indices(runtime, state, return_to, execution_budget)
+        }
+    }
+}
+
+fn begin_reflect_construct_length_conversion(
+    runtime: &mut Runtime,
+    state: ReflectConstructContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let realm = state.realm;
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::ReflectConstructLength(state),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_reflect_construct_length(
+    runtime: &mut Runtime,
+    mut state: ReflectConstructContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let number = operator_to_number(value, state.realm, &state.origin)?;
+    // The argument-list length is read with `ToLength` and then bounded by the
+    // pinned 65,534 call-argument ceiling (`quickjs.c:41058`).
+    let length_bound = number_to_length(number);
+    let integer = length_bound_as_f64(length_bound);
+    if integer > f64::from(MAX_FUNCTION_APPLY_ARGUMENTS) {
+        return Err(function_apply_exception(
+            state.realm,
+            ExceptionKind::RangeError,
+            "too many arguments in function call (only 65534 allowed)",
+            state.origin,
+        )?);
+    }
+    let length = u32::try_from(length_bound).map_err(|_| EngineFault::RuntimeInvariant {
+        message: "construct length passed the argument ceiling but exceeded the u32 domain",
+    })?;
+    check_execution_limit(
+        RuntimeResource::FrameValues,
+        runtime.limits.max_active_frame_values,
+        state
+            .active_frame_values
+            .saturating_add(3)
+            .saturating_add(u64::from(length)),
+    )?;
+    state
+        .arguments
+        .try_reserve_exact(length as usize)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: length as usize,
+        })?;
+    // Charge the complete fixed scan before the first observable indexed Get.
+    execution_budget.charge_instructions(u64::from(length))?;
+    state.length = Some(length);
+    state.stage = ReflectConstructStage::AwaitIndex;
+    advance_reflect_construct_indices(runtime, state, return_to, execution_budget)
+}
+
+fn advance_reflect_construct_indices(
+    runtime: &mut Runtime,
+    mut state: ReflectConstructContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let length = state.length.ok_or(EngineFault::RuntimeInvariant {
+        message: "construct argument scan has no fixed length",
+    })?;
+    while state.next_index < length {
+        let index = ArrayIndex::new(state.next_index).ok_or(EngineFault::RuntimeInvariant {
+            message: "construct argument index exceeds the array-index domain",
+        })?;
+        let key = PropertyKey::from_index(index);
+        charge_heap_property_lookup(runtime, &state.array_like, execution_budget)?;
+        match read_static_property(runtime, state.realm, &state.array_like, &key)? {
+            PropertyReadOutcome::Value(value) => {
+                state.arguments.push(value);
+                state.next_index = state.next_index.saturating_add(1);
+            }
+            PropertyReadOutcome::Getter { function, receiver } => {
+                state.stage = ReflectConstructStage::AwaitIndex;
+                return reflect_construct_getter_call(state, function, receiver, return_to);
+            }
+            PropertyReadOutcome::Failed(_) => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "object-valued construct argument list failed an indexed read",
+                }
+                .into());
+            }
+        }
+    }
+    reflect_construct_target_call(state, return_to)
+}
+
+/// Validates the target and dispatches the construction.
+///
+/// The check is last, matching `JS_CallConstructor2` (`quickjs.c:50205`): a
+/// non-function target is reported only after the argument list is read.
+fn reflect_construct_target_call(
+    state: ReflectConstructContinuation,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(target) = state.target else {
+        return Err(function_apply_exception(
+            state.realm,
+            ExceptionKind::TypeError,
+            "not a function",
+            state.origin,
+        )?);
+    };
+    let Some(new_target) = state.new_target else {
+        // A defaulted `newTarget` mirrors the target, so reaching this without
+        // one means the target was not a function, which was checked above.
+        return Err(EngineFault::RuntimeInvariant {
+            message: "Reflect.construct reached its call without a newTarget",
+        }
+        .into());
+    };
+    function_apply_target_call(
+        target,
+        StoredValue::Undefined,
+        state.arguments,
+        return_to,
+        state.origin,
+        Some(new_target),
+        None,
+    )
+}
+
+fn reflect_construct_getter_call(
+    state: ReflectConstructContinuation,
+    function: FunctionId,
+    receiver: StoredValue,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::ReflectConstruct(state));
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::empty(),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
     }))
 }
 

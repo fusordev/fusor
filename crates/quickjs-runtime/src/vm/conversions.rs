@@ -1587,6 +1587,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             finish_function_apply_length(runtime, state, value, return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::ReflectConstructLength(state) => {
+            finish_reflect_construct_length(runtime, state, value, return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::BigIntToString { value: receiver } => {
             let radix = operator_to_number(value, realm, origin)?;
             let radix = validated_radix(radix, realm, origin)?;

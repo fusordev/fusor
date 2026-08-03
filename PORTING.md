@@ -371,16 +371,34 @@ Known intentional write-path differences:
   `JsString::shares_allocation`, so a throwing comparator on `[5,5,5,5]` is
   never invoked, and the write-back skips `Set` for an element that did not
   move (`quickjs.c:43249-43251`).
+- [x] `Reflect.apply` and `Reflect.construct`, the first slice of the
+  `Object`/`Function`/`Reflect` surface and the three cases the Error corpus was
+  missing. `Reflect.apply` shares `Function.prototype.apply`'s argument-list
+  read but validates the target first and rejects a nullish list with
+  `TypeError: not a object` instead of treating it as empty (magic 2 in
+  `js_function_apply`, `quickjs.c:41100-41107`). `Reflect.construct` validates a
+  *supplied* `newTarget` before reading the list — a non-function reports
+  `not a constructor` while a non-constructor function reports
+  `<name> is not a constructor` (`quickjs.c:7799-7810`) — then reads the list,
+  and only then checks the target, so a length getter runs before a non-function
+  target reports `not a function` (`JS_CallConstructor2`,
+  `quickjs.c:50195-50206`). An omitted `newTarget` defaults to the target. The
+  namespace is an ordinary object inheriting `Object.prototype` with
+  `Reflect[Symbol.toStringTag]`, arities 3 and 2, and a writable,
+  non-enumerable, configurable global binding.
+  `Runtime::function_is_constructor` answers `[[Construct]]` presence by walking
+  bytecode/native/bound implementations iteratively, so a bind chain cannot
+  recurse.
 - [ ] Remaining String/Number/Array method surface (`String.prototype` case
   conversions and `localeCompare`, the RegExp-dependent `match`, `matchAll`,
   `replace`, `search`, and `split`, `normalize`, `String.raw`, and the
   locale-dependent renderings), shape sharing/transition
   interning, remaining exotics (arguments, Proxy), dense indexed storage,
   deterministic finalization, and diagnostics.
-- [ ] Close Error compatibility gaps, then implement Object/Function/Reflect,
-  Proxy, remaining built-ins, RegExp/Date/JSON, collections, binary data,
-  Atomics, Unicode tables, promises, async functions/generators, weak
-  references, and finalization registries.
+- [ ] Complete the `Object`/`Function`/`Reflect` surface beyond `apply` and
+  `construct`, then Proxy, remaining built-ins, RegExp/Date/JSON, collections,
+  binary data, Atomics, Unicode tables, promises, async functions/generators,
+  weak references, and finalization registries.
 - [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide
   host I/O, timers, cancellation, and wakeups, but never Promise-job ordering.
 
@@ -427,10 +445,8 @@ fixture declares an unreachable one, or when an observed oracle message does not
 match the pinned format string.
 
 Current corpus status: parser 196/196, Number radix 991/991, control flow 63/63,
-iterators 40/40, function apply 15/15, function bind 21/21, call spread 15/15.
-The Error corpus stands at 32/35. The three remaining mismatches need
-`Reflect`, which belongs to the built-ins milestone; each fails closed as a
-missing property rather than producing a wrong answer.
+iterators 40/40, function apply 15/15, function bind 21/21, call spread 15/15,
+and Errors 35/35.
 
 ## Engineering rules
 

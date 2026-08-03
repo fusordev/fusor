@@ -724,6 +724,36 @@ impl Runtime {
         Ok(deletion)
     }
 
+    /// Returns whether a function has a `[[Construct]]` behavior.
+    ///
+    /// Native kinds decide individually (`NativeFunctionKind::is_constructor`);
+    /// bytecode functions are ordinary functions and therefore constructors in
+    /// the current profile; a bound function forwards the question to its
+    /// target, walked iteratively so a bind chain cannot recurse.
+    pub(crate) fn function_is_constructor(
+        &self,
+        function: FunctionId,
+    ) -> Result<bool, crate::EngineFault> {
+        let mut current = function;
+        loop {
+            let heap_function =
+                self.functions
+                    .get(current)
+                    .ok_or(crate::EngineFault::StaleHeapEdge {
+                        edge: "function",
+                        index: current.index(),
+                        generation: current.generation(),
+                    })?;
+            match &heap_function.implementation {
+                FunctionImplementation::Bytecode(_) => return Ok(true),
+                FunctionImplementation::Native(native) => {
+                    return Ok(native.kind.is_constructor());
+                }
+                FunctionImplementation::Bound(bound) => current = bound.target,
+            }
+        }
+    }
+
     pub(crate) fn object_record(
         &self,
         reference: HeapReference,
