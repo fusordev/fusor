@@ -27,6 +27,7 @@
 
 mod allocation;
 mod atoms;
+mod publication;
 mod reservation;
 mod schema;
 mod transaction;
@@ -49,9 +50,13 @@ use super::{
 };
 
 use atoms::{RealmAtomBindings, RealmAtomPlan};
+use publication::RealmPublicationError;
 use reservation::RealmReservationPlan;
-use schema::IntrinsicObjectId;
-use schema::RealmNameId;
+use schema::{
+    IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicIdentity,
+    IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicObjectId, IntrinsicPropertySpec,
+    IntrinsicValueSpec, PrototypeSpec, RealmNameId,
+};
 use transaction::RealmBuildTransaction;
 
 /// The `BigInt` static names that have no predefined atom.
@@ -1177,11 +1182,8 @@ impl Runtime {
         let mut transaction = RealmBuildTransaction::try_new(self, reservation)?;
         let graph = transaction.build_realm_graph(records, &atom_plan)?;
 
-        if transaction
-            .publish_realm_properties(&graph, &keys, &names)
-            .is_err()
-        {
-            return Err(property_allocation_failed(1));
+        if let Err(error) = transaction.publish_realm_properties(&graph, &keys, &names) {
+            return Err(error.into_runtime_error());
         }
 
         let id = graph.base.realm;
@@ -2345,7 +2347,7 @@ impl RealmBuildTransaction<'_> {
                 public_roots: 0,
             })
             .expect("the realm transaction reserved all intrinsic function slots");
-        self.record_function(schema::IntrinsicFunctionId(kind), function);
+        self.record_function(IntrinsicFunctionId(kind), function);
         function
     }
 
@@ -2380,13 +2382,13 @@ impl RealmBuildTransaction<'_> {
     }
 }
 
-impl Runtime {
+impl RealmBuildTransaction<'_> {
     fn publish_realm_properties(
         &mut self,
         graph: &RealmGraph,
         keys: &RealmKeys,
         names: &RealmNames,
-    ) -> Result<(), TryReserveError> {
+    ) -> Result<(), RealmPublicationError> {
         self.append_object_methods(
             graph.base.object_prototype,
             [
@@ -2439,8 +2441,8 @@ impl Runtime {
         self.publish_locale_string_methods(graph, keys)?;
         self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
         self.publish_global_value_properties(graph)?;
-        self.publish_global_numeric_functions(graph, keys)?;
-        self.publish_uri_functions(graph, keys)?;
+        self.publish_global_numeric_functions(graph)?;
+        self.publish_uri_functions(graph)?;
         self.publish_symbol_intrinsic_properties(&graph.symbol, graph, keys, names)?;
         self.publish_reflect_intrinsic_properties(graph, keys, names)?;
         self.publish_json_intrinsic_properties(graph, keys, names)?;
@@ -2457,7 +2459,8 @@ impl Runtime {
                 (&keys.array, graph.array.constructor),
                 (&keys.symbol, graph.symbol.constructor),
             ],
-        )
+        )?;
+        Ok(())
     }
 
     /// Publishes deterministic no-`Intl` `toLocaleString` methods.
@@ -2705,8 +2708,7 @@ impl Runtime {
     fn publish_global_numeric_functions(
         &mut self,
         graph: &RealmGraph,
-        keys: &RealmKeys,
-    ) -> Result<(), TryReserveError> {
+    ) -> Result<(), RealmPublicationError> {
         for ((kind, length), function) in GLOBAL_NUMERIC_FUNCTIONS
             .into_iter()
             .zip(graph.global_numeric_functions)
@@ -2721,58 +2723,76 @@ impl Runtime {
                 GlobalNumericFunction::ParseFloat => RealmNameId::ParseFloat,
                 GlobalNumericFunction::ParseInt => RealmNameId::ParseInt,
             };
-            let atom = graph.dynamic_atoms.atom(atom_id).clone();
-            let name = atom
-                .description()
-                .expect("global numeric function name has a description")
-                .clone();
-            let key = PropertyKey::from_validated_atom(atom);
-            self.objects
-                .get_mut(graph.base.global_object)
-                .expect("new realm global object remains live")
-                .record
-                .append_data(
-                    key.clone(),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
+            let id = IntrinsicFunctionId(NativeFunctionKind::GlobalNumeric(kind));
+            debug_assert_eq!(self.allocated.function(id), function);
+            let property = IntrinsicPropertySpec {
+                holder: IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
+                key: IntrinsicKeySpec::InternedString(atom_id),
+                descriptor: IntrinsicDescriptorSpec::Data {
+                    layout: METHOD_PROPERTY,
+                    value: IntrinsicValueSpec::Function(id),
+                },
+            };
+            self.publish_intrinsic_property(&property, &graph.dynamic_atoms)?;
             if matches!(
                 kind,
                 GlobalNumericFunction::ParseFloat | GlobalNumericFunction::ParseInt
             ) {
-                self.functions
-                    .get_mut(graph.number.constructor)
-                    .expect("new Number constructor remains live")
-                    .object
-                    .append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
+                let alias = IntrinsicPropertySpec {
+                    holder: IntrinsicIdentity::Function(IntrinsicFunctionId(
+                        NativeFunctionKind::NumberConstructor,
+                    )),
+                    ..property
+                };
+                self.publish_intrinsic_property(&alias, &graph.dynamic_atoms)?;
             }
-            self.append_function_identity(function, &name, length, keys)?;
+            self.publish_intrinsic_function_identity(
+                &IntrinsicFunctionSpec {
+                    id,
+                    implementation: NativeFunctionKind::GlobalNumeric(kind),
+                    prototype: PrototypeSpec::Intrinsic(IntrinsicIdentity::Function(
+                        IntrinsicFunctionId(NativeFunctionKind::FunctionPrototype),
+                    )),
+                    name: IntrinsicNameSpec::RealmName(atom_id),
+                    length,
+                    constructable: false,
+                },
+                &graph.dynamic_atoms,
+            )?;
         }
         Ok(())
     }
 
     /// Publishes the four ordinary URI handling methods on the global object.
-    fn publish_uri_functions(
-        &mut self,
-        graph: &RealmGraph,
-        keys: &RealmKeys,
-    ) -> Result<(), TryReserveError> {
+    fn publish_uri_functions(&mut self, graph: &RealmGraph) -> Result<(), RealmPublicationError> {
         for ((_, kind), function) in URI_FUNCTIONS.into_iter().zip(graph.uri_functions) {
-            let atom = graph.dynamic_atoms.atom(RealmNameId::Uri(kind)).clone();
-            let name = atom
-                .description()
-                .expect("URI function name has a description")
-                .clone();
-            self.objects
-                .get_mut(graph.base.global_object)
-                .expect("new realm global object remains live")
-                .record
-                .append_data(
-                    PropertyKey::from_validated_atom(atom),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
-            self.append_function_identity(function, &name, 1, keys)?;
+            let id = IntrinsicFunctionId(NativeFunctionKind::GlobalUri(kind));
+            let atom_id = RealmNameId::Uri(kind);
+            debug_assert_eq!(self.allocated.function(id), function);
+            self.publish_intrinsic_property(
+                &IntrinsicPropertySpec {
+                    holder: IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
+                    key: IntrinsicKeySpec::InternedString(atom_id),
+                    descriptor: IntrinsicDescriptorSpec::Data {
+                        layout: METHOD_PROPERTY,
+                        value: IntrinsicValueSpec::Function(id),
+                    },
+                },
+                &graph.dynamic_atoms,
+            )?;
+            self.publish_intrinsic_function_identity(
+                &IntrinsicFunctionSpec {
+                    id,
+                    implementation: NativeFunctionKind::GlobalUri(kind),
+                    prototype: PrototypeSpec::Intrinsic(IntrinsicIdentity::Function(
+                        IntrinsicFunctionId(NativeFunctionKind::FunctionPrototype),
+                    )),
+                    name: IntrinsicNameSpec::RealmName(atom_id),
+                    length: 1,
+                    constructable: false,
+                },
+                &graph.dynamic_atoms,
+            )?;
         }
         Ok(())
     }
@@ -3767,6 +3787,18 @@ impl Runtime {
     ) -> Result<(), TryReserveError> {
         let key_for_key =
             PropertyKey::from_validated_atom(graph.dynamic_atoms.atom(RealmNameId::KeyFor).clone());
+        let split_symbol = self.atoms.predefined(PredefinedAtom::SymbolSplit);
+        let static_properties = DYNAMIC_SYMBOL_STATIC_PROPERTIES.map(|(_, symbol_atom)| {
+            (
+                PropertyKey::from_validated_atom(
+                    graph
+                        .dynamic_atoms
+                        .atom(RealmNameId::SymbolStatic(symbol_atom))
+                        .clone(),
+                ),
+                self.atoms.predefined(symbol_atom),
+            )
+        });
         let record = &mut self
             .functions
             .get_mut(symbol.constructor)
@@ -3797,24 +3829,15 @@ impl Runtime {
             METHOD_PROPERTY,
             StoredValue::Function(symbol.key_for),
         )?;
-        for (index, (_, symbol_atom)) in DYNAMIC_SYMBOL_STATIC_PROPERTIES.iter().enumerate() {
+        for (index, (key, symbol)) in static_properties.into_iter().enumerate() {
             if index == 6 {
                 record.append_data(
                     keys.split.clone(),
                     FROZEN_PROPERTY,
-                    StoredValue::Symbol(self.atoms.predefined(PredefinedAtom::SymbolSplit)),
+                    StoredValue::Symbol(split_symbol.clone()),
                 )?;
             }
-            record.append_data(
-                PropertyKey::from_validated_atom(
-                    graph
-                        .dynamic_atoms
-                        .atom(RealmNameId::SymbolStatic(*symbol_atom))
-                        .clone(),
-                ),
-                FROZEN_PROPERTY,
-                StoredValue::Symbol(self.atoms.predefined(*symbol_atom)),
-            )?;
+            record.append_data(key, FROZEN_PROPERTY, StoredValue::Symbol(symbol))?;
         }
         Ok(())
     }
@@ -3881,7 +3904,9 @@ impl Runtime {
         }
         Ok(())
     }
+}
 
+impl Runtime {
     /// Borrows an exclusive execution context for one same-runtime realm.
     ///
     /// # Errors
