@@ -73,13 +73,6 @@ impl RealmFunctionSchema {
         &self.objects
     }
 
-    pub(super) fn spec(&self, id: IntrinsicFunctionId) -> &IntrinsicFunctionSpec {
-        self.specs
-            .iter()
-            .find(|spec| spec.id == id)
-            .expect("the complete intrinsic function schema contains every allocated ID")
-    }
-
     pub(super) fn properties(&self) -> &[IntrinsicPropertySpec] {
         &self.properties
     }
@@ -128,13 +121,34 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
 pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
     matches!(
         id.0,
-        NativeFunctionKind::Reflect(_)
+        NativeFunctionKind::GlobalNumeric(_)
+            | NativeFunctionKind::GlobalUri(_)
+            | NativeFunctionKind::Reflect(_)
             | NativeFunctionKind::JsonIsRawJson
             | NativeFunctionKind::JsonParse
             | NativeFunctionKind::JsonRawJson
             | NativeFunctionKind::JsonStringify
             | NativeFunctionKind::Math(_)
     )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DeclarativeBatch {
+    Globals,
+    NamespaceObjects,
+}
+
+pub(super) const fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatch {
+    match property.descriptor {
+        IntrinsicDescriptorSpec::Data {
+            value:
+                IntrinsicValueSpec::Function(IntrinsicFunctionId(
+                    NativeFunctionKind::GlobalNumeric(_) | NativeFunctionKind::GlobalUri(_),
+                )),
+            ..
+        } => DeclarativeBatch::Globals,
+        _ => DeclarativeBatch::NamespaceObjects,
+    }
 }
 
 fn count_specs<T>(
@@ -176,6 +190,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
 }
 
 fn visit_property_specs(visit: PropertySink<'_>) {
+    globals::visit_properties(visit);
     reflect::visit_properties(visit);
     json::visit_properties(visit);
     math::visit_properties(visit);

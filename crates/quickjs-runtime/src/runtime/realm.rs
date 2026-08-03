@@ -52,13 +52,10 @@ use super::{
 
 use allocation::DeclarativeIntrinsicRecords;
 use atoms::{RealmAtomBindings, RealmAtomPlan};
-use families::RealmFunctionSchema;
+use families::{DeclarativeBatch, RealmFunctionSchema};
 use publication::RealmPublicationError;
 use reservation::RealmReservationPlan;
-use schema::{
-    IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec,
-    IntrinsicNameSpec, IntrinsicObjectId, IntrinsicPropertySpec, IntrinsicValueSpec, RealmNameId,
-};
+use schema::{IntrinsicFunctionId, IntrinsicObjectId, RealmNameId};
 use transaction::RealmBuildTransaction;
 
 /// The `BigInt` static names that have no predefined atom.
@@ -765,8 +762,6 @@ struct RealmRecords {
     string: PrimitiveIntrinsicRecords,
     string_methods: [ObjectRecord; STRING_PROTOTYPE_METHODS.len()],
     number_predicates: [ObjectRecord; NUMBER_PREDICATE_STATICS.len()],
-    global_numeric_functions: [ObjectRecord; GLOBAL_NUMERIC_FUNCTIONS.len()],
-    uri_functions: [ObjectRecord; URI_FUNCTIONS.len()],
     string_from_statics: [ObjectRecord; STRING_FROM_STATICS.len()],
     string_raw: ObjectRecord,
     array_searches: [ObjectRecord; ARRAY_SEARCH_METHODS.len()],
@@ -847,8 +842,6 @@ impl RealmRecords {
                 + 2,
         )?;
         let number_predicates = reserved_function_records()?;
-        let global_numeric_functions = reserved_function_records()?;
-        let uri_functions = reserved_function_records()?;
         let bigint = BigIntIntrinsicRecords::try_new()?;
         // `String.prototype` additionally carries `length`, its iterator, and
         // every installed method.
@@ -918,8 +911,6 @@ impl RealmRecords {
             string,
             string_methods,
             number_predicates,
-            global_numeric_functions,
-            uri_functions,
             string_from_statics,
             string_raw: reserved_record(2)?,
             array_searches: reserved_function_records()?,
@@ -1036,8 +1027,6 @@ struct RealmGraph {
     string: PrimitiveIntrinsicGraph,
     string_methods: [FunctionId; STRING_PROTOTYPE_METHODS.len()],
     number_predicates: [FunctionId; NUMBER_PREDICATE_STATICS.len()],
-    global_numeric_functions: [FunctionId; GLOBAL_NUMERIC_FUNCTIONS.len()],
-    uri_functions: [FunctionId; URI_FUNCTIONS.len()],
     string_from_statics: [FunctionId; STRING_FROM_STATICS.len()],
     string_raw: FunctionId,
     array_searches: [FunctionId; ARRAY_SEARCH_METHODS.len()],
@@ -1212,10 +1201,6 @@ impl Runtime {
 }
 
 impl RealmBuildTransaction<'_> {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one flat insertion transaction keeps the exact intrinsic order auditable"
-    )]
     fn build_realm_graph(
         &mut self,
         records: RealmRecords,
@@ -1267,9 +1252,6 @@ impl RealmBuildTransaction<'_> {
         self.insert_declarative_intrinsics(base.realm, intrinsic_schema, records.declarative);
         let string_methods = self.insert_string_prototype_methods(&base, records.string_methods);
         let number_predicates = self.insert_number_predicates(&base, records.number_predicates);
-        let global_numeric_functions =
-            self.insert_global_numeric_functions(&base, records.global_numeric_functions);
-        let uri_functions = self.insert_uri_functions(&base, records.uri_functions);
         let string_from_statics =
             self.insert_string_from_statics(&base, records.string_from_statics);
         let string_raw = self.insert_string_raw(&base, records.string_raw);
@@ -1308,8 +1290,6 @@ impl RealmBuildTransaction<'_> {
             string,
             string_methods,
             number_predicates,
-            global_numeric_functions,
-            uri_functions,
             string_from_statics,
             string_raw,
             array_searches,
@@ -1860,46 +1840,6 @@ impl RealmBuildTransaction<'_> {
         inserted.map(|slot| slot.expect("every Number predicate function was inserted"))
     }
 
-    /// Inserts the realm-owned coercing numeric globals.
-    fn insert_global_numeric_functions(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; GLOBAL_NUMERIC_FUNCTIONS.len()],
-    ) -> [FunctionId; GLOBAL_NUMERIC_FUNCTIONS.len()] {
-        let mut inserted = [None; GLOBAL_NUMERIC_FUNCTIONS.len()];
-        for ((slot, (kind, _)), record) in inserted
-            .iter_mut()
-            .zip(GLOBAL_NUMERIC_FUNCTIONS)
-            .zip(records)
-        {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::GlobalNumeric(kind),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every global numeric function was inserted"))
-    }
-
-    /// Inserts the four realm-owned URI handling functions.
-    fn insert_uri_functions(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; URI_FUNCTIONS.len()],
-    ) -> [FunctionId; URI_FUNCTIONS.len()] {
-        let mut inserted = [None; URI_FUNCTIONS.len()];
-        for ((slot, (_, kind)), record) in inserted.iter_mut().zip(URI_FUNCTIONS).zip(records) {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::GlobalUri(kind),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every URI function was inserted"))
-    }
-
     /// Inserts one native function per installed `String.prototype` method.
     ///
     /// The result keeps `STRING_PROTOTYPE_METHODS` order so the publication step
@@ -2281,10 +2221,17 @@ impl RealmBuildTransaction<'_> {
         self.publish_locale_string_methods(graph, keys)?;
         self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
         self.publish_global_value_properties(graph)?;
-        self.publish_global_numeric_functions(graph, intrinsic_schema)?;
-        self.publish_uri_functions(graph, intrinsic_schema)?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::Globals,
+        )?;
         self.publish_symbol_intrinsic_properties(&graph.symbol, graph, keys, names)?;
-        self.publish_intrinsic_schema(intrinsic_schema, &graph.dynamic_atoms)?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::NamespaceObjects,
+        )?;
         self.append_object_methods(
             graph.base.global_object,
             [
@@ -2367,92 +2314,6 @@ impl RealmBuildTransaction<'_> {
             METHOD_PROPERTY,
             StoredValue::Object(graph.base.global_object),
         )
-    }
-
-    /// Publishes the four coercing global numeric functions and the two parser
-    /// aliases on `Number`.
-    ///
-    /// `isFinite` and `isNaN` reuse the atoms already interned for their
-    /// non-coercing `Number` counterparts. `parseFloat` and `parseInt` share
-    /// both their property keys and function identities with the `Number`
-    /// aliases, so strict equality observes the specification-required alias.
-    fn publish_global_numeric_functions(
-        &mut self,
-        graph: &RealmGraph,
-        intrinsic_schema: &RealmFunctionSchema,
-    ) -> Result<(), RealmPublicationError> {
-        for ((kind, length), function) in GLOBAL_NUMERIC_FUNCTIONS
-            .into_iter()
-            .zip(graph.global_numeric_functions)
-        {
-            let atom_id = match kind {
-                GlobalNumericFunction::IsFinite => {
-                    RealmNameId::NumberPredicate(NumberPredicate::IsFinite)
-                }
-                GlobalNumericFunction::IsNaN => {
-                    RealmNameId::NumberPredicate(NumberPredicate::IsNaN)
-                }
-                GlobalNumericFunction::ParseFloat => RealmNameId::ParseFloat,
-                GlobalNumericFunction::ParseInt => RealmNameId::ParseInt,
-            };
-            let id = IntrinsicFunctionId(NativeFunctionKind::GlobalNumeric(kind));
-            debug_assert_eq!(self.allocated.function(id), function);
-            let property = IntrinsicPropertySpec {
-                holder: IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
-                key: IntrinsicKeySpec::InternedString(atom_id),
-                descriptor: IntrinsicDescriptorSpec::Data {
-                    layout: METHOD_PROPERTY,
-                    value: IntrinsicValueSpec::Function(id),
-                },
-            };
-            self.publish_intrinsic_property(&property, &graph.dynamic_atoms)?;
-            if matches!(
-                kind,
-                GlobalNumericFunction::ParseFloat | GlobalNumericFunction::ParseInt
-            ) {
-                let alias = IntrinsicPropertySpec {
-                    holder: IntrinsicIdentity::Function(IntrinsicFunctionId(
-                        NativeFunctionKind::NumberConstructor,
-                    )),
-                    ..property
-                };
-                self.publish_intrinsic_property(&alias, &graph.dynamic_atoms)?;
-            }
-            let spec = intrinsic_schema.spec(id);
-            debug_assert_eq!(spec.length, length);
-            debug_assert_eq!(spec.name, IntrinsicNameSpec::RealmName(atom_id));
-            self.publish_intrinsic_function_identity(spec, &graph.dynamic_atoms)?;
-        }
-        Ok(())
-    }
-
-    /// Publishes the four ordinary URI handling methods on the global object.
-    fn publish_uri_functions(
-        &mut self,
-        graph: &RealmGraph,
-        intrinsic_schema: &RealmFunctionSchema,
-    ) -> Result<(), RealmPublicationError> {
-        for ((_, kind), function) in URI_FUNCTIONS.into_iter().zip(graph.uri_functions) {
-            let id = IntrinsicFunctionId(NativeFunctionKind::GlobalUri(kind));
-            let atom_id = RealmNameId::Uri(kind);
-            debug_assert_eq!(self.allocated.function(id), function);
-            self.publish_intrinsic_property(
-                &IntrinsicPropertySpec {
-                    holder: IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
-                    key: IntrinsicKeySpec::InternedString(atom_id),
-                    descriptor: IntrinsicDescriptorSpec::Data {
-                        layout: METHOD_PROPERTY,
-                        value: IntrinsicValueSpec::Function(id),
-                    },
-                },
-                &graph.dynamic_atoms,
-            )?;
-            self.publish_intrinsic_function_identity(
-                intrinsic_schema.spec(id),
-                &graph.dynamic_atoms,
-            )?;
-        }
-        Ok(())
     }
 
     fn publish_error_intrinsic_properties(

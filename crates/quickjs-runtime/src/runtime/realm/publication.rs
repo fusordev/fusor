@@ -7,7 +7,7 @@ use crate::ArrayIndex;
 use super::{
     AtomError, JsNumber, JsString, ObjectRecord, PredefinedAtom, PropertyKey,
     RealmBuildTransaction, RuntimeError, StoredValue,
-    families::RealmFunctionSchema,
+    families::{DeclarativeBatch, RealmFunctionSchema, property_batch},
     property_allocation_failed,
     schema::{
         IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicIdentity,
@@ -51,20 +51,26 @@ enum ResolvedDescriptor {
 impl RealmBuildTransaction<'_> {
     /// Publishes the function identities and descriptors owned by the
     /// currently migrated declarative families.
-    pub(super) fn publish_intrinsic_schema(
+    pub(super) fn publish_intrinsic_schema_batch(
         &mut self,
         schema: &RealmFunctionSchema,
         atoms: &super::RealmAtomBindings,
+        batch: DeclarativeBatch,
     ) -> Result<(), RealmPublicationError> {
         for function in schema.specs().iter().filter(|function| {
             schema
                 .properties()
                 .iter()
+                .filter(|property| property_batch(**property) == batch)
                 .any(|property| descriptor_references_function(property.descriptor, function.id))
         }) {
             self.publish_intrinsic_function_identity(function, atoms)?;
         }
-        for property in schema.properties() {
+        for property in schema
+            .properties()
+            .iter()
+            .filter(|property| property_batch(**property) == batch)
+        {
             self.publish_intrinsic_property(property, atoms)?;
         }
         Ok(())
