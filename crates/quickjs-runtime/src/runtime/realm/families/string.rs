@@ -1,9 +1,13 @@
 //! String method and factory declarations.
 
-use super::{FunctionSink, ordinary};
+use super::{FunctionSink, PropertySink, data, method, ordinary};
 use crate::runtime::realm::{
-    NativeFunctionKind, PredefinedAtom, STRING_FROM_STATICS, STRING_PROTOTYPE_METHODS,
-    schema::{IntrinsicNameSpec, RealmNameId},
+    CONSTRUCTOR_PROTOTYPE_PROPERTY, IDENTITY_PROPERTY, NativeFunctionKind, PredefinedAtom,
+    STRING_FROM_STATICS, STRING_PROTOTYPE_METHODS,
+    schema::{
+        IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec,
+        IntrinsicObjectId, IntrinsicValueSpec, RealmNameId,
+    },
 };
 
 pub(super) fn visit_functions(visit: FunctionSink<'_>) {
@@ -29,5 +33,71 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         NativeFunctionKind::StringRaw,
         IntrinsicNameSpec::Predefined(PredefinedAtom::Raw),
         1,
+    ));
+}
+
+pub(super) fn visit_properties(visit: PropertySink<'_>) {
+    let prototype = IntrinsicIdentity::Object(IntrinsicObjectId::StringPrototype);
+    visit(data(
+        prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Length),
+        IDENTITY_PROPERTY,
+        IntrinsicValueSpec::NumberBits(0_f64.to_bits()),
+    ));
+    for (key, function) in [
+        (
+            PredefinedAtom::Constructor,
+            NativeFunctionKind::StringConstructor,
+        ),
+        (
+            PredefinedAtom::ToString,
+            NativeFunctionKind::StringPrototypeToString,
+        ),
+        (
+            PredefinedAtom::ValueOf,
+            NativeFunctionKind::StringPrototypeValueOf,
+        ),
+    ] {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::PredefinedString(key),
+            function,
+        ));
+    }
+    for method_spec in STRING_PROTOTYPE_METHODS {
+        let key = method_spec.predefined_name.map_or(
+            IntrinsicKeySpec::InternedString(RealmNameId::StringMethod(method_spec.method)),
+            IntrinsicKeySpec::PredefinedString,
+        );
+        visit(method(
+            prototype,
+            key,
+            NativeFunctionKind::StringPrototypeMethod(method_spec.method),
+        ));
+    }
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolIterator),
+        NativeFunctionKind::StringPrototypeIterator,
+    ));
+    let constructor =
+        IntrinsicIdentity::Function(IntrinsicFunctionId(NativeFunctionKind::StringConstructor));
+    for (_, method_id) in STRING_FROM_STATICS {
+        visit(method(
+            constructor,
+            IntrinsicKeySpec::InternedString(RealmNameId::StringStatic(method_id)),
+            NativeFunctionKind::StringPrototypeMethod(method_id),
+        ));
+    }
+    visit(method(
+        constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Raw),
+        NativeFunctionKind::StringRaw,
+    ));
+    visit(data(
+        constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::StringPrototype),
     ));
 }

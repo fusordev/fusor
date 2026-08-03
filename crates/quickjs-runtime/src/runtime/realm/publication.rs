@@ -7,7 +7,10 @@ use crate::ArrayIndex;
 use super::{
     AtomError, JsNumber, JsString, ObjectRecord, PredefinedAtom, PropertyKey,
     RealmBuildTransaction, RuntimeError, StoredValue,
-    families::{DeclarativeBatch, RealmFunctionSchema, property_batch},
+    families::{
+        DeclarativeBatch, RealmFunctionSchema, function_batch, is_declarative_function,
+        property_batch,
+    },
     property_allocation_failed,
     schema::{
         IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicIdentity,
@@ -58,11 +61,7 @@ impl RealmBuildTransaction<'_> {
         batch: DeclarativeBatch,
     ) -> Result<(), RealmPublicationError> {
         for function in schema.specs().iter().filter(|function| {
-            schema
-                .properties()
-                .iter()
-                .filter(|property| property_batch(**property) == batch)
-                .any(|property| descriptor_references_function(property.descriptor, function.id))
+            is_declarative_function(function.id) && function_batch(function.id) == batch
         }) {
             self.publish_intrinsic_function_identity(function, atoms)?;
         }
@@ -230,22 +229,6 @@ impl RealmBuildTransaction<'_> {
                 .map_err(RuntimeError::from)
                 .map_err(RealmPublicationError::Runtime),
         }
-    }
-}
-
-fn descriptor_references_function(
-    descriptor: IntrinsicDescriptorSpec,
-    id: IntrinsicFunctionId,
-) -> bool {
-    match descriptor {
-        IntrinsicDescriptorSpec::Data {
-            value: IntrinsicValueSpec::Function(candidate),
-            ..
-        } => candidate == id,
-        IntrinsicDescriptorSpec::Accessor { getter, setter, .. } => {
-            getter == Some(id) || setter == Some(id)
-        }
-        IntrinsicDescriptorSpec::Data { .. } => false,
     }
 }
 

@@ -114,14 +114,39 @@ impl RealmFunctionSchema {
 pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
     matches!(
         id,
-        IntrinsicObjectId::Reflect | IntrinsicObjectId::Json | IntrinsicObjectId::Math
+        IntrinsicObjectId::BooleanPrototype
+            | IntrinsicObjectId::NumberPrototype
+            | IntrinsicObjectId::BigIntPrototype
+            | IntrinsicObjectId::StringPrototype
+            | IntrinsicObjectId::Reflect
+            | IntrinsicObjectId::Json
+            | IntrinsicObjectId::Math
     )
 }
 
 pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
     matches!(
         id.0,
-        NativeFunctionKind::GlobalNumeric(_)
+        NativeFunctionKind::BooleanConstructor
+            | NativeFunctionKind::BooleanPrototypeToString
+            | NativeFunctionKind::BooleanPrototypeValueOf
+            | NativeFunctionKind::NumberConstructor
+            | NativeFunctionKind::NumberPrototypeToString
+            | NativeFunctionKind::NumberPrototypeValueOf
+            | NativeFunctionKind::NumberPredicateStatic(_)
+            | NativeFunctionKind::NumberPrototypeFormat(_)
+            | NativeFunctionKind::BigIntConstructor
+            | NativeFunctionKind::BigIntPrototypeToString
+            | NativeFunctionKind::BigIntPrototypeValueOf
+            | NativeFunctionKind::BigIntAsIntN
+            | NativeFunctionKind::BigIntAsUintN
+            | NativeFunctionKind::StringConstructor
+            | NativeFunctionKind::StringPrototypeToString
+            | NativeFunctionKind::StringPrototypeValueOf
+            | NativeFunctionKind::StringPrototypeMethod(_)
+            | NativeFunctionKind::StringRaw
+            | NativeFunctionKind::LocaleString(_)
+            | NativeFunctionKind::GlobalNumeric(_)
             | NativeFunctionKind::GlobalUri(_)
             | NativeFunctionKind::Reflect(_)
             | NativeFunctionKind::JsonIsRawJson
@@ -135,19 +160,99 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DeclarativeBatch {
     Globals,
+    Primitives,
+    PrimitiveGlobals,
     NamespaceObjects,
 }
 
 pub(super) const fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatch {
-    match property.descriptor {
+    let referenced_function = match property.descriptor {
         IntrinsicDescriptorSpec::Data {
-            value:
-                IntrinsicValueSpec::Function(IntrinsicFunctionId(
-                    NativeFunctionKind::GlobalNumeric(_) | NativeFunctionKind::GlobalUri(_),
-                )),
+            value: IntrinsicValueSpec::Function(id),
             ..
-        } => DeclarativeBatch::Globals,
-        _ => DeclarativeBatch::NamespaceObjects,
+        } => Some(id),
+        _ => None,
+    };
+    if matches!(
+        referenced_function,
+        Some(IntrinsicFunctionId(
+            NativeFunctionKind::GlobalNumeric(_) | NativeFunctionKind::GlobalUri(_)
+        ))
+    ) {
+        return DeclarativeBatch::Globals;
+    }
+    if matches!(
+        (property.holder, referenced_function),
+        (
+            IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
+            Some(IntrinsicFunctionId(
+                NativeFunctionKind::BooleanConstructor
+                    | NativeFunctionKind::NumberConstructor
+                    | NativeFunctionKind::BigIntConstructor
+                    | NativeFunctionKind::StringConstructor
+            ))
+        )
+    ) {
+        return DeclarativeBatch::PrimitiveGlobals;
+    }
+    let references_primitive = match referenced_function {
+        Some(id) => is_primitive_function(id),
+        None => false,
+    };
+    if is_primitive_identity(property.holder) || references_primitive {
+        return DeclarativeBatch::Primitives;
+    }
+    DeclarativeBatch::NamespaceObjects
+}
+
+const fn is_primitive_identity(id: IntrinsicIdentity) -> bool {
+    match id {
+        IntrinsicIdentity::Object(id) => matches!(
+            id,
+            IntrinsicObjectId::BooleanPrototype
+                | IntrinsicObjectId::NumberPrototype
+                | IntrinsicObjectId::BigIntPrototype
+                | IntrinsicObjectId::StringPrototype
+        ),
+        IntrinsicIdentity::Function(id) => is_primitive_function(id),
+    }
+}
+
+const fn is_primitive_function(id: IntrinsicFunctionId) -> bool {
+    matches!(
+        id.0,
+        NativeFunctionKind::BooleanConstructor
+            | NativeFunctionKind::BooleanPrototypeToString
+            | NativeFunctionKind::BooleanPrototypeValueOf
+            | NativeFunctionKind::NumberConstructor
+            | NativeFunctionKind::NumberPrototypeToString
+            | NativeFunctionKind::NumberPrototypeValueOf
+            | NativeFunctionKind::NumberPredicateStatic(_)
+            | NativeFunctionKind::NumberPrototypeFormat(_)
+            | NativeFunctionKind::BigIntConstructor
+            | NativeFunctionKind::BigIntPrototypeToString
+            | NativeFunctionKind::BigIntPrototypeValueOf
+            | NativeFunctionKind::BigIntAsIntN
+            | NativeFunctionKind::BigIntAsUintN
+            | NativeFunctionKind::StringConstructor
+            | NativeFunctionKind::StringPrototypeToString
+            | NativeFunctionKind::StringPrototypeValueOf
+            | NativeFunctionKind::StringPrototypeMethod(_)
+            | NativeFunctionKind::StringRaw
+            | NativeFunctionKind::LocaleString(_)
+    )
+}
+
+pub(super) const fn function_batch(id: IntrinsicFunctionId) -> DeclarativeBatch {
+    if matches!(
+        id.0,
+        NativeFunctionKind::GlobalNumeric(_) | NativeFunctionKind::GlobalUri(_)
+    ) {
+        DeclarativeBatch::Globals
+    } else if is_primitive_function(id) {
+        DeclarativeBatch::Primitives
+    } else {
+        DeclarativeBatch::NamespaceObjects
     }
 }
 
@@ -190,6 +295,8 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
 }
 
 fn visit_property_specs(visit: PropertySink<'_>) {
+    primitives::visit_properties(visit);
+    string::visit_properties(visit);
     globals::visit_properties(visit);
     reflect::visit_properties(visit);
     json::visit_properties(visit);

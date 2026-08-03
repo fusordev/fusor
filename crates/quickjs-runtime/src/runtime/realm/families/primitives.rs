@@ -1,9 +1,17 @@
 //! Boolean, Number, `BigInt`, and primitive prototype declarations.
 
-use super::{FunctionSink, ObjectSink, object, object_prototype, ordinary};
+use super::{
+    FunctionSink, ObjectSink, PropertySink, data, method, object, object_prototype, ordinary,
+};
 use crate::runtime::realm::{
-    NativeFunctionKind, PredefinedAtom,
-    schema::{IntrinsicNameSpec, IntrinsicObjectId, IntrinsicObjectKind, RealmNameId},
+    CONSTRUCTOR_PROTOTYPE_PROPERTY, FROZEN_PROPERTY, IDENTITY_PROPERTY, LOCALE_STRING_METHODS,
+    NUMBER_FORMAT_METHODS, NUMBER_PREDEFINED_VALUE_STATICS, NUMBER_PREDICATE_STATICS,
+    NUMBER_VALUE_STATICS, NativeFunctionKind, PredefinedAtom,
+    schema::{
+        IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec,
+        IntrinsicObjectId, IntrinsicObjectKind, IntrinsicStringSpec, IntrinsicValueSpec,
+        RealmNameId,
+    },
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -103,4 +111,196 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     ] {
         visit(ordinary(kind, name, length));
     }
+}
+
+pub(super) fn visit_properties(visit: PropertySink<'_>) {
+    visit_boolean_properties(visit);
+    visit_number_properties(visit);
+    visit_bigint_properties(visit);
+    visit_locale_properties(visit);
+    for (key, constructor) in [
+        (
+            PredefinedAtom::Boolean,
+            NativeFunctionKind::BooleanConstructor,
+        ),
+        (
+            PredefinedAtom::Number,
+            NativeFunctionKind::NumberConstructor,
+        ),
+        (
+            PredefinedAtom::BigInt,
+            NativeFunctionKind::BigIntConstructor,
+        ),
+        (
+            PredefinedAtom::String,
+            NativeFunctionKind::StringConstructor,
+        ),
+    ] {
+        visit(method(
+            IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
+            IntrinsicKeySpec::PredefinedString(key),
+            constructor,
+        ));
+    }
+}
+
+fn visit_boolean_properties(visit: PropertySink<'_>) {
+    let prototype = IntrinsicIdentity::Object(IntrinsicObjectId::BooleanPrototype);
+    for (key, function) in [
+        (
+            PredefinedAtom::Constructor,
+            NativeFunctionKind::BooleanConstructor,
+        ),
+        (
+            PredefinedAtom::ToString,
+            NativeFunctionKind::BooleanPrototypeToString,
+        ),
+        (
+            PredefinedAtom::ValueOf,
+            NativeFunctionKind::BooleanPrototypeValueOf,
+        ),
+    ] {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::PredefinedString(key),
+            function,
+        ));
+    }
+    visit(constructor_prototype(
+        NativeFunctionKind::BooleanConstructor,
+        IntrinsicObjectId::BooleanPrototype,
+    ));
+}
+
+fn visit_number_properties(visit: PropertySink<'_>) {
+    let prototype = IntrinsicIdentity::Object(IntrinsicObjectId::NumberPrototype);
+    for (key, function) in [
+        (
+            PredefinedAtom::Constructor,
+            NativeFunctionKind::NumberConstructor,
+        ),
+        (
+            PredefinedAtom::ToString,
+            NativeFunctionKind::NumberPrototypeToString,
+        ),
+        (
+            PredefinedAtom::ValueOf,
+            NativeFunctionKind::NumberPrototypeValueOf,
+        ),
+    ] {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::PredefinedString(key),
+            function,
+        ));
+    }
+    let constructor =
+        IntrinsicIdentity::Function(IntrinsicFunctionId(NativeFunctionKind::NumberConstructor));
+    visit(constructor_prototype(
+        NativeFunctionKind::NumberConstructor,
+        IntrinsicObjectId::NumberPrototype,
+    ));
+    for (atom, bits) in NUMBER_PREDEFINED_VALUE_STATICS {
+        visit(data(
+            constructor,
+            IntrinsicKeySpec::PredefinedString(atom),
+            FROZEN_PROPERTY,
+            IntrinsicValueSpec::NumberBits(bits),
+        ));
+    }
+    for (name, bits) in NUMBER_VALUE_STATICS {
+        visit(data(
+            constructor,
+            IntrinsicKeySpec::InternedString(RealmNameId::NumberValue(name)),
+            FROZEN_PROPERTY,
+            IntrinsicValueSpec::NumberBits(bits),
+        ));
+    }
+    for (_, predicate) in NUMBER_PREDICATE_STATICS {
+        visit(method(
+            constructor,
+            IntrinsicKeySpec::InternedString(RealmNameId::NumberPredicate(predicate)),
+            NativeFunctionKind::NumberPredicateStatic(predicate),
+        ));
+    }
+    for format in NUMBER_FORMAT_METHODS {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::NumberFormat(format)),
+            NativeFunctionKind::NumberPrototypeFormat(format),
+        ));
+    }
+}
+
+fn visit_bigint_properties(visit: PropertySink<'_>) {
+    let prototype = IntrinsicIdentity::Object(IntrinsicObjectId::BigIntPrototype);
+    for (key, function) in [
+        (
+            PredefinedAtom::Constructor,
+            NativeFunctionKind::BigIntConstructor,
+        ),
+        (
+            PredefinedAtom::ToString,
+            NativeFunctionKind::BigIntPrototypeToString,
+        ),
+        (
+            PredefinedAtom::ValueOf,
+            NativeFunctionKind::BigIntPrototypeValueOf,
+        ),
+    ] {
+        visit(method(
+            prototype,
+            IntrinsicKeySpec::PredefinedString(key),
+            function,
+        ));
+    }
+    visit(data(
+        prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        IDENTITY_PROPERTY,
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Predefined(PredefinedAtom::BigInt)),
+    ));
+    let constructor =
+        IntrinsicIdentity::Function(IntrinsicFunctionId(NativeFunctionKind::BigIntConstructor));
+    visit(constructor_prototype(
+        NativeFunctionKind::BigIntConstructor,
+        IntrinsicObjectId::BigIntPrototype,
+    ));
+    for function in [
+        NativeFunctionKind::BigIntAsIntN,
+        NativeFunctionKind::BigIntAsUintN,
+    ] {
+        visit(method(
+            constructor,
+            IntrinsicKeySpec::InternedString(RealmNameId::BigIntStatic(function)),
+            function,
+        ));
+    }
+}
+
+fn visit_locale_properties(visit: PropertySink<'_>) {
+    for (method_id, holder) in LOCALE_STRING_METHODS.into_iter().zip([
+        IntrinsicObjectId::ObjectPrototype,
+        IntrinsicObjectId::NumberPrototype,
+        IntrinsicObjectId::BigIntPrototype,
+        IntrinsicObjectId::ArrayPrototype,
+    ]) {
+        visit(method(
+            IntrinsicIdentity::Object(holder),
+            IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToLocaleString),
+            NativeFunctionKind::LocaleString(method_id),
+        ));
+    }
+}
+
+const fn constructor_prototype(
+    constructor: NativeFunctionKind,
+    prototype: IntrinsicObjectId,
+) -> crate::runtime::realm::schema::IntrinsicPropertySpec {
+    data(
+        IntrinsicIdentity::Function(IntrinsicFunctionId(constructor)),
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(prototype),
+    )
 }

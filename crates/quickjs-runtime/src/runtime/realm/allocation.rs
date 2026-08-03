@@ -1,8 +1,8 @@
 //! Transaction-private materialization of typed intrinsic identities.
 
 use super::{
-    FunctionId, HeapObject, HeapReference, ObjectId, ObjectRecord, RealmBuildTransaction, RealmId,
-    RuntimeError, RuntimeResource, allocation_failed,
+    FunctionId, HeapObject, HeapReference, JsNumber, JsString, ObjectId, ObjectRecord,
+    RealmBuildTransaction, RealmId, RuntimeError, RuntimeResource, allocation_failed,
     families::{RealmFunctionSchema, is_declarative_function, is_declarative_object},
     reserved_record,
     schema::{
@@ -10,6 +10,7 @@ use super::{
         IntrinsicObjectKind, PrototypeSpec,
     },
 };
+use crate::runtime::BoxedPrimitive;
 
 /// Pre-reserved records whose capacities are derived from declarative holders.
 pub(super) struct DeclarativeIntrinsicRecords {
@@ -92,10 +93,28 @@ impl RealmBuildTransaction<'_> {
             .iter()
             .filter(|spec| is_declarative_object(spec.id))
         {
-            assert_eq!(object.kind, IntrinsicObjectKind::Ordinary);
             let mut record = records.take(IntrinsicIdentity::Object(object.id));
             record.replace_prototype(self.resolve_intrinsic_prototype(object.prototype));
-            self.insert_reserved_object(object.id, HeapObject::ordinary(record));
+            let object_value = match object.kind {
+                IntrinsicObjectKind::Ordinary | IntrinsicObjectKind::BigIntPrototype => {
+                    HeapObject::ordinary(record)
+                }
+                IntrinsicObjectKind::BooleanPrototype => {
+                    HeapObject::with_boxed_primitive(record, BoxedPrimitive::Boolean(false))
+                }
+                IntrinsicObjectKind::NumberPrototype => HeapObject::with_boxed_primitive(
+                    record,
+                    BoxedPrimitive::Number(JsNumber::from_i32(0)),
+                ),
+                IntrinsicObjectKind::StringPrototype => HeapObject::with_boxed_primitive(
+                    record,
+                    BoxedPrimitive::String(JsString::empty()),
+                ),
+                IntrinsicObjectKind::ArrayPrototype => {
+                    unreachable!("Array allocation remains a documented special hook")
+                }
+            };
+            self.insert_reserved_object(object.id, object_value);
         }
         for function in schema
             .specs()

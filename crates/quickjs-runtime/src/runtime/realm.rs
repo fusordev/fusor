@@ -39,9 +39,9 @@ use std::collections::TryReserveError;
 use super::{
     Arc, Arena, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics, ArrayMutator,
     ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic, AtomError, AtomTable,
-    BigIntIntrinsics, BooleanIntrinsics, BoxedPrimitive, Context, ErrorIntrinsic,
-    ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation, GlobalNumericFunction,
-    HandleError, HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
+    BigIntIntrinsics, BooleanIntrinsics, Context, ErrorIntrinsic, ErrorIntrinsicKind,
+    ErrorIntrinsics, FunctionId, FunctionImplementation, GlobalNumericFunction, HandleError,
+    HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
     IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, MathMethod, NativeFunction,
     NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord,
     PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics,
@@ -470,11 +470,7 @@ struct RealmKeys {
     errors: [PropertyKey; ErrorIntrinsicKind::ALL.len()],
     function: PropertyKey,
     object: PropertyKey,
-    bigint: PropertyKey,
     join: PropertyKey,
-    boolean: PropertyKey,
-    number: PropertyKey,
-    string: PropertyKey,
     array: PropertyKey,
     symbol: PropertyKey,
     prototype: PropertyKey,
@@ -506,11 +502,7 @@ impl RealmKeys {
             errors: ErrorIntrinsicKind::ALL.map(|kind| key(kind.predefined_atom())),
             function: key(PredefinedAtom::Function),
             object: key(PredefinedAtom::Object),
-            bigint: key(PredefinedAtom::BigInt),
             join: key(PredefinedAtom::Join),
-            boolean: key(PredefinedAtom::Boolean),
-            number: key(PredefinedAtom::Number),
-            string: key(PredefinedAtom::String),
             array: key(PredefinedAtom::Array),
             symbol: key(PredefinedAtom::Symbol),
             prototype: key(PredefinedAtom::Prototype),
@@ -551,13 +543,7 @@ struct RealmNames {
     errors: [JsString; ErrorIntrinsicKind::ALL.len()],
     function: JsString,
     object: JsString,
-    bigint: JsString,
     join: JsString,
-    as_int_n: JsString,
-    as_uint_n: JsString,
-    boolean: JsString,
-    number: JsString,
-    string: JsString,
     array: JsString,
     symbol: JsString,
     empty: JsString,
@@ -594,13 +580,7 @@ impl RealmNames {
                 .map(|kind| predefined_string(atoms, kind.predefined_atom())),
             function: predefined_string(atoms, PredefinedAtom::Function),
             object: predefined_string(atoms, PredefinedAtom::Object),
-            bigint: predefined_string(atoms, PredefinedAtom::BigInt),
             join: predefined_string(atoms, PredefinedAtom::Join),
-            as_int_n: JsString::from_utf8("asIntN").map_err(AtomError::from)?,
-            as_uint_n: JsString::from_utf8("asUintN").map_err(AtomError::from)?,
-            boolean: predefined_string(atoms, PredefinedAtom::Boolean),
-            number: predefined_string(atoms, PredefinedAtom::Number),
-            string: predefined_string(atoms, PredefinedAtom::String),
             array: predefined_string(atoms, PredefinedAtom::Array),
             symbol: predefined_string(atoms, PredefinedAtom::Symbol),
             empty: predefined_string(atoms, PredefinedAtom::EmptyString),
@@ -663,64 +643,6 @@ struct ErrorRecords {
     is_error: ObjectRecord,
 }
 
-struct PrimitiveIntrinsicRecords {
-    prototype: ObjectRecord,
-    constructor: ObjectRecord,
-    to_string: ObjectRecord,
-    value_of: ObjectRecord,
-}
-
-/// Reserved records for the `BigInt` constructor, prototype, and methods.
-struct BigIntIntrinsicRecords {
-    prototype: ObjectRecord,
-    constructor: ObjectRecord,
-    to_string: ObjectRecord,
-    value_of: ObjectRecord,
-    as_int_n: ObjectRecord,
-    as_uint_n: ObjectRecord,
-}
-
-impl BigIntIntrinsicRecords {
-    /// Reserves the `BigInt` records in the realm transaction's order.
-    ///
-    /// `BigInt.prototype` holds `constructor`, `toString`, `toLocaleString`,
-    /// `valueOf`, and `[Symbol.toStringTag]`; the constructor holds `prototype`,
-    /// `length`, `name`, `asIntN`, and `asUintN`.
-    fn try_new() -> Result<Self, RuntimeError> {
-        Ok(Self {
-            prototype: reserved_record(5)?,
-            constructor: reserved_record(5)?,
-            to_string: reserved_record(2)?,
-            value_of: reserved_record(2)?,
-            as_int_n: reserved_record(2)?,
-            as_uint_n: reserved_record(2)?,
-        })
-    }
-}
-
-impl PrimitiveIntrinsicRecords {
-    /// Reserves one primitive wrapper's records.
-    ///
-    /// `prototype_properties` differs per family because each prototype carries
-    /// its own extra members beyond `constructor`, `toString`, and `valueOf`.
-    fn try_new(prototype_properties: usize) -> Result<Self, RuntimeError> {
-        Self::try_new_with_constructor(prototype_properties, 3)
-    }
-
-    /// Reserves records when the constructor also carries static members.
-    fn try_new_with_constructor(
-        prototype_properties: usize,
-        constructor_properties: usize,
-    ) -> Result<Self, RuntimeError> {
-        Ok(Self {
-            prototype: reserved_record(prototype_properties)?,
-            constructor: reserved_record(constructor_properties)?,
-            to_string: reserved_record(2)?,
-            value_of: reserved_record(2)?,
-        })
-    }
-}
-
 struct ArrayIntrinsicRecords {
     prototype: ObjectRecord,
     constructor: ObjectRecord,
@@ -756,21 +678,11 @@ struct SymbolIntrinsicRecords {
 struct RealmRecords {
     base: RealmBaseRecords,
     errors: ErrorRecords,
-    boolean: PrimitiveIntrinsicRecords,
-    number: PrimitiveIntrinsicRecords,
-    bigint: BigIntIntrinsicRecords,
-    string: PrimitiveIntrinsicRecords,
-    string_methods: [ObjectRecord; STRING_PROTOTYPE_METHODS.len()],
-    number_predicates: [ObjectRecord; NUMBER_PREDICATE_STATICS.len()],
-    string_from_statics: [ObjectRecord; STRING_FROM_STATICS.len()],
-    string_raw: ObjectRecord,
     array_searches: [ObjectRecord; ARRAY_SEARCH_METHODS.len()],
     array_mutators: [ObjectRecord; ARRAY_MUTATOR_METHODS.len()],
     array_copiers: [ObjectRecord; ARRAY_COPIER_TOTAL],
     array_sorts: [ObjectRecord; ARRAY_SORT_METHODS.len()],
     array_flattens: [ObjectRecord; ARRAY_FLATTEN_METHODS.len()],
-    locale_strings: [ObjectRecord; LOCALE_STRING_METHODS.len()],
-    number_formats: [ObjectRecord; NUMBER_FORMAT_METHODS.len()],
     array_callbacks: [ObjectRecord; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [ObjectRecord; ARRAY_REDUCTION_METHODS.len()],
     array_splice: ObjectRecord,
@@ -831,26 +743,6 @@ impl RealmRecords {
             to_string: reserved_record(2)?,
             is_error: reserved_record(2)?,
         };
-        let boolean = PrimitiveIntrinsicRecords::try_new(3)?;
-        // The `Number` constructor additionally carries its value and predicate
-        // statics plus the two parser aliases.
-        let number = PrimitiveIntrinsicRecords::try_new_with_constructor(
-            4 + NUMBER_FORMAT_METHODS.len(),
-            3 + NUMBER_VALUE_STATICS.len()
-                + NUMBER_PREDEFINED_VALUE_STATICS.len()
-                + NUMBER_PREDICATE_STATICS.len()
-                + 2,
-        )?;
-        let number_predicates = reserved_function_records()?;
-        let bigint = BigIntIntrinsicRecords::try_new()?;
-        // `String.prototype` additionally carries `length`, its iterator, and
-        // every installed method.
-        let string = PrimitiveIntrinsicRecords::try_new_with_constructor(
-            5 + STRING_PROTOTYPE_METHODS.len(),
-            3 + STRING_FROM_STATICS.len() + 1,
-        )?;
-        let string_methods = reserved_function_records()?;
-        let string_from_statics = reserved_function_records()?;
         let mut array = ArrayIntrinsicRecords {
             prototype: reserved_record(
                 8 + ARRAY_SEARCH_METHODS.len()
@@ -905,21 +797,11 @@ impl RealmRecords {
         Ok(Self {
             base,
             errors,
-            boolean,
-            number,
-            bigint,
-            string,
-            string_methods,
-            number_predicates,
-            string_from_statics,
-            string_raw: reserved_record(2)?,
             array_searches: reserved_function_records()?,
             array_mutators: reserved_function_records()?,
             array_copiers: reserved_function_records()?,
             array_sorts: reserved_function_records()?,
             array_flattens: reserved_function_records()?,
-            locale_strings: reserved_function_records()?,
-            number_formats: reserved_function_records()?,
             array_callbacks: reserved_function_records()?,
             array_reductions: reserved_function_records()?,
             array_splice: reserved_record(2)?,
@@ -950,39 +832,6 @@ struct RealmBase {
     function_apply: FunctionId,
     function_bind: FunctionId,
     function_has_instance: FunctionId,
-}
-
-struct PrimitiveIntrinsicGraph {
-    prototype: ObjectId,
-    constructor: FunctionId,
-    to_string: FunctionId,
-    value_of: FunctionId,
-}
-
-#[derive(Clone, Copy)]
-struct PrimitiveIntrinsicKinds {
-    prototype: IntrinsicObjectId,
-    constructor: NativeFunctionKind,
-    to_string: NativeFunctionKind,
-    value_of: NativeFunctionKind,
-}
-
-#[derive(Clone, Copy)]
-struct PrimitivePropertySpec<'a> {
-    constructor_name: &'a JsString,
-    to_string_length: i32,
-    prototype_length: Option<i32>,
-    defer_constructor_prototype: bool,
-}
-
-/// The inserted `BigInt` intrinsic identities.
-struct BigIntIntrinsicGraph {
-    prototype: ObjectId,
-    constructor: FunctionId,
-    to_string: FunctionId,
-    value_of: FunctionId,
-    as_int_n: FunctionId,
-    as_uint_n: FunctionId,
 }
 
 struct ArrayIntrinsicGraph {
@@ -1021,21 +870,11 @@ struct RealmGraph {
     base: RealmBase,
     dynamic_atoms: RealmAtomBindings,
     errors: ErrorIntrinsics,
-    boolean: PrimitiveIntrinsicGraph,
-    number: PrimitiveIntrinsicGraph,
-    bigint: BigIntIntrinsicGraph,
-    string: PrimitiveIntrinsicGraph,
-    string_methods: [FunctionId; STRING_PROTOTYPE_METHODS.len()],
-    number_predicates: [FunctionId; NUMBER_PREDICATE_STATICS.len()],
-    string_from_statics: [FunctionId; STRING_FROM_STATICS.len()],
-    string_raw: FunctionId,
     array_searches: [FunctionId; ARRAY_SEARCH_METHODS.len()],
     array_mutators: [FunctionId; ARRAY_MUTATOR_METHODS.len()],
     array_copiers: [FunctionId; ARRAY_COPIER_TOTAL],
     array_sorts: [FunctionId; ARRAY_SORT_METHODS.len()],
     array_flattens: [FunctionId; ARRAY_FLATTEN_METHODS.len()],
-    locale_strings: [FunctionId; LOCALE_STRING_METHODS.len()],
-    number_formats: [FunctionId; NUMBER_FORMAT_METHODS.len()],
     array_callbacks: [FunctionId; ARRAY_CALLBACK_METHODS.len()],
     array_reductions: [FunctionId; ARRAY_REDUCTION_METHODS.len()],
     array_splice: FunctionId,
@@ -1118,6 +957,30 @@ impl Runtime {
         }
 
         let id = graph.base.realm;
+        let boolean_prototype = transaction
+            .allocated
+            .object(IntrinsicObjectId::BooleanPrototype);
+        let boolean_constructor = transaction
+            .allocated
+            .function(IntrinsicFunctionId(NativeFunctionKind::BooleanConstructor));
+        let number_prototype = transaction
+            .allocated
+            .object(IntrinsicObjectId::NumberPrototype);
+        let number_constructor = transaction
+            .allocated
+            .function(IntrinsicFunctionId(NativeFunctionKind::NumberConstructor));
+        let bigint_prototype = transaction
+            .allocated
+            .object(IntrinsicObjectId::BigIntPrototype);
+        let bigint_constructor = transaction
+            .allocated
+            .function(IntrinsicFunctionId(NativeFunctionKind::BigIntConstructor));
+        let string_prototype = transaction
+            .allocated
+            .object(IntrinsicObjectId::StringPrototype);
+        let string_constructor = transaction
+            .allocated
+            .function(IntrinsicFunctionId(NativeFunctionKind::StringConstructor));
         let state = transaction
             .realms
             .get_mut(id)
@@ -1128,20 +991,20 @@ impl Runtime {
             function_constructor: graph.base.function_constructor,
             errors: graph.errors,
             boolean: BooleanIntrinsics {
-                prototype: graph.boolean.prototype,
-                constructor: graph.boolean.constructor,
+                prototype: boolean_prototype,
+                constructor: boolean_constructor,
             },
             number: NumberIntrinsics {
-                prototype: graph.number.prototype,
-                constructor: graph.number.constructor,
+                prototype: number_prototype,
+                constructor: number_constructor,
             },
             bigint: BigIntIntrinsics {
-                prototype: graph.bigint.prototype,
-                constructor: graph.bigint.constructor,
+                prototype: bigint_prototype,
+                constructor: bigint_constructor,
             },
             string: StringIntrinsics {
-                prototype: graph.string.prototype,
-                constructor: graph.string.constructor,
+                prototype: string_prototype,
+                constructor: string_constructor,
             },
             array: ArrayIntrinsics {
                 prototype: graph.array.prototype,
@@ -1212,56 +1075,15 @@ impl RealmBuildTransaction<'_> {
         let base = self.insert_realm_base(records.base);
 
         let errors = self.insert_error_intrinsics(&base, records.errors);
-        let boolean = self.insert_primitive_intrinsics(
-            &base,
-            records.boolean,
-            BoxedPrimitive::Boolean(false),
-            PrimitiveIntrinsicKinds {
-                prototype: IntrinsicObjectId::BooleanPrototype,
-                constructor: NativeFunctionKind::BooleanConstructor,
-                to_string: NativeFunctionKind::BooleanPrototypeToString,
-                value_of: NativeFunctionKind::BooleanPrototypeValueOf,
-            },
-        );
-        let number = self.insert_primitive_intrinsics(
-            &base,
-            records.number,
-            BoxedPrimitive::Number(JsNumber::from_i32(0)),
-            PrimitiveIntrinsicKinds {
-                prototype: IntrinsicObjectId::NumberPrototype,
-                constructor: NativeFunctionKind::NumberConstructor,
-                to_string: NativeFunctionKind::NumberPrototypeToString,
-                value_of: NativeFunctionKind::NumberPrototypeValueOf,
-            },
-        );
-        let string = self.insert_primitive_intrinsics(
-            &base,
-            records.string,
-            BoxedPrimitive::String(JsString::empty()),
-            PrimitiveIntrinsicKinds {
-                prototype: IntrinsicObjectId::StringPrototype,
-                constructor: NativeFunctionKind::StringConstructor,
-                to_string: NativeFunctionKind::StringPrototypeToString,
-                value_of: NativeFunctionKind::StringPrototypeValueOf,
-            },
-        );
-        let bigint = self.insert_bigint_intrinsics(&base, records.bigint);
         let array = self.insert_array_intrinsics(&base, records.array);
         let iterators = self.insert_iterator_intrinsics(&base, records.iterators);
         let symbol = self.insert_symbol_intrinsics(&base, records.symbol);
         self.insert_declarative_intrinsics(base.realm, intrinsic_schema, records.declarative);
-        let string_methods = self.insert_string_prototype_methods(&base, records.string_methods);
-        let number_predicates = self.insert_number_predicates(&base, records.number_predicates);
-        let string_from_statics =
-            self.insert_string_from_statics(&base, records.string_from_statics);
-        let string_raw = self.insert_string_raw(&base, records.string_raw);
         let array_searches = self.insert_array_searches(&base, records.array_searches);
         let array_mutators = self.insert_array_mutators(&base, records.array_mutators);
         let array_copiers = self.insert_array_copiers(&base, records.array_copiers);
         let array_sorts = self.insert_array_sorts(&base, records.array_sorts);
         let array_flattens = self.insert_array_flattens(&base, records.array_flattens);
-        let locale_strings = self.insert_locale_strings(&base, records.locale_strings);
-        let number_formats = self.insert_number_formats(&base, records.number_formats);
         let array_callbacks = self.insert_array_callbacks(&base, records.array_callbacks);
         let array_reductions = self.insert_array_reductions(&base, records.array_reductions);
         let array_splice = self.insert_reserved_native(
@@ -1284,21 +1106,11 @@ impl RealmBuildTransaction<'_> {
             base,
             dynamic_atoms,
             errors,
-            boolean,
-            number,
-            bigint,
-            string,
-            string_methods,
-            number_predicates,
-            string_from_statics,
-            string_raw,
             array_searches,
             array_mutators,
             array_copiers,
             array_sorts,
             array_flattens,
-            locale_strings,
-            number_formats,
             array_callbacks,
             array_reductions,
             array_splice,
@@ -1571,45 +1383,6 @@ impl RealmBuildTransaction<'_> {
         }
     }
 
-    fn insert_primitive_intrinsics(
-        &mut self,
-        base: &RealmBase,
-        records: PrimitiveIntrinsicRecords,
-        primitive: BoxedPrimitive,
-        kinds: PrimitiveIntrinsicKinds,
-    ) -> PrimitiveIntrinsicGraph {
-        let prototype = self.insert_reserved_boxed_object(
-            kinds.prototype,
-            records.prototype,
-            HeapReference::Object(base.object_prototype),
-            primitive,
-        );
-        let constructor = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            kinds.constructor,
-            records.constructor,
-        );
-        let to_string = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            kinds.to_string,
-            records.to_string,
-        );
-        let value_of = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            kinds.value_of,
-            records.value_of,
-        );
-        PrimitiveIntrinsicGraph {
-            prototype,
-            constructor,
-            to_string,
-            value_of,
-        }
-    }
-
     /// Inserts one native function per `Array.prototype` reduction.
     fn insert_array_reductions(
         &mut self,
@@ -1649,25 +1422,6 @@ impl RealmBuildTransaction<'_> {
             ));
         }
         inserted.map(|slot| slot.expect("every Array callback function was inserted"))
-    }
-
-    /// Inserts one native function per `Number.prototype` decimal rendering.
-    fn insert_number_formats(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; NUMBER_FORMAT_METHODS.len()],
-    ) -> [FunctionId; NUMBER_FORMAT_METHODS.len()] {
-        let mut inserted = [None; NUMBER_FORMAT_METHODS.len()];
-        for ((slot, format), record) in inserted.iter_mut().zip(NUMBER_FORMAT_METHODS).zip(records)
-        {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::NumberPrototypeFormat(format),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every Number format function was inserted"))
     }
 
     /// Inserts one native function per `Array.prototype` copying method.
@@ -1751,25 +1505,6 @@ impl RealmBuildTransaction<'_> {
         inserted.map(|slot| slot.expect("every Array flatten function was inserted"))
     }
 
-    /// Inserts the no-`Intl` locale-string methods.
-    fn insert_locale_strings(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; LOCALE_STRING_METHODS.len()],
-    ) -> [FunctionId; LOCALE_STRING_METHODS.len()] {
-        let mut inserted = [None; LOCALE_STRING_METHODS.len()];
-        for ((slot, method), record) in inserted.iter_mut().zip(LOCALE_STRING_METHODS).zip(records)
-        {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::LocaleString(method),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every locale-string function was inserted"))
-    }
-
     /// Inserts one native function per `Array.prototype` search.
     fn insert_array_searches(
         &mut self,
@@ -1788,138 +1523,6 @@ impl RealmBuildTransaction<'_> {
             ));
         }
         inserted.map(|slot| slot.expect("every Array search function was inserted"))
-    }
-
-    /// Inserts one native function per `String` code-unit factory.
-    fn insert_string_from_statics(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; STRING_FROM_STATICS.len()],
-    ) -> [FunctionId; STRING_FROM_STATICS.len()] {
-        let mut inserted = [None; STRING_FROM_STATICS.len()];
-        for ((slot, (_, kind)), record) in inserted.iter_mut().zip(STRING_FROM_STATICS).zip(records)
-        {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::StringPrototypeMethod(kind),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every String factory function was inserted"))
-    }
-
-    fn insert_string_raw(&mut self, base: &RealmBase, record: ObjectRecord) -> FunctionId {
-        self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::StringRaw,
-            record,
-        )
-    }
-
-    /// Inserts one native function per `Number` predicate static.
-    fn insert_number_predicates(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; NUMBER_PREDICATE_STATICS.len()],
-    ) -> [FunctionId; NUMBER_PREDICATE_STATICS.len()] {
-        let mut inserted = [None; NUMBER_PREDICATE_STATICS.len()];
-        for ((slot, (_, predicate)), record) in inserted
-            .iter_mut()
-            .zip(NUMBER_PREDICATE_STATICS)
-            .zip(records)
-        {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::NumberPredicateStatic(predicate),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every Number predicate function was inserted"))
-    }
-
-    /// Inserts one native function per installed `String.prototype` method.
-    ///
-    /// The result keeps `STRING_PROTOTYPE_METHODS` order so the publication step
-    /// can zip the two together.
-    fn insert_string_prototype_methods(
-        &mut self,
-        base: &RealmBase,
-        records: [ObjectRecord; STRING_PROTOTYPE_METHODS.len()],
-    ) -> [FunctionId; STRING_PROTOTYPE_METHODS.len()] {
-        let mut inserted = [None; STRING_PROTOTYPE_METHODS.len()];
-        for ((slot, method), record) in inserted
-            .iter_mut()
-            .zip(STRING_PROTOTYPE_METHODS)
-            .zip(records)
-        {
-            *slot = Some(self.insert_reserved_native(
-                base.realm,
-                HeapReference::Function(base.function_prototype),
-                NativeFunctionKind::StringPrototypeMethod(method.method),
-                record,
-            ));
-        }
-        inserted.map(|slot| slot.expect("every String method function was inserted"))
-    }
-
-    /// Inserts the `BigInt` constructor, prototype, and methods.
-    ///
-    /// `BigInt.prototype` is an ordinary object, not a wrapper: it carries no
-    /// `[[BigIntData]]`, which is why `BigInt.prototype.valueOf()` throws
-    /// instead of returning `0n` (`quickjs.c:56014-56027`).
-    fn insert_bigint_intrinsics(
-        &mut self,
-        base: &RealmBase,
-        mut records: BigIntIntrinsicRecords,
-    ) -> BigIntIntrinsicGraph {
-        records
-            .prototype
-            .replace_prototype(Some(HeapReference::Object(base.object_prototype)));
-        let prototype = self.insert_reserved_object(
-            IntrinsicObjectId::BigIntPrototype,
-            HeapObject::ordinary(records.prototype),
-        );
-        let constructor = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::BigIntConstructor,
-            records.constructor,
-        );
-        let to_string = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::BigIntPrototypeToString,
-            records.to_string,
-        );
-        let value_of = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::BigIntPrototypeValueOf,
-            records.value_of,
-        );
-        let signed_truncation = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::BigIntAsIntN,
-            records.as_int_n,
-        );
-        let unsigned_truncation = self.insert_reserved_native(
-            base.realm,
-            HeapReference::Function(base.function_prototype),
-            NativeFunctionKind::BigIntAsUintN,
-            records.as_uint_n,
-        );
-        BigIntIntrinsicGraph {
-            prototype,
-            constructor,
-            to_string,
-            value_of,
-            as_int_n: signed_truncation,
-            as_uint_n: unsigned_truncation,
-        }
     }
 
     fn insert_array_intrinsics(
@@ -2148,17 +1751,6 @@ impl RealmBuildTransaction<'_> {
         record.replace_prototype(Some(prototype));
         self.insert_reserved_object(id, HeapObject::ordinary(record))
     }
-
-    fn insert_reserved_boxed_object(
-        &mut self,
-        id: IntrinsicObjectId,
-        mut record: ObjectRecord,
-        prototype: HeapReference,
-        primitive: BoxedPrimitive,
-    ) -> ObjectId {
-        record.replace_prototype(Some(prototype));
-        self.insert_reserved_object(id, HeapObject::with_boxed_primitive(record, primitive))
-    }
 }
 
 impl RealmBuildTransaction<'_> {
@@ -2179,46 +1771,14 @@ impl RealmBuildTransaction<'_> {
         self.publish_object_reflection_methods(graph, keys)?;
         self.publish_error_intrinsic_properties(graph, keys, names)?;
         self.publish_function_intrinsic_properties(graph, keys, names)?;
-        self.publish_primitive_intrinsic_properties(
-            &graph.boolean,
-            PrimitivePropertySpec {
-                constructor_name: &names.boolean,
-                to_string_length: 0,
-                prototype_length: None,
-                defer_constructor_prototype: false,
-            },
-            keys,
-            names,
-        )?;
-        self.publish_primitive_intrinsic_properties(
-            &graph.number,
-            PrimitivePropertySpec {
-                constructor_name: &names.number,
-                to_string_length: 1,
-                prototype_length: None,
-                defer_constructor_prototype: false,
-            },
-            keys,
-            names,
-        )?;
-        self.publish_primitive_intrinsic_properties(
-            &graph.string,
-            PrimitivePropertySpec {
-                constructor_name: &names.string,
-                to_string_length: 0,
-                prototype_length: Some(0),
-                defer_constructor_prototype: true,
-            },
-            keys,
-            names,
-        )?;
         self.publish_array_constructor_identity(&graph.array, keys, names)?;
-        self.publish_string_prototype_methods(graph, keys)?;
         self.publish_number_statics(graph, keys)?;
-        self.publish_string_raw_and_constructor_prototype(graph, keys)?;
-        self.publish_bigint_intrinsic_properties(&graph.bigint, &graph.dynamic_atoms, keys, names)?;
         self.publish_array_intrinsic_properties(&graph.array, keys, names)?;
-        self.publish_locale_string_methods(graph, keys)?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::Primitives,
+        )?;
         self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
         self.publish_global_value_properties(graph)?;
         self.publish_intrinsic_schema_batch(
@@ -2237,43 +1797,20 @@ impl RealmBuildTransaction<'_> {
             [
                 (&keys.function, graph.base.function_constructor),
                 (&keys.object, graph.base.object_constructor),
-                (&keys.boolean, graph.boolean.constructor),
-                (&keys.number, graph.number.constructor),
-                (&keys.bigint, graph.bigint.constructor),
-                (&keys.string, graph.string.constructor),
+            ],
+        )?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::PrimitiveGlobals,
+        )?;
+        self.append_object_methods(
+            graph.base.global_object,
+            [
                 (&keys.array, graph.array.constructor),
                 (&keys.symbol, graph.symbol.constructor),
             ],
         )?;
-        Ok(())
-    }
-
-    /// Publishes deterministic no-`Intl` `toLocaleString` methods.
-    fn publish_locale_string_methods(
-        &mut self,
-        graph: &RealmGraph,
-        keys: &RealmKeys,
-    ) -> Result<(), TryReserveError> {
-        let key = self.predefined_property_key(PredefinedAtom::ToLocaleString);
-        let name = predefined_string(&self.atoms, PredefinedAtom::ToLocaleString);
-        let targets = [
-            graph.base.object_prototype,
-            graph.number.prototype,
-            graph.bigint.prototype,
-            graph.array.prototype,
-        ];
-        for (target, function) in targets.into_iter().zip(graph.locale_strings) {
-            self.objects
-                .get_mut(target)
-                .expect("locale-string prototype remains live")
-                .record
-                .append_data(
-                    key.clone(),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
-            self.append_function_identity(function, &name, 0, keys)?;
-        }
         Ok(())
     }
 
@@ -2582,81 +2119,6 @@ impl RealmBuildTransaction<'_> {
         Ok(())
     }
 
-    fn publish_primitive_intrinsic_properties(
-        &mut self,
-        graph: &PrimitiveIntrinsicGraph,
-        spec: PrimitivePropertySpec<'_>,
-        keys: &RealmKeys,
-        names: &RealmNames,
-    ) -> Result<(), TryReserveError> {
-        if let Some(length) = spec.prototype_length {
-            self.objects
-                .get_mut(graph.prototype)
-                .expect("new primitive prototype remains live")
-                .record
-                .append_data(
-                    keys.length.clone(),
-                    IDENTITY_PROPERTY,
-                    StoredValue::Number(JsNumber::from_i32(length)),
-                )?;
-        }
-        self.append_object_methods(
-            graph.prototype,
-            [
-                (&keys.constructor, graph.constructor),
-                (&keys.to_string, graph.to_string),
-                (&keys.value_of, graph.value_of),
-            ],
-        )?;
-        if spec.defer_constructor_prototype {
-            self.append_function_identity(graph.constructor, spec.constructor_name, 1, keys)?;
-        } else {
-            self.append_constructor_identity(
-                graph.constructor,
-                StoredValue::Object(graph.prototype),
-                spec.constructor_name,
-                keys,
-            )?;
-        }
-        self.append_function_identity(
-            graph.to_string,
-            &names.to_string,
-            spec.to_string_length,
-            keys,
-        )?;
-        self.append_function_identity(graph.value_of, &names.value_of, 0, keys)
-    }
-
-    /// Publishes `String.raw` before the constructor's `prototype` property so
-    /// the observable own-key order matches the intrinsic creation algorithm.
-    fn publish_string_raw_and_constructor_prototype(
-        &mut self,
-        graph: &RealmGraph,
-        keys: &RealmKeys,
-    ) -> Result<(), TryReserveError> {
-        let name = predefined_string(&self.atoms, PredefinedAtom::Raw);
-        let key = self.predefined_property_key(PredefinedAtom::Raw);
-        self.functions
-            .get_mut(graph.string.constructor)
-            .expect("new String constructor remains live")
-            .object
-            .append_data(
-                key,
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.string_raw),
-            )?;
-        self.append_function_identity(graph.string_raw, &name, 1, keys)?;
-        self.functions
-            .get_mut(graph.string.constructor)
-            .expect("new String constructor remains live")
-            .object
-            .append_data(
-                keys.prototype.clone(),
-                CONSTRUCTOR_PROTOTYPE_PROPERTY,
-                StoredValue::Object(graph.string.prototype),
-            )
-    }
-
     /// Publishes the `Object.prototype` reflection methods.
     fn publish_object_reflection_methods(
         &mut self,
@@ -2689,109 +2151,16 @@ impl RealmBuildTransaction<'_> {
         Ok(())
     }
 
-    /// Publishes every installed `String.prototype` method.
-    ///
-    /// Each is a `METHOD_PROPERTY`, so it is writable and configurable but not
-    /// enumerable, and carries the `name` and `length` the pinned oracle reports.
-    fn publish_string_prototype_methods(
-        &mut self,
-        graph: &RealmGraph,
-        keys: &RealmKeys,
-    ) -> Result<(), TryReserveError> {
-        for (method, function) in STRING_PROTOTYPE_METHODS
-            .into_iter()
-            .zip(graph.string_methods)
-        {
-            let (key, name) = if let Some(atom) = method.predefined_name {
-                (
-                    self.predefined_property_key(atom),
-                    predefined_string(&self.atoms, atom),
-                )
-            } else {
-                let atom = graph
-                    .dynamic_atoms
-                    .atom(RealmNameId::StringMethod(method.method))
-                    .clone();
-                let name = atom
-                    .description()
-                    .expect("interned String method name has a description")
-                    .clone();
-                (PropertyKey::from_validated_atom(atom), name)
-            };
-            self.objects
-                .get_mut(graph.string.prototype)
-                .expect("new String.prototype remains live")
-                .record
-                .append_data(key, METHOD_PROPERTY, StoredValue::Function(function))?;
-            self.append_function_identity(function, &name, method.length, keys)?;
-        }
-        Ok(())
-    }
-
-    /// Publishes the `Number` value and predicate statics plus `Array.isArray`.
-    ///
-    /// The value properties are frozen, matching the pinned descriptors for
-    /// `Number.MAX_VALUE`; the predicates are ordinary methods.
+    /// Publishes the Array method families that have not migrated yet.
     #[expect(
         clippy::too_many_lines,
-        reason = "one flat publication site keeps the Number, Array, and String constructor statics and their exact descriptors auditable together"
+        reason = "the remaining Array method families preserve their exact declaration order until the Array schema migration"
     )]
     fn publish_number_statics(
         &mut self,
         graph: &RealmGraph,
         keys: &RealmKeys,
     ) -> Result<(), TryReserveError> {
-        for (atom, bits) in NUMBER_PREDEFINED_VALUE_STATICS {
-            let key = self.predefined_property_key(atom);
-            self.functions
-                .get_mut(graph.number.constructor)
-                .expect("new Number constructor remains live")
-                .object
-                .append_data(
-                    key,
-                    FROZEN_PROPERTY,
-                    StoredValue::Number(JsNumber::from_f64(f64::from_bits(bits))),
-                )?;
-        }
-        for (name, bits) in NUMBER_VALUE_STATICS {
-            let atom = graph
-                .dynamic_atoms
-                .atom(RealmNameId::NumberValue(name))
-                .clone();
-            self.functions
-                .get_mut(graph.number.constructor)
-                .expect("new Number constructor remains live")
-                .object
-                .append_data(
-                    PropertyKey::from_validated_atom(atom),
-                    FROZEN_PROPERTY,
-                    StoredValue::Number(JsNumber::from_f64(f64::from_bits(bits))),
-                )?;
-        }
-        for ((_, predicate), function) in NUMBER_PREDICATE_STATICS
-            .into_iter()
-            .zip(graph.number_predicates)
-        {
-            let atom = graph
-                .dynamic_atoms
-                .atom(RealmNameId::NumberPredicate(predicate))
-                .clone();
-            let name = atom
-                .description()
-                .expect("interned Number static name has a description")
-                .clone();
-            self.functions
-                .get_mut(graph.number.constructor)
-                .expect("new Number constructor remains live")
-                .object
-                .append_data(
-                    PropertyKey::from_validated_atom(atom),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
-            self.append_function_identity(function, &name, 1, keys)?;
-        }
-
         let atom = graph.dynamic_atoms.atom(RealmNameId::ArrayIsArray).clone();
         let name = atom
             .description()
@@ -2824,30 +2193,6 @@ impl RealmBuildTransaction<'_> {
                     StoredValue::Function(function),
                 )?;
             self.append_function_identity(function, &name, method.length(), keys)?;
-        }
-
-        for ((_, method), function) in STRING_FROM_STATICS
-            .into_iter()
-            .zip(graph.string_from_statics)
-        {
-            let atom = graph
-                .dynamic_atoms
-                .atom(RealmNameId::StringStatic(method))
-                .clone();
-            let name = atom
-                .description()
-                .expect("interned String factory name has a description")
-                .clone();
-            self.functions
-                .get_mut(graph.string.constructor)
-                .expect("new String constructor remains live")
-                .object
-                .append_data(
-                    PropertyKey::from_validated_atom(atom),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
-            self.append_function_identity(function, &name, 1, keys)?;
         }
 
         for ((_, search), function) in ARRAY_SEARCH_METHODS.into_iter().zip(graph.array_searches) {
@@ -2970,27 +2315,6 @@ impl RealmBuildTransaction<'_> {
             self.append_function_identity(function, &name, method.arity(), keys)?;
         }
 
-        for (method, function) in NUMBER_FORMAT_METHODS.into_iter().zip(graph.number_formats) {
-            let atom = graph
-                .dynamic_atoms
-                .atom(RealmNameId::NumberFormat(method))
-                .clone();
-            let name = atom
-                .description()
-                .expect("interned Number format name has a description")
-                .clone();
-            self.objects
-                .get_mut(graph.number.prototype)
-                .expect("new Number.prototype remains live")
-                .record
-                .append_data(
-                    PropertyKey::from_validated_atom(atom),
-                    METHOD_PROPERTY,
-                    StoredValue::Function(function),
-                )?;
-            self.append_function_identity(function, &name, 1, keys)?;
-        }
-
         // Every callback method and reduction reports arity 1; `splice` reports
         // 2, which the pinned oracle confirms.
         let callback_arities = ARRAY_CALLBACK_METHODS
@@ -3026,88 +2350,6 @@ impl RealmBuildTransaction<'_> {
             self.append_function_identity(function, &name, arity, keys)?;
         }
         Ok(())
-    }
-
-    /// Publishes the `BigInt` prototype members and constructor statics.
-    ///
-    /// The base `BigInt` graph carries `toString`, `valueOf`,
-    /// `[Symbol.toStringTag]`, and `constructor`. The no-`Intl`
-    /// `toLocaleString` method is published with the other shared locale
-    /// methods. The constructor carries `asIntN` and `asUintN`, each with
-    /// arity 2.
-    fn publish_bigint_intrinsic_properties(
-        &mut self,
-        graph: &BigIntIntrinsicGraph,
-        dynamic_atoms: &RealmAtomBindings,
-        keys: &RealmKeys,
-        names: &RealmNames,
-    ) -> Result<(), TryReserveError> {
-        {
-            let record = &mut self
-                .objects
-                .get_mut(graph.prototype)
-                .expect("new BigInt.prototype remains live")
-                .record;
-            record.append_data(
-                keys.constructor.clone(),
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.constructor),
-            )?;
-            record.append_data(
-                keys.to_string.clone(),
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.to_string),
-            )?;
-            record.append_data(
-                keys.value_of.clone(),
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.value_of),
-            )?;
-            record.append_data(
-                keys.symbol_to_string_tag.clone(),
-                // The tag is non-writable and non-enumerable but configurable,
-                // which is the specification's descriptor for it.
-                IDENTITY_PROPERTY,
-                StoredValue::String(names.bigint.clone()),
-            )?;
-        }
-        self.append_constructor_identity(
-            graph.constructor,
-            StoredValue::Object(graph.prototype),
-            &names.bigint,
-            keys,
-        )?;
-        self.append_function_identity(graph.to_string, &names.to_string, 0, keys)?;
-        self.append_function_identity(graph.value_of, &names.value_of, 0, keys)?;
-        {
-            let signed_key = PropertyKey::from_validated_atom(
-                dynamic_atoms
-                    .atom(RealmNameId::BigIntStatic(NativeFunctionKind::BigIntAsIntN))
-                    .clone(),
-            );
-            let unsigned_key = PropertyKey::from_validated_atom(
-                dynamic_atoms
-                    .atom(RealmNameId::BigIntStatic(NativeFunctionKind::BigIntAsUintN))
-                    .clone(),
-            );
-            let record = &mut self
-                .functions
-                .get_mut(graph.constructor)
-                .expect("new BigInt constructor remains live")
-                .object;
-            record.append_data(
-                signed_key,
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.as_int_n),
-            )?;
-            record.append_data(
-                unsigned_key,
-                METHOD_PROPERTY,
-                StoredValue::Function(graph.as_uint_n),
-            )?;
-        }
-        self.append_function_identity(graph.as_int_n, &names.as_int_n, 2, keys)?;
-        self.append_function_identity(graph.as_uint_n, &names.as_uint_n, 2, keys)
     }
 
     fn publish_array_intrinsic_properties(
@@ -3226,10 +2468,6 @@ impl RealmBuildTransaction<'_> {
                 StoredValue::String(names.string_iterator.clone()),
             )?;
         self.append_function_identity(iterators.string_iterator_next, &names.next, 0, keys)?;
-        self.append_object_methods(
-            graph.string.prototype,
-            [(&keys.symbol_iterator, iterators.string_iterator)],
-        )?;
         self.append_function_identity(
             iterators.string_iterator,
             &names.symbol_iterator_name,
