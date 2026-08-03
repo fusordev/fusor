@@ -34,8 +34,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::{
-    BytecodePc, DecodeError, DecodedInstruction, FinalOpcode, InstructionDecoder, OperandFormat,
-    Operands,
+    BytecodePc, DecodeError, DecodedInstruction, FinalOpcode, OperandFormat, Operands,
     function::{
         FunctionBitField, FunctionHeaderFlag, FunctionHeaderFlags, FunctionKind,
         FunctionKindRequirement, FunctionMode, JS_MODE_MASK, SERIALIZED_FUNCTION_FLAGS_MASK,
@@ -46,6 +45,7 @@ use crate::{
 mod error;
 mod limits;
 mod model;
+mod predecode;
 
 pub use error::{
     ControlFlowEdge, FunctionCountDomain, InvalidControlFlowTargetReason, OperandIndexDomain,
@@ -61,6 +61,7 @@ pub use model::{
     VerifiedSuccessors,
 };
 use model::{CompilerCapturedBindingIdentity, VerifiedSuccessorsRepr};
+use predecode::{PredecodedBody, is_instruction_start, predecode_complete};
 
 /// Completely predecodes and verifies the currently supported ordinary-value
 /// control-flow subset.
@@ -184,12 +185,10 @@ fn verify_control_flow_common(
         ));
     }
 
-    let mut instruction_start_bitmap = allocate_boundary_bitmap(bytecode.len())?;
-    let decoded = predecode_complete(
-        &bytecode,
-        &mut instruction_start_bitmap,
-        limits.max_instructions_per_function,
-    )?;
+    let PredecodedBody {
+        instructions: decoded,
+        instruction_start_bitmap,
+    } = predecode_complete(&bytecode, limits.max_instructions_per_function)?;
     let function_header = validate_function_header(function_header, domains)?;
     if stack_mode.requires_empty_exits()
         && compiler_capture_layout.is_none()
@@ -527,63 +526,6 @@ fn check_limit(
     Ok(())
 }
 
-fn allocate_boundary_bitmap(bytecode_len: usize) -> Result<Vec<u64>, VerificationError> {
-    let word_count = bytecode_len.checked_add(63).ok_or_else(|| {
-        VerificationError::root(VerificationErrorKind::AllocationFailed {
-            resource: VerificationResource::InstructionBoundaryWords,
-            requested: u64::MAX,
-        })
-    })? / 64;
-    let mut bitmap = Vec::new();
-    bitmap.try_reserve_exact(word_count).map_err(|_| {
-        VerificationError::root(VerificationErrorKind::AllocationFailed {
-            resource: VerificationResource::InstructionBoundaryWords,
-            requested: usize_to_u64(word_count),
-        })
-    })?;
-    bitmap.resize(word_count, 0);
-    Ok(bitmap)
-}
-
-fn predecode_complete(
-    bytecode: &[u8],
-    instruction_start_bitmap: &mut [u64],
-    max_instructions: u32,
-) -> Result<Vec<DecodedInstruction>, VerificationError> {
-    let mut instructions = Vec::new();
-    let instruction_stream = InstructionDecoder::new(bytecode);
-
-    for item in instruction_stream {
-        let decoded = item.map_err(VerificationError::from_decode)?;
-        let observed = usize_to_u64(instructions.len()).saturating_add(1);
-        if observed > u64::from(max_instructions) {
-            return Err(VerificationError::at_instruction(
-                decoded,
-                VerificationErrorKind::LimitExceeded {
-                    resource: VerificationResource::Instructions,
-                    limit: u64::from(max_instructions),
-                    observed,
-                },
-            ));
-        }
-        mark_instruction_start(instruction_start_bitmap, bytecode.len(), decoded.pc())?;
-        if instructions.len() == instructions.capacity() {
-            instructions.try_reserve(1).map_err(|_| {
-                VerificationError::at_instruction(
-                    decoded,
-                    VerificationErrorKind::AllocationFailed {
-                        resource: VerificationResource::Instructions,
-                        requested: 1,
-                    },
-                )
-            })?;
-        }
-        instructions.push(decoded);
-    }
-
-    Ok(instructions)
-}
-
 #[allow(
     clippy::too_many_arguments,
     reason = "decoded control-flow domains and compiler-only metadata form one static-semantics boundary"
@@ -843,32 +785,6 @@ fn require_encoded_target(
             },
         )
     })
-}
-
-fn mark_instruction_start(
-    bitmap: &mut [u64],
-    bytecode_len: usize,
-    pc: BytecodePc,
-) -> Result<(), VerificationError> {
-    let offset = usize::try_from(pc.get())
-        .map_err(|_| VerificationError::from_decode(DecodeError::PcNotRepresentable { pc }))?;
-    let word = bitmap.get_mut(offset / 64).ok_or_else(|| {
-        VerificationError::from_decode(DecodeError::PcOutOfBounds { pc, bytecode_len })
-    })?;
-    *word |= 1_u64 << (offset % 64);
-    Ok(())
-}
-
-fn is_instruction_start(bitmap: &[u64], bytecode_len: usize, pc: BytecodePc) -> bool {
-    let Ok(offset) = usize::try_from(pc.get()) else {
-        return false;
-    };
-    if offset >= bytecode_len {
-        return false;
-    }
-    bitmap
-        .get(offset / 64)
-        .is_some_and(|word| word & (1_u64 << (offset % 64)) != 0)
 }
 
 fn decoded_instruction_index_at(
