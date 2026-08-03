@@ -5,12 +5,14 @@
     reason = "validation becomes the production entry point as intrinsic families migrate"
 )]
 
-use crate::{PropertyLayoutKind, predefined_atoms::PredefinedAtomKind};
+use crate::{
+    PredefinedAtom, PropertyLayout, PropertyLayoutKind, predefined_atoms::PredefinedAtomKind,
+};
 
 use super::schema::{
     ConstructorPrototypeSpec, IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicIdentity,
-    IntrinsicKeySpec, IntrinsicObjectId, IntrinsicPropertySpec, IntrinsicSchema,
-    IntrinsicValueSpec, PrototypeSpec,
+    IntrinsicIdentityPublication, IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicObjectId,
+    IntrinsicPropertySpec, IntrinsicSchema, IntrinsicStringSpec, IntrinsicValueSpec, PrototypeSpec,
 };
 
 /// A structural defect in the immutable intrinsic declaration graph.
@@ -40,6 +42,10 @@ pub(in crate::runtime) enum SchemaValidationError {
     MissingMandatoryFunction(IntrinsicFunctionId),
     FunctionIdentityMismatch(IntrinsicFunctionId),
     ConstructabilityMismatch(IntrinsicFunctionId),
+    DeclaredFunctionIdentityMismatch {
+        function: IntrinsicFunctionId,
+        key: PredefinedAtom,
+    },
     ConstructorPrototypeMismatch(ConstructorPrototypeSpec),
     FamilyCardinality {
         family: &'static str,
@@ -115,6 +121,54 @@ fn validate_functions(schema: IntrinsicSchema<'_>) -> Result<(), SchemaValidatio
         if function.constructable != function.implementation.is_constructor() {
             return Err(SchemaValidationError::ConstructabilityMismatch(function.id));
         }
+        if function.identity_publication == IntrinsicIdentityPublication::Declared {
+            validate_declared_function_identity(schema, function)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_declared_function_identity(
+    schema: IntrinsicSchema<'_>,
+    function: &super::schema::IntrinsicFunctionSpec,
+) -> Result<(), SchemaValidationError> {
+    let holder = IntrinsicIdentity::Function(function.id);
+    let length_matches = schema.properties.iter().any(|property| {
+        property.holder == holder
+            && property.key == IntrinsicKeySpec::PredefinedString(PredefinedAtom::Length)
+            && matches!(
+                property.descriptor,
+                IntrinsicDescriptorSpec::Data { layout, value: IntrinsicValueSpec::NumberBits(bits) }
+                    if layout == PropertyLayout::data(false, false, true)
+                        && bits == f64::from(function.length).to_bits()
+            )
+    });
+    if !length_matches {
+        return Err(SchemaValidationError::DeclaredFunctionIdentityMismatch {
+            function: function.id,
+            key: PredefinedAtom::Length,
+        });
+    }
+    let expected_name = match function.name {
+        IntrinsicNameSpec::Predefined(atom) => IntrinsicStringSpec::Predefined(atom),
+        IntrinsicNameSpec::RealmName(id) => IntrinsicStringSpec::RealmName(id),
+        IntrinsicNameSpec::Literal(name) => IntrinsicStringSpec::Literal(name),
+    };
+    let name_matches = schema.properties.iter().any(|property| {
+        property.holder == holder
+            && property.key == IntrinsicKeySpec::PredefinedString(PredefinedAtom::Name)
+            && matches!(
+                property.descriptor,
+                IntrinsicDescriptorSpec::Data { layout, value: IntrinsicValueSpec::String(value) }
+                    if layout == PropertyLayout::data(false, false, true)
+                        && value == expected_name
+            )
+    });
+    if !name_matches {
+        return Err(SchemaValidationError::DeclaredFunctionIdentityMismatch {
+            function: function.id,
+            key: PredefinedAtom::Name,
+        });
     }
     Ok(())
 }
@@ -291,8 +345,8 @@ fn has_function(schema: IntrinsicSchema<'_>, id: IntrinsicFunctionId) -> bool {
 mod tests {
     use super::*;
     use crate::runtime::realm::schema::{
-        FamilyCardinality, IntrinsicFunctionSpec, IntrinsicNameSpec, IntrinsicObjectKind,
-        IntrinsicObjectSpec, IntrinsicPropertySpec, IntrinsicStringSpec,
+        FamilyCardinality, IntrinsicFunctionSpec, IntrinsicIdentityPublication, IntrinsicNameSpec,
+        IntrinsicObjectKind, IntrinsicObjectSpec, IntrinsicPropertySpec, IntrinsicStringSpec,
     };
     use crate::runtime::{NativeFunctionKind, PredefinedAtom, PropertyLayout};
 
@@ -311,6 +365,7 @@ mod tests {
         name: IntrinsicNameSpec::Literal(""),
         length: 0,
         constructable: false,
+        identity_publication: IntrinsicIdentityPublication::Automatic,
     };
     const KEY: IntrinsicKeySpec = IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor);
     const PROPERTY: IntrinsicPropertySpec = IntrinsicPropertySpec {
@@ -489,6 +544,36 @@ mod tests {
         assert_eq!(
             validate_intrinsic_schema(schema(&[OBJECT_SPEC], &[function], &[])).err(),
             Some(SchemaValidationError::ConstructabilityMismatch(FUNCTION))
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_mismatched_declared_function_identity_properties() {
+        let function = IntrinsicFunctionSpec {
+            identity_publication: IntrinsicIdentityPublication::Declared,
+            ..FUNCTION_SPEC
+        };
+        assert_eq!(
+            validate_intrinsic_schema(schema(&[OBJECT_SPEC], &[function], &[])).err(),
+            Some(SchemaValidationError::DeclaredFunctionIdentityMismatch {
+                function: FUNCTION,
+                key: PredefinedAtom::Length,
+            })
+        );
+        let length = IntrinsicPropertySpec {
+            holder: IntrinsicIdentity::Function(FUNCTION),
+            key: IntrinsicKeySpec::PredefinedString(PredefinedAtom::Length),
+            descriptor: IntrinsicDescriptorSpec::Data {
+                layout: PropertyLayout::data(false, false, true),
+                value: IntrinsicValueSpec::NumberBits(0_f64.to_bits()),
+            },
+        };
+        assert_eq!(
+            validate_intrinsic_schema(schema(&[OBJECT_SPEC], &[function], &[length])).err(),
+            Some(SchemaValidationError::DeclaredFunctionIdentityMismatch {
+                function: FUNCTION,
+                key: PredefinedAtom::Name,
+            })
         );
     }
 

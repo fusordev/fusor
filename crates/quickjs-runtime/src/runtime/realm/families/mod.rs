@@ -14,8 +14,9 @@ mod symbol;
 
 use super::schema::{
     FamilyCardinality, IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicFunctionSpec,
-    IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicObjectId, IntrinsicObjectKind,
-    IntrinsicObjectSpec, IntrinsicPropertySpec, IntrinsicSchema, IntrinsicValueSpec, PrototypeSpec,
+    IntrinsicIdentity, IntrinsicIdentityPublication, IntrinsicKeySpec, IntrinsicNameSpec,
+    IntrinsicObjectId, IntrinsicObjectKind, IntrinsicObjectSpec, IntrinsicPropertySpec,
+    IntrinsicSchema, IntrinsicValueSpec, PrototypeSpec,
 };
 use super::validation::{SchemaValidationError, validate_intrinsic_schema};
 use super::{NativeFunctionKind, RuntimeError, RuntimeResource, allocation_failed};
@@ -114,10 +115,12 @@ impl RealmFunctionSchema {
 pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
     matches!(
         id,
-        IntrinsicObjectId::BooleanPrototype
+        IntrinsicObjectId::ErrorPrototype(_)
+            | IntrinsicObjectId::BooleanPrototype
             | IntrinsicObjectId::NumberPrototype
             | IntrinsicObjectId::BigIntPrototype
             | IntrinsicObjectId::StringPrototype
+            | IntrinsicObjectId::SymbolPrototype
             | IntrinsicObjectId::Reflect
             | IntrinsicObjectId::Json
             | IntrinsicObjectId::Math
@@ -127,7 +130,10 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
 pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
     matches!(
         id.0,
-        NativeFunctionKind::BooleanConstructor
+        NativeFunctionKind::ErrorConstructor(_)
+            | NativeFunctionKind::ErrorPrototypeToString
+            | NativeFunctionKind::ErrorIsError
+            | NativeFunctionKind::BooleanConstructor
             | NativeFunctionKind::BooleanPrototypeToString
             | NativeFunctionKind::BooleanPrototypeValueOf
             | NativeFunctionKind::NumberConstructor
@@ -146,6 +152,13 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::StringPrototypeMethod(_)
             | NativeFunctionKind::StringRaw
             | NativeFunctionKind::LocaleString(_)
+            | NativeFunctionKind::SymbolConstructor
+            | NativeFunctionKind::SymbolPrototypeToString
+            | NativeFunctionKind::SymbolPrototypeValueOf
+            | NativeFunctionKind::SymbolPrototypeToPrimitive
+            | NativeFunctionKind::SymbolPrototypeDescription
+            | NativeFunctionKind::SymbolFor
+            | NativeFunctionKind::SymbolKeyFor
             | NativeFunctionKind::GlobalNumeric(_)
             | NativeFunctionKind::GlobalUri(_)
             | NativeFunctionKind::Reflect(_)
@@ -159,9 +172,13 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DeclarativeBatch {
+    Errors,
+    ErrorGlobals,
     Globals,
     Primitives,
     PrimitiveGlobals,
+    Symbols,
+    SymbolGlobals,
     NamespaceObjects,
 }
 
@@ -185,6 +202,15 @@ pub(super) const fn property_batch(property: IntrinsicPropertySpec) -> Declarati
         (property.holder, referenced_function),
         (
             IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
+            Some(IntrinsicFunctionId(NativeFunctionKind::ErrorConstructor(_)))
+        )
+    ) {
+        return DeclarativeBatch::ErrorGlobals;
+    }
+    if matches!(
+        (property.holder, referenced_function),
+        (
+            IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
             Some(IntrinsicFunctionId(
                 NativeFunctionKind::BooleanConstructor
                     | NativeFunctionKind::NumberConstructor
@@ -195,6 +221,27 @@ pub(super) const fn property_batch(property: IntrinsicPropertySpec) -> Declarati
     ) {
         return DeclarativeBatch::PrimitiveGlobals;
     }
+    if matches!(
+        (property.holder, referenced_function),
+        (
+            IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
+            Some(IntrinsicFunctionId(NativeFunctionKind::SymbolConstructor))
+        )
+    ) {
+        return DeclarativeBatch::SymbolGlobals;
+    }
+    if is_error_identity(property.holder)
+        || matches!(
+            referenced_function,
+            Some(IntrinsicFunctionId(
+                NativeFunctionKind::ErrorConstructor(_)
+                    | NativeFunctionKind::ErrorPrototypeToString
+                    | NativeFunctionKind::ErrorIsError
+            ))
+        )
+    {
+        return DeclarativeBatch::Errors;
+    }
     let references_primitive = match referenced_function {
         Some(id) => is_primitive_function(id),
         None => false,
@@ -202,7 +249,51 @@ pub(super) const fn property_batch(property: IntrinsicPropertySpec) -> Declarati
     if is_primitive_identity(property.holder) || references_primitive {
         return DeclarativeBatch::Primitives;
     }
+    if is_symbol_identity(property.holder)
+        || matches!(
+            referenced_function,
+            Some(IntrinsicFunctionId(
+                NativeFunctionKind::SymbolConstructor
+                    | NativeFunctionKind::SymbolPrototypeToString
+                    | NativeFunctionKind::SymbolPrototypeValueOf
+                    | NativeFunctionKind::SymbolPrototypeToPrimitive
+                    | NativeFunctionKind::SymbolPrototypeDescription
+                    | NativeFunctionKind::SymbolFor
+                    | NativeFunctionKind::SymbolKeyFor
+            ))
+        )
+    {
+        return DeclarativeBatch::Symbols;
+    }
     DeclarativeBatch::NamespaceObjects
+}
+
+const fn is_error_identity(id: IntrinsicIdentity) -> bool {
+    matches!(
+        id,
+        IntrinsicIdentity::Object(IntrinsicObjectId::ErrorPrototype(_))
+            | IntrinsicIdentity::Function(IntrinsicFunctionId(
+                NativeFunctionKind::ErrorConstructor(_)
+                    | NativeFunctionKind::ErrorPrototypeToString
+                    | NativeFunctionKind::ErrorIsError,
+            ))
+    )
+}
+
+const fn is_symbol_identity(id: IntrinsicIdentity) -> bool {
+    matches!(
+        id,
+        IntrinsicIdentity::Object(IntrinsicObjectId::SymbolPrototype)
+            | IntrinsicIdentity::Function(IntrinsicFunctionId(
+                NativeFunctionKind::SymbolConstructor
+                    | NativeFunctionKind::SymbolPrototypeToString
+                    | NativeFunctionKind::SymbolPrototypeValueOf
+                    | NativeFunctionKind::SymbolPrototypeToPrimitive
+                    | NativeFunctionKind::SymbolPrototypeDescription
+                    | NativeFunctionKind::SymbolFor
+                    | NativeFunctionKind::SymbolKeyFor,
+            ))
+    )
 }
 
 const fn is_primitive_identity(id: IntrinsicIdentity) -> bool {
@@ -246,11 +337,29 @@ const fn is_primitive_function(id: IntrinsicFunctionId) -> bool {
 pub(super) const fn function_batch(id: IntrinsicFunctionId) -> DeclarativeBatch {
     if matches!(
         id.0,
+        NativeFunctionKind::ErrorConstructor(_)
+            | NativeFunctionKind::ErrorPrototypeToString
+            | NativeFunctionKind::ErrorIsError
+    ) {
+        DeclarativeBatch::Errors
+    } else if matches!(
+        id.0,
         NativeFunctionKind::GlobalNumeric(_) | NativeFunctionKind::GlobalUri(_)
     ) {
         DeclarativeBatch::Globals
     } else if is_primitive_function(id) {
         DeclarativeBatch::Primitives
+    } else if matches!(
+        id.0,
+        NativeFunctionKind::SymbolConstructor
+            | NativeFunctionKind::SymbolPrototypeToString
+            | NativeFunctionKind::SymbolPrototypeValueOf
+            | NativeFunctionKind::SymbolPrototypeToPrimitive
+            | NativeFunctionKind::SymbolPrototypeDescription
+            | NativeFunctionKind::SymbolFor
+            | NativeFunctionKind::SymbolKeyFor
+    ) {
+        DeclarativeBatch::Symbols
     } else {
         DeclarativeBatch::NamespaceObjects
     }
@@ -295,8 +404,10 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
 }
 
 fn visit_property_specs(visit: PropertySink<'_>) {
+    error::visit_properties(visit);
     primitives::visit_properties(visit);
     string::visit_properties(visit);
+    symbol::visit_properties(visit);
     globals::visit_properties(visit);
     reflect::visit_properties(visit);
     json::visit_properties(visit);
@@ -351,6 +462,7 @@ const fn function(
         name,
         length,
         constructable: implementation.is_constructor(),
+        identity_publication: IntrinsicIdentityPublication::Automatic,
     }
 }
 
@@ -378,6 +490,24 @@ const fn method(
         super::METHOD_PROPERTY,
         IntrinsicValueSpec::Function(IntrinsicFunctionId(function)),
     )
+}
+
+const fn accessor(
+    holder: IntrinsicIdentity,
+    key: IntrinsicKeySpec,
+    layout: super::PropertyLayout,
+    getter: Option<IntrinsicFunctionId>,
+    setter: Option<IntrinsicFunctionId>,
+) -> IntrinsicPropertySpec {
+    IntrinsicPropertySpec {
+        holder,
+        key,
+        descriptor: IntrinsicDescriptorSpec::Accessor {
+            layout,
+            getter,
+            setter,
+        },
+    }
 }
 
 #[cfg(test)]

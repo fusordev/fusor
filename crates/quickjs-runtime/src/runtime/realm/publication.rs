@@ -14,7 +14,8 @@ use super::{
     property_allocation_failed,
     schema::{
         IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicIdentity,
-        IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicStringSpec, IntrinsicValueSpec, RealmNameId,
+        IntrinsicIdentityPublication, IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicStringSpec,
+        IntrinsicValueSpec, RealmNameId,
     },
 };
 
@@ -61,7 +62,9 @@ impl RealmBuildTransaction<'_> {
         batch: DeclarativeBatch,
     ) -> Result<(), RealmPublicationError> {
         for function in schema.specs().iter().filter(|function| {
-            is_declarative_function(function.id) && function_batch(function.id) == batch
+            is_declarative_function(function.id)
+                && function_batch(function.id) == batch
+                && function.identity_publication == IntrinsicIdentityPublication::Automatic
         }) {
             self.publish_intrinsic_function_identity(function, atoms)?;
         }

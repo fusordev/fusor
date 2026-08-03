@@ -171,6 +171,14 @@ pub(in crate::runtime) enum IntrinsicNameSpec {
     Literal(&'static str),
 }
 
+/// Whether ordinary `length` and `name` are derived before family properties
+/// or appear explicitly in the ordered property declaration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::runtime) enum IntrinsicIdentityPublication {
+    Automatic,
+    Declared,
+}
+
 /// One Realm-owned native function identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::runtime) struct IntrinsicFunctionSpec {
@@ -180,6 +188,7 @@ pub(in crate::runtime) struct IntrinsicFunctionSpec {
     pub(in crate::runtime) name: IntrinsicNameSpec,
     pub(in crate::runtime) length: i32,
     pub(in crate::runtime) constructable: bool,
+    pub(in crate::runtime) identity_publication: IntrinsicIdentityPublication,
 }
 
 /// A string value used by an intrinsic data descriptor.
