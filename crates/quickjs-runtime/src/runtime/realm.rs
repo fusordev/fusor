@@ -27,6 +27,7 @@
 
 mod allocation;
 mod atoms;
+mod families;
 mod publication;
 mod reservation;
 mod schema;
@@ -50,12 +51,12 @@ use super::{
 };
 
 use atoms::{RealmAtomBindings, RealmAtomPlan};
+use families::RealmFunctionSchema;
 use publication::RealmPublicationError;
 use reservation::RealmReservationPlan;
 use schema::{
-    IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicIdentity,
-    IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicObjectId, IntrinsicPropertySpec,
-    IntrinsicValueSpec, PrototypeSpec, RealmNameId,
+    IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec,
+    IntrinsicNameSpec, IntrinsicObjectId, IntrinsicPropertySpec, IntrinsicValueSpec, RealmNameId,
 };
 use transaction::RealmBuildTransaction;
 
@@ -1176,13 +1177,22 @@ impl Runtime {
         let keys = RealmKeys::new(&self.atoms);
         let names = RealmNames::try_new(&self.atoms)?;
         let atom_plan = RealmAtomPlan::try_new(&names)?;
-        let reservation = RealmReservationPlan::try_new(&atom_plan)?;
+        let intrinsic_schema = RealmFunctionSchema::try_new()?;
+        intrinsic_schema
+            .validate()
+            .expect("the immutable complete Realm schema is valid");
+        let reservation = RealmReservationPlan::try_new(&atom_plan, &intrinsic_schema)?;
         reservation.preflight_and_reserve(self)?;
         let records = RealmRecords::try_new(&keys.length)?;
         let mut transaction = RealmBuildTransaction::try_new(self, reservation)?;
         let graph = transaction.build_realm_graph(records, &atom_plan)?;
+        transaction
+            .allocated
+            .assert_matches(intrinsic_schema.specs());
 
-        if let Err(error) = transaction.publish_realm_properties(&graph, &keys, &names) {
+        if let Err(error) =
+            transaction.publish_realm_properties(&graph, &keys, &names, &intrinsic_schema)
+        {
             return Err(error.into_runtime_error());
         }
 
@@ -2388,6 +2398,7 @@ impl RealmBuildTransaction<'_> {
         graph: &RealmGraph,
         keys: &RealmKeys,
         names: &RealmNames,
+        intrinsic_schema: &RealmFunctionSchema,
     ) -> Result<(), RealmPublicationError> {
         self.append_object_methods(
             graph.base.object_prototype,
@@ -2441,8 +2452,8 @@ impl RealmBuildTransaction<'_> {
         self.publish_locale_string_methods(graph, keys)?;
         self.publish_iterator_intrinsic_properties(&graph.iterators, graph, keys, names)?;
         self.publish_global_value_properties(graph)?;
-        self.publish_global_numeric_functions(graph)?;
-        self.publish_uri_functions(graph)?;
+        self.publish_global_numeric_functions(graph, intrinsic_schema)?;
+        self.publish_uri_functions(graph, intrinsic_schema)?;
         self.publish_symbol_intrinsic_properties(&graph.symbol, graph, keys, names)?;
         self.publish_reflect_intrinsic_properties(graph, keys, names)?;
         self.publish_json_intrinsic_properties(graph, keys, names)?;
@@ -2708,6 +2719,7 @@ impl RealmBuildTransaction<'_> {
     fn publish_global_numeric_functions(
         &mut self,
         graph: &RealmGraph,
+        intrinsic_schema: &RealmFunctionSchema,
     ) -> Result<(), RealmPublicationError> {
         for ((kind, length), function) in GLOBAL_NUMERIC_FUNCTIONS
             .into_iter()
@@ -2746,25 +2758,20 @@ impl RealmBuildTransaction<'_> {
                 };
                 self.publish_intrinsic_property(&alias, &graph.dynamic_atoms)?;
             }
-            self.publish_intrinsic_function_identity(
-                &IntrinsicFunctionSpec {
-                    id,
-                    implementation: NativeFunctionKind::GlobalNumeric(kind),
-                    prototype: PrototypeSpec::Intrinsic(IntrinsicIdentity::Function(
-                        IntrinsicFunctionId(NativeFunctionKind::FunctionPrototype),
-                    )),
-                    name: IntrinsicNameSpec::RealmName(atom_id),
-                    length,
-                    constructable: false,
-                },
-                &graph.dynamic_atoms,
-            )?;
+            let spec = intrinsic_schema.spec(id);
+            debug_assert_eq!(spec.length, length);
+            debug_assert_eq!(spec.name, IntrinsicNameSpec::RealmName(atom_id));
+            self.publish_intrinsic_function_identity(spec, &graph.dynamic_atoms)?;
         }
         Ok(())
     }
 
     /// Publishes the four ordinary URI handling methods on the global object.
-    fn publish_uri_functions(&mut self, graph: &RealmGraph) -> Result<(), RealmPublicationError> {
+    fn publish_uri_functions(
+        &mut self,
+        graph: &RealmGraph,
+        intrinsic_schema: &RealmFunctionSchema,
+    ) -> Result<(), RealmPublicationError> {
         for ((_, kind), function) in URI_FUNCTIONS.into_iter().zip(graph.uri_functions) {
             let id = IntrinsicFunctionId(NativeFunctionKind::GlobalUri(kind));
             let atom_id = RealmNameId::Uri(kind);
@@ -2781,16 +2788,7 @@ impl RealmBuildTransaction<'_> {
                 &graph.dynamic_atoms,
             )?;
             self.publish_intrinsic_function_identity(
-                &IntrinsicFunctionSpec {
-                    id,
-                    implementation: NativeFunctionKind::GlobalUri(kind),
-                    prototype: PrototypeSpec::Intrinsic(IntrinsicIdentity::Function(
-                        IntrinsicFunctionId(NativeFunctionKind::FunctionPrototype),
-                    )),
-                    name: IntrinsicNameSpec::RealmName(atom_id),
-                    length: 1,
-                    constructable: false,
-                },
+                intrinsic_schema.spec(id),
                 &graph.dynamic_atoms,
             )?;
         }

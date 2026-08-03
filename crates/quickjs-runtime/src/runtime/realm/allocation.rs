@@ -2,7 +2,7 @@
 
 use super::{
     FunctionId, ObjectId, RuntimeError, RuntimeResource, allocation_failed,
-    schema::{IntrinsicFunctionId, IntrinsicObjectId},
+    schema::{IntrinsicFunctionId, IntrinsicFunctionSpec, IntrinsicObjectId},
 };
 
 /// Fully typed identities allocated before the Realm becomes observable.
@@ -75,6 +75,13 @@ impl AllocatedIntrinsics {
         );
         for &(id, function) in &self.functions {
             assert_eq!(self.function(id), function);
+        }
+    }
+
+    pub(super) fn assert_matches(&self, specs: &[IntrinsicFunctionSpec]) {
+        assert_eq!(self.functions.len(), specs.len());
+        for spec in specs {
+            let _ = self.function(spec.id);
         }
     }
 }

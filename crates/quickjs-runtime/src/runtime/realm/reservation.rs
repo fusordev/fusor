@@ -2,12 +2,10 @@
 
 use super::{
     Runtime, RuntimeError, RuntimeResource, allocation_failed, atoms::RealmAtomPlan, check_limit,
-    usize_to_u64,
+    families::RealmFunctionSchema, usize_to_u64,
 };
 
 const REALMS_PER_REALM: usize = 1;
-const OBJECTS_PER_REALM: usize = 23;
-const FUNCTIONS_PER_REALM: usize = 219;
 const PROPERTIES_PER_REALM: u64 = 718;
 
 /// Single source of truth for Realm construction's bounded resources.
@@ -23,19 +21,24 @@ pub(super) struct RealmReservationPlan {
 }
 
 impl RealmReservationPlan {
-    pub(super) fn try_new(atom_plan: &RealmAtomPlan<'_>) -> Result<Self, RuntimeError> {
+    pub(super) fn try_new(
+        atom_plan: &RealmAtomPlan<'_>,
+        schema: &RealmFunctionSchema,
+    ) -> Result<Self, RuntimeError> {
+        let objects = schema.object_count();
+        let functions = schema.function_count();
         let journal_entries = atom_plan
             .len()
             .checked_add(REALMS_PER_REALM)
-            .and_then(|value| value.checked_add(OBJECTS_PER_REALM))
-            .and_then(|value| value.checked_add(FUNCTIONS_PER_REALM))
+            .and_then(|value| value.checked_add(objects))
+            .and_then(|value| value.checked_add(functions))
             .ok_or_else(|| allocation_failed(RuntimeResource::ObjectProperties, usize::MAX))?;
         Ok(Self {
             dynamic_atoms: atom_plan.len(),
             dynamic_atom_code_units: atom_plan.description_code_units(),
             realms: REALMS_PER_REALM,
-            objects: OBJECTS_PER_REALM,
-            functions: FUNCTIONS_PER_REALM,
+            objects,
+            functions,
             object_properties: PROPERTIES_PER_REALM,
             journal_entries,
         })
@@ -105,7 +108,8 @@ mod tests {
         let runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
         let names = RealmNames::try_new(&runtime.atoms).expect("Realm names");
         let atoms = RealmAtomPlan::try_new(&names).expect("atom plan");
-        let plan = RealmReservationPlan::try_new(&atoms).expect("reservation plan");
+        let schema = RealmFunctionSchema::try_new().expect("function schema");
+        let plan = RealmReservationPlan::try_new(&atoms, &schema).expect("reservation plan");
 
         assert_eq!(plan.dynamic_atoms, 159);
         assert_eq!(plan.dynamic_atom_code_units, 1_232);
