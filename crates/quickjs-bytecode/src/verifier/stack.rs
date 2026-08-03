@@ -8,6 +8,12 @@ use super::{
     static_control_flow::StructurallyVerifiedControlFlow, usize_to_u64,
 };
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(test)]
+static FAIL_WORKLIST_RESERVATION: AtomicBool = AtomicBool::new(false);
+
 /// Ordinary-stack dataflow certificate for structurally checked control flow.
 pub(super) struct StackCertificate {
     pub(super) instructions: Vec<VerifiedInstruction>,
@@ -280,7 +286,7 @@ fn reserve_worklist_entry(
     decoded: DecodedInstruction,
 ) -> Result<(), VerificationError> {
     if worklist.len() == worklist.capacity() {
-        worklist.try_reserve(1).map_err(|_| {
+        try_reserve_worklist(worklist, 1).map_err(|_| {
             VerificationError::at_instruction(
                 decoded,
                 VerificationErrorKind::AllocationFailed {
@@ -291,4 +297,53 @@ fn reserve_worklist_entry(
         })?;
     }
     Ok(())
+}
+
+fn try_reserve_worklist(
+    worklist: &mut VecDeque<InstructionIndex>,
+    additional: usize,
+) -> Result<(), std::collections::TryReserveError> {
+    #[cfg(test)]
+    if FAIL_WORKLIST_RESERVATION.swap(false, Ordering::Relaxed) {
+        return VecDeque::<InstructionIndex>::new().try_reserve(usize::MAX);
+    }
+    worklist.try_reserve(additional)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use crate::{BytecodeBuilder, BytecodePc, FinalOpcode, InstructionDecoder, Operands};
+
+    use super::{
+        FAIL_WORKLIST_RESERVATION, Ordering, VerificationErrorKind, VerificationResource,
+        reserve_worklist_entry,
+    };
+
+    #[test]
+    fn worklist_allocation_failure_preserves_exact_resource_and_location() {
+        let mut builder = BytecodeBuilder::new();
+        builder
+            .push(FinalOpcode::ReturnUndef, Operands::None)
+            .expect("test instruction must encode");
+        let bytecode = builder.into_bytes();
+        let decoded = InstructionDecoder::new(&bytecode)
+            .next()
+            .expect("test body must contain an instruction")
+            .expect("test instruction must decode");
+
+        FAIL_WORKLIST_RESERVATION.store(true, Ordering::Relaxed);
+        let error = reserve_worklist_entry(&mut VecDeque::new(), decoded)
+            .expect_err("injected worklist reservation failure must fail closed");
+        assert_eq!(error.pc(), Some(BytecodePc::ZERO));
+        assert_eq!(error.opcode(), Some(FinalOpcode::ReturnUndef));
+        assert_eq!(
+            error.kind(),
+            &VerificationErrorKind::AllocationFailed {
+                resource: VerificationResource::WorklistEntries,
+                requested: 1,
+            }
+        );
+    }
 }

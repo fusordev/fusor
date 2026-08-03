@@ -1,3 +1,10 @@
+//! The single control-flow proof pipeline.
+//!
+//! Verification deliberately proceeds in this order: limits and counts,
+//! complete predecode, header and compiler-layout validation, static operand
+//! and successor validation, then bounded stack dataflow. Only this module
+//! combines every private stage result into [`VerifiedControlFlow`].
+
 use crate::function::UnverifiedFunctionHeader;
 
 use super::{
