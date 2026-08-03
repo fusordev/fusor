@@ -1536,6 +1536,12 @@ pub enum BytecodeVerificationErrorKind {
         /// Final bytecode position of `define_method`.
         pc: BytecodePc,
     },
+    /// `set_name` is not paired with one immediately preceding anonymous
+    /// ordinary-function closure on its unique incoming edge.
+    SetNameTemplateMismatch {
+        /// Final bytecode position of `set_name`.
+        pc: BytecodePc,
+    },
     /// `define_method` does not target one fresh object-literal value on every
     /// incoming control-flow path.
     DefineMethodTargetMismatch {
@@ -1874,6 +1880,10 @@ impl fmt::Display for BytecodeVerificationErrorKind {
                 formatter,
                 "define_method at PC {pc} is not paired with one typed method closure"
             ),
+            Self::SetNameTemplateMismatch { pc } => write!(
+                formatter,
+                "set_name at PC {pc} is not paired with one anonymous ordinary-function closure"
+            ),
             Self::DefineMethodTargetMismatch { pc } => write!(
                 formatter,
                 "define_method at PC {pc} does not target one fresh object literal"
@@ -1983,6 +1993,7 @@ pub fn verify_compiler_bytecode_graph(
         verified.push(record);
     }
     verify_closure_metadata(&graph, &verified)?;
+    verify_inferred_function_names(&graph, &verified)?;
     verify_method_definitions(&graph, &verified, limits, &mut usage)?;
 
     requirements.sort_unstable();
@@ -3862,6 +3873,99 @@ fn verify_method_definitions(
     Ok(())
 }
 
+/// Certifies the compiler-owned named-evaluation primitive. `set_name` may
+/// only rename the fresh anonymous ordinary closure produced immediately
+/// before it, and the instruction must have exactly one effective incoming
+/// edge. This prevents arbitrary function objects, methods, named templates,
+/// or control-flow joins from acquiring the intrinsic mutation authority.
+fn verify_inferred_function_names(
+    graph: &VerifiedCompilerFunctionGraph,
+    metadata: &[VerifiedFunctionMetadata],
+) -> Result<(), BytecodeVerificationError> {
+    for (parent_index, parent) in graph.functions().iter().enumerate() {
+        let parent_id = function_id(parent_index)?;
+        let instructions = parent.control_flow().instructions();
+        let internal_stack = &metadata[parent_index].internal_stack;
+        let mut predecessor_counts = try_filled_vec(
+            parent_id,
+            instructions.len(),
+            0_u32,
+            BytecodeGraphResource::SourceMappings,
+        )?;
+        for index in 0..instructions.len() {
+            for edge in internal_stack.effective_successors(instructions, index) {
+                let successor = edge.target;
+                predecessor_counts[successor.get() as usize] =
+                    predecessor_counts[successor.get() as usize].saturating_add(1);
+            }
+        }
+
+        for (index, verified) in instructions.iter().enumerate() {
+            let decoded = verified.decoded();
+            if decoded.instruction().opcode() != FinalOpcode::SetName {
+                continue;
+            }
+            if inferred_function_name_pair(
+                parent,
+                metadata,
+                instructions,
+                &predecessor_counts,
+                internal_stack,
+                index,
+            )
+            .is_none()
+            {
+                return Err(BytecodeVerificationError::function(
+                    parent_id,
+                    BytecodeVerificationErrorKind::SetNameTemplateMismatch { pc: decoded.pc() },
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn inferred_function_name_pair(
+    parent: &VerifiedCompilerFunction,
+    metadata: &[VerifiedFunctionMetadata],
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+    set_name_index: usize,
+) -> Option<FunctionTemplateId> {
+    let set_name = instructions.get(set_name_index)?;
+    if !matches!(
+        (
+            set_name.decoded().instruction().opcode(),
+            set_name.decoded().instruction().operands(),
+        ),
+        (FinalOpcode::SetName, Operands::Atom(_))
+    ) || predecessor_counts.get(set_name_index) != Some(&1)
+    {
+        return None;
+    }
+    let closure_index = set_name_index.checked_sub(1)?;
+    if !internal_stack.has_effective_successor(
+        instructions,
+        closure_index,
+        usize_to_u32(set_name_index),
+    ) {
+        return None;
+    }
+    let closure = instructions.get(closure_index)?.decoded().instruction();
+    let constant = closure_constant(closure.opcode(), closure.operands())?;
+    let crate::CompilerConstant::Function(child) = parent.constants().get(constant as usize)?
+    else {
+        return None;
+    };
+    let child_metadata = usize::try_from(child.get())
+        .ok()
+        .and_then(|index| metadata.get(index))?;
+    (child_metadata.executable_kind == CompilerExecutableKind::OrdinaryFunction
+        && child_metadata.function_name.is_none())
+    .then_some(*child)
+}
+
 fn method_definition_pair(
     graph: &VerifiedCompilerFunctionGraph,
     parent: &VerifiedCompilerFunction,
@@ -5061,6 +5165,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
         FinalOpcode::PushI32
             | FinalOpcode::PushConst
             | FinalOpcode::FClosure
+            | FinalOpcode::SetName
             | FinalOpcode::PushAtomValue
             | FinalOpcode::Undefined
             | FinalOpcode::Null
@@ -8387,6 +8492,7 @@ fn collect_requirements(
             }
             FinalOpcode::Object
             | FinalOpcode::SpecialObject
+            | FinalOpcode::SetName
             | FinalOpcode::GetField
             | FinalOpcode::GetField2
             | FinalOpcode::PutField

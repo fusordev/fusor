@@ -479,8 +479,7 @@ Known intentional runtime differences:
   closure created by a later default that reads an earlier parameter after the
   body mutates it: the live cell exposes the new value, while that QuickJS
   release exposes its initializer-time value.
-  Anonymous inferred-name defaults remain fail-closed until their name-setting
-  certificates land.
+  Named evaluation for anonymous defaults is tracked separately below.
 - [x] Split parameter and body VariableEnvironment bindings for functions with
   parameter expressions. Oxc's legally merged redeclaration symbol is retained
   as source authority but maps to distinct compiler cells by exact declaration
@@ -493,6 +492,19 @@ Known intentional runtime differences:
   body `var`/function named `arguments`, except when a formal parameter already
   suppresses that object. Source functions and dynamic `Function` construction
   share the same verified prologue and capture behavior.
+- [x] Implement `NamedEvaluation` for anonymous ordinary-function parameter
+  defaults. Single-name top-level, object, and array binding defaults emit the
+  exact `fclosure; set_name` sequence only on the `undefined` branch;
+  parenthesized functions retain the same inferred binding name, while a
+  supplied function bypasses both creation and renaming. Whole-graph authority
+  admits `set_name` only immediately after an anonymous ordinary-function
+  template on its unique incoming edge, so it cannot rename an older stack
+  value, a named function, or an ordinary method. Runtime execution preserves
+  the stack value and installs the observable `name` descriptor as
+  non-writable, non-enumerable, configurable. Source functions, object methods,
+  and dynamic `Function` construction share the same behavior. Anonymous class
+  and arrow defaults remain fail closed with their wider unsupported lowering
+  boundaries.
 - [x] Implement formal rest parameters through the pinned `rest firstArgument`
   entry operation. The fixed argument domain and observable function `length`
   stop before the rest binding; exactly one non-simple rest site snapshots the

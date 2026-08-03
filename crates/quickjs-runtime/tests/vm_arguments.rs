@@ -351,6 +351,25 @@ fn parameter_expressions_initialize_left_to_right_with_tdz_bindings() {
 }
 
 #[test]
+fn anonymous_parameter_defaults_receive_spec_inferred_names_only_when_evaluated() {
+    let result = string_result(
+        "function inspect(top=(function(){}),{nested=function(){}}={},\
+            [element=function(){}]=[]){\
+                const descriptor=Object.getOwnPropertyDescriptor(top,'name');\
+                return top.name+':'+nested.name+':'+element.name+':'+\
+                    descriptor.writable+descriptor.enumerable+descriptor.configurable;}\
+            function supplied(){}\
+            const holder={method(callback=function(){}){return callback.name;}};\
+            return inspect()+'|'+inspect(supplied,{nested:supplied},[supplied])+'|'+\
+                holder.method();",
+    );
+    assert_eq!(
+        result,
+        "top:nested:element:falsefalsetrue|supplied:supplied:supplied:falsefalsetrue|callback"
+    );
+}
+
+#[test]
 fn parameter_expression_body_environments_copy_and_then_diverge() {
     let result = string_result(
         "function copied(a=1){var a;return ''+a;}\

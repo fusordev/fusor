@@ -4002,39 +4002,13 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             let (opcode, operands) = compact_get_argument(slot);
             flow.emit(PlannedInstruction::new(opcode, operands, parameter.span))?;
             if let Some(initializer) = &parameter.initializer {
-                let skip = flow.new_label(parameter.span)?;
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::Dup,
-                    Operands::None,
-                    parameter.span,
-                ))?;
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::Undefined,
-                    Operands::None,
-                    parameter.span,
-                ))?;
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::StrictEq,
-                    Operands::None,
-                    parameter.span,
-                ))?;
-                flow.branch(BranchKind::IfFalse, &skip, parameter.span)?;
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::Drop,
-                    Operands::None,
-                    parameter.span,
-                ))?;
-                if let Some(span) = anonymous_named_evaluation_span(initializer) {
-                    return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
-                }
-                self.plan_expression(
+                self.emit_parameter_default_initializer(
+                    &parameter.pattern,
                     initializer,
-                    planning.layout,
-                    planning.tree_layout,
-                    planning.constants,
+                    parameter.span,
+                    planning,
                     flow,
                 )?;
-                flow.bind(&skip)?;
             }
             self.plan_destructuring_pattern_value(
                 &parameter.pattern,
@@ -4066,6 +4040,62 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             )?;
         }
         Ok(())
+    }
+
+    fn emit_parameter_default_initializer(
+        &self,
+        pattern: &BindingPattern<'arena>,
+        initializer: &Expression<'arena>,
+        parameter_span: Span,
+        planning: &FunctionPlanningContext<'_>,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let skip = flow.new_label(parameter_span)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            parameter_span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Undefined,
+            Operands::None,
+            parameter_span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::StrictEq,
+            Operands::None,
+            parameter_span,
+        ))?;
+        flow.branch(BranchKind::IfFalse, &skip, parameter_span)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            parameter_span,
+        ))?;
+        let inferred_name = match pattern {
+            BindingPattern::BindingIdentifier(identifier) => {
+                anonymous_named_evaluation_span(initializer).map(|span| (identifier, span))
+            }
+            BindingPattern::AssignmentPattern(_)
+            | BindingPattern::ArrayPattern(_)
+            | BindingPattern::ObjectPattern(_) => None,
+        };
+        if let Some((_, span)) = inferred_name
+            && anonymous_ordinary_function_span(initializer).is_none()
+        {
+            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+        }
+        self.plan_expression(
+            initializer,
+            planning.layout,
+            planning.tree_layout,
+            planning.constants,
+            flow,
+        )?;
+        if let Some((identifier, span)) = inferred_name {
+            flow.emit(self.plan_inferred_function_name(identifier, planning.constants, span)?)?;
+        }
+        flow.bind(&skip)
     }
 
     fn emit_parameter_body_binding_copies(
@@ -5554,10 +5584,32 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                     Operands::None,
                     assignment.span,
                 ))?;
-                if let Some(span) = anonymous_named_evaluation_span(&assignment.right) {
+                let inferred_name = match binding_initialization {
+                    DestructuringBindingInitialization::Parameter => match &assignment.left {
+                        BindingPattern::BindingIdentifier(identifier) => {
+                            anonymous_named_evaluation_span(&assignment.right)
+                                .map(|span| (identifier, span))
+                        }
+                        BindingPattern::AssignmentPattern(_)
+                        | BindingPattern::ArrayPattern(_)
+                        | BindingPattern::ObjectPattern(_) => None,
+                    },
+                    DestructuringBindingInitialization::Declaration(_) => {
+                        if let Some(span) = anonymous_named_evaluation_span(&assignment.right) {
+                            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+                        }
+                        None
+                    }
+                };
+                if let Some((_, span)) = inferred_name
+                    && anonymous_ordinary_function_span(&assignment.right).is_none()
+                {
                     return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
                 }
                 self.plan_expression(&assignment.right, layout, tree_layout, constants, flow)?;
+                if let Some((identifier, span)) = inferred_name {
+                    flow.emit(self.plan_inferred_function_name(identifier, constants, span)?)?;
+                }
                 flow.bind(&skip)?;
                 self.plan_destructuring_pattern_value(
                     &assignment.left,
@@ -5648,6 +5700,22 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
                 }
             }
         }
+    }
+
+    fn plan_inferred_function_name(
+        &self,
+        identifier: &BindingIdentifier<'arena>,
+        constants: &CompiledConstantPool,
+        span: Span,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        let binding = self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+        Ok(PlannedInstruction::new(
+            FinalOpcode::SetName,
+            Operands::Atom(
+                constants.metadata_atom_index(CompiledMetadataAtomKey::Binding(binding))?,
+            ),
+            span,
+        ))
     }
 
     #[allow(
@@ -12219,6 +12287,16 @@ fn anonymous_named_evaluation_span(mut expression: &Expression<'_>) -> Option<Sp
     match expression {
         Expression::FunctionExpression(function) if function.id.is_none() => Some(function.span),
         Expression::ClassExpression(class) if class.id.is_none() => Some(class.span),
+        _ => None,
+    }
+}
+
+fn anonymous_ordinary_function_span(mut expression: &Expression<'_>) -> Option<Span> {
+    while let Expression::ParenthesizedExpression(parenthesized) = expression {
+        expression = &parenthesized.expression;
+    }
+    match expression {
+        Expression::FunctionExpression(function) if function.id.is_none() => Some(function.span),
         _ => None,
     }
 }

@@ -1859,6 +1859,84 @@ fn final_authority_requires_object_data_keys_to_be_converted_before_the_value() 
 }
 
 #[test]
+fn final_authority_admits_named_evaluation_for_one_fresh_anonymous_closure() {
+    let instructions = [
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::SetName, Operands::Atom(AtomPoolIndex::new(1))),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let verified = verify_compiler_bytecode_graph(
+        define_method_input(&instructions, CompilerExecutableKind::OrdinaryFunction, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("one adjacent anonymous ordinary closure gains named-evaluation authority");
+
+    assert_eq!(
+        verified.requirements(),
+        [
+            ExecutionRequirement::CoreValues,
+            ExecutionRequirement::Strings,
+            ExecutionRequirement::Closures,
+            ExecutionRequirement::OrdinaryObjects,
+        ]
+    );
+}
+
+#[test]
+fn final_authority_rejects_unpaired_or_method_set_name_operands() {
+    let nonadjacent = [
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::Dup, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::SetName, Operands::Atom(AtomPoolIndex::new(1))),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(&nonadjacent, CompilerExecutableKind::OrdinaryFunction, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("set_name cannot target an older stack function");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::SetNameTemplateMismatch { .. }
+    ));
+
+    let joined = [
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::Dup, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(4)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::SetName, Operands::Atom(AtomPoolIndex::new(1))),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(&joined, CompilerExecutableKind::OrdinaryFunction, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a branch cannot enter an otherwise adjacent set_name pair");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::SetNameTemplateMismatch { .. }
+    ));
+
+    let method = [
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::SetName, Operands::Atom(AtomPoolIndex::new(1))),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(&method, CompilerExecutableKind::OrdinaryMethod, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("set_name cannot stand in for define_method");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::SetNameTemplateMismatch { .. }
+    ));
+}
+
+#[test]
 fn final_authority_admits_only_enumerable_static_define_method_kinds() {
     for (flags, arguments) in [(4, 0), (5, 0), (6, 1)] {
         let instructions = [

@@ -1033,6 +1033,26 @@ pub(super) fn execute_one(
             let function = create_closure(runtime, frame, child)?;
             push(frame, StoredValue::Function(function));
         }
+        FinalOpcode::SetName => {
+            let name = static_property_operand(runtime, frame, operands)?.name;
+            let function = match peek(frame)? {
+                StoredValue::Function(function) => *function,
+                StoredValue::Undefined
+                | StoredValue::Null
+                | StoredValue::Boolean(_)
+                | StoredValue::Number(_)
+                | StoredValue::BigInt(_)
+                | StoredValue::String(_)
+                | StoredValue::Symbol(_)
+                | StoredValue::Object(_) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "verified set_name operand is not a function",
+                    }
+                    .into());
+                }
+            };
+            set_inferred_function_name(runtime, function, name)?;
+        }
         FinalOpcode::GetArrayEl | FinalOpcode::GetArrayEl2 => {
             let realm = code(runtime, frame.code)?.realm;
             let key = pop(frame)?;

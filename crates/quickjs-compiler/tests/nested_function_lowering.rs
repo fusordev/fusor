@@ -245,7 +245,6 @@ fn anonymous_functions_in_inferred_name_contexts_fail_closed() {
     for source in [
         "function outer(){ let inferred = function(){}; }",
         "function outer(){ let inferred; inferred = (function(){}); }",
-        "function outer(inferred=function(){}){}",
     ] {
         let error = with_parsed_program(
             source,
@@ -273,6 +272,59 @@ fn anonymous_functions_in_inferred_name_contexts_fail_closed() {
             "{source}"
         );
     }
+}
+
+#[test]
+fn anonymous_parameter_defaults_emit_adjacent_inferred_name_pairs() {
+    let tree = compile_tree(
+        "function outer(\
+             top=(function(){}),\
+             {nested=function(){}}={},\
+             [element=function(){}]=[],\
+             {}=function(){}\
+         ){}",
+        "outer",
+    );
+    let outer = tree.root();
+    let instructions = opcodes(outer);
+    let set_names = instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (opcode, operands))| {
+            (*opcode == FinalOpcode::SetName).then_some((index, *operands))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(set_names.len(), 3);
+
+    let inferred_names = set_names
+        .iter()
+        .map(|(index, operands)| {
+            assert!(matches!(
+                instructions[index - 1],
+                (FinalOpcode::FClosure | FinalOpcode::FClosure8, _)
+            ));
+            let Operands::Atom(atom) = operands else {
+                panic!("set_name must carry one atom operand");
+            };
+            String::from_utf16(
+                &outer.atoms()[atom.get() as usize]
+                    .string()
+                    .code_units()
+                    .collect::<Vec<_>>(),
+            )
+            .expect("identifier atom is valid UTF-16")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inferred_names, ["top", "nested", "element"]);
+    assert_eq!(
+        outer
+            .constants()
+            .iter()
+            .filter(|constant| constant.function().is_some())
+            .count(),
+        4,
+        "a pattern-level anonymous default is evaluated without inferred naming"
+    );
 }
 
 #[test]

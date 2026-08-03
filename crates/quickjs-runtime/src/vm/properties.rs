@@ -1165,7 +1165,7 @@ pub(super) fn define_static_method(
     }
 
     let function_name = method_function_name(name, kind)?;
-    let previous_name = preflight_method_function_name(runtime, function)?;
+    let previous_name = preflight_function_name(runtime, function)?;
     let (existing, extensible) = {
         let record = runtime.object_record(reference)?;
         (record.own_property(&key), record.is_extensible())
@@ -1204,7 +1204,7 @@ pub(super) fn define_static_method(
             PropertyLayout::accessor(enumerable, true)
         }
     };
-    set_preflighted_method_function_name(runtime, function, function_name)?;
+    set_preflighted_function_name(runtime, function, function_name)?;
     let definition = (|| -> Result<(), ExecutionError> {
         if let Some(existing) = existing {
             let replacement = match kind {
@@ -1263,7 +1263,7 @@ pub(super) fn define_static_method(
         Ok(())
     })();
     if let Err(error) = definition {
-        restore_preflighted_method_function_name(runtime, function, previous_name)?;
+        restore_preflighted_function_name(runtime, function, previous_name)?;
         return Err(error);
     }
     // The function name is initialized before the target slot becomes
@@ -1294,7 +1294,7 @@ fn method_function_name(
     }
 }
 
-fn preflight_method_function_name(
+fn preflight_function_name(
     runtime: &Runtime,
     function: FunctionId,
 ) -> Result<OwnProperty, ExecutionError> {
@@ -1303,7 +1303,7 @@ fn preflight_method_function_name(
         .object_record(HeapReference::Function(function))?
         .own_property(&key)
         .ok_or(EngineFault::RuntimeInvariant {
-            message: "define_method function has no own name property",
+            message: "verified function has no own name property",
         })?;
     match property {
         OwnProperty::Data { layout, .. } if layout == PropertyLayout::data(false, false, true) => {
@@ -1311,14 +1311,14 @@ fn preflight_method_function_name(
         }
         OwnProperty::Data { .. } | OwnProperty::Accessor { .. } => {
             Err(EngineFault::RuntimeInvariant {
-                message: "define_method function has an invalid name descriptor",
+                message: "verified function has an invalid name descriptor",
             }
             .into())
         }
     }
 }
 
-fn set_preflighted_method_function_name(
+fn set_preflighted_function_name(
     runtime: &mut Runtime,
     function: FunctionId,
     name: JsString,
@@ -1333,14 +1333,14 @@ fn set_preflighted_method_function_name(
         );
     if replaced.is_none() {
         return Err(EngineFault::RuntimeInvariant {
-            message: "preflighted define_method name property disappeared",
+            message: "preflighted function name property disappeared",
         }
         .into());
     }
     Ok(())
 }
 
-fn restore_preflighted_method_function_name(
+fn restore_preflighted_function_name(
     runtime: &mut Runtime,
     function: FunctionId,
     previous: OwnProperty,
@@ -1351,11 +1351,25 @@ fn restore_preflighted_method_function_name(
         .restore_existing_property(&key, previous);
     if restored.is_none() {
         return Err(EngineFault::RuntimeInvariant {
-            message: "preflighted define_method name property disappeared during rollback",
+            message: "preflighted function name property disappeared during rollback",
         }
         .into());
     }
     Ok(())
+}
+
+/// Applies the verified named-evaluation mutation to a freshly created
+/// anonymous ordinary closure. The whole-graph certificate guarantees that
+/// the function is the value left by the immediately preceding `fclosure`;
+/// this layer still validates the intrinsic `name` descriptor before the
+/// infallible in-place replacement.
+pub(super) fn set_inferred_function_name(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    name: JsString,
+) -> Result<(), ExecutionError> {
+    let _previous = preflight_function_name(runtime, function)?;
+    set_preflighted_function_name(runtime, function, name)
 }
 
 /// Starts the pinned `copy_data_properties` abstract operation over the
