@@ -17,6 +17,11 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         object_prototype(),
         IntrinsicObjectKind::Ordinary,
     ));
+    visit(object(
+        IntrinsicObjectId::AsyncIteratorPrototype,
+        object_prototype(),
+        IntrinsicObjectKind::Ordinary,
+    ));
     let iterator_prototype = PrototypeSpec::Intrinsic(IntrinsicIdentity::Object(
         IntrinsicObjectId::IteratorPrototype,
     ));
@@ -37,6 +42,10 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         (
             NativeFunctionKind::IteratorPrototypeIterator,
             IntrinsicNameSpec::Literal("[Symbol.iterator]"),
+        ),
+        (
+            NativeFunctionKind::AsyncIteratorPrototypeAsyncIterator,
+            IntrinsicNameSpec::Literal("[Symbol.asyncIterator]"),
         ),
         (
             NativeFunctionKind::ArrayIteratorNext,
@@ -72,6 +81,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicIdentity::Object(IntrinsicObjectId::IteratorPrototype),
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolIterator),
         NativeFunctionKind::IteratorPrototypeIterator,
+    ));
+    visit(method(
+        IntrinsicIdentity::Object(IntrinsicObjectId::AsyncIteratorPrototype),
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolAsyncIterator),
+        NativeFunctionKind::AsyncIteratorPrototypeAsyncIterator,
     ));
 
     let array_iterator = IntrinsicIdentity::Object(IntrinsicObjectId::ArrayIteratorPrototype);

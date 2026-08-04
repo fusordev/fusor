@@ -87,6 +87,11 @@ does not imply complete ECMAScript or QuickJS compatibility.
   `await` and async return to verified suspension programs. Calls allocate the
   intrinsic Promise capability, run synchronously to the first suspension, and
   resume through typed FIFO reactions; return/throw settle instead of escaping.
+- [x] Async generator functions, methods, and dynamic
+  `AsyncGeneratorFunction` wrappers lower direct `await`, `yield`, and return to
+  verified suspension programs. Admission requires every direct async yield to
+  be immediately dominated by its compiler-owned await; async `yield*` remains
+  typed fail closed.
 - [x] Runtime execution uses explicit frame and continuation stacks for
   bytecode/native calls, constructors, abrupt completion, iterator closing,
   coercion re-entry, and verified stack traces. Bound receiver/argument
@@ -94,9 +99,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Deterministic fuel and host interrupts are separate. The interrupt hook is
   polled on the pinned 10,000-instruction counter and reports an uncatchable
   `ExecutionError::Interrupted`.
-- [ ] Complete remaining opcode families, debug/source tables, async
-  generators, and direct/indirect `eval`. Raw or serialized
-  unverified bytecode and `eval` remain fail closed.
+- [ ] Complete remaining opcode families, debug/source tables, async-generator
+  delegation, and direct/indirect `eval`. Raw or serialized unverified bytecode,
+  async `yield*`, and `eval` remain fail closed.
 
 ### Values, objects, and functions
 
@@ -107,11 +112,11 @@ does not imply complete ECMAScript or QuickJS compatibility.
   own-key phase order, prototype mutation, extensibility/integrity levels,
   object literal `__proto__`, Array exotic `length`, holes, and primitive String
   indexed properties.
-- [x] Ordinary functions/constructors, lexical capture and TDZ, dynamic
-  `Function`, `GeneratorFunction`, and `AsyncFunction`, `call`/`apply`/`bind`,
-  `instanceof`, rest/default/destructured parameters, separate parameter/body
-  environments, strict and mapped `arguments` objects, `Function.prototype`
-  legacy poison accessors backed by a shared `%ThrowTypeError%`, and admitted
+- [x] Ordinary functions/constructors, lexical capture and TDZ, all four
+  dynamic Function-constructor families, `call`/`apply`/`bind`, `instanceof`,
+  rest/default/destructured parameters, separate parameter/body environments,
+  strict and mapped `arguments` objects, `Function.prototype` legacy poison
+  accessors backed by a shared `%ThrowTypeError%`, and admitted
   `NamedEvaluation` forms.
 - [x] Synchronous iterator protocols, Array/String iterators, array and call
   spread, destructuring, `for-of`, `IteratorClose`, and original-abrupt-
@@ -119,7 +124,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Realm bootstrap is declared by validated intrinsic schemas. Atom and
   resource plans, typed shell allocation, ordered publication, and allocation-
   free reverse rollback are derived from that schema. A normalized snapshot
-  pins all 283 Realm-local identities and 879 ordered properties across Realms.
+  pins all 291 Realm-local identities and 899 ordered properties across Realms.
 - [ ] Add Proxy and remaining exotics, shape/transition interning, dense indexed
   storage, deterministic finalization, and complete reflection/diagnostics.
 
@@ -190,8 +195,15 @@ does not imply complete ECMAScript or QuickJS compatibility.
   `%AsyncFunction%`, `%AsyncFunction.prototype%`, methods, dynamic construction,
   suspended-frame GC edges, and non-constructability are pinned by QuickJS and
   Node differentials.
-- [ ] Add async generators and dynamic `AsyncGeneratorFunction` on verified
-  continuations.
+- [x] Async generators use realm-local `%AsyncGeneratorFunction%`,
+  `%AsyncGenerator%`, and `%AsyncIteratorPrototype%` chains plus a typed FIFO
+  request queue. Calls defer the body; `next`/`return`/`throw` allocate intrinsic
+  Promise capabilities, await yielded and returned values, preserve synchronous
+  parameter timing and `catch`/`finally` order, drain completed requests, and
+  trace suspended frames, awaits, capabilities, and reactions through GC.
+  Dynamic construction preserves coercion order and `newTarget` fallback.
+- [ ] Implement async-generator `yield*` over the async-iterator protocol;
+  compiler and verifier reject it before execution meanwhile.
 - [ ] Implement module linking/evaluation, cycles, resolver semantics, dynamic
   import, and top-level `await`. Module parsing alone is not an execution claim.
 - [ ] Finish the Rust embedding API, ESM REPL, `qjs`, Rust-native `qjsc`,
@@ -264,6 +276,7 @@ QuickJS `qjs` or `qjsc`. Current corpus results are:
 | Promise core | 29/29, 46/46 feature tags |
 | Synchronous generators | 18/18, 43/43 feature tags |
 | Async functions | 9/9, 18/18 feature tags |
+| Async generators | 12/12, 28/28 feature tags (QuickJS and Node) |
 
 The parser gate also fails for an uncovered pinned production, uncovered
 reachable diagnostic, falsely unreachable diagnostic, or changed oracle

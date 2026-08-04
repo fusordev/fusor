@@ -404,10 +404,20 @@ impl Context<'_> {
         let root_header = authority.root().function().control_flow().function_header();
         let root_is_generator = root_header.kind() == quickjs_bytecode::FunctionKind::Generator;
         let root_is_async = root_header.kind() == quickjs_bytecode::FunctionKind::Async;
+        let root_is_async_generator =
+            root_header.kind() == quickjs_bytecode::FunctionKind::AsyncGenerator;
         let root_has_prototype = publication.is_public() && root_header.flags().has_prototype();
-        let root_creates_prototype =
-            publication.is_public() && (root_has_prototype || root_is_generator);
-        let function_prototype = if root_is_generator {
+        let root_creates_prototype = publication.is_public()
+            && (root_has_prototype || root_is_generator || root_is_async_generator);
+        let function_prototype = if root_is_async_generator {
+            HeapReference::Object(
+                self.runtime
+                    .realm_async_generator_function_prototype(self.realm)
+                    .map_err(|_| InstallError::AuthorityInvariant {
+                        message: "constructor realm has no AsyncGeneratorFunction.prototype intrinsic",
+                    })?,
+            )
+        } else if root_is_generator {
             HeapReference::Object(
                 self.runtime
                     .realm_generator_function_prototype(self.realm)
@@ -430,7 +440,11 @@ impl Context<'_> {
                 },
             )?)
         };
-        let object_prototype = if root_is_generator {
+        let object_prototype = if root_is_async_generator {
+            root_creates_prototype
+                .then(|| self.runtime.realm_async_generator_prototype(self.realm))
+                .transpose()
+        } else if root_is_generator {
             root_creates_prototype
                 .then(|| self.runtime.realm_generator_prototype(self.realm))
                 .transpose()

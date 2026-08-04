@@ -5077,6 +5077,10 @@ fn define_method_input_with_root_arguments(
             CompilerExecutableKind::AsyncFunction | CompilerExecutableKind::AsyncMethod => {
                 panic!("this ordinary-method fixture cannot create an async child")
             }
+            CompilerExecutableKind::AsyncGeneratorFunction
+            | CompilerExecutableKind::AsyncGeneratorMethod => {
+                panic!("this ordinary-method fixture cannot create an async-generator child")
+            }
         },
     );
     let child_atoms = (0..child_arguments)

@@ -1092,6 +1092,9 @@ pub(crate) enum PromiseReactionTarget {
     AsyncFunction {
         activation: ObjectId,
     },
+    AsyncGenerator {
+        generator: ObjectId,
+    },
 }
 
 pub(crate) enum PromiseState {

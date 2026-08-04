@@ -15,6 +15,8 @@ pub enum DynamicFunctionFamily {
     GeneratorFunction,
     /// A dynamic `AsyncFunction`.
     AsyncFunction,
+    /// A dynamic `AsyncGeneratorFunction`.
+    AsyncGeneratorFunction,
 }
 
 /// Owned source fragments for one supported dynamic-function compilation.

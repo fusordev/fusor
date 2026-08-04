@@ -9,7 +9,7 @@ use super::*;
 const ITERATOR_RESULT_FRAME_VALUES: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum GeneratorResumeMode {
+pub(crate) enum GeneratorResumeMode {
     Next,
     Return,
     Throw,

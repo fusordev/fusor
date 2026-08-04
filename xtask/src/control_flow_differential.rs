@@ -28,6 +28,7 @@ use std::time::Duration;
 
 pub(crate) const DEFAULT_CONTROL_FLOW_CORPUS: &str = "tests/control-flow/manifest.json";
 pub(crate) const DEFAULT_ASYNC_FUNCTION_CORPUS: &str = "tests/async-function/manifest.json";
+pub(crate) const DEFAULT_ASYNC_GENERATOR_CORPUS: &str = "tests/async-generator/manifest.json";
 pub(crate) const DEFAULT_ERROR_CORPUS: &str = "tests/error/manifest.json";
 pub(crate) const DEFAULT_FUNCTION_APPLY_CORPUS: &str = "tests/function-apply/manifest.json";
 pub(crate) const DEFAULT_FUNCTION_BIND_CORPUS: &str = "tests/function-bind/manifest.json";
@@ -503,9 +504,41 @@ const ASYNC_FUNCTION_REQUIRED_COVERAGE: &[&str] = &[
     "throw-rejects",
 ];
 
+const ASYNC_GENERATOR_REQUIRED_COVERAGE: &[&str] = &[
+    "async-iterator-identity",
+    "await-fulfill",
+    "await-reject",
+    "call-deferred",
+    "completed-next",
+    "completed-return-await",
+    "completed-throw",
+    "dynamic-async-generator-function",
+    "dynamic-new-target",
+    "dynamic-prototype-fallback",
+    "dynamic-source-order",
+    "fifo-request-queue",
+    "function-prototype-chain",
+    "instance-prototype-chain",
+    "invalid-receiver-rejects",
+    "method",
+    "next-promise",
+    "next-resume-value",
+    "nonconstructable",
+    "parameter-abrupt-throw",
+    "parameter-initialization",
+    "return-await",
+    "return-finally",
+    "return-promise-resolve-abrupt",
+    "return-reject",
+    "throw-catch",
+    "uncaught-throw",
+    "yield-await-assimilation",
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeDifferentialSuite {
     AsyncFunction,
+    AsyncGenerator,
     ControlFlow,
     Error,
     FunctionApply,
@@ -522,6 +555,7 @@ impl RuntimeDifferentialSuite {
     const fn label(self) -> &'static str {
         match self {
             Self::AsyncFunction => "async-function",
+            Self::AsyncGenerator => "async-generator",
             Self::ControlFlow => "control-flow",
             Self::Error => "error",
             Self::FunctionApply => "function-apply",
@@ -538,6 +572,7 @@ impl RuntimeDifferentialSuite {
     const fn required_coverage(self) -> &'static [&'static str] {
         match self {
             Self::AsyncFunction => ASYNC_FUNCTION_REQUIRED_COVERAGE,
+            Self::AsyncGenerator => ASYNC_GENERATOR_REQUIRED_COVERAGE,
             Self::ControlFlow => REQUIRED_COVERAGE,
             Self::Error => ERROR_REQUIRED_COVERAGE,
             Self::FunctionApply => FUNCTION_APPLY_REQUIRED_COVERAGE,
@@ -550,6 +585,10 @@ impl RuntimeDifferentialSuite {
             Self::StringHtml => STRING_HTML_REQUIRED_COVERAGE,
         }
     }
+
+    const fn reads_async_result(self) -> bool {
+        matches!(self, Self::AsyncFunction | Self::AsyncGenerator)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -561,6 +600,13 @@ pub(crate) struct ControlFlowDifferentialOptions {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct AsyncFunctionDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct AsyncGeneratorDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -677,6 +723,17 @@ pub(crate) fn run_async_function_differential(
         &options.corpus,
         options.timeout,
         RuntimeDifferentialSuite::AsyncFunction,
+    )
+}
+
+pub(crate) fn run_async_generator_differential(
+    options: &AsyncGeneratorDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::AsyncGenerator,
     )
 }
 
@@ -1346,7 +1403,7 @@ fn build_oracle_source(
          if(__scopeProbe!==\"undefined:undefined\")throw new Error(\"oracle harness lexical scope leaked\");\n",
     );
     let body = js_string_literal(&case.body)?;
-    let runner = if suite == RuntimeDifferentialSuite::AsyncFunction {
+    let runner = if suite.reads_async_result() {
         "__runAsync"
     } else {
         "__run"
@@ -1570,7 +1627,7 @@ fn observe_candidate(
         .try_reserve_exact(cases.len())
         .map_err(|_| format!("cannot reserve {} candidate results", cases.len()))?;
     for case in cases {
-        let worker_command = if suite == RuntimeDifferentialSuite::AsyncFunction {
+        let worker_command = if suite.reads_async_result() {
             ASYNC_FUNCTION_CANDIDATE_WORKER_COMMAND
         } else {
             CANDIDATE_WORKER_COMMAND
@@ -2313,6 +2370,21 @@ mod tests {
         .expect("checked-in async-function manifest");
         assert_eq!(corpus.cases.len(), 9);
         assert_eq!(super::ASYNC_FUNCTION_REQUIRED_COVERAGE.len(), 18);
+    }
+
+    #[test]
+    fn checked_in_async_generator_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/async-generator/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in async-generator manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::AsyncGenerator,
+        )
+        .expect("checked-in async-generator manifest");
+        assert_eq!(corpus.cases.len(), 12);
+        assert_eq!(super::ASYNC_GENERATOR_REQUIRED_COVERAGE.len(), 28);
     }
 
     #[test]

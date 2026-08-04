@@ -11,15 +11,16 @@ mod parser_productions;
 
 use control_flow_differential::{
     ASYNC_FUNCTION_CANDIDATE_WORKER_COMMAND, AsyncFunctionDifferentialOptions,
-    CANDIDATE_WORKER_COMMAND, CallSpreadDifferentialOptions, ControlFlowDifferentialOptions,
-    DEFAULT_ASYNC_FUNCTION_CORPUS, DEFAULT_CALL_SPREAD_CORPUS, DEFAULT_CONTROL_FLOW_CORPUS,
-    DEFAULT_ERROR_CORPUS, DEFAULT_FUNCTION_APPLY_CORPUS, DEFAULT_FUNCTION_BIND_CORPUS,
-    DEFAULT_GENERATOR_CORPUS, DEFAULT_ITERATOR_CORPUS, DEFAULT_OBJECT_LEGACY_CORPUS,
-    DEFAULT_PROMISE_CORE_CORPUS, DEFAULT_STRING_HTML_CORPUS, ErrorDifferentialOptions,
-    FunctionApplyDifferentialOptions, FunctionBindDifferentialOptions,
-    GeneratorDifferentialOptions, IteratorDifferentialOptions, MAX_CONTROL_FLOW_TIMEOUT_MS,
-    ObjectLegacyDifferentialOptions, PromiseCoreDifferentialOptions, StringHtmlDifferentialOptions,
-    run_async_function_differential, run_call_spread_differential,
+    AsyncGeneratorDifferentialOptions, CANDIDATE_WORKER_COMMAND, CallSpreadDifferentialOptions,
+    ControlFlowDifferentialOptions, DEFAULT_ASYNC_FUNCTION_CORPUS, DEFAULT_ASYNC_GENERATOR_CORPUS,
+    DEFAULT_CALL_SPREAD_CORPUS, DEFAULT_CONTROL_FLOW_CORPUS, DEFAULT_ERROR_CORPUS,
+    DEFAULT_FUNCTION_APPLY_CORPUS, DEFAULT_FUNCTION_BIND_CORPUS, DEFAULT_GENERATOR_CORPUS,
+    DEFAULT_ITERATOR_CORPUS, DEFAULT_OBJECT_LEGACY_CORPUS, DEFAULT_PROMISE_CORE_CORPUS,
+    DEFAULT_STRING_HTML_CORPUS, ErrorDifferentialOptions, FunctionApplyDifferentialOptions,
+    FunctionBindDifferentialOptions, GeneratorDifferentialOptions, IteratorDifferentialOptions,
+    MAX_CONTROL_FLOW_TIMEOUT_MS, ObjectLegacyDifferentialOptions, PromiseCoreDifferentialOptions,
+    StringHtmlDifferentialOptions, run_async_function_differential,
+    run_async_generator_differential, run_call_spread_differential,
     run_control_flow_candidate_worker, run_control_flow_differential, run_error_differential,
     run_function_apply_differential, run_function_bind_differential, run_generator_differential,
     run_iterator_differential, run_object_legacy_differential, run_promise_core_differential,
@@ -105,6 +106,16 @@ fn main() -> ExitCode {
         }
         Ok(Args::AsyncFunctionDifferential(options)) => {
             match run_async_function_differential(&options) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::FAILURE,
+                Err(error) => {
+                    eprintln!("xtask: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Ok(Args::AsyncGeneratorDifferential(options)) => {
+            match run_async_generator_differential(&options) {
                 Ok(true) => ExitCode::SUCCESS,
                 Ok(false) => ExitCode::FAILURE,
                 Err(error) => {
@@ -219,6 +230,7 @@ Usage:
   cargo xtask dynamic-function-differential --oracle QJSC_PATH [OPTIONS]
   cargo xtask number-radix-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask async-function-differential --oracle QJS_PATH [OPTIONS]
+  cargo xtask async-generator-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask control-flow-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask error-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask function-apply-differential --oracle QJS_PATH [OPTIONS]
@@ -236,6 +248,7 @@ Options:
                       dynamic Function default: {DEFAULT_DYNAMIC_FUNCTION_CORPUS};
                       Number radix manifest default: {DEFAULT_NUMBER_RADIX_CORPUS};
                       async-function manifest default: {DEFAULT_ASYNC_FUNCTION_CORPUS};
+                      async-generator manifest default: {DEFAULT_ASYNC_GENERATOR_CORPUS};
                       control-flow manifest default: {DEFAULT_CONTROL_FLOW_CORPUS};
                       Error manifest default: {DEFAULT_ERROR_CORPUS};
                       Function.prototype.apply manifest default: {DEFAULT_FUNCTION_APPLY_CORPUS};
@@ -252,6 +265,8 @@ Dynamic Function --oracle must be the pinned QuickJS 2026-06-04 qjsc compiler.
 It is invoked with -c only; generated code is never compiled or executed.
 Number radix --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter.
 Async function --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
+its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
+Async generator --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
 its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
 Control flow --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
 its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
@@ -283,6 +298,7 @@ enum Args {
     DynamicFunctionDifferential(DynamicFunctionDifferentialOptions),
     NumberRadixDifferential(NumberRadixDifferentialOptions),
     AsyncFunctionDifferential(AsyncFunctionDifferentialOptions),
+    AsyncGeneratorDifferential(AsyncGeneratorDifferentialOptions),
     ControlFlowDifferential(ControlFlowDifferentialOptions),
     ErrorDifferential(ErrorDifferentialOptions),
     FunctionApplyDifferential(FunctionApplyDifferentialOptions),
@@ -350,6 +366,10 @@ impl Args {
             "async-function-differential" => {
                 parse_async_function_differential_options(arguments.into_iter())
                     .map(Self::AsyncFunctionDifferential)
+            }
+            "async-generator-differential" => {
+                parse_async_generator_differential_options(arguments.into_iter())
+                    .map(Self::AsyncGeneratorDifferential)
             }
             "control-flow-differential" => {
                 parse_control_flow_differential_options(arguments.into_iter())
@@ -560,6 +580,41 @@ fn parse_async_function_differential_options(
     }
 
     Ok(AsyncFunctionDifferentialOptions {
+        oracle: oracle.ok_or("missing required --oracle PATH")?,
+        corpus,
+        timeout,
+    })
+}
+
+fn parse_async_generator_differential_options(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<AsyncGeneratorDifferentialOptions, String> {
+    let mut oracle = None;
+    let mut corpus = PathBuf::from(DEFAULT_ASYNC_GENERATOR_CORPUS);
+    let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    while let Some(option) = arguments.next() {
+        match option.to_string_lossy().as_ref() {
+            "--oracle" => oracle = Some(required_path(&mut arguments, "--oracle")?),
+            "--corpus" => corpus = required_path(&mut arguments, "--corpus")?,
+            "--timeout-ms" => {
+                timeout = required_timeout(&mut arguments)?;
+                let milliseconds = timeout.as_millis();
+                if milliseconds == 0 || milliseconds > u128::from(MAX_CONTROL_FLOW_TIMEOUT_MS) {
+                    return Err(format!(
+                        "async-generator --timeout-ms must be between 1 and {MAX_CONTROL_FLOW_TIMEOUT_MS}"
+                    ));
+                }
+            }
+            unknown => {
+                return Err(format!(
+                    "unknown async-generator-differential option `{unknown}`"
+                ));
+            }
+        }
+    }
+
+    Ok(AsyncGeneratorDifferentialOptions {
         oracle: oracle.ok_or("missing required --oracle PATH")?,
         corpus,
         timeout,

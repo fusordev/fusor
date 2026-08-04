@@ -2,10 +2,10 @@ use super::super::{
     ArrayExpression, ArrayExpressionElement, AssignmentExpression, AssignmentOperator,
     AssignmentTarget, AtomPoolIndex, BinaryOperator, BranchKind, CompilationContext,
     CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel, ConditionalExpression,
-    ExecutableId, Expression, FinalOpcode, FrameLayout, Function, FunctionTreeLayout, GetSpan,
-    IdentifierReference, LeafCompilationError, LogicalExpression, LogicalOperator,
-    LoweredReference, ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands,
-    PlannedControlFlow, PlannedInstruction, PropertyKind, SequenceExpression,
+    ExecutableId, ExecutableKind, Expression, FinalOpcode, FrameLayout, Function,
+    FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError, LogicalExpression,
+    LogicalOperator, LoweredReference, ObjectExpression, ObjectProperty, ObjectPropertyKind,
+    Operands, PlannedControlFlow, PlannedInstruction, PropertyKind, SequenceExpression,
     SimpleAssignmentTarget, Span, UnaryExpression, UnaryOperator, UnsupportedLeafFeature,
     UpdateExpression, UpdateOperator, compiled_static_property_key, object_method_or_accessor_span,
     unsupported,
@@ -354,7 +354,26 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             )?)?;
                         }
                         Expression::YieldExpression(yield_expression) => {
+                            let executable =
+                                self.planned.plan.executable(layout.executable).ok_or(
+                                    LeafCompilationError::InvalidExecutable {
+                                        executable: layout.executable,
+                                    },
+                                )?;
+                            let async_generator = matches!(
+                                executable.kind(),
+                                ExecutableKind::Function {
+                                    asynchronous: true,
+                                    generator: true,
+                                }
+                            );
                             if yield_expression.delegate {
+                                if async_generator {
+                                    return unsupported(
+                                        UnsupportedLeafFeature::UnsupportedExpression,
+                                        yield_expression.span,
+                                    );
+                                }
                                 Self::plan_delegated_yield(
                                     yield_expression,
                                     constants,
@@ -386,6 +405,13 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                                 Operands::None,
                                 yield_expression.span,
                             )));
+                            if async_generator {
+                                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                                    FinalOpcode::Await,
+                                    Operands::None,
+                                    yield_expression.span,
+                                )));
+                            }
                             if let Some(argument) = &yield_expression.argument {
                                 work.push(ExpressionWork::Visit(argument));
                             } else {

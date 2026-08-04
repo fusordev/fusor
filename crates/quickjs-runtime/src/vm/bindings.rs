@@ -182,15 +182,20 @@ pub(super) fn create_closure(
     };
     let generator = function_kind == FunctionKind::Generator;
     let asynchronous = function_kind == FunctionKind::Async;
-    let creates_prototype = has_prototype || generator;
-    let function_prototype = if generator {
+    let async_generator = function_kind == FunctionKind::AsyncGenerator;
+    let creates_prototype = has_prototype || generator || async_generator;
+    let function_prototype = if async_generator {
+        HeapReference::Object(runtime.realm_async_generator_function_prototype(realm)?)
+    } else if generator {
         HeapReference::Object(runtime.realm_generator_function_prototype(realm)?)
     } else if asynchronous {
         HeapReference::Object(runtime.realm_async_function_prototype(realm)?)
     } else {
         HeapReference::Function(runtime.realm_function_prototype(realm)?)
     };
-    let object_prototype = if generator {
+    let object_prototype = if async_generator {
+        Some(runtime.realm_async_generator_prototype(realm)?)
+    } else if generator {
         Some(runtime.realm_generator_prototype(realm)?)
     } else {
         has_prototype

@@ -93,6 +93,7 @@ enum RealmIntrinsics {
         iterators: IteratorIntrinsics,
         generators: GeneratorIntrinsics,
         async_functions: AsyncFunctionIntrinsics,
+        async_generators: AsyncGeneratorIntrinsics,
     },
 }
 
@@ -246,6 +247,7 @@ struct SymbolIntrinsics {
 )]
 struct IteratorIntrinsics {
     iterator_prototype: ObjectId,
+    async_iterator_prototype: ObjectId,
     array_iterator_prototype: ObjectId,
     string_iterator_prototype: ObjectId,
     array_values: FunctionId,
@@ -262,6 +264,13 @@ struct GeneratorIntrinsics {
 struct AsyncFunctionIntrinsics {
     function_constructor: FunctionId,
     function_prototype: ObjectId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AsyncGeneratorIntrinsics {
+    function_constructor: FunctionId,
+    function_prototype: ObjectId,
+    generator_prototype: ObjectId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1167,6 +1176,7 @@ pub(crate) enum NativeFunctionKind {
     SymbolFor,
     SymbolKeyFor,
     IteratorPrototypeIterator,
+    AsyncIteratorPrototypeAsyncIterator,
     ArrayPrototypeJoin,
     ArrayPrototypeToString,
     /// One no-`Intl` `toLocaleString` implementation.
@@ -1182,6 +1192,10 @@ pub(crate) enum NativeFunctionKind {
     GeneratorPrototypeNext,
     GeneratorPrototypeReturn,
     GeneratorPrototypeThrow,
+    AsyncGeneratorFunctionConstructor,
+    AsyncGeneratorPrototypeNext,
+    AsyncGeneratorPrototypeReturn,
+    AsyncGeneratorPrototypeThrow,
     PromiseConstructor,
     PromiseResolve,
     PromiseReject,
@@ -1340,6 +1354,7 @@ impl NativeFunctionKind {
                 | Self::ArrayConstructor
                 | Self::GeneratorFunctionConstructor
                 | Self::AsyncFunctionConstructor
+                | Self::AsyncGeneratorFunctionConstructor
                 | Self::PromiseConstructor
         )
     }
@@ -1867,6 +1882,7 @@ pub struct Runtime {
     pub(crate) promise_jobs: VecDeque<PromiseJob>,
     pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,
     pub(crate) async_function_states: HashMap<ObjectId, crate::vm::AsyncFunctionRecord>,
+    pub(crate) async_generator_states: HashMap<ObjectId, crate::vm::AsyncGeneratorRecord>,
     /// Next non-zero seed assigned after a realm transaction commits.
     next_math_random_seed: u64,
 }
@@ -1994,7 +2010,9 @@ fn require_root_kind(
         || (expected == CompilerExecutableKind::OrdinaryFunction
             && matches!(
                 actual,
-                CompilerExecutableKind::GeneratorFunction | CompilerExecutableKind::AsyncFunction
+                CompilerExecutableKind::GeneratorFunction
+                    | CompilerExecutableKind::AsyncFunction
+                    | CompilerExecutableKind::AsyncGeneratorFunction
             ))
     {
         return Ok(());
@@ -2010,7 +2028,11 @@ fn require_root_kind(
         | CompilerExecutableKind::GeneratorFunction
         | CompilerExecutableKind::GeneratorMethod
         | CompilerExecutableKind::AsyncFunction
-        | CompilerExecutableKind::AsyncMethod => "unsupported executable-kind admission request",
+        | CompilerExecutableKind::AsyncMethod
+        | CompilerExecutableKind::AsyncGeneratorFunction
+        | CompilerExecutableKind::AsyncGeneratorMethod => {
+            "unsupported executable-kind admission request"
+        }
     };
     Err(InstallError::AuthorityInvariant { message })
 }

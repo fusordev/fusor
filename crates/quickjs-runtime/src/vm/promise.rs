@@ -1,6 +1,7 @@
 //! ECMAScript Promise core and runtime-owned job execution.
 
 use super::async_function::begin_async_function_resume;
+use super::async_generator::begin_async_generator_await_resume;
 use super::{
     Arc, CallArguments, CallInputs, CallReturn, CollectionRoot, EngineFault, ExceptionKind,
     ExecutionBudget, ExecutionError, FunctionId, HeapFunction, HeapReference,
@@ -1398,6 +1399,22 @@ pub(super) fn perform_async_function_await(
     perform_promise_reactions(runtime, promise, fulfill_reaction, reject_reaction)
 }
 
+pub(super) fn perform_async_generator_await(
+    runtime: &mut Runtime,
+    promise: ObjectId,
+    generator: ObjectId,
+) -> Result<(), NativeFailure> {
+    let fulfill_reaction = PromiseReaction {
+        kind: PromiseReactionKind::Fulfill,
+        target: PromiseReactionTarget::AsyncGenerator { generator },
+    };
+    let reject_reaction = PromiseReaction {
+        kind: PromiseReactionKind::Reject,
+        target: PromiseReactionTarget::AsyncGenerator { generator },
+    };
+    perform_promise_reactions(runtime, promise, fulfill_reaction, reject_reaction)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "all Promise reaction targets share one state transition and rejection-tracker order"
@@ -1506,7 +1523,7 @@ fn perform_promise_reactions(
     Ok(())
 }
 
-fn fulfill_promise(
+pub(super) fn fulfill_promise(
     runtime: &mut Runtime,
     promise: ObjectId,
     value: StoredValue,
@@ -1514,7 +1531,7 @@ fn fulfill_promise(
     settle_promise(runtime, promise, value, PromiseReactionKind::Fulfill)
 }
 
-fn reject_promise(
+pub(super) fn reject_promise(
     runtime: &mut Runtime,
     promise: ObjectId,
     reason: StoredValue,
@@ -2146,6 +2163,7 @@ pub(super) fn trace_promise_capability(
 pub(super) fn begin_promise_job(
     runtime: &mut Runtime,
     job: PromiseJob,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match job {
         PromiseJob::Reaction { reaction, argument } => match reaction.target {
@@ -2179,6 +2197,15 @@ pub(super) fn begin_promise_job(
             }
             PromiseReactionTarget::AsyncFunction { activation } => {
                 begin_async_function_resume(runtime, activation, reaction.kind, argument)
+            }
+            PromiseReactionTarget::AsyncGenerator { generator } => {
+                begin_async_generator_await_resume(
+                    runtime,
+                    generator,
+                    reaction.kind,
+                    argument,
+                    execution_budget,
+                )
             }
         },
         PromiseJob::Thenable {
@@ -2216,7 +2243,7 @@ pub(super) fn drain_promise_jobs(
 ) -> Result<(), ExecutionError> {
     while let Some(job) = runtime.promise_jobs.pop_front() {
         let prepared_frames = Vec::new();
-        let dispatch = begin_promise_job(runtime, job);
+        let dispatch = begin_promise_job(runtime, job, execution_budget);
         let dispatch = match dispatch {
             Ok(dispatch) => resolve_native_dispatch(
                 runtime,

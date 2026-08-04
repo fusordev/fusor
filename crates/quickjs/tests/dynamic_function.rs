@@ -959,15 +959,63 @@ fn runtime_failure_retains_the_wrapper_and_releases_internal_script_state() {
 }
 
 #[test]
-fn dynamic_async_generator_is_rejected_before_parsing() {
-    let kind = DynamicFunctionKind::AsyncGeneratorFunction;
+fn dynamic_async_generator_constructs_and_executes_awaited_yield() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");
-    let input = DynamicFunctionSource::new(kind, &[], SourceFragment::new(""));
-    assert!(matches!(
-        construct_dynamic_function(&mut context, input, DynamicFunctionLimits::default()),
-        Err(DynamicFunctionConstructionError::UnsupportedKind { kind: actual })
-            if actual == kind
-    ));
+    let parameters = [SourceFragment::new("value")];
+    let generated = construct_dynamic_function(
+        &mut context,
+        source_kind(
+            DynamicFunctionKind::AsyncGeneratorFunction,
+            &parameters,
+            "yield await value;",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic AsyncGeneratorFunction")
+    .into_value();
+    let consumer_parameters = [SourceFragment::new("factory")];
+    let consumer = construct_dynamic_function(
+        &mut context,
+        source(
+            &consumer_parameters,
+            "let state={result:''};\
+             factory(4).next().then(function(result){\
+                 state.result=result.value+':'+result.done;\
+             });\
+             return state;",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("async-generator consumer")
+    .into_value()
+    .into_function()
+    .expect("consumer function");
+    let read_parameters = [SourceFragment::new("state")];
+    let read = construct_dynamic_function(
+        &mut context,
+        source(&read_parameters, "return state.result;"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("state reader")
+    .into_value()
+    .into_function()
+    .expect("reader function");
+
+    let state = context
+        .call(&consumer, &[generated], ExecutionLimits::default())
+        .expect("consume async generator");
+    let result = context
+        .call(&read, &[state], ExecutionLimits::default())
+        .expect("read async result");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "4:false"
+    );
 }

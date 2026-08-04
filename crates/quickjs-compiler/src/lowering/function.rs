@@ -287,7 +287,9 @@ impl CompilationContext<'_, '_, '_> {
         let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
         let (executable_kind, function_span, function_name, function_name_span) = match form {
             OrdinaryFunctionForm::Function => (
-                if generator {
+                if generator && asynchronous {
+                    CompilerExecutableKind::AsyncGeneratorFunction
+                } else if generator {
                     CompilerExecutableKind::GeneratorFunction
                 } else if asynchronous {
                     CompilerExecutableKind::AsyncFunction
@@ -304,7 +306,9 @@ impl CompilationContext<'_, '_, '_> {
             OrdinaryFunctionForm::ObjectMethod {
                 property_span: source_span,
             } => (
-                if generator {
+                if generator && asynchronous {
+                    CompilerExecutableKind::AsyncGeneratorMethod
+                } else if generator {
                     CompilerExecutableKind::GeneratorMethod
                 } else if asynchronous {
                     CompilerExecutableKind::AsyncMethod
@@ -506,6 +510,20 @@ const fn executable_header(
         }
         CompilerExecutableKind::AsyncMethod => {
             UnverifiedFunctionHeader::async_method_with_variable_references(
+                strict,
+                defined_argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::AsyncGeneratorFunction => {
+            UnverifiedFunctionHeader::async_generator_source_function_with_variable_references(
+                strict,
+                defined_argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::AsyncGeneratorMethod => {
+            UnverifiedFunctionHeader::async_generator_method_with_variable_references(
                 strict,
                 defined_argument_count,
                 variable_reference_count,

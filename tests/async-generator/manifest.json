@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "call-is-deferred-and-queued-next-resumes-in-fifo-order",
+      "covers": ["await-fulfill", "call-deferred", "fifo-request-queue", "next-promise", "next-resume-value"],
+      "body": "let state={result:'',done:null};async function* values(){state.result=state.result+'start|';let resumed=yield await 1;yield resumed+1;}let iterator=values();state.result=state.result+'called|';let first=iterator.next();state.result=state.result+'promise:'+(first instanceof Promise)+'|';let second=iterator.next(7);first.then(function(result){state.result=state.result+'first:'+result.value+':'+result.done+'|';});state.done=second.then(function(result){state.result=state.result+'second:'+result.value+':'+result.done;});return state;",
+      "expect": {"kind": "string", "value": "called|start|promise:true|first:1:false|second:8:false"}
+    },
+    {
+      "id": "yield-awaits-thenables-before-fulfilling-next",
+      "covers": ["yield-await-assimilation"],
+      "body": "let state={result:'',done:null};async function* values(){yield {then:function(resolve){state.result=state.result+'thenable|';resolve(3);}};}let promise=values().next();state.result=state.result+'after-next|';state.done=promise.then(function(result){state.result=state.result+'yield:'+result.value+':'+result.done;});return state;",
+      "expect": {"kind": "string", "value": "after-next|thenable|yield:3:false"}
+    },
+    {
+      "id": "rejected-await-is-thrown-at-the-await-site",
+      "covers": ["await-reject", "throw-catch"],
+      "body": "let state={result:'',done:null};async function* values(){try{await {then:function(resolve,reject){reject('reason');}};}catch(error){yield 'caught:'+error;}}state.done=values().next().then(function(result){state.result=result.value+':'+result.done;});return state;",
+      "expect": {"kind": "string", "value": "caught:reason:false"}
+    },
+    {
+      "id": "uncaught-body-throw-rejects-the-active-request",
+      "covers": ["uncaught-throw"],
+      "body": "let state={result:'returned|',done:null};async function* values(){throw 'boom';}state.done=values().next().catch(function(reason){state.result=state.result+'rejected:'+reason;});return state;",
+      "expect": {"kind": "string", "value": "returned|rejected:boom"}
+    },
+    {
+      "id": "return-awaits-thenables-before-running-finally",
+      "covers": ["return-await", "return-finally"],
+      "body": "let state={result:'',done:null};async function* values(){try{yield 1;}finally{state.result=state.result+'finally|';}}let iterator=values();state.done=iterator.next().then(function(){let completion=iterator.return({then:function(resolve){state.result=state.result+'thenable|';resolve(8);}});state.result=state.result+'after-return|';return completion.then(function(result){state.result=state.result+'return:'+result.value+':'+result.done;});});return state;",
+      "expect": {"kind": "string", "value": "after-return|thenable|finally|return:8:true"}
+    },
+    {
+      "id": "rejected-return-value-runs-finally-and-rejects",
+      "covers": ["return-reject"],
+      "body": "let state={result:'',done:null};async function* values(){try{yield 1;}finally{state.result=state.result+'finally|';}}let iterator=values();state.done=iterator.next().then(function(){let returned=iterator.return({then:function(resolve,reject){state.result=state.result+'thenable|';reject('nope');}});state.result=state.result+'after-return|';return returned.catch(function(reason){state.result=state.result+'rejected:'+reason;});});return state;",
+      "expect": {"kind": "string", "value": "after-return|thenable|finally|rejected:nope"}
+    },
+    {
+      "id": "return-promise-resolve-abrupt-is-injected-as-throw",
+      "covers": ["return-promise-resolve-abrupt"],
+      "body": "let state={result:'',done:null};async function* values(){try{yield 1;}catch(error){yield 'caught:'+error;}}let iterator=values();let first=iterator.next();state.done=first.then(function(){first.__defineGetter__('constructor',function(){state.result=state.result+'getter|';throw 'bad';});let returned=iterator.return(first);state.result=state.result+'returned|';return returned.then(function(result){state.result=state.result+result.value+':'+result.done;});});return state;",
+      "expect": {"kind": "string", "value": "getter|returned|caught:bad:false"}
+    },
+    {
+      "id": "completed-generator-next-return-and-throw-rules",
+      "covers": ["completed-next", "completed-return-await", "completed-throw"],
+      "body": "let state={result:'',done:null};async function* values(){}let iterator=values();state.done=iterator.next().then(function(first){state.result=state.result+'first:'+first.value+':'+first.done+'|';return iterator.next();}).then(function(next){state.result=state.result+'next:'+next.value+':'+next.done+'|';return iterator.return({then:function(resolve){state.result=state.result+'thenable|';resolve(4);}});}).then(function(returned){state.result=state.result+'return:'+returned.value+':'+returned.done+'|';return iterator.throw('late').catch(function(reason){state.result=state.result+'throw:'+reason;});});return state;",
+      "expect": {"kind": "string", "value": "first:undefined:true|next:undefined:true|thenable|return:4:true|throw:late"}
+    },
+    {
+      "id": "invalid-receiver-rejects-instead-of-throwing",
+      "covers": ["invalid-receiver-rejects"],
+      "body": "let state={result:'returned|',done:null};async function* values(){}let next=values().next;state.done=next.call({}).catch(function(error){state.result=state.result+error.name;});return state;",
+      "expect": {"kind": "string", "value": "returned|TypeError"}
+    },
+    {
+      "id": "parameter-abrupt-completion-throws-during-call",
+      "covers": ["parameter-abrupt-throw", "parameter-initialization"],
+      "body": "function fail(){throw new Error('bad');}async function* values(value=fail()){yield value;}let iterator=values();return {result:'unreachable',done:iterator.next()};",
+      "expect": {"kind": "throw", "name": "Error", "message": "bad"}
+    },
+    {
+      "id": "method-and-instance-use-async-generator-intrinsics",
+      "covers": ["async-iterator-identity", "function-prototype-chain", "instance-prototype-chain", "method", "nonconstructable"],
+      "body": "let holder={async *values(){yield 3;}};let fn=holder.values;let functionPrototype=Object.getPrototypeOf(fn);let C=functionPrototype.constructor;let iterator=fn.call(holder);let intrinsicPrototype=Object.getPrototypeOf((async function*(){}).prototype);let constructError='';try{new fn();}catch(error){constructError=error.name;}let state={result:Object.prototype.toString.call(fn)+'|'+C.name+':'+C.length+'|'+(Object.getPrototypeOf(C)===Function)+'|'+(Object.getPrototypeOf(functionPrototype)===Function.prototype)+'|'+fn.hasOwnProperty('prototype')+'|'+(Object.getPrototypeOf(iterator)===fn.prototype)+'|'+(Object.getPrototypeOf(fn.prototype)===intrinsicPrototype)+'|'+(iterator[Symbol.asyncIterator]()===iterator)+'|'+constructError+'|',done:null};state.done=iterator.next().then(function(result){state.result=state.result+result.value+':'+result.done;});return state;",
+      "expect": {"kind": "string", "value": "[object AsyncGeneratorFunction]|AsyncGeneratorFunction:1|true|true|true|true|true|true|TypeError|3:false"}
+    },
+    {
+      "id": "dynamic-constructor-source-order-and-new-target-fallback",
+      "covers": ["dynamic-async-generator-function", "dynamic-new-target", "dynamic-prototype-fallback", "dynamic-source-order"],
+      "body": "let log='';let parameter={toString:function(){log=log+'parameter|';return 'value';}};let body={toString:function(){log=log+'body|';return 'yield await value+1;';}};let C=(async function*(){}).constructor;let generated=C(parameter,body);let Custom=function Custom(){};let expected={marker:1};Custom.prototype=expected;let first=Reflect.construct(C,['yield 1;'],Custom);Custom.prototype=0;let second=Reflect.construct(C,['yield 2;'],Custom);let state={result:log+generated.name+':'+generated.length+'|'+(Object.getPrototypeOf(generated)===C.prototype)+'|'+(Object.getPrototypeOf(first)===expected)+'|'+(Object.getPrototypeOf(second)===C.prototype)+'|',done:null};state.done=generated(5).next().then(function(a){state.result=state.result+a.value+':'+a.done+'|';return first().next();}).then(function(b){state.result=state.result+b.value+':'+b.done+'|';return second().next();}).then(function(c){state.result=state.result+c.value+':'+c.done;});return state;",
+      "expect": {"kind": "string", "value": "parameter|body|anonymous:1|true|true|true|6:false|1:false|2:false"}
+    }
+  ]
+}

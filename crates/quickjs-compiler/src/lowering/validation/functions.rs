@@ -62,9 +62,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 executable.span(),
             );
         };
-        if function.r#async && function.generator {
-            return unsupported(UnsupportedLeafFeature::NonOrdinaryFunction, function.span);
-        }
         let is_declaration = function.r#type == FunctionType::FunctionDeclaration;
         let is_expression = function.r#type == FunctionType::FunctionExpression;
         if !is_declaration && !is_expression {

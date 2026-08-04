@@ -37,12 +37,12 @@ mod validation;
 use super::{
     Arc, Arena, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics, ArrayMutator,
     ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic, AsyncFunctionIntrinsics,
-    AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics, Context, ErrorIntrinsic,
-    ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation, GeneratorIntrinsics,
-    GlobalNumericFunction, HandleError, HandleKind, HashMap, HeapFunction, HeapObject,
-    HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod,
-    MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberIntrinsics,
-    NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PromiseIntrinsics,
+    AsyncGeneratorIntrinsics, AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics, Context,
+    ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation,
+    GeneratorIntrinsics, GlobalNumericFunction, HandleError, HandleKind, HashMap, HeapFunction,
+    HeapObject, HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString,
+    LocaleStringMethod, MathMethod, NativeFunction, NativeFunctionKind, NumberFormat,
+    NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PromiseIntrinsics,
     PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId,
     RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError,
     RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringHtmlMethod,
@@ -556,6 +556,7 @@ impl Runtime {
             promise_jobs: VecDeque::new(),
             generator_states: HashMap::new(),
             async_function_states: HashMap::new(),
+            async_generator_states: HashMap::new(),
             next_math_random_seed: 1,
         })
     }
@@ -705,6 +706,7 @@ impl RealmBuildTransaction<'_> {
             },
             iterators: IteratorIntrinsics {
                 iterator_prototype: object(IntrinsicObjectId::IteratorPrototype),
+                async_iterator_prototype: object(IntrinsicObjectId::AsyncIteratorPrototype),
                 array_iterator_prototype: object(IntrinsicObjectId::ArrayIteratorPrototype),
                 string_iterator_prototype: object(IntrinsicObjectId::StringIteratorPrototype),
                 array_values: function(NativeFunctionKind::ArrayPrototypeValues),
@@ -717,6 +719,13 @@ impl RealmBuildTransaction<'_> {
             async_functions: AsyncFunctionIntrinsics {
                 function_constructor: function(NativeFunctionKind::AsyncFunctionConstructor),
                 function_prototype: object(IntrinsicObjectId::AsyncFunctionPrototype),
+            },
+            async_generators: AsyncGeneratorIntrinsics {
+                function_constructor: function(
+                    NativeFunctionKind::AsyncGeneratorFunctionConstructor,
+                ),
+                function_prototype: object(IntrinsicObjectId::AsyncGeneratorFunctionPrototype),
+                generator_prototype: object(IntrinsicObjectId::AsyncGeneratorPrototype),
             },
         }
     }

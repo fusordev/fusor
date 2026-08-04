@@ -171,6 +171,9 @@ impl UnverifiedFunctionHeader {
     const ASYNC_SOURCE_FLAGS: u16 = (1 << 1) | (2 << 4) | (1 << 6) | (1 << 9) | (1 << 10);
     const ASYNC_METHOD_FLAGS: u16 =
         (1 << 1) | (2 << 4) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
+    const ASYNC_GENERATOR_SOURCE_FLAGS: u16 = (1 << 1) | (3 << 4) | (1 << 6) | (1 << 9) | (1 << 10);
+    const ASYNC_GENERATOR_METHOD_FLAGS: u16 =
+        (1 << 1) | (3 << 4) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
     const DYNAMIC_FUNCTION_SCRIPT_FLAGS: u16 = 1 << 10;
 
     /// Creates an unverified function header.
@@ -338,6 +341,38 @@ impl UnverifiedFunctionHeader {
     ) -> Self {
         Self::new(
             Self::ASYNC_METHOD_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates an async-generator source-function header with retained debug
+    /// source and a typed capture layout.
+    #[must_use]
+    pub const fn async_generator_source_function_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::ASYNC_GENERATOR_SOURCE_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates an async-generator object-method header with retained debug
+    /// source and a typed capture layout.
+    #[must_use]
+    pub const fn async_generator_method_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::ASYNC_GENERATOR_METHOD_FLAGS,
             if strict { 1 } else { 0 },
             defined_argument_count,
             variable_reference_count,

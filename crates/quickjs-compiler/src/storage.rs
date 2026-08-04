@@ -922,19 +922,14 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             CompilationGoal::DynamicFunction(
                 DynamicFunctionKind::Function
                 | DynamicFunctionKind::GeneratorFunction
-                | DynamicFunctionKind::AsyncFunction,
+                | DynamicFunctionKind::AsyncFunction
+                | DynamicFunctionKind::AsyncGeneratorFunction,
             ) => (
                 CompilationUnitKind::Script,
                 ExecutableKind::Script {
                     asynchronous: false,
                 },
             ),
-            CompilationGoal::DynamicFunction(kind) => {
-                return Err(CompilerError::Unsupported {
-                    feature: UnsupportedFeature::DynamicFunctionKind(kind),
-                    span: root_span,
-                });
-            }
         };
         let semantic = unit.semantic();
         Ok(Self {

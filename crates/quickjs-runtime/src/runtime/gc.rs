@@ -301,6 +301,7 @@ impl Runtime {
                 iterators,
                 generators,
                 async_functions,
+                async_generators,
             } = realm.intrinsics
             {
                 mark_heap_reference(
@@ -429,11 +430,14 @@ impl Runtime {
                 );
                 for prototype in [
                     iterators.iterator_prototype,
+                    iterators.async_iterator_prototype,
                     iterators.array_iterator_prototype,
                     iterators.string_iterator_prototype,
                     generators.function_prototype,
                     generators.generator_prototype,
                     async_functions.function_prototype,
+                    async_generators.function_prototype,
+                    async_generators.generator_prototype,
                 ] {
                     mark_heap_reference(
                         HeapReference::Object(prototype),
@@ -450,6 +454,12 @@ impl Runtime {
                 );
                 mark_heap_reference(
                     HeapReference::Function(async_functions.function_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(async_generators.function_constructor),
                     &mut marked_functions,
                     &mut marked_objects,
                     &mut work,
@@ -482,6 +492,14 @@ impl Runtime {
                         PromiseReactionTarget::AsyncFunction { activation } => {
                             mark_heap_reference(
                                 HeapReference::Object(*activation),
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
+                        PromiseReactionTarget::AsyncGenerator { generator } => {
+                            mark_heap_reference(
+                                HeapReference::Object(*generator),
                                 &mut marked_functions,
                                 &mut marked_objects,
                                 &mut work,
@@ -695,6 +713,41 @@ impl Runtime {
                             );
                         });
                     }
+                    if let Some(record) = self.async_generator_states.get(&id) {
+                        if let Some(awaiting) = &record.awaiting {
+                            mark_heap_reference(
+                                HeapReference::Object(awaiting.promise),
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
+                        if let Some(frame) = &record.frame {
+                            crate::vm::trace_frame_roots(frame, &mut |root| {
+                                mark_collection_root(
+                                    root,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut marked_cells,
+                                    &mut work,
+                                );
+                            });
+                        }
+                        for request in &record.queue {
+                            mark_stored_value(
+                                &request.value,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                            mark_promise_capability(
+                                &request.capability,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
+                    }
                     if let Some(object) = self.objects.get(id) {
                         for cell in object.arguments_cells() {
                             if marked_cells.insert(cell) {
@@ -750,6 +803,14 @@ impl Runtime {
                                             PromiseReactionTarget::AsyncFunction { activation } => {
                                                 mark_heap_reference(
                                                     HeapReference::Object(*activation),
+                                                    &mut marked_functions,
+                                                    &mut marked_objects,
+                                                    &mut work,
+                                                );
+                                            }
+                                            PromiseReactionTarget::AsyncGenerator { generator } => {
+                                                mark_heap_reference(
+                                                    HeapReference::Object(*generator),
                                                     &mut marked_functions,
                                                     &mut marked_objects,
                                                     &mut work,
@@ -865,6 +926,7 @@ impl Runtime {
         for id in dead_objects {
             self.generator_states.remove(&id);
             self.async_function_states.remove(&id);
+            self.async_generator_states.remove(&id);
             if let Some(object) = self.objects.remove(id) {
                 self.object_properties = self
                     .object_properties

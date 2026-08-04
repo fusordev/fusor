@@ -35,9 +35,9 @@ use super::{
     usize_to_u64,
 };
 
-const REALM_OBJECT_SLOTS: u64 = 27;
-const REALM_PROPERTY_SLOTS: u64 = 879;
-const REALM_FUNCTION_SLOTS: u64 = 256;
+const REALM_OBJECT_SLOTS: u64 = 30;
+const REALM_PROPERTY_SLOTS: u64 = 899;
+const REALM_FUNCTION_SLOTS: u64 = 261;
 
 #[test]
 #[allow(
@@ -1191,6 +1191,7 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         iterators: _,
         generators: _,
         async_functions: _,
+        async_generators: _,
         promise: _,
     } = state.intrinsics
     else {

@@ -368,6 +368,7 @@ pub(super) fn dispatch_pending_exception(
             Catch { frame: usize, marker: usize },
             ForOf { frame: usize, marker: usize },
             Native(usize),
+            AsyncGenerator(usize),
         }
         let mut handler = None;
         for (index, frame) in frames.iter().enumerate().rev() {
@@ -408,6 +409,7 @@ pub(super) fn dispatch_pending_exception(
                         | NativeContinuation::PromiseCombinator(_)
                         | NativeContinuation::IteratorAppend(_)
                         | NativeContinuation::IteratorClose(_)
+                        | NativeContinuation::AsyncGeneratorReturnAwait { .. }
                 ) || matches!(
                     continuation,
                     NativeContinuation::Promise(state) if state.handles_abrupt()
@@ -416,12 +418,124 @@ pub(super) fn dispatch_pending_exception(
                 handler = Some(Handler::Native(index));
                 break;
             }
+            if frame
+                .generator_resume
+                .is_some_and(|generator| runtime.async_generator_states.contains_key(&generator))
+            {
+                handler = Some(Handler::AsyncGenerator(index));
+                break;
+            }
         }
         let Some(handler) = handler else {
             let caller_frames = exception_caller_frames(runtime, frames)?;
             let exception = finish_exception(runtime, pending, caller_frames)?;
             return Err(ExecutionError::Exception(exception));
         };
+
+        if let Handler::AsyncGenerator(handler_frame) = handler {
+            while frames.len() > handler_frame.saturating_add(1) {
+                let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
+                    message: "exception unwinder lost a frame above its async-generator boundary",
+                })?;
+                if let Some(generator) = frame.generator_resume {
+                    complete_generator_resume(runtime, generator)?;
+                }
+                *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
+                if let Some(dynamic) = frame.dynamic_return.take() {
+                    runtime.retire_dynamic_root(dynamic.root)?;
+                }
+            }
+            let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
+                message: "exception unwinder lost its async-generator boundary frame",
+            })?;
+            *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
+            let generator = frame
+                .generator_resume
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "async-generator boundary lost its resume identity",
+                })?;
+            if !frame.native_returns.is_empty() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "async-generator abrupt completion retained native continuations",
+                }
+                .into());
+            }
+            if let Some(dynamic) = frame.dynamic_return.take() {
+                runtime.retire_dynamic_root(dynamic.root)?;
+            }
+            let return_to = frame.return_to;
+            let PendingException { realm, payload, .. } = pending;
+            let thrown = match payload {
+                PendingExceptionPayload::ThrownValue(value) => value,
+                PendingExceptionPayload::FrozenEngineError {
+                    kind,
+                    message,
+                    stack,
+                } => StoredValue::Object(runtime.materialize_error_object(
+                    realm,
+                    kind,
+                    message,
+                    Some(stack),
+                )?),
+                PendingExceptionPayload::EngineError { .. } => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "async-generator engine error has no frozen stack snapshot",
+                    }
+                    .into());
+                }
+            };
+            let dispatch =
+                complete_async_generator_throw(runtime, generator, thrown, execution_budget)
+                    .map_err(native_failure_to_execution)?;
+            let active_frames = active_execution_frames(frames);
+            let result = match resolve_native_dispatch(
+                runtime,
+                dispatch,
+                frames,
+                active_frames,
+                *active_frame_values,
+                compiler,
+                execution_budget,
+            )
+            .map_err(native_failure_to_execution)?
+            {
+                NativeDispatch::Immediate(value) => value,
+                NativeDispatch::Frame(next) => {
+                    *active_frame_values = active_frame_values.saturating_add(next.reserved_values);
+                    frames.push(next);
+                    return Ok(());
+                }
+                NativeDispatch::Pair(_, _)
+                | NativeDispatch::ForOfRecord { .. }
+                | NativeDispatch::ForOfStep { .. }
+                | NativeDispatch::ForOfClosed
+                | NativeDispatch::CopyDataPropertiesDone
+                | NativeDispatch::AsyncAwait { .. }
+                | NativeDispatch::Call(_) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "async-generator abrupt completion produced an invalid dispatch",
+                    }
+                    .into());
+                }
+            };
+            if let Some(parent) = frames.last_mut() {
+                push_call_result(
+                    parent,
+                    result,
+                    return_to.ok_or(EngineFault::RuntimeInvariant {
+                        message: "nested async-generator throw has no caller continuation",
+                    })?,
+                )?;
+            } else if return_to.is_none() {
+                execution_budget.native_root_completion = Some(result);
+            } else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "root async-generator throw retained a caller continuation",
+                }
+                .into());
+            }
+            return Ok(());
+        }
 
         if let Handler::ForOf {
             frame: handler_frame,

@@ -158,6 +158,7 @@ pub(super) fn take_iterator_abrupt_handler(
                 | NativeContinuation::PromiseCombinator(_)
                 | NativeContinuation::IteratorAppend(_)
                 | NativeContinuation::IteratorClose(_)
+                | NativeContinuation::AsyncGeneratorReturnAwait { .. }
         ) || matches!(
             continuation,
             NativeContinuation::Promise(state) if state.handles_abrupt()
@@ -206,6 +207,20 @@ pub(super) fn resume_iterator_abrupt_continuations(
             NativeContinuation::PromiseCombinator(state) => resume_promise_combinator_abrupt(
                 runtime,
                 *state,
+                pending,
+                return_to,
+                execution_budget,
+            ),
+            NativeContinuation::AsyncGeneratorReturnAwait {
+                generator,
+                kind,
+                origin: _,
+                completion,
+            } => resume_async_generator_return_await_abrupt(
+                runtime,
+                generator,
+                kind,
+                completion,
                 pending,
                 return_to,
                 execution_budget,
@@ -547,6 +562,14 @@ pub(super) fn resume_native_continuations(
                 execution_budget,
             )?,
             NativeContinuation::AsyncAwait { origin } => finish_async_await(&value, origin)?,
+            NativeContinuation::AsyncGeneratorReturnAwait {
+                generator,
+                kind,
+                origin,
+                completion,
+            } => finish_async_generator_return_await(
+                runtime, generator, kind, origin, completion, &value,
+            )?,
             NativeContinuation::ReflectSet => NativeDispatch::Immediate(StoredValue::Boolean(true)),
             NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
         };
@@ -1358,7 +1381,8 @@ pub(super) fn dispatch_native_call_with_frames(
         }
         NativeFunctionKind::OrdinaryFunctionConstructor
         | NativeFunctionKind::GeneratorFunctionConstructor
-        | NativeFunctionKind::AsyncFunctionConstructor => {
+        | NativeFunctionKind::AsyncFunctionConstructor
+        | NativeFunctionKind::AsyncGeneratorFunctionConstructor => {
             let Some(compiler) = compiler else {
                 return Err(NativeFailure::Execution(
                     DynamicFunctionCompileFailure::Engine {
@@ -2308,7 +2332,8 @@ pub(super) fn dispatch_native_call_with_frames(
         }
         NativeFunctionKind::ArraySpeciesGetter
         | NativeFunctionKind::PromiseSpeciesGetter
-        | NativeFunctionKind::IteratorPrototypeIterator => {
+        | NativeFunctionKind::IteratorPrototypeIterator
+        | NativeFunctionKind::AsyncIteratorPrototypeAsyncIterator => {
             Ok(NativeDispatch::Immediate(inputs.receiver))
         }
         NativeFunctionKind::SymbolConstructor => {
@@ -2484,6 +2509,26 @@ pub(super) fn dispatch_native_call_with_frames(
                 return_to,
                 origin.unwrap_or_else(native_function_host_origin),
                 active_frame_values,
+            )
+        }
+        NativeFunctionKind::AsyncGeneratorPrototypeNext
+        | NativeFunctionKind::AsyncGeneratorPrototypeReturn
+        | NativeFunctionKind::AsyncGeneratorPrototypeThrow => {
+            let mode = match native.kind {
+                NativeFunctionKind::AsyncGeneratorPrototypeNext => GeneratorResumeMode::Next,
+                NativeFunctionKind::AsyncGeneratorPrototypeReturn => GeneratorResumeMode::Return,
+                NativeFunctionKind::AsyncGeneratorPrototypeThrow => GeneratorResumeMode::Throw,
+                _ => unreachable!("async-generator resume arm is exhaustively selected"),
+            };
+            begin_async_generator_resume(
+                runtime,
+                &inputs.receiver,
+                inputs.arguments,
+                mode,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
             )
         }
         NativeFunctionKind::FunctionPrototypeToString => {

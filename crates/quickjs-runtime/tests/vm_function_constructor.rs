@@ -56,6 +56,10 @@ impl OrdinaryDynamicFunctionCompiler for TestCompiler {
                 DynamicFunctionKind::AsyncFunction,
                 Arc::from("<runtime AsyncFunction>"),
             ),
+            DynamicFunctionFamily::AsyncGeneratorFunction => (
+                DynamicFunctionKind::AsyncGeneratorFunction,
+                Arc::from("<runtime AsyncGeneratorFunction>"),
+            ),
         };
         let dynamic_source =
             DynamicFunctionSource::new(kind, &parameters, SourceFragment::new(&body_text));
@@ -195,6 +199,49 @@ fn async_function_constructor_has_exact_intrinsics_and_executes_await() {
     assert_string(
         &result,
         "AsyncFunction|1|true|true|true|true|false,false,true|false,false,false|7",
+    );
+}
+
+#[test]
+fn async_generator_function_constructor_has_exact_intrinsics_and_executes_yield() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let C=(async function*(){}).constructor;\
+         let f=new C('value','yield await value;');\
+         let p=Object.getPrototypeOf(f);\
+         let gp=Object.getPrototypeOf(f.prototype);\
+         let cd=Object.getOwnPropertyDescriptor(p,'constructor');\
+         let pd=Object.getOwnPropertyDescriptor(C,'prototype');\
+         let nonconstructable=false;\
+         try{new f();}catch(error){nonconstructable=error instanceof TypeError;}\
+         let state={result:C.name+'|'+C.length+'|'+\
+             (Object.getPrototypeOf(C)===Function)+'|'+\
+             (Object.getPrototypeOf(p)===Function.prototype)+'|'+\
+             (Object.getPrototypeOf(gp)[Symbol.asyncIterator].call({})!==undefined)+'|'+\
+             nonconstructable+'|'+\
+             cd.writable+','+cd.enumerable+','+cd.configurable+'|'+\
+             pd.writable+','+pd.enumerable+','+pd.configurable+'|'};\
+         f(7).next().then(function(result){\
+             state.result=state.result+result.value+':'+result.done;\
+         });\
+         return state;",
+    );
+    let read = dynamic_function(&mut context, &["state"], "return state.result;");
+
+    let state = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("AsyncGeneratorFunction construction");
+    let result = context
+        .call(&read, &[state], ExecutionLimits::default())
+        .expect("async-generator result");
+
+    assert_string(
+        &result,
+        "AsyncGeneratorFunction|1|true|true|true|true|false,false,true|false,false,false|7:false",
     );
 }
 

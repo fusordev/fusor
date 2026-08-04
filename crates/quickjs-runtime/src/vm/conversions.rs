@@ -716,6 +716,9 @@ pub(super) fn advance_function_source_conversion(
                 NativeFunctionKind::AsyncFunctionConstructor => {
                     DynamicFunctionFamily::AsyncFunction
                 }
+                NativeFunctionKind::AsyncGeneratorFunctionConstructor => {
+                    DynamicFunctionFamily::AsyncGeneratorFunction
+                }
                 _ => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "dynamic source conversion has a nondynamic constructor",

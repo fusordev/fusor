@@ -19,6 +19,7 @@ pub(crate) const fn is_supported_dynamic_function_goal(
             quickjs_frontend::DynamicFunctionKind::Function
                 | quickjs_frontend::DynamicFunctionKind::GeneratorFunction
                 | quickjs_frontend::DynamicFunctionKind::AsyncFunction
+                | quickjs_frontend::DynamicFunctionKind::AsyncGeneratorFunction
         )
     )
 }

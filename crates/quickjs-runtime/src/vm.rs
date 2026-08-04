@@ -25,7 +25,7 @@
 
 //! Iterative execution of runtime-installed verified bytecode.
 
-use std::{cell::RefCell, error::Error, fmt, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::VecDeque, error::Error, fmt, rc::Rc, sync::Arc};
 
 use quickjs_bytecode::{
     BytecodePc, CompilerBindingKind, CompilerClosureBinding, CompilerClosureSource,
@@ -80,6 +80,7 @@ mod array_search;
 mod array_sort;
 mod array_statics;
 mod async_function;
+mod async_generator;
 mod bigint_intrinsics;
 mod bindings;
 mod conversions;
@@ -119,12 +120,13 @@ use async_function::{begin_async_await, suspend_async_function};
 )]
 use {
     aggregate_error::*, array_callbacks::*, array_copiers::*, array_flatten::*, array_join::*,
-    array_mutators::*, array_search::*, array_sort::*, array_statics::*, bigint_intrinsics::*,
-    bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*,
-    errors::*, exceptions::*, execution::*, from_entries::*, generator::*, group_by::*,
-    iterators::*, json_parse::*, json_stringify::*, locale_string::*, math::*, math_sum_precise::*,
-    native::*, object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*,
-    stack::*, string_methods::*, string_raw::*, string_replace::*, uri::*,
+    array_mutators::*, array_search::*, array_sort::*, array_statics::*, async_generator::*,
+    bigint_intrinsics::*, bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*,
+    error_stack::*, errors::*, exceptions::*, execution::*, from_entries::*, generator::*,
+    group_by::*, iterators::*, json_parse::*, json_stringify::*, locale_string::*, math::*,
+    math_sum_precise::*, native::*, object_intrinsics::*, promise::*, promise_combinators::*,
+    properties::*, reflect::*, stack::*, string_methods::*, string_raw::*, string_replace::*,
+    uri::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -303,6 +305,43 @@ pub(crate) struct AsyncFunctionRecord {
     pub(crate) origin: JsStackFrame,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AsyncGeneratorLifecycle {
+    SuspendedStart,
+    SuspendedYield,
+    Executing,
+    DrainingQueue,
+    Completed,
+}
+
+pub(crate) struct AsyncGeneratorRequest {
+    pub(crate) mode: GeneratorResumeMode,
+    pub(crate) value: StoredValue,
+    pub(crate) capability: crate::object::PromiseCapability,
+    pub(crate) realm: RealmId,
+    pub(crate) origin: JsStackFrame,
+}
+
+pub(crate) struct AsyncGeneratorAwait {
+    pub(crate) promise: ObjectId,
+    pub(crate) origin: JsStackFrame,
+    pub(crate) kind: AsyncGeneratorAwaitKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AsyncGeneratorAwaitKind {
+    Body,
+    ReturnResume,
+    ReturnComplete,
+}
+
+pub(crate) struct AsyncGeneratorRecord {
+    pub(crate) state: AsyncGeneratorLifecycle,
+    pub(crate) frame: Option<Frame>,
+    pub(crate) queue: VecDeque<AsyncGeneratorRequest>,
+    pub(crate) awaiting: Option<AsyncGeneratorAwait>,
+}
+
 /// The pinned `call (native)` / `apply (native)` entry `QuickJS` places
 /// between the target function and its caller when a bytecode function is
 /// reached through `Function.prototype.call` or `Function.prototype.apply`.
@@ -375,6 +414,12 @@ enum NativeContinuation {
     AsyncAwait {
         origin: JsStackFrame,
     },
+    AsyncGeneratorReturnAwait {
+        generator: ObjectId,
+        kind: AsyncGeneratorAwaitKind,
+        origin: JsStackFrame,
+        completion: StoredValue,
+    },
     /// Ignore an accessor setter's return value and complete `Reflect.set`
     /// with the internal-method success Boolean.
     ReflectSet,
@@ -428,6 +473,7 @@ impl NativeContinuation {
             Self::Promise(state) => state.retained_values(),
             Self::PromiseCombinator(state) => state.retained_values(),
             Self::AsyncAwait { .. } | Self::ReflectSet | Self::FunctionCall => 0,
+            Self::AsyncGeneratorReturnAwait { .. } => 1,
         }
     }
 }
@@ -1827,6 +1873,9 @@ fn trace_native_continuation_roots(
         }
         NativeContinuation::Promise(state) => state.trace_roots(mark),
         NativeContinuation::PromiseCombinator(state) => state.trace_roots(mark),
+        NativeContinuation::AsyncGeneratorReturnAwait { completion, .. } => {
+            trace_stored_value_root(completion, mark);
+        }
         NativeContinuation::AsyncAwait { .. }
         | NativeContinuation::ReflectSet
         | NativeContinuation::FunctionCall => {}
@@ -3912,7 +3961,21 @@ fn execute_frame_loop(
                 initial.reserved_values = initial
                     .reserved_values
                     .saturating_sub(native_continuation_values(&native_returns));
-                let mut result = create_generator(runtime, initial)?;
+                let function_kind = code(runtime, initial.code)?
+                    .authority
+                    .function(initial.template)
+                    .ok_or(EngineFault::InvalidClosureEnvironment {
+                        function: initial.template,
+                    })?
+                    .function()
+                    .control_flow()
+                    .function_header()
+                    .kind();
+                let mut result = if function_kind == FunctionKind::AsyncGenerator {
+                    create_async_generator(runtime, initial)?
+                } else {
+                    create_generator(runtime, initial)?
+                };
                 if !native_returns.is_empty() {
                     match resume_suspended_native_returns(
                         runtime,
@@ -3959,6 +4022,82 @@ fn execute_frame_loop(
                         .ok_or(EngineFault::RuntimeInvariant {
                             message: "yielding frame has no generator resume identity",
                         })?;
+                if runtime.async_generator_states.contains_key(&generator) {
+                    if suspended.generator_result.is_some() {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "async-generator yield retained a synchronous result object",
+                        }
+                        .into());
+                    }
+                    if !suspended.native_returns.is_empty() {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "async-generator yield retained native continuations",
+                        }
+                        .into());
+                    }
+                    match finish_async_generator_yield(
+                        runtime,
+                        generator,
+                        suspended,
+                        value,
+                        execution_budget,
+                    )
+                    .map_err(native_failure_to_execution)?
+                    {
+                        AsyncGeneratorYieldOutcome::Frame(next) => {
+                            *active_frame_values =
+                                active_frame_values.saturating_add(next.reserved_values);
+                            frames.push(next);
+                            continue;
+                        }
+                        AsyncGeneratorYieldOutcome::Dispatch(dispatch) => {
+                            let active_frames = active_execution_frames(frames);
+                            let dispatch = resolve_native_dispatch(
+                                runtime,
+                                dispatch,
+                                frames,
+                                active_frames,
+                                *active_frame_values,
+                                compiler,
+                                execution_budget,
+                            )
+                            .map_err(native_failure_to_execution)?;
+                            match dispatch {
+                                NativeDispatch::Frame(next) => {
+                                    *active_frame_values =
+                                        active_frame_values.saturating_add(next.reserved_values);
+                                    frames.push(next);
+                                    continue;
+                                }
+                                NativeDispatch::Immediate(result) if frames.is_empty() => {
+                                    return Ok(result);
+                                }
+                                NativeDispatch::Immediate(_)
+                                | NativeDispatch::Pair(_, _)
+                                | NativeDispatch::ForOfRecord { .. }
+                                | NativeDispatch::ForOfStep { .. }
+                                | NativeDispatch::ForOfClosed
+                                | NativeDispatch::CopyDataPropertiesDone
+                                | NativeDispatch::AsyncAwait { .. }
+                                | NativeDispatch::Call(_) => {
+                                    return Err(EngineFault::RuntimeInvariant {
+                                        message: "queued async-generator return produced an invalid dispatch",
+                                    }
+                                    .into());
+                                }
+                            }
+                        }
+                        AsyncGeneratorYieldOutcome::Suspended if frames.is_empty() => {
+                            return Ok(StoredValue::Undefined);
+                        }
+                        AsyncGeneratorYieldOutcome::Suspended => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "async-generator yield retained an execution parent",
+                            }
+                            .into());
+                        }
+                    }
+                }
                 let result =
                     suspended
                         .generator_result
@@ -4093,7 +4232,51 @@ fn execute_frame_loop(
                 })?;
                 *active_frame_values = active_frame_values.saturating_sub(finished.reserved_values);
                 let return_to = finished.return_to;
-                let mut value = if let Some(generator) = finished.generator_resume {
+                let mut value = if let Some(generator) = finished.generator_resume
+                    && runtime.async_generator_states.contains_key(&generator)
+                {
+                    if finished.generator_result.is_some() {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "async-generator return retained a synchronous result object",
+                        }
+                        .into());
+                    }
+                    let dispatch =
+                        finish_async_generator_return(runtime, generator, value, execution_budget)
+                            .map_err(native_failure_to_execution)?;
+                    let active_frames = active_execution_frames(frames);
+                    match resolve_native_dispatch(
+                        runtime,
+                        dispatch,
+                        frames,
+                        active_frames,
+                        *active_frame_values,
+                        compiler,
+                        execution_budget,
+                    )
+                    .map_err(native_failure_to_execution)?
+                    {
+                        NativeDispatch::Immediate(value) => value,
+                        NativeDispatch::Frame(next) => {
+                            *active_frame_values =
+                                active_frame_values.saturating_add(next.reserved_values);
+                            frames.push(next);
+                            continue;
+                        }
+                        NativeDispatch::Pair(_, _)
+                        | NativeDispatch::ForOfRecord { .. }
+                        | NativeDispatch::ForOfStep { .. }
+                        | NativeDispatch::ForOfClosed
+                        | NativeDispatch::CopyDataPropertiesDone
+                        | NativeDispatch::AsyncAwait { .. }
+                        | NativeDispatch::Call(_) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "async-generator completion produced an invalid dispatch",
+                            }
+                            .into());
+                        }
+                    }
+                } else if let Some(generator) = finished.generator_resume {
                     let result = finished.generator_result.take().ok_or(
                         EngineFault::RuntimeInvariant {
                             message: "returning generator frame has no reserved iterator result",
@@ -4321,6 +4504,18 @@ enum AsyncSuspension {
     Root(StoredValue),
 }
 
+fn native_failure_to_execution(failure: NativeFailure) -> ExecutionError {
+    match failure {
+        NativeFailure::Execution(error) => error,
+        NativeFailure::Abrupt(_) | NativeFailure::AbruptAfterTransient(_) => {
+            EngineFault::RuntimeInvariant {
+                message: "internal async-generator settlement threw JavaScript",
+            }
+            .into()
+        }
+    }
+}
+
 fn finish_async_suspension(
     runtime: &mut Runtime,
     frames: &mut Vec<Frame>,
@@ -4334,6 +4529,29 @@ fn finish_async_suspension(
         message: "async suspension lost its executing frame",
     })?;
     *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
+    if let Some(generator) = frame.generator_resume
+        && runtime.async_generator_states.contains_key(&generator)
+    {
+        let (result, return_to) =
+            suspend_async_generator_await(runtime, generator, frame, promise, origin)?;
+        if let Some(parent) = frames.last_mut() {
+            push_call_result(
+                parent,
+                result,
+                return_to.ok_or(EngineFault::RuntimeInvariant {
+                    message: "nested async-generator request has no caller continuation",
+                })?,
+            )?;
+            return Ok(AsyncSuspension::Continued);
+        }
+        if return_to.is_some() {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "host async-generator request retained a caller continuation",
+            }
+            .into());
+        }
+        return Ok(AsyncSuspension::Root(result));
+    }
     let (mut result, outer, return_to) = suspend_async_function(runtime, frame, promise, origin)?;
     if !outer.is_empty() {
         match resume_suspended_native_returns(

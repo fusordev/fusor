@@ -379,16 +379,24 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         executable: layout.executable,
                     },
                 )?;
-                let return_opcode = if matches!(
+                let async_generator = matches!(
                     executable.kind(),
                     ExecutableKind::Function {
                         asynchronous: true,
-                        generator: false,
-                    } | ExecutableKind::Function {
-                        asynchronous: false,
                         generator: true,
                     }
-                ) {
+                );
+                let return_opcode = if async_generator
+                    || matches!(
+                        executable.kind(),
+                        ExecutableKind::Function {
+                            asynchronous: true,
+                            generator: false,
+                        } | ExecutableKind::Function {
+                            asynchronous: false,
+                            generator: true,
+                        }
+                    ) {
                     FinalOpcode::ReturnAsync
                 } else {
                     FinalOpcode::Return
@@ -397,6 +405,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     statement,
                     &state.abrupt_markers,
                     return_opcode,
+                    async_generator,
                     flow,
                     &mut state.work,
                 )?;
@@ -535,6 +544,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         statement: &'statement ReturnStatement<'arena>,
         abrupt_markers: &[AbruptMarker],
         return_opcode: FinalOpcode,
+        await_value: bool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -561,6 +571,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 statement.span,
             )));
             Self::schedule_value_return_cleanup(abrupt_markers, statement.span, work);
+            if await_value {
+                work.push(StatementWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Await,
+                    Operands::None,
+                    statement.span,
+                )));
+            }
             work.push(StatementWork::Expression(argument));
         } else if crosses_finalizer
             || closes_iterator

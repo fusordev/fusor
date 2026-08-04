@@ -77,16 +77,22 @@ fn dynamic_async_function_is_a_script_with_an_async_child() {
 }
 
 #[test]
-fn dynamic_async_generator_remains_typed_fail_closed() {
-    let kind = DynamicFunctionKind::AsyncGeneratorFunction;
-    let error = storage_result(kind, "").expect_err("family must remain unsupported");
-    assert!(matches!(
-        error,
-        CompilerError::Unsupported {
-            feature: UnsupportedFeature::DynamicFunctionKind(actual),
-            ..
-        } if actual == kind
-    ));
+fn dynamic_async_generator_is_a_script_with_an_async_generator_child() {
+    let plan = storage_result(
+        DynamicFunctionKind::AsyncGeneratorFunction,
+        "yield await 1;",
+    )
+    .expect("dynamic AsyncGeneratorFunction storage");
+
+    assert_eq!(plan.kind(), CompilationUnitKind::Script);
+    assert_eq!(
+        plan.executables()[1].kind(),
+        ExecutableKind::Function {
+            asynchronous: true,
+            generator: true
+        }
+    );
+    assert_eq!(plan.executables()[1].name(), Some("anonymous"));
 }
 
 #[test]
