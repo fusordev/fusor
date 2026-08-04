@@ -9,7 +9,7 @@ use super::{
     ArrayCallback, ArrayCopier, ArrayFlatten, ArrayMutator, ArrayReduction, ArraySearch, ArraySort,
     ArrayStatic, ErrorIntrinsicKind, GlobalNumericFunction, LocaleStringMethod, MapMethod,
     MathMethod, NativeFunctionKind, NumberFormat, NumberPredicate, PredefinedAtom, PromiseStatic,
-    PropertyLayout, ReflectMethod, StringMethod, UriFunction,
+    PropertyLayout, ReflectMethod, SetMethod, StringMethod, UriFunction,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -40,13 +40,15 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     PromisePrototype,
     MapPrototype,
     MapIteratorPrototype,
+    SetPrototype,
+    SetIteratorPrototype,
     Reflect,
     Json,
     Math,
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 33] = [
+    pub(in crate::runtime) const ALL: [Self; 35] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -77,6 +79,8 @@ impl IntrinsicObjectId {
         Self::PromisePrototype,
         Self::MapPrototype,
         Self::MapIteratorPrototype,
+        Self::SetPrototype,
+        Self::SetIteratorPrototype,
         Self::Reflect,
         Self::Json,
         Self::Math,
@@ -128,6 +132,7 @@ pub(in crate::runtime) enum RealmNameId {
     ArrayFromAsync,
     PromiseStatic(PromiseStatic),
     MapMethod(MapMethod),
+    SetMethod(SetMethod),
     ArraySort(ArraySort),
     ArrayFlatten(ArrayFlatten),
     MathMethod(MathMethod),

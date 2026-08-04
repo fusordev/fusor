@@ -45,9 +45,9 @@ use super::{
     NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom,
     PromiseIntrinsics, PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Realm,
     RealmHandle, RealmId, RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime,
-    RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringHtmlMethod,
-    StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction, VecDeque, check_limit,
-    predefined_string, usize_to_u64,
+    RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, SetIntrinsics, SetMethod,
+    StoredValue, StringHtmlMethod, StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction,
+    VecDeque, check_limit, predefined_string, usize_to_u64,
 };
 
 use allocation::IntrinsicRecords;
@@ -703,6 +703,11 @@ impl RealmBuildTransaction<'_> {
                 constructor: function(NativeFunctionKind::MapConstructor),
                 iterator_prototype: object(IntrinsicObjectId::MapIteratorPrototype),
             },
+            set: SetIntrinsics {
+                prototype: object(IntrinsicObjectId::SetPrototype),
+                constructor: function(NativeFunctionKind::SetConstructor),
+                iterator_prototype: object(IntrinsicObjectId::SetIteratorPrototype),
+            },
             promise: PromiseIntrinsics {
                 prototype: object(IntrinsicObjectId::PromisePrototype),
                 constructor: function(NativeFunctionKind::PromiseConstructor),
@@ -830,11 +835,7 @@ impl RealmBuildTransaction<'_> {
             &graph.dynamic_atoms,
             DeclarativeBatch::Promises,
         )?;
-        self.publish_intrinsic_schema_batch(
-            intrinsic_schema,
-            &graph.dynamic_atoms,
-            DeclarativeBatch::Maps,
-        )?;
+        self.publish_collection_properties(graph, intrinsic_schema)?;
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,
             &graph.dynamic_atoms,
@@ -870,6 +871,22 @@ impl RealmBuildTransaction<'_> {
             &graph.dynamic_atoms,
             DeclarativeBatch::MapGlobals,
         )?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::SetGlobals,
+        )?;
+        Ok(())
+    }
+
+    fn publish_collection_properties(
+        &mut self,
+        graph: &RealmPublicationState,
+        intrinsic_schema: &RealmIntrinsicSchema,
+    ) -> Result<(), RealmPublicationError> {
+        for batch in [DeclarativeBatch::Maps, DeclarativeBatch::Sets] {
+            self.publish_intrinsic_schema_batch(intrinsic_schema, &graph.dynamic_atoms, batch)?;
+        }
         Ok(())
     }
 }

@@ -453,6 +453,10 @@ pub(super) fn finish_intrinsic_get(
             message: "Map prototype getter resumed without an execution budget",
         }
         .into()),
+        IntrinsicGetContinuation::SetConstructor { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Set prototype getter resumed without an execution budget",
+        }
+        .into()),
         IntrinsicGetContinuation::PromiseConstructor { .. } => Err(EngineFault::RuntimeInvariant {
             message: "Promise prototype getter resumed without its caller completion",
         }
@@ -1795,6 +1799,10 @@ fn finish_operator_primitive_target(
                 return_to,
                 execution_budget,
             )
+        }
+        OperatorPrimitiveTarget::SetRecordSize(state) => {
+            let size = operator_to_number(value, realm, origin)?;
+            finish_set_record_size(runtime, *state, size, return_to, execution_budget)
         }
         OperatorPrimitiveTarget::StringRawValue(state) => {
             advance_string_raw(runtime, *state, Some(value), return_to, execution_budget)

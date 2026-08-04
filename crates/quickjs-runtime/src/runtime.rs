@@ -58,6 +58,7 @@ mod iterators;
 mod limits;
 mod maps;
 mod promises;
+mod sets;
 mod symbols;
 pub(crate) use iterators::PreparedIteratorResultPlan;
 pub use limits::{RuntimeLimits, RuntimeUsage};
@@ -90,6 +91,7 @@ enum RealmIntrinsics {
         string: StringIntrinsics,
         array: ArrayIntrinsics,
         map: MapIntrinsics,
+        set: SetIntrinsics,
         promise: PromiseIntrinsics,
         symbol: SymbolIntrinsics,
         iterators: IteratorIntrinsics,
@@ -232,6 +234,13 @@ struct ArrayIntrinsics {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MapIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+    iterator_prototype: ObjectId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SetIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
     iterator_prototype: ObjectId,
@@ -1206,6 +1215,11 @@ pub(crate) enum NativeFunctionKind {
     MapSpeciesGetter,
     MapPrototype(MapMethod),
     MapIteratorNext,
+    SetConstructor,
+    SetGroupBy,
+    SetSpeciesGetter,
+    SetPrototype(SetMethod),
+    SetIteratorNext,
     StringPrototypeIterator,
     StringIteratorNext,
     GeneratorFunctionConstructor,
@@ -1282,6 +1296,85 @@ impl MapMethod {
             Self::Set | Self::GetOrInsert | Self::GetOrInsertComputed => 2,
             Self::Get | Self::Has | Self::Delete | Self::ForEach => 1,
             Self::Clear | Self::Size | Self::Values | Self::Keys | Self::Entries => 0,
+        }
+    }
+}
+
+/// Function identities installed on `%Set.prototype%` in pinned `QuickJS` order.
+/// `keys` and `@@iterator` alias the single `values` identity and therefore do
+/// not receive their own enum variants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SetMethod {
+    Add,
+    Has,
+    Delete,
+    Clear,
+    Size,
+    ForEach,
+    IsDisjointFrom,
+    IsSubsetOf,
+    IsSupersetOf,
+    Intersection,
+    Difference,
+    SymmetricDifference,
+    Union,
+    Values,
+    Entries,
+}
+
+impl SetMethod {
+    pub(crate) const ALL: [Self; 15] = [
+        Self::Add,
+        Self::Has,
+        Self::Delete,
+        Self::Clear,
+        Self::Size,
+        Self::ForEach,
+        Self::IsDisjointFrom,
+        Self::IsSubsetOf,
+        Self::IsSupersetOf,
+        Self::Intersection,
+        Self::Difference,
+        Self::SymmetricDifference,
+        Self::Union,
+        Self::Values,
+        Self::Entries,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Has => "has",
+            Self::Delete => "delete",
+            Self::Clear => "clear",
+            Self::Size => "size",
+            Self::ForEach => "forEach",
+            Self::IsDisjointFrom => "isDisjointFrom",
+            Self::IsSubsetOf => "isSubsetOf",
+            Self::IsSupersetOf => "isSupersetOf",
+            Self::Intersection => "intersection",
+            Self::Difference => "difference",
+            Self::SymmetricDifference => "symmetricDifference",
+            Self::Union => "union",
+            Self::Values => "values",
+            Self::Entries => "entries",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Clear | Self::Size | Self::Values | Self::Entries => 0,
+            Self::Add
+            | Self::Has
+            | Self::Delete
+            | Self::ForEach
+            | Self::IsDisjointFrom
+            | Self::IsSubsetOf
+            | Self::IsSupersetOf
+            | Self::Intersection
+            | Self::Difference
+            | Self::SymmetricDifference
+            | Self::Union => 1,
         }
     }
 }
@@ -1439,6 +1532,7 @@ impl NativeFunctionKind {
                 | Self::AsyncGeneratorFunctionConstructor
                 | Self::PromiseConstructor
                 | Self::MapConstructor
+                | Self::SetConstructor
         )
     }
 }

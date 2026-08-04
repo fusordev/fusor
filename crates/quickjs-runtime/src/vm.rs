@@ -64,7 +64,7 @@ use crate::{
         PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
         PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
         PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
-        ReflectMethod, SetPrototypeOutcome, StringArgument, StringMethod, UriFunction,
+        ReflectMethod, SetMethod, SetPrototypeOutcome, StringArgument, StringMethod, UriFunction,
         array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
@@ -109,6 +109,7 @@ mod promise;
 mod promise_combinators;
 mod properties;
 mod reflect;
+mod set;
 mod stack;
 mod string_methods;
 mod string_raw;
@@ -130,7 +131,7 @@ use {
     exceptions::*, execution::*, from_entries::*, generator::*, group_by::*, iterators::*,
     json_parse::*, json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*,
     native::*, object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*,
-    stack::*, string_methods::*, string_raw::*, string_replace::*, uri::*,
+    set::*, stack::*, string_methods::*, string_raw::*, string_replace::*, uri::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -387,6 +388,9 @@ enum NativeContinuation {
     MapConstructor(Box<MapConstructorContinuation>),
     MapForEach(Box<MapForEachContinuation>),
     MapComputed(Box<MapComputedContinuation>),
+    SetConstructor(Box<SetConstructorContinuation>),
+    SetForEach(Box<SetForEachContinuation>),
+    SetOperation(Box<SetOperationContinuation>),
     MathSumPrecise(Box<MathSumPreciseContinuation>),
     JsonParse(Box<JsonParseContinuation>),
     JsonStringify(Box<JsonStringifyContinuation>),
@@ -454,6 +458,9 @@ impl NativeContinuation {
             Self::MapConstructor(state) => state.retained_values(),
             Self::MapForEach(_) => MapForEachContinuation::retained_values(),
             Self::MapComputed(_) => MapComputedContinuation::retained_values(),
+            Self::SetConstructor(state) => state.retained_values(),
+            Self::SetForEach(_) => SetForEachContinuation::retained_values(),
+            Self::SetOperation(state) => state.retained_values(),
             Self::MathSumPrecise(state) => state.retained_values(),
             Self::JsonParse(state) => state.retained_values(),
             Self::JsonStringify(state) => state.retained_values(),
@@ -502,6 +509,7 @@ impl NativeContinuation {
                 | Self::FromEntries(_)
                 | Self::GroupBy(_)
                 | Self::MapConstructor(_)
+                | Self::SetConstructor(_)
                 | Self::ArrayStatic(_)
                 | Self::ArrayFromAsync(_)
                 | Self::PromiseCombinator(_)
@@ -749,6 +757,12 @@ enum IntrinsicGetContinuation {
         iterable: StoredValue,
         origin: JsStackFrame,
     },
+    SetConstructor {
+        realm: RealmId,
+        new_target: FunctionId,
+        iterable: StoredValue,
+        origin: JsStackFrame,
+    },
     PromiseConstructor {
         realm: RealmId,
         new_target: FunctionId,
@@ -770,7 +784,9 @@ impl IntrinsicGetContinuation {
             Self::ArrayConstructor { arguments, .. } => {
                 1_u64.saturating_add(usize_to_u64(arguments.len()))
             }
-            Self::MapConstructor { .. } | Self::PromiseConstructor { .. } => 2,
+            Self::MapConstructor { .. }
+            | Self::SetConstructor { .. }
+            | Self::PromiseConstructor { .. } => 2,
             Self::ObjectPrototypeToString {
                 temporary_receiver, ..
             } => u64::from(temporary_receiver.is_some()),
@@ -1500,6 +1516,8 @@ enum OperatorPrimitiveTarget {
     ArrayFromAsyncLength {
         operation: ObjectId,
     },
+    /// A Set-like record's `size`, awaiting the normative `ToNumber` step.
+    SetRecordSize(Box<SetOperationContinuation>),
     /// One `String.raw` length, literal, or substitution conversion.
     StringRawValue(Box<StringRawContinuation>),
     /// One `String.prototype.replace` fallback operand or callback result,
@@ -1547,6 +1565,7 @@ impl OperatorPrimitiveTarget {
             | Self::MathBinaryRight { .. }
             | Self::MathBinaryFinish { .. }
             | Self::ArrayFromAsyncLength { .. } => 1,
+            Self::SetRecordSize(state) => state.retained_values(),
             Self::ErrorConstructorMessage(state) => state.retained_values(),
             Self::JsonParseText(state) => state.retained_values(),
             Self::JsonStringifyReplacerItem(state)
@@ -1802,6 +1821,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
             mark(CollectionRoot::Heap(HeapReference::Object(*operation)));
         }
+        OperatorPrimitiveTarget::SetRecordSize(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::StringRawValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::StringReplaceValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::LocaleStringValue(state) => state.trace_roots(mark),
@@ -1923,6 +1943,11 @@ fn trace_native_continuation_roots(
                 new_target,
                 iterable,
                 ..
+            }
+            | IntrinsicGetContinuation::SetConstructor {
+                new_target,
+                iterable,
+                ..
             } => {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
                 trace_stored_value_root(iterable, mark);
@@ -1949,6 +1974,9 @@ fn trace_native_continuation_roots(
         NativeContinuation::MapConstructor(state) => state.trace_roots(mark),
         NativeContinuation::MapForEach(state) => state.trace_roots(mark),
         NativeContinuation::MapComputed(state) => state.trace_roots(mark),
+        NativeContinuation::SetConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::SetForEach(state) => state.trace_roots(mark),
+        NativeContinuation::SetOperation(state) => state.trace_roots(mark),
         NativeContinuation::MathSumPrecise(state) => state.trace_roots(mark),
         NativeContinuation::JsonParse(state) => state.trace_roots(mark),
         NativeContinuation::JsonStringify(state) => state.trace_roots(mark),

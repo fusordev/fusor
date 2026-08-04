@@ -9,7 +9,7 @@ use super::{
     MathMethod, NUMBER_FORMAT_METHODS, NUMBER_PREDICATE_STATICS, NUMBER_VALUE_STATICS,
     NativeFunctionKind, OBJECT_PROTOTYPE_LEGACY_ACCESSORS, OBJECT_PROTOTYPE_REFLECTION,
     OBJECT_STATIC_METHODS, PromiseStatic, Runtime, RuntimeError, RuntimeResource,
-    STRING_FROM_STATICS, STRING_PROTOTYPE_METHODS, URI_FUNCTIONS, allocation_failed,
+    STRING_FROM_STATICS, STRING_PROTOTYPE_METHODS, SetMethod, URI_FUNCTIONS, allocation_failed,
     families::RealmIntrinsicSchema,
     schema::{
         IntrinsicDescriptorSpec, IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicStringSpec,
@@ -284,6 +284,7 @@ fn visit_realm_name_order(
         visit(RealmNameId::PromiseStatic(method))?;
     }
     visit_map_name_order(&mut visit)?;
+    visit_set_name_order(&mut visit)?;
     for method in ARRAY_SORT_METHODS {
         visit(RealmNameId::ArraySort(method))?;
     }
@@ -312,6 +313,28 @@ fn visit_map_name_order(
                 | MapMethod::ForEach
         ) {
             visit(RealmNameId::MapMethod(method))?;
+        }
+    }
+    Ok(())
+}
+
+fn visit_set_name_order(
+    visit: &mut impl FnMut(RealmNameId) -> Result<(), RuntimeError>,
+) -> Result<(), RuntimeError> {
+    for method in SetMethod::ALL {
+        if matches!(
+            method,
+            SetMethod::Clear
+                | SetMethod::ForEach
+                | SetMethod::IsDisjointFrom
+                | SetMethod::IsSubsetOf
+                | SetMethod::IsSupersetOf
+                | SetMethod::Intersection
+                | SetMethod::Difference
+                | SetMethod::SymmetricDifference
+                | SetMethod::Union
+        ) {
+            visit(RealmNameId::SetMethod(method))?;
         }
     }
     Ok(())
@@ -392,6 +415,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArrayFromAsync => "fromAsync",
         RealmNameId::PromiseStatic(method) => method.name(),
         RealmNameId::MapMethod(method) => method.name(),
+        RealmNameId::SetMethod(method) => method.name(),
         RealmNameId::ArraySort(method) => method.name(),
         RealmNameId::ArrayFlatten(method) => method.name(),
         RealmNameId::MathMethod(method) => method.name(),
@@ -408,8 +432,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 188);
-        assert_eq!(plan.description_code_units(), 1_461);
+        assert_eq!(plan.len(), 195);
+        assert_eq!(plan.description_code_units(), 1_543);
     }
 
     #[test]

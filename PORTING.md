@@ -87,7 +87,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 314 Realm-local identities and 964 ordered properties.
+  snapshot pins 335 Realm-local identities and 1,027 ordered properties.
 - [ ] Add Proxy and remaining exotics, shape/transition interning, dense indexed
   storage, deterministic finalization, and complete reflection/diagnostics.
 
@@ -102,11 +102,16 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] `Map`: ordered SameValueZero storage, `AddEntriesFromIterable` close
   boundaries, live iterators, reentrant `forEach`, `groupBy`, `getOrInsert*`,
   and exact GC/resource accounting. Corpus: 6/6, 13/13 feature tags.
+- [x] `Set`: ordered SameValueZero storage; exact constructor close boundaries;
+  live iteration and `forEach`; ES-first set-like composition/predicates with
+  branch-dependent order, mutation, and normal early close; intrinsic results;
+  pinned `groupBy`; and exact fuel/GC/resource accounting. Corpus: 8/8, 21/21
+  feature tags against QuickJS and Node.
 - [x] Iterative `%JSON%` plus `rawJSON`; complete pinned `%Math%`, including
   exact `sumPrecise`; and intrinsic Promise core/combinators with bounded FIFO
   jobs and typed close/order continuations (29/29, 46/46 feature tags).
 - [ ] Complete RegExp-coupled String methods; implement RegExp, Date, Temporal,
-  Proxy, Set/WeakMap/WeakSet, binary data/typed arrays, Atomics, weak references,
+  Proxy, WeakMap/WeakSet, binary data/typed arrays, Atomics, weak references,
   and finalization registries.
 
 ### Jobs, asynchronous semantics, and modules
@@ -195,6 +200,7 @@ QuickJS `qjs` or `qjsc`. Current corpus results are:
 | Promise core | 29/29, 46/46 feature tags |
 | `Array.fromAsync` | 5/5 (Node; absent in pinned QuickJS) |
 | Map | 6/6, 13/13 feature tags (QuickJS and Node) |
+| Set | 8/8, 21/21 feature tags (QuickJS and Node) |
 | Synchronous generators | 18/18, 43/43 feature tags |
 | Async functions | 9/9, 18/18 feature tags |
 | Async generators | 18/18, 41/41 feature tags (QuickJS and Node) |

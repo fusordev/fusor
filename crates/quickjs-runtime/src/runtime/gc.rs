@@ -298,6 +298,7 @@ impl Runtime {
                 string,
                 array,
                 map,
+                set,
                 promise,
                 symbol,
                 iterators,
@@ -410,6 +411,18 @@ impl Runtime {
                     HeapReference::Object(map.prototype),
                     HeapReference::Object(map.iterator_prototype),
                     HeapReference::Function(map.constructor),
+                ] {
+                    mark_heap_reference(
+                        reference,
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
+                for reference in [
+                    HeapReference::Object(set.prototype),
+                    HeapReference::Object(set.iterator_prototype),
+                    HeapReference::Function(set.constructor),
                 ] {
                     mark_heap_reference(
                         reference,
@@ -812,7 +825,23 @@ impl Runtime {
                                 &mut work,
                             );
                         }
+                        if let Some(current) = object.set_iterator_current() {
+                            mark_heap_reference(
+                                HeapReference::Object(current),
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
                         for value in object.map_retained_values() {
+                            mark_stored_value(
+                                value,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
+                        for value in object.set_retained_values() {
                             mark_stored_value(
                                 value,
                                 &mut marked_functions,
@@ -993,9 +1022,11 @@ impl Runtime {
                 self.for_in_entries = self
                     .for_in_entries
                     .saturating_sub(usize_to_u64(object.for_in_entry_count()));
-                self.collection_entries = self
-                    .collection_entries
-                    .saturating_sub(usize_to_u64(object.map_entry_count()));
+                self.collection_entries = self.collection_entries.saturating_sub(usize_to_u64(
+                    object
+                        .map_entry_count()
+                        .saturating_add(object.set_entry_count()),
+                ));
             }
         }
         for id in dead_cells {
