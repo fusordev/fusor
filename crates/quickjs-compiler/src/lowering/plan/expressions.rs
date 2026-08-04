@@ -355,10 +355,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         }
                         Expression::YieldExpression(yield_expression) => {
                             if yield_expression.delegate {
-                                return unsupported(
-                                    UnsupportedLeafFeature::UnsupportedExpression,
-                                    yield_expression.span,
-                                );
+                                Self::plan_delegated_yield(
+                                    yield_expression,
+                                    constants,
+                                    abrupt_markers,
+                                    flow,
+                                    &mut work,
+                                )?;
+                                continue;
                             }
                             let resumed = flow.new_label(yield_expression.span)?;
                             work.push(ExpressionWork::Bind(resumed.clone()));
@@ -413,9 +417,24 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         span: Span,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) {
-        for marker in abrupt_markers {
+        let mut cleanup = Vec::new();
+        Self::append_yield_return_cleanup(abrupt_markers, span, &mut cleanup);
+        work.extend(cleanup.into_iter().rev());
+    }
+
+    fn append_yield_return_cleanup<'expression>(
+        abrupt_markers: &[AbruptMarker],
+        span: Span,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) {
+        for marker in abrupt_markers.iter().rev() {
             match &marker.kind {
                 AbruptMarkerKind::Catch { finalizer } => {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::NipCatch,
+                        Operands::None,
+                        span,
+                    )));
                     if let Some(finalizer) = finalizer {
                         work.push(ExpressionWork::Branch {
                             kind: BranchKind::Gosub,
@@ -423,11 +442,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             span,
                         });
                     }
-                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::NipCatch,
-                        Operands::None,
-                        span,
-                    )));
                 }
                 AbruptMarkerKind::ForIn => {
                     work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -438,12 +452,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 }
                 AbruptMarkerKind::ForOf => {
                     work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::IteratorClose,
-                        Operands::None,
-                        span,
-                    )));
-                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::Undefined,
+                        FinalOpcode::NipCatch,
                         Operands::None,
                         span,
                     )));
@@ -453,7 +462,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         span,
                     )));
                     work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::NipCatch,
+                        FinalOpcode::Undefined,
+                        Operands::None,
+                        span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::IteratorClose,
                         Operands::None,
                         span,
                     )));
@@ -469,6 +483,148 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 }
             }
         }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the ECMA-262 delegated-yield loop is emitted as one auditable control-flow template"
+    )]
+    fn plan_delegated_yield<'expression>(
+        yield_expression: &'expression oxc_ast::ast::YieldExpression<'arena>,
+        constants: &CompiledConstantPool,
+        abrupt_markers: &[AbruptMarker],
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let Some(argument) = yield_expression.argument.as_ref() else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "delegated yield has an assignment expression",
+                span: Some(yield_expression.span),
+            });
+        };
+        let span = yield_expression.span;
+        let done_atom = constants.yield_star_done_atom_index(span)?;
+        let value_atom = constants.yield_star_value_atom_index(span)?;
+        let loop_label = flow.new_label(span)?;
+        let yield_label = flow.new_label(span)?;
+        let resume_abrupt = flow.new_label(span)?;
+        let resume_throw = flow.new_label(span)?;
+        let return_done = flow.new_label(span)?;
+        let missing_throw = flow.new_label(span)?;
+        let missing_throw_closed = flow.new_label(span)?;
+        let delegate_done = flow.new_label(span)?;
+
+        let emit = |opcode, operands| {
+            ExpressionWork::Emit(PlannedInstruction::new(opcode, operands, span))
+        };
+        let mut sequence = vec![
+            ExpressionWork::Visit(argument),
+            emit(FinalOpcode::ForOfStart, Operands::None),
+            emit(FinalOpcode::Drop, Operands::None),
+            emit(FinalOpcode::Undefined, Operands::None),
+            emit(FinalOpcode::Undefined, Operands::None),
+            ExpressionWork::Bind(loop_label.clone()),
+            emit(FinalOpcode::IteratorNext, Operands::None),
+            emit(FinalOpcode::IteratorCheckObject, Operands::None),
+            emit(FinalOpcode::GetField2, Operands::Atom(done_atom)),
+            ExpressionWork::Branch {
+                kind: BranchKind::IfTrue,
+                target: delegate_done.clone(),
+                span,
+            },
+            ExpressionWork::Bind(yield_label.clone()),
+            emit(FinalOpcode::YieldStar, Operands::None),
+            emit(FinalOpcode::Dup, Operands::None),
+            ExpressionWork::Branch {
+                kind: BranchKind::IfTrue,
+                target: resume_abrupt.clone(),
+                span,
+            },
+            emit(FinalOpcode::Drop, Operands::None),
+            ExpressionWork::Branch {
+                kind: BranchKind::Goto,
+                target: loop_label,
+                span,
+            },
+            ExpressionWork::Bind(resume_abrupt.clone()),
+            emit(FinalOpcode::Push2, Operands::NoneInt),
+            emit(FinalOpcode::StrictEq, Operands::None),
+            ExpressionWork::Branch {
+                kind: BranchKind::IfTrue,
+                target: resume_throw.clone(),
+                span,
+            },
+            emit(FinalOpcode::IteratorCall, Operands::U8(0)),
+            ExpressionWork::Branch {
+                kind: BranchKind::IfTrue,
+                target: return_done.clone(),
+                span,
+            },
+            emit(FinalOpcode::IteratorCheckObject, Operands::None),
+            emit(FinalOpcode::GetField2, Operands::Atom(done_atom)),
+            ExpressionWork::Branch {
+                kind: BranchKind::IfFalse,
+                target: yield_label.clone(),
+                span,
+            },
+            emit(FinalOpcode::GetField, Operands::Atom(value_atom)),
+            ExpressionWork::Bind(return_done.clone()),
+            emit(FinalOpcode::Nip, Operands::None),
+            emit(FinalOpcode::Nip, Operands::None),
+            emit(FinalOpcode::Nip, Operands::None),
+        ];
+        Self::append_yield_return_cleanup(abrupt_markers, span, &mut sequence);
+        sequence.extend([
+            emit(FinalOpcode::ReturnAsync, Operands::None),
+            ExpressionWork::Bind(resume_throw.clone()),
+            emit(FinalOpcode::IteratorCall, Operands::U8(1)),
+            ExpressionWork::Branch {
+                kind: BranchKind::IfTrue,
+                target: missing_throw.clone(),
+                span,
+            },
+            emit(FinalOpcode::IteratorCheckObject, Operands::None),
+            emit(FinalOpcode::GetField2, Operands::Atom(done_atom)),
+            ExpressionWork::Branch {
+                kind: BranchKind::IfFalse,
+                target: yield_label,
+                span,
+            },
+            ExpressionWork::Branch {
+                kind: BranchKind::Goto,
+                target: delegate_done.clone(),
+                span,
+            },
+            ExpressionWork::Bind(missing_throw),
+            emit(FinalOpcode::IteratorCall, Operands::U8(2)),
+            ExpressionWork::Branch {
+                kind: BranchKind::IfTrue,
+                target: missing_throw_closed.clone(),
+                span,
+            },
+            emit(FinalOpcode::IteratorCheckObject, Operands::None),
+            ExpressionWork::Bind(missing_throw_closed),
+            emit(FinalOpcode::Drop, Operands::None),
+            emit(FinalOpcode::Undefined, Operands::None),
+            emit(FinalOpcode::Nip, Operands::None),
+            emit(FinalOpcode::Nip, Operands::None),
+            emit(FinalOpcode::Nip, Operands::None),
+            emit(FinalOpcode::Drop, Operands::None),
+            emit(
+                FinalOpcode::ThrowError,
+                Operands::AtomU8 {
+                    atom: AtomPoolIndex::new(0),
+                    value: 4,
+                },
+            ),
+            ExpressionWork::Bind(delegate_done),
+            emit(FinalOpcode::GetField, Operands::Atom(value_atom)),
+            emit(FinalOpcode::Nip, Operands::None),
+            emit(FinalOpcode::Nip, Operands::None),
+            emit(FinalOpcode::Nip, Operands::None),
+        ]);
+        work.extend(sequence.into_iter().rev());
+        Ok(())
     }
 
     fn plan_this_expression(

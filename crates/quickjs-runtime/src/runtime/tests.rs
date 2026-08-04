@@ -31,7 +31,8 @@ use super::{
     PromiseCombinatorKind, PromiseCombinatorShared, PromiseFinallyThunkKind, PromiseJob,
     RealmIntrinsics, RootEnvironment, Runtime, RuntimeLimits, RuntimeUsage,
     array_length_from_number, dynamic_function_declaration_property_layout,
-    global_function_replacement_layout, is_supported_opcode, usize_to_u64,
+    global_function_replacement_layout, is_supported_instruction, is_supported_opcode,
+    usize_to_u64,
 };
 
 const REALM_OBJECT_SLOTS: u64 = 26;
@@ -619,7 +620,7 @@ fn inferred_function_name_opcode_is_admitted_by_whole_graph_runtime_preflight() 
 
 #[test]
 fn array_spread_opcodes_are_admitted_without_public_iterator_markers() {
-    use quickjs_bytecode::FinalOpcode;
+    use quickjs_bytecode::{AtomPoolIndex, FinalOpcode, Instruction, Operands};
 
     assert!(is_supported_opcode(FinalOpcode::Append));
     assert!(is_supported_opcode(FinalOpcode::Dup1));
@@ -627,7 +628,31 @@ fn array_spread_opcodes_are_admitted_without_public_iterator_markers() {
     assert!(is_supported_opcode(FinalOpcode::ForOfStart));
     assert!(is_supported_opcode(FinalOpcode::ForOfNext));
     assert!(is_supported_opcode(FinalOpcode::IteratorClose));
-    assert!(!is_supported_opcode(FinalOpcode::IteratorNext));
+    assert!(is_supported_opcode(FinalOpcode::IteratorNext));
+    assert!(is_supported_opcode(FinalOpcode::IteratorCall));
+    assert!(is_supported_opcode(FinalOpcode::IteratorCheckObject));
+    assert!(is_supported_opcode(FinalOpcode::YieldStar));
+    assert!(is_supported_opcode(FinalOpcode::ThrowError));
+    assert!(is_supported_instruction(
+        Instruction::new(
+            FinalOpcode::ThrowError,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(0),
+                value: 4,
+            },
+        )
+        .expect("yield-star missing-throw shortcut")
+    ));
+    assert!(!is_supported_instruction(
+        Instruction::new(
+            FinalOpcode::ThrowError,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(0),
+                value: 0,
+            },
+        )
+        .expect("deferred throw-error form")
+    ));
     assert!(!is_supported_opcode(FinalOpcode::ForAwaitOfStart));
 }
 

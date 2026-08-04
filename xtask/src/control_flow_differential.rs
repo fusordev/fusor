@@ -434,26 +434,43 @@ const PROMISE_CORE_REQUIRED_COVERAGE: &[&str] = &[
 ];
 
 const GENERATOR_REQUIRED_COVERAGE: &[&str] = &[
+    "abrupt-resume-forwarding",
     "call-apply",
     "completed-next",
     "completed-return",
     "completed-throw",
-    "parameter-initialization",
+    "delegate-next",
+    "delegate-return",
+    "delegate-throw",
+    "done-before-value",
     "for-of-consumption",
     "function-prototype-chain",
     "generator-method",
     "instance-prototype-chain",
+    "iterator-close",
+    "iterator-result-identity",
+    "iterator-result-validation",
+    "lazy-yield-value",
+    "missing-return",
+    "missing-throw",
+    "missing-throw-type-error",
     "next-first-argument",
     "next-resume-value",
     "nonconstructable",
+    "parameter-initialization",
     "prestart-return",
     "prestart-throw",
     "reentrancy",
+    "return-completion-propagation",
     "return-finally",
     "return-nested-close",
     "throw-catch",
+    "throw-done-completion",
     "uncaught-completes",
     "yield",
+    "yield-star",
+    "yield-star-finally",
+    "zero-argument-close",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2176,8 +2193,8 @@ mod tests {
             RuntimeDifferentialSuite::Generator,
         )
         .expect("checked-in generator manifest");
-        assert_eq!(corpus.cases.len(), 9);
-        assert_eq!(super::GENERATOR_REQUIRED_COVERAGE.len(), 20);
+        assert_eq!(corpus.cases.len(), 16);
+        assert_eq!(super::GENERATOR_REQUIRED_COVERAGE.len(), 37);
     }
 
     #[test]

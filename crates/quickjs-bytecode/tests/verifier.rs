@@ -934,6 +934,29 @@ fn synchronous_for_of_markers_are_compiler_only_structural_inputs() {
         (FinalOpcode::ForAwaitOfStart, Operands::None),
         (FinalOpcode::ForAwaitOfNext, Operands::None),
         (FinalOpcode::IteratorGetValueDone, Operands::None),
+    ] {
+        let error = verify_compiler_control_flow(
+            UnverifiedCompilerFunctionBody::new(
+                encode(&[
+                    (opcode, operands),
+                    (FinalOpcode::ReturnUndef, Operands::None),
+                ]),
+                FunctionIndexDomains::default(),
+                UnverifiedFunctionHeader::default(),
+            ),
+            VerificationLimits::default(),
+        )
+        .expect_err("async iterator marker families stay fail-closed");
+        assert_eq!(
+            error.kind(),
+            &VerificationErrorKind::UnsupportedOpcodeSemantics {
+                feature: UnsupportedVerifierFeature::IteratorMarkers,
+            },
+            "{opcode}"
+        );
+    }
+
+    for (opcode, operands) in [
         (FinalOpcode::IteratorNext, Operands::None),
         (FinalOpcode::IteratorCall, Operands::U8(0)),
     ] {
@@ -948,11 +971,12 @@ fn synchronous_for_of_markers_are_compiler_only_structural_inputs() {
             ),
             VerificationLimits::default(),
         )
-        .expect_err("async and public iterator marker families stay fail-closed");
+        .expect_err("delegated iterator calls require their compiler-owned stack record");
         assert_eq!(
             error.kind(),
-            &VerificationErrorKind::UnsupportedOpcodeSemantics {
-                feature: UnsupportedVerifierFeature::IteratorMarkers,
+            &VerificationErrorKind::StackUnderflow {
+                required: 4,
+                available: 0,
             },
             "{opcode}"
         );

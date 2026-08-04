@@ -257,6 +257,36 @@ impl Runtime {
         Ok(())
     }
 
+    pub(crate) fn discard_reserved_iterator_result(
+        &mut self,
+        result: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        let object = self
+            .objects
+            .get(result)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "reserved iterator result",
+                index: result.index(),
+                generation: result.generation(),
+            })?;
+        if object.record.property_count() != 2 {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "reserved iterator result changed before delegated yield",
+            });
+        }
+        let object = self
+            .objects
+            .remove(result)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "reserved iterator result",
+                index: result.index(),
+                generation: result.generation(),
+            })?;
+        debug_assert_eq!(object.record.property_count(), 2);
+        self.object_properties = self.object_properties.saturating_sub(2);
+        Ok(())
+    }
+
     pub(crate) fn realm_array_iterator_prototype(
         &self,
         realm: RealmId,

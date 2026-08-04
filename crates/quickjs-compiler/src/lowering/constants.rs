@@ -414,6 +414,30 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             AstKind::ArrayExpression(array) => {
                 Self::record_array_property_candidates(owner, array, atom_candidates)?;
             }
+            AstKind::YieldExpression(expression) if expression.delegate => {
+                for (value, property_key) in [
+                    (
+                        "done",
+                        CompiledPropertyAtomKey::YieldStarDone {
+                            expression: expression.span,
+                        },
+                    ),
+                    (
+                        "value",
+                        CompiledPropertyAtomKey::YieldStarValue {
+                            expression: expression.span,
+                        },
+                    ),
+                ] {
+                    record_property_candidate_for(
+                        owner,
+                        compiler_identifier_string(value, expression.span)?,
+                        expression.span,
+                        property_key,
+                        atom_candidates,
+                    )?;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -878,6 +902,26 @@ impl CompiledConstantPool {
         span: Span,
     ) -> Result<AtomPoolIndex, LeafCompilationError> {
         self.property_atom_index_for(CompiledPropertyAtomKey::ArrayLength { array }, span)
+    }
+
+    pub(in crate::lowering) fn yield_star_done_atom_index(
+        &self,
+        expression: Span,
+    ) -> Result<AtomPoolIndex, LeafCompilationError> {
+        self.property_atom_index_for(
+            CompiledPropertyAtomKey::YieldStarDone { expression },
+            expression,
+        )
+    }
+
+    pub(in crate::lowering) fn yield_star_value_atom_index(
+        &self,
+        expression: Span,
+    ) -> Result<AtomPoolIndex, LeafCompilationError> {
+        self.property_atom_index_for(
+            CompiledPropertyAtomKey::YieldStarValue { expression },
+            expression,
+        )
     }
 
     fn property_atom_index_for(

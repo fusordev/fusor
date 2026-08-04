@@ -5206,7 +5206,17 @@ fn verify_supported_opcodes(
         if !supported_compiler_opcode(opcode)
             || (matches!(
                 opcode,
-                FinalOpcode::InitialYield | FinalOpcode::Yield | FinalOpcode::ReturnAsync
+                FinalOpcode::InitialYield
+                    | FinalOpcode::Yield
+                    | FinalOpcode::YieldStar
+                    | FinalOpcode::ReturnAsync
+            ) && !generator)
+            || (matches!(
+                opcode,
+                FinalOpcode::IteratorNext
+                    | FinalOpcode::IteratorCall
+                    | FinalOpcode::IteratorCheckObject
+                    | FinalOpcode::ThrowError
             ) && !generator)
             || (matches!(opcode, FinalOpcode::Return | FinalOpcode::ReturnUndef) && generator)
             || (opcode == FinalOpcode::PushThis
@@ -5256,6 +5266,12 @@ fn verify_supported_opcodes(
                     | (FinalOpcode::DefineMethodComputed, Operands::U8(value))
                     if !(4..=6).contains(&value)
             )
+            || matches!(
+                (opcode, instruction.operands()),
+                (FinalOpcode::ThrowError, Operands::AtomU8 { value: 4, .. }) if !generator
+            )
+            || matches!(opcode, FinalOpcode::ThrowError)
+                && !matches!(instruction.operands(), Operands::AtomU8 { value: 4, .. })
         {
             return Err(BytecodeVerificationError::function(
                 id,
@@ -5325,6 +5341,11 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ReturnAsync
             | FinalOpcode::InitialYield
             | FinalOpcode::Yield
+            | FinalOpcode::YieldStar
+            | FinalOpcode::IteratorNext
+            | FinalOpcode::IteratorCall
+            | FinalOpcode::IteratorCheckObject
+            | FinalOpcode::ThrowError
             | FinalOpcode::Throw
             | FinalOpcode::Catch
             | FinalOpcode::NipCatch
@@ -5495,6 +5516,19 @@ enum InternalStackValue {
     ForOfCloseIterator(BytecodePc),
     ForOfCloseNextMethod(BytecodePc),
     ForOfCloseDummy(BytecodePc),
+    YieldStarIterator(BytecodePc),
+    YieldStarNextMethod(BytecodePc),
+    YieldStarDummy(BytecodePc),
+    YieldStarIteratorResult(BytecodePc),
+    YieldStarDone(BytecodePc),
+    YieldStarYieldResult(BytecodePc),
+    YieldStarFinalResult(BytecodePc),
+    YieldStarResumeValue(BytecodePc),
+    YieldStarResumeMode(BytecodePc),
+    YieldStarResumeModeTest(BytecodePc),
+    YieldStarIsThrow(BytecodePc),
+    YieldStarCallValue(BytecodePc, YieldStarCallKind),
+    YieldStarMethodMissing(BytecodePc, YieldStarCallKind),
     CatchMarker {
         site: BytecodePc,
         handler: InstructionIndex,
@@ -5507,6 +5541,13 @@ enum InternalStackValue {
     FinallyReturn {
         target: InstructionIndex,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum YieldStarCallKind {
+    Return,
+    Throw,
+    Close,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5525,7 +5566,6 @@ enum JavaScriptStackValue {
 impl JavaScriptStackValue {
     const fn from_internal(value: InternalStackValue) -> Option<Self> {
         match value {
-            InternalStackValue::Ordinary => Some(Self::Ordinary),
             InternalStackValue::ForInKey(site) => Some(Self::ForInKey(site)),
             InternalStackValue::ForInDone(site) => Some(Self::ForInDone(site)),
             InternalStackValue::ForInHeadKey(site) => Some(Self::ForInHeadKey(site)),
@@ -5547,9 +5587,23 @@ impl JavaScriptStackValue {
             | InternalStackValue::ForOfCloseIterator(_)
             | InternalStackValue::ForOfCloseNextMethod(_)
             | InternalStackValue::ForOfCloseDummy(_)
+            | InternalStackValue::YieldStarIterator(_)
+            | InternalStackValue::YieldStarNextMethod(_)
+            | InternalStackValue::YieldStarDummy(_)
             | InternalStackValue::CatchMarker { .. }
             | InternalStackValue::FinallyPending { .. }
             | InternalStackValue::FinallyReturn { .. } => None,
+            InternalStackValue::Ordinary
+            | InternalStackValue::YieldStarIteratorResult(_)
+            | InternalStackValue::YieldStarDone(_)
+            | InternalStackValue::YieldStarYieldResult(_)
+            | InternalStackValue::YieldStarFinalResult(_)
+            | InternalStackValue::YieldStarResumeValue(_)
+            | InternalStackValue::YieldStarResumeMode(_)
+            | InternalStackValue::YieldStarResumeModeTest(_)
+            | InternalStackValue::YieldStarIsThrow(_)
+            | InternalStackValue::YieldStarCallValue(_, _)
+            | InternalStackValue::YieldStarMethodMissing(_, _) => Some(Self::Ordinary),
         }
     }
 
@@ -5585,6 +5639,9 @@ impl InternalStackValue {
                 | Self::ForOfCloseIterator(_)
                 | Self::ForOfCloseNextMethod(_)
                 | Self::ForOfCloseDummy(_)
+                | Self::YieldStarIterator(_)
+                | Self::YieldStarNextMethod(_)
+                | Self::YieldStarDummy(_)
                 | Self::CatchMarker { .. }
                 | Self::FinallyPending { .. }
                 | Self::FinallyReturn { .. }
@@ -5621,6 +5678,19 @@ impl InternalStackValue {
                 | Self::ForOfCloseIterator(_)
                 | Self::ForOfCloseNextMethod(_)
                 | Self::ForOfCloseDummy(_)
+                | Self::YieldStarIterator(_)
+                | Self::YieldStarNextMethod(_)
+                | Self::YieldStarDummy(_)
+                | Self::YieldStarIteratorResult(_)
+                | Self::YieldStarDone(_)
+                | Self::YieldStarYieldResult(_)
+                | Self::YieldStarFinalResult(_)
+                | Self::YieldStarResumeValue(_)
+                | Self::YieldStarResumeMode(_)
+                | Self::YieldStarResumeModeTest(_)
+                | Self::YieldStarIsThrow(_)
+                | Self::YieldStarCallValue(_, _)
+                | Self::YieldStarMethodMissing(_, _)
         )
     }
 }
@@ -5727,7 +5797,18 @@ struct InternalStackTransfer {
 #[derive(Clone, Copy)]
 enum IterationBranchValue {
     ForIn(BytecodePc),
-    ForOf { site: BytecodePc, extras: usize },
+    ForOf {
+        site: BytecodePc,
+        extras: usize,
+    },
+    YieldStarDone {
+        site: BytecodePc,
+        branch_when_true: bool,
+    },
+    YieldStarMethod {
+        site: BytecodePc,
+        kind: YieldStarCallKind,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -6181,6 +6262,34 @@ fn verify_internal_operand_stack(
                                 InternalStackValue::Ordinary
                             }
                         }
+                        IterationBranchValue::YieldStarDone {
+                            site,
+                            branch_when_true,
+                        } if state[value_index]
+                            == InternalStackValue::YieldStarIteratorResult(site) =>
+                        {
+                            if edge.is_branch_target == branch_when_true {
+                                InternalStackValue::YieldStarFinalResult(site)
+                            } else {
+                                InternalStackValue::YieldStarYieldResult(site)
+                            }
+                        }
+                        IterationBranchValue::YieldStarMethod { site, kind }
+                            if state[value_index]
+                                == InternalStackValue::YieldStarCallValue(site, kind) =>
+                        {
+                            if kind == YieldStarCallKind::Close {
+                                InternalStackValue::Ordinary
+                            } else if edge.is_branch_target {
+                                if kind == YieldStarCallKind::Throw {
+                                    InternalStackValue::YieldStarResumeValue(site)
+                                } else {
+                                    InternalStackValue::Ordinary
+                                }
+                            } else {
+                                InternalStackValue::YieldStarIteratorResult(site)
+                            }
+                        }
                         _ => {
                             return Err(internal_stack_error(
                                 id,
@@ -6263,6 +6372,12 @@ fn verify_internal_operand_stack(
                         state[record_index + 1] = InternalStackValue::ForOfNextMethod(site);
                         state[record_index + 2] = InternalStackValue::ForOfCatch(site);
                         InternalStackValue::ForOfValue(site)
+                    }
+                    IterationBranchValue::YieldStarDone { site, .. } => {
+                        InternalStackValue::YieldStarIteratorResult(site)
+                    }
+                    IterationBranchValue::YieldStarMethod { site, kind } => {
+                        InternalStackValue::YieldStarCallValue(site, kind)
                     }
                 };
             }
@@ -6590,7 +6705,225 @@ fn transfer_internal_operand_stack(
                 ret_finalizer: None,
             });
         }
+        FinalOpcode::IteratorNext => {
+            let Some(base) = state.len().checked_sub(4) else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            let (
+                InternalStackValue::YieldStarIterator(iterator),
+                InternalStackValue::YieldStarNextMethod(next),
+                InternalStackValue::YieldStarDummy(dummy),
+            ) = (state[base], state[base + 1], state[base + 2])
+            else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            if iterator != next || next != dummy || !state[base + 3].is_javascript_value() {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            }
+            state[base + 3] = InternalStackValue::YieldStarIteratorResult(iterator);
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::IteratorCheckObject
+            if matches!(
+                state.last(),
+                Some(
+                    InternalStackValue::YieldStarIteratorResult(_)
+                        | InternalStackValue::YieldStarYieldResult(_)
+                        | InternalStackValue::YieldStarFinalResult(_)
+                )
+            ) =>
+        {
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::GetField2
+            if matches!(
+                state.last(),
+                Some(InternalStackValue::YieldStarIteratorResult(_))
+            ) =>
+        {
+            let Some(InternalStackValue::YieldStarIteratorResult(site)) = state.last().copied()
+            else {
+                unreachable!("delegated iterator result guard established the value")
+            };
+            state.try_reserve(1).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 1,
+                    },
+                )
+            })?;
+            state.push(InternalStackValue::YieldStarDone(site));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::GetField
+            if matches!(
+                state.last(),
+                Some(
+                    InternalStackValue::YieldStarIteratorResult(_)
+                        | InternalStackValue::YieldStarFinalResult(_)
+                )
+            ) =>
+        {
+            *state.last_mut().expect("matched delegated result") = InternalStackValue::Ordinary;
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::YieldStar => {
+            let Some(InternalStackValue::YieldStarYieldResult(site)) = state.last().copied() else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            *state.last_mut().expect("matched delegated result") =
+                InternalStackValue::YieldStarResumeValue(site);
+            state.try_reserve(1).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 1,
+                    },
+                )
+            })?;
+            state.push(InternalStackValue::YieldStarResumeMode(site));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::Dup => {
+            if let Some(InternalStackValue::YieldStarResumeMode(site)) = state.last().copied() {
+                state.try_reserve(1).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::AllocationFailed {
+                            resource: BytecodeGraphResource::FrameStateEntries,
+                            requested: 1,
+                        },
+                    )
+                })?;
+                state.push(InternalStackValue::YieldStarResumeModeTest(site));
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
+        }
+        FinalOpcode::Push2 => {
+            if matches!(
+                state.last(),
+                Some(InternalStackValue::YieldStarResumeMode(_))
+            ) {
+                state.try_reserve(1).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::AllocationFailed {
+                            resource: BytecodeGraphResource::FrameStateEntries,
+                            requested: 1,
+                        },
+                    )
+                })?;
+                state.push(InternalStackValue::Ordinary);
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
+        }
+        FinalOpcode::StrictEq => {
+            if let Some(base) = state.len().checked_sub(2)
+                && let InternalStackValue::YieldStarResumeMode(site) = state[base]
+                && state[base + 1] == InternalStackValue::Ordinary
+            {
+                state[base] = InternalStackValue::YieldStarIsThrow(site);
+                state.truncate(base + 1);
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
+        }
+        FinalOpcode::IteratorCall => {
+            let Operands::U8(flags) = instruction.operands() else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            let Some(base) = state.len().checked_sub(4) else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            let (
+                InternalStackValue::YieldStarIterator(iterator),
+                InternalStackValue::YieldStarNextMethod(next),
+                InternalStackValue::YieldStarDummy(dummy),
+            ) = (state[base], state[base + 1], state[base + 2])
+            else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            let InternalStackValue::YieldStarResumeValue(value_site) = state[base + 3] else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            if iterator != next || next != dummy || dummy != value_site {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            }
+            let kind = match flags {
+                0 => YieldStarCallKind::Return,
+                1 => YieldStarCallKind::Throw,
+                2 => YieldStarCallKind::Close,
+                _ => return Err(for_of_stack_error(id, decoded.pc(), opcode)),
+            };
+            state[base + 3] = InternalStackValue::YieldStarCallValue(iterator, kind);
+            state.try_reserve(1).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 1,
+                    },
+                )
+            })?;
+            state.push(InternalStackValue::YieldStarMethodMissing(iterator, kind));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
         FinalOpcode::IfFalse | FinalOpcode::IfFalse8 => {
+            if let Some(InternalStackValue::YieldStarDone(site)) = state.last().copied()
+                && matches!(
+                    state.get(state.len().saturating_sub(2)),
+                    Some(InternalStackValue::YieldStarIteratorResult(result_site))
+                        if *result_site == site
+                )
+            {
+                state.pop();
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: Some(IterationBranchValue::YieldStarDone {
+                        site,
+                        branch_when_true: false,
+                    }),
+                    ret_finalizer: None,
+                });
+            }
             if let Some((record_index, site)) = for_of_branch_record(state) {
                 let value_index = state.len().saturating_sub(2);
                 let extras = value_index
@@ -6625,10 +6958,59 @@ fn transfer_internal_operand_stack(
                 return Err(for_of_stack_error(id, decoded.pc(), opcode));
             }
         }
-        FinalOpcode::IfTrue | FinalOpcode::IfTrue8
-            if matches!(state.last(), Some(InternalStackValue::ForOfDone(_))) =>
-        {
-            return Err(for_of_stack_error(id, decoded.pc(), opcode));
+        FinalOpcode::IfTrue | FinalOpcode::IfTrue8 => {
+            if let Some(InternalStackValue::YieldStarDone(site)) = state.last().copied()
+                && matches!(
+                    state.get(state.len().saturating_sub(2)),
+                    Some(InternalStackValue::YieldStarIteratorResult(result_site))
+                        if *result_site == site
+                )
+            {
+                state.pop();
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: Some(IterationBranchValue::YieldStarDone {
+                        site,
+                        branch_when_true: true,
+                    }),
+                    ret_finalizer: None,
+                });
+            }
+            if matches!(
+                state.last(),
+                Some(
+                    InternalStackValue::YieldStarResumeModeTest(_)
+                        | InternalStackValue::YieldStarIsThrow(_)
+                )
+            ) {
+                state.pop();
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
+            if let Some(InternalStackValue::YieldStarMethodMissing(site, kind)) =
+                state.last().copied()
+                && matches!(
+                    state.get(state.len().saturating_sub(2)),
+                    Some(InternalStackValue::YieldStarCallValue(value_site, value_kind))
+                        if *value_site == site && *value_kind == kind
+                )
+            {
+                state.pop();
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: Some(IterationBranchValue::YieldStarMethod {
+                        site,
+                        kind,
+                    }),
+                    ret_finalizer: None,
+                });
+            }
+            if matches!(state.last(), Some(InternalStackValue::ForOfDone(_))) {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            }
         }
         opcode if is_unchecked_local_put(opcode) => {
             if let Some(InternalStackValue::CatchException(_catch_site)) = state.last().copied() {
@@ -6708,6 +7090,39 @@ fn transfer_internal_operand_stack(
             }
         }
         FinalOpcode::Drop => {
+            if let Some(base) = state.len().checked_sub(3)
+                && let (
+                    InternalStackValue::ForOfIterator(iterator),
+                    InternalStackValue::ForOfNextMethod(next),
+                    InternalStackValue::ForOfCatch(catch),
+                ) = (state[base], state[base + 1], state[base + 2])
+                && iterator == next
+                && next == catch
+            {
+                state[base] = InternalStackValue::YieldStarIterator(iterator);
+                state[base + 1] = InternalStackValue::YieldStarNextMethod(iterator);
+                state.truncate(base + 2);
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
+            if let Some(base) = state.len().checked_sub(2)
+                && let (
+                    InternalStackValue::YieldStarResumeValue(value),
+                    InternalStackValue::YieldStarResumeMode(mode),
+                ) = (state[base], state[base + 1])
+                && value == mode
+            {
+                state[base] = InternalStackValue::Ordinary;
+                state.truncate(base + 1);
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
             if state.is_empty() {
                 if effectively_reachable {
                     return Err(internal_stack_error(id, decoded.pc(), opcode, state));
@@ -6766,6 +7181,20 @@ fn transfer_internal_operand_stack(
             };
             if !state[value_index].is_javascript_value() {
                 return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+            }
+            if matches!(
+                state[marker_index],
+                InternalStackValue::YieldStarIterator(_)
+                    | InternalStackValue::YieldStarNextMethod(_)
+                    | InternalStackValue::YieldStarDummy(_)
+            ) {
+                state[marker_index] = state[value_index];
+                state.truncate(value_index);
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
             }
             match state[marker_index] {
                 InternalStackValue::ForInIterator(_)
@@ -6924,6 +7353,54 @@ fn transfer_internal_operand_stack(
             });
         }
         FinalOpcode::Undefined => {
+            if let Some(base) = state.len().checked_sub(2)
+                && let (
+                    InternalStackValue::YieldStarIterator(iterator),
+                    InternalStackValue::YieldStarNextMethod(next),
+                ) = (state[base], state[base + 1])
+                && iterator == next
+            {
+                state.try_reserve(1).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::AllocationFailed {
+                            resource: BytecodeGraphResource::FrameStateEntries,
+                            requested: 1,
+                        },
+                    )
+                })?;
+                state.push(InternalStackValue::YieldStarDummy(iterator));
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
+            if let Some(base) = state.len().checked_sub(3)
+                && let (
+                    InternalStackValue::YieldStarIterator(iterator),
+                    InternalStackValue::YieldStarNextMethod(next),
+                    InternalStackValue::YieldStarDummy(dummy),
+                ) = (state[base], state[base + 1], state[base + 2])
+                && iterator == next
+                && next == dummy
+            {
+                state.try_reserve(1).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::AllocationFailed {
+                            resource: BytecodeGraphResource::FrameStateEntries,
+                            requested: 1,
+                        },
+                    )
+                })?;
+                state.push(InternalStackValue::Ordinary);
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
             if let Some(base) = state.len().checked_sub(3)
                 && state[base].is_javascript_value()
                 && let (
@@ -7355,7 +7832,10 @@ fn verify_internal_stack_exit(
             BytecodeVerificationErrorKind::FinallyReturnMarkerAtExit { pc: decoded.pc() },
         ));
     }
-    if decoded.instruction().opcode() == FinalOpcode::Throw {
+    if matches!(
+        decoded.instruction().opcode(),
+        FinalOpcode::Throw | FinalOpcode::ThrowError
+    ) {
         let mut cursor = 0;
         while cursor < state.len() {
             match state[cursor] {

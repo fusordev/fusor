@@ -194,7 +194,10 @@ pub(super) fn analyze_ordinary_stack(
             }
             VerifiedSuccessorsRepr::Terminate => {
                 let protected_throw = has_catch_marker
-                    && current.decoded.instruction().opcode() == FinalOpcode::Throw;
+                    && matches!(
+                        current.decoded.instruction().opcode(),
+                        FinalOpcode::Throw | FinalOpcode::ThrowError
+                    );
                 let returns_from_finally =
                     current.decoded.instruction().opcode() == FinalOpcode::Ret;
                 // This structural pass cannot distinguish the pending

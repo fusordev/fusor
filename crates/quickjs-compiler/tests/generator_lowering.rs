@@ -64,3 +64,34 @@ fn empty_generator_has_an_explicit_undefined_async_return() {
         ]
     );
 }
+
+#[test]
+fn delegated_yield_uses_the_verified_iterator_protocol_loop() {
+    let compiled = compile(
+        "function* outer(iterable) { return yield* iterable; }",
+        "outer",
+    );
+    let opcodes = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        compiled.control_flow().function_header().kind(),
+        FunctionKind::Generator
+    );
+    for required in [
+        FinalOpcode::ForOfStart,
+        FinalOpcode::IteratorNext,
+        FinalOpcode::IteratorCheckObject,
+        FinalOpcode::YieldStar,
+        FinalOpcode::IteratorCall,
+    ] {
+        assert!(
+            opcodes.contains(&required),
+            "delegated yield did not emit {required:?}: {opcodes:?}"
+        );
+    }
+}

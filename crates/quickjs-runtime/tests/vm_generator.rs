@@ -376,6 +376,66 @@ fn suspended_generator_frames_trace_functions_cells_and_heap_values_until_comple
 }
 
 #[test]
+fn suspended_yield_star_traces_the_delegate_and_cached_next_method() {
+    let maker = compile(
+        "function make(){\
+            let box={marker:7};\
+            let delegated=(function*(){})();\
+            delegated.next=function(value){\
+                return value===void 0?{value:1,done:false}:{value:box.marker,done:true};\
+            };\
+            function* outer(){return yield* delegated;}\
+            let iterator=outer();\
+            iterator.next();\
+            return iterator;\
+        }",
+        "make",
+    );
+    let resume = compile(
+        "function resume(iterator){return iterator.next(2).value;}",
+        "resume",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let (maker, resume, iterator) = {
+        let mut context = runtime.context(&realm).expect("context");
+        let maker = context.instantiate(maker).expect("maker");
+        let resume = context.instantiate(resume).expect("resume");
+        let iterator = context
+            .call(&maker, &[], ExecutionLimits::default())
+            .expect("delegating generator");
+        (maker, resume, iterator)
+    };
+
+    runtime
+        .collect_cycles()
+        .expect("collection with suspended delegation");
+    let result = runtime
+        .context(&realm)
+        .expect("context")
+        .call(
+            &resume,
+            std::slice::from_ref(&iterator),
+            ExecutionLimits::default(),
+        )
+        .expect("resume delegated generator after collection");
+    assert_eq!(
+        result
+            .as_number()
+            .expect("live result")
+            .map(JsNumber::as_f64),
+        Some(7.0)
+    );
+
+    drop(iterator);
+    drop(maker);
+    drop(resume);
+    runtime
+        .collect_cycles()
+        .expect("released delegated generator collection");
+}
+
+#[test]
 fn rejected_generator_result_allocation_does_not_advance_the_generator() {
     let probe = generator_allocation_case(RuntimeLimits::default());
     let heap_limit = probe.runtime.usage().heap_objects();
@@ -444,5 +504,144 @@ fn rejected_generator_result_allocation_does_not_advance_the_generator() {
             .to_utf8_lossy()
             .expect("UTF-8"),
         "1:false"
+    );
+}
+
+#[test]
+fn yield_star_forwards_next_values_and_preserves_iterator_result_identity() {
+    assert_eq!(
+        run("function run(){\
+                let log='';\
+                let first={value:2,done:false};\
+                let last={value:9,done:true};\
+                let iterable=(function*(){})();\
+                iterable.next=function(value){log=log+(''+value)+'|';return log==='undefined|'?first:last;};\
+                function* outer(){let delegated=yield* iterable;return delegated+1;}\
+                let iterator=outer();\
+                let yielded=iterator.next(100);\
+                let completed=iterator.next(4);\
+                return (yielded===first)+'|'+yielded.value+':'+yielded.done+'|'+\
+                    completed.value+':'+completed.done+'|'+log;\
+            }"),
+        "true|2:false|10:true|undefined|4|"
+    );
+}
+
+#[test]
+fn yield_star_forwards_return_and_throw_completions() {
+    assert_eq!(
+        run("function run(){\
+                let log='';\
+                let returnResult={value:3,done:false};\
+                let throwResult={value:4,done:false};\
+                let iterable=(function*(){})();\
+                iterable.next=function(value){\
+                    log=log+'n'+(''+value)+'|';\
+                    return value===void 0?{value:1,done:false}:{value:8,done:true};\
+                };\
+                iterable.return=function(value){log=log+'r'+value+'|';return returnResult;};\
+                iterable.throw=function(value){log=log+'t'+value+'|';return throwResult;};\
+                function* outer(){return (yield* iterable)+1;}\
+                let returned=outer();returned.next();\
+                let returnYield=returned.return(6);\
+                let returnDone=returned.next(7);\
+                let thrown=outer();thrown.next();\
+                let throwYield=thrown.throw(5);\
+                let throwDone=thrown.next(9);\
+                return (returnYield===returnResult)+'|'+returnDone.value+':'+returnDone.done+'|'+\
+                    (throwYield===throwResult)+'|'+throwDone.value+':'+throwDone.done+'|'+log;\
+            }"),
+        "true|9:true|true|9:true|nundefined|r6|n7|nundefined|t5|n9|"
+    );
+}
+
+#[test]
+fn yield_star_missing_throw_closes_without_an_argument_before_type_error() {
+    assert_eq!(
+        run("function run(){\
+                let log='';\
+                let iterable=(function*(){})();\
+                iterable.next=function(){return {value:1,done:false};};\
+                iterable.return=function(){log=log+arguments.length;return {value:2,done:true};};\
+                iterable.throw=void 0;\
+                function* outer(){yield* iterable;}\
+                let iterator=outer();iterator.next();\
+                let name;try{iterator.throw(7);}catch(error){name=error.name;}\
+                return log+'|'+name+'|'+(''+iterator.next().value)+':'+iterator.next().done;\
+            }"),
+        "0|TypeError|undefined:true"
+    );
+}
+
+#[test]
+fn yield_star_rejects_non_object_results_from_every_delegate_method() {
+    assert_eq!(
+        run("function run(){\
+                function iterable(method){\
+                    let iterator=(function*(){})();\
+                    iterator.next=method.next;iterator.return=method.return;iterator.throw=method.throw;\
+                    return iterator;\
+                }\
+                function* outer(value){yield* value;}\
+                let nextName;try{outer(iterable({next(){return 1;}})).next();}catch(error){nextName=error.name;}\
+                let returned=outer(iterable({next(){return {value:1,done:false};},return(){return 2;}}));\
+                returned.next();let returnName;try{returned.return(3);}catch(error){returnName=error.name;}\
+                let thrown=outer(iterable({next(){return {value:1,done:false};},throw(){return 4;}}));\
+                thrown.next();let throwName;try{thrown.throw(5);}catch(error){throwName=error.name;}\
+                return nextName+'|'+returnName+'|'+throwName;\
+            }"),
+        "TypeError|TypeError|TypeError"
+    );
+}
+
+#[test]
+fn yield_star_missing_return_propagates_return_after_outer_finally() {
+    assert_eq!(
+        run("function run(){\
+                let log='';\
+                let delegated=(function*(){})();\
+                delegated.next=function(){return {value:1,done:false};};\
+                delegated.return=void 0;\
+                function* outer(){try{return (yield* delegated)+1;}finally{log=log+'finally';}}\
+                let iterator=outer();iterator.next();\
+                let result=iterator.return(7);\
+                return log+'|'+result.value+':'+result.done;\
+            }"),
+        "finally|7:true"
+    );
+}
+
+#[test]
+fn yield_star_throw_done_true_completes_the_expression_normally() {
+    assert_eq!(
+        run("function run(){\
+                let delegated=(function*(){})();\
+                delegated.next=function(){return {value:1,done:false};};\
+                delegated.throw=function(value){return {value:value+1,done:true};};\
+                function* outer(){return (yield* delegated)+1;}\
+                let iterator=outer();iterator.next();\
+                let result=iterator.throw(4);\
+                return result.value+':'+result.done;\
+            }"),
+        "6:true"
+    );
+}
+
+#[test]
+fn yield_star_reads_done_before_yielding_without_eagerly_reading_value() {
+    assert_eq!(
+        run("function run(){\
+                let log='';\
+                let result={};\
+                result.__defineGetter__('done',function(){log=log+'done|';return false;});\
+                result.__defineGetter__('value',function(){log=log+'value|';return 3;});\
+                let delegated=(function*(){})();\
+                delegated.next=function(){return result;};\
+                function* outer(){yield* delegated;}\
+                let yielded=outer().next();\
+                let before=log;let value=yielded.value;\
+                return (yielded===result)+'|'+before+'|'+log+'|'+value;\
+            }"),
+        "true|done||done|value||3"
     );
 }

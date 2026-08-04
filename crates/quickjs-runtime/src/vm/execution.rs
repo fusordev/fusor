@@ -1896,6 +1896,98 @@ pub(super) fn execute_one(
                 return_to,
             );
         }
+        FinalOpcode::IteratorNext => {
+            let input = pop(frame)?;
+            let base = frame
+                .stack
+                .len()
+                .checked_sub(3)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "verified yield-star next has an incomplete iterator record",
+                })?;
+            let iterator = stack_value_at(frame, base)?.duplicate();
+            let next = stack_value_at(frame, base + 1)?.duplicate();
+            let StoredValue::Function(function) = next else {
+                let realm = code(runtime, frame.code)?.realm;
+                return Ok(Step::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("not a function")?,
+                    },
+                    origin: instruction_location(runtime, frame, source_pc)?,
+                }));
+            };
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            return Ok(Step::Call {
+                function,
+                inputs: CallInputSource::Prepared(CallInputs {
+                    receiver: iterator,
+                    arguments: CallArguments::from_values(vec![input]),
+                    new_target: None,
+                }),
+                return_to,
+                source_pc,
+            });
+        }
+        FinalOpcode::IteratorCall => {
+            let Operands::U8(flags) = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let input = pop(frame)?;
+            let base = frame
+                .stack
+                .len()
+                .checked_sub(3)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "verified yield-star method call has an incomplete iterator record",
+                })?;
+            let iterator = stack_value_at(frame, base)?.duplicate();
+            let realm = code(runtime, frame.code)?.realm;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_yield_star_iterator_call(
+                    runtime,
+                    iterator,
+                    input,
+                    flags,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
+        }
+        FinalOpcode::IteratorCheckObject => {
+            if !matches!(
+                peek(frame)?,
+                StoredValue::Function(_) | StoredValue::Object(_)
+            ) {
+                let realm = code(runtime, frame.code)?.realm;
+                return Ok(Step::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("iterator must return an object")?,
+                    },
+                    origin: instruction_location(runtime, frame, source_pc)?,
+                }));
+            }
+        }
         FinalOpcode::IteratorClose => {
             let (iterator, _next) = deactivate_for_of_record(frame, true, 0)?;
             let realm = code(runtime, frame.code)?.realm;
@@ -2178,6 +2270,20 @@ pub(super) fn execute_one(
                 origin,
             }));
         }
+        FinalOpcode::ThrowError => {
+            let Operands::AtomU8 { value: 4, .. } = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let realm = code(runtime, frame.code)?.realm;
+            return Ok(Step::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: JsString::from_utf8("iterator does not have a throw method")?,
+                },
+                origin: instruction_location(runtime, frame, source_pc)?,
+            }));
+        }
         FinalOpcode::InitialYield => {
             return Ok(Step::InitialYield);
         }
@@ -2189,6 +2295,15 @@ pub(super) fn execute_one(
                 },
             )?;
             return Ok(Step::Yield(pop(frame)?));
+        }
+        FinalOpcode::YieldStar => {
+            frame.instruction = verified_instruction.successors().fallthrough().ok_or(
+                EngineFault::InvalidSuccessor {
+                    function: frame.template,
+                    pc: source_pc,
+                },
+            )?;
+            return Ok(Step::YieldStar(pop(frame)?));
         }
         FinalOpcode::Return | FinalOpcode::ReturnAsync => return Ok(Step::Return(pop(frame)?)),
         FinalOpcode::ReturnUndef => return Ok(Step::Return(StoredValue::Undefined)),

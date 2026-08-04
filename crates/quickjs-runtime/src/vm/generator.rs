@@ -227,7 +227,7 @@ pub(super) fn begin_generator_resume(
             }
             GeneratorResumeMode::Next => {}
         },
-        GeneratorLifecycle::SuspendedYield => {}
+        GeneratorLifecycle::SuspendedYield | GeneratorLifecycle::SuspendedYieldStar => {}
     }
 
     let suspended_values = suspended_values.ok_or(EngineFault::RuntimeInvariant {
@@ -240,8 +240,10 @@ pub(super) fn begin_generator_resume(
             .saturating_add(suspended_values)
             .saturating_add(ITERATOR_RESULT_FRAME_VALUES),
     )?;
-    if state == GeneratorLifecycle::SuspendedYield
-        && mode != GeneratorResumeMode::Throw
+    if matches!(
+        state,
+        GeneratorLifecycle::SuspendedYield | GeneratorLifecycle::SuspendedYieldStar
+    ) && (mode != GeneratorResumeMode::Throw || state == GeneratorLifecycle::SuspendedYieldStar)
         && runtime
             .generator_states
             .get(&generator)
@@ -273,21 +275,37 @@ pub(super) fn begin_generator_resume(
     frame.generator_result = Some(result);
     frame.reserved_values = frame.reserved_values.saturating_add(1);
     frame.return_to = return_to;
-    if state == GeneratorLifecycle::SuspendedYield {
-        match mode {
-            GeneratorResumeMode::Next | GeneratorResumeMode::Return => {
-                push(&mut frame, argument);
-                push(
-                    &mut frame,
-                    StoredValue::Boolean(mode == GeneratorResumeMode::Return),
-                );
-            }
-            GeneratorResumeMode::Throw => {
-                frame.resume_abrupt = Some(PendingException {
-                    realm,
-                    payload: PendingExceptionPayload::ThrownValue(argument),
-                    origin,
-                });
+    if matches!(
+        state,
+        GeneratorLifecycle::SuspendedYield | GeneratorLifecycle::SuspendedYieldStar
+    ) {
+        if state == GeneratorLifecycle::SuspendedYieldStar {
+            let resume_mode = match mode {
+                GeneratorResumeMode::Next => 0,
+                GeneratorResumeMode::Return => 1,
+                GeneratorResumeMode::Throw => 2,
+            };
+            push(&mut frame, argument);
+            push(
+                &mut frame,
+                StoredValue::Number(JsNumber::from_i32(resume_mode)),
+            );
+        } else {
+            match mode {
+                GeneratorResumeMode::Next | GeneratorResumeMode::Return => {
+                    push(&mut frame, argument);
+                    push(
+                        &mut frame,
+                        StoredValue::Boolean(mode == GeneratorResumeMode::Return),
+                    );
+                }
+                GeneratorResumeMode::Throw => {
+                    frame.resume_abrupt = Some(PendingException {
+                        realm,
+                        payload: PendingExceptionPayload::ThrownValue(argument),
+                        origin,
+                    });
+                }
             }
         }
     } else if mode != GeneratorResumeMode::Next {
@@ -303,6 +321,7 @@ pub(super) fn suspend_generator_frame(
     runtime: &mut Runtime,
     generator: ObjectId,
     mut frame: Frame,
+    lifecycle: GeneratorLifecycle,
 ) -> Result<(), ExecutionError> {
     if frame.generator_result.is_some() {
         return Err(EngineFault::RuntimeInvariant {
@@ -327,7 +346,16 @@ pub(super) fn suspend_generator_frame(
         }
         .into());
     }
-    record.state = GeneratorLifecycle::SuspendedYield;
+    if !matches!(
+        lifecycle,
+        GeneratorLifecycle::SuspendedYield | GeneratorLifecycle::SuspendedYieldStar
+    ) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "generator suspension requested an invalid lifecycle",
+        }
+        .into());
+    }
+    record.state = lifecycle;
     record.frame = Some(frame);
     Ok(())
 }
@@ -358,4 +386,155 @@ pub(super) fn complete_active_generator_resumes(
         complete_generator_resume(runtime, generator)?;
     }
     Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the resumable GetMethod/Call operation carries an explicit iterator, completion, realm, caller, origin, and shared execution budget"
+)]
+pub(super) fn begin_yield_star_iterator_call(
+    runtime: &mut Runtime,
+    iterator: StoredValue,
+    input: StoredValue,
+    flags: u8,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mode = match flags {
+        0 => YieldStarIteratorCallMode::Return,
+        1 => YieldStarIteratorCallMode::Throw,
+        2 => YieldStarIteratorCallMode::Close,
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "verified yield-star iterator call has invalid flags",
+            }
+            .into());
+        }
+    };
+    let state = YieldStarIteratorCallContinuation {
+        iterator,
+        input: Some(input),
+        realm,
+        mode,
+        stage: YieldStarIteratorCallStage::Method,
+        origin,
+    };
+    read_yield_star_iterator_method(runtime, state, return_to, execution_budget)
+}
+
+fn read_yield_star_iterator_method(
+    runtime: &mut Runtime,
+    state: YieldStarIteratorCallContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (key, property_name) = match state.mode {
+        YieldStarIteratorCallMode::Throw => (
+            runtime.predefined_property_key(PredefinedAtom::Throw),
+            "throw",
+        ),
+        YieldStarIteratorCallMode::Return | YieldStarIteratorCallMode::Close => (
+            runtime.predefined_property_key(PredefinedAtom::Return),
+            "return",
+        ),
+    };
+    charge_iterator_property_lookup(runtime, &state.iterator, execution_budget)?;
+    match read_static_property(runtime, state.realm, &state.iterator, &key)? {
+        PropertyReadOutcome::Value(value) => {
+            advance_yield_star_iterator_call(runtime, state, value, return_to)
+        }
+        PropertyReadOutcome::Getter { function, receiver } => {
+            let origin = state.origin.clone();
+            iterator_getter_call(
+                function,
+                receiver,
+                NativeContinuation::YieldStarIteratorCall(state),
+                return_to,
+                origin,
+                None,
+            )
+        }
+        PropertyReadOutcome::Failed(failure) => {
+            let property_name = JsString::from_utf8(property_name)?;
+            Err(NativeFailure::Abrupt(property_exception_at(
+                state.realm,
+                state.origin,
+                Some(&property_name),
+                failure,
+            )?))
+        }
+    }
+}
+
+pub(super) fn advance_yield_star_iterator_call(
+    _runtime: &mut Runtime,
+    mut state: YieldStarIteratorCallContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        YieldStarIteratorCallStage::Method => match completion {
+            StoredValue::Undefined | StoredValue::Null => Ok(NativeDispatch::Pair(
+                state.input.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "yield-star missing method lost its completion value",
+                })?,
+                StoredValue::Boolean(true),
+            )),
+            StoredValue::Function(function) => {
+                let arguments = if state.mode == YieldStarIteratorCallMode::Close {
+                    let _ = state.input.take().ok_or(EngineFault::RuntimeInvariant {
+                        message: "yield-star close lost its completion value",
+                    })?;
+                    CallArguments::empty()
+                } else {
+                    CallArguments::from_values(vec![state.input.take().ok_or(
+                        EngineFault::RuntimeInvariant {
+                            message: "yield-star method call lost its completion value",
+                        },
+                    )?])
+                };
+                let receiver = state.iterator.duplicate();
+                state.stage = YieldStarIteratorCallStage::Call;
+                let origin = state.origin.clone();
+                let mut continuations = Vec::new();
+                continuations.try_reserve_exact(1).map_err(|_| {
+                    ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::Frames,
+                        additional: 1,
+                    }
+                })?;
+                continuations.push(NativeContinuation::YieldStarIteratorCall(state));
+                Ok(NativeDispatch::Call(NativeCall {
+                    function,
+                    receiver,
+                    arguments,
+                    return_to,
+                    origin,
+                    continuations,
+                    pre_call: None,
+                    new_target: None,
+                    native_caller: None,
+                }))
+            }
+            StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_)
+            | StoredValue::Object(_) => Err(NativeFailure::Abrupt(PendingException {
+                realm: state.realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: JsString::from_utf8("not a function")?,
+                },
+                origin: state.origin,
+            })),
+        },
+        YieldStarIteratorCallStage::Call => Ok(NativeDispatch::Pair(
+            completion,
+            StoredValue::Boolean(false),
+        )),
+    }
 }

@@ -33,7 +33,7 @@ use std::{
 use quickjs_bytecode::{
     CompilerBindingKind, CompilerBindingPolicy, CompilerCaptureLayout, CompilerCapturedBinding,
     CompilerClosureBinding, CompilerConstant, CompilerConstantValue, CompilerExecutableKind,
-    FinalOpcode, FunctionTemplateId, Operands, VerifiedBytecode,
+    FinalOpcode, FunctionTemplateId, Instruction, Operands, VerifiedBytecode,
 };
 
 use crate::promise_rejection::PromiseRejectionState;
@@ -2017,8 +2017,9 @@ fn preflight_opcodes(authority: &VerifiedBytecode) -> Result<(), InstallError> {
         }
         for (instruction, mapping) in instructions.iter().zip(mappings) {
             let decoded = instruction.decoded();
-            let opcode = decoded.instruction().opcode();
-            if !is_supported_opcode(opcode) {
+            let instruction = decoded.instruction();
+            let opcode = instruction.opcode();
+            if !is_supported_instruction(instruction) {
                 return Err(InstallError::UnsupportedOpcode {
                     function: function_id,
                     pc: decoded.pc(),
@@ -2029,6 +2030,12 @@ fn preflight_opcodes(authority: &VerifiedBytecode) -> Result<(), InstallError> {
         }
     }
     Ok(())
+}
+
+const fn is_supported_instruction(instruction: Instruction) -> bool {
+    is_supported_opcode(instruction.opcode())
+        && (!matches!(instruction.opcode(), FinalOpcode::ThrowError)
+            || matches!(instruction.operands(), Operands::AtomU8 { value: 4, .. }))
 }
 
 #[allow(
@@ -2079,6 +2086,8 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ReturnAsync
             | FinalOpcode::InitialYield
             | FinalOpcode::Yield
+            | FinalOpcode::YieldStar
+            | FinalOpcode::ThrowError
             | FinalOpcode::GetLoc
             | FinalOpcode::PutLoc
             | FinalOpcode::SetLoc
@@ -2103,6 +2112,9 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ForOfStart
             | FinalOpcode::ForOfNext
             | FinalOpcode::IteratorClose
+            | FinalOpcode::IteratorNext
+            | FinalOpcode::IteratorCall
+            | FinalOpcode::IteratorCheckObject
             | FinalOpcode::GetField
             | FinalOpcode::GetField2
             | FinalOpcode::GetArrayEl

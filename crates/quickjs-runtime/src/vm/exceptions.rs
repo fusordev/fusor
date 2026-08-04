@@ -305,6 +305,8 @@ fn exception_caller_frames(
                 | FinalOpcode::ForOfStart
                 | FinalOpcode::ForOfNext
                 | FinalOpcode::IteratorClose
+                | FinalOpcode::IteratorNext
+                | FinalOpcode::IteratorCall
                 | FinalOpcode::ToPropKey
                 | FinalOpcode::DefineMethodComputed
                 | FinalOpcode::Neg

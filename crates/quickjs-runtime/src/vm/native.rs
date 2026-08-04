@@ -389,6 +389,9 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::ForOfClose(state) => {
                 advance_for_of_close(state, &value, return_to)?
             }
+            NativeContinuation::YieldStarIteratorCall(state) => {
+                advance_yield_star_iterator_call(runtime, state, value, return_to)?
+            }
             NativeContinuation::IteratorAppend(state) => {
                 advance_iterator_append(runtime, state, value, return_to, execution_budget)?
             }

@@ -113,6 +113,8 @@ pub(super) fn validate_static_semantics(
                     FinalOpcode::ForOfStart
                         | FinalOpcode::ForOfNext
                         | FinalOpcode::IteratorClose
+                        | FinalOpcode::IteratorNext
+                        | FinalOpcode::IteratorCall
                         | FinalOpcode::CopyDataProperties
                 )
             {

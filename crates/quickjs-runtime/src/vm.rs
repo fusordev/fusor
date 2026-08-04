@@ -284,6 +284,7 @@ pub(crate) struct Frame {
 pub(crate) enum GeneratorLifecycle {
     SuspendedStart,
     SuspendedYield,
+    SuspendedYieldStar,
     Executing,
     Completed,
 }
@@ -337,6 +338,7 @@ enum NativeContinuation {
     ForOfStart(ForOfStartContinuation),
     ForOfNext(ForOfNextContinuation),
     ForOfClose(ForOfCloseContinuation),
+    YieldStarIteratorCall(YieldStarIteratorCallContinuation),
     IteratorAppend(IteratorAppendContinuation),
     IteratorClose(IteratorCloseContinuation),
     CopyDataProperties(CopyDataPropertiesContinuation),
@@ -388,6 +390,7 @@ impl NativeContinuation {
             Self::ForOfStart(state) => state.retained_values(),
             Self::ForOfNext(state) => state.retained_values(),
             Self::ForOfClose(state) => state.retained_values(),
+            Self::YieldStarIteratorCall(state) => state.retained_values(),
             Self::IteratorAppend(state) => state.retained_values(),
             Self::IteratorClose(state) => state.retained_values(),
             Self::CopyDataProperties(state) => state.retained_values(),
@@ -767,6 +770,34 @@ struct ForOfCloseContinuation {
     realm: RealmId,
     stage: ForOfCloseStage,
     origin: JsStackFrame,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum YieldStarIteratorCallMode {
+    Return,
+    Throw,
+    Close,
+}
+
+#[derive(Clone, Copy)]
+enum YieldStarIteratorCallStage {
+    Method,
+    Call,
+}
+
+struct YieldStarIteratorCallContinuation {
+    iterator: StoredValue,
+    input: Option<StoredValue>,
+    realm: RealmId,
+    mode: YieldStarIteratorCallMode,
+    stage: YieldStarIteratorCallStage,
+    origin: JsStackFrame,
+}
+
+impl YieldStarIteratorCallContinuation {
+    fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(u64::from(self.input.is_some()))
+    }
 }
 
 impl ForOfCloseContinuation {
@@ -1739,6 +1770,12 @@ fn trace_native_continuation_roots(
         NativeContinuation::ForOfClose(state) => {
             trace_stored_value_root(&state.iterator, mark);
         }
+        NativeContinuation::YieldStarIteratorCall(state) => {
+            trace_stored_value_root(&state.iterator, mark);
+            if let Some(input) = &state.input {
+                trace_stored_value_root(input, mark);
+            }
+        }
         NativeContinuation::IteratorAppend(state) => {
             mark(CollectionRoot::Heap(HeapReference::Object(state.array)));
             trace_stored_value_root(&state.iterable, mark);
@@ -2110,6 +2147,7 @@ enum Step {
     Abrupt(PendingException),
     InitialYield,
     Yield(StoredValue),
+    YieldStar(StoredValue),
     Return(StoredValue),
 }
 
@@ -3790,7 +3828,12 @@ fn execute_frame_loop(
                     .reserved_values
                     .saturating_sub(native_continuation_values(&native_returns));
                 runtime.finish_iterator_result(result, value, false)?;
-                suspend_generator_frame(runtime, generator, suspended)?;
+                suspend_generator_frame(
+                    runtime,
+                    generator,
+                    suspended,
+                    GeneratorLifecycle::SuspendedYield,
+                )?;
                 let mut result = StoredValue::Object(result);
                 if !native_returns.is_empty() {
                     match resume_suspended_native_returns(
@@ -3820,6 +3863,79 @@ fn execute_frame_loop(
                 if return_to.is_some() {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "host generator resume has a caller continuation",
+                    }
+                    .into());
+                }
+                return Ok(result);
+            }
+            Step::YieldStar(value) => {
+                if !matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "verified delegated yield produced a non-object iterator result",
+                    }
+                    .into());
+                }
+                let mut suspended = frames.pop().ok_or(EngineFault::MissingInstruction {
+                    function: FunctionTemplateId::new(0),
+                    instruction: 0,
+                })?;
+                *active_frame_values =
+                    active_frame_values.saturating_sub(suspended.reserved_values);
+                let generator =
+                    suspended
+                        .generator_resume
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "delegated-yield frame has no generator resume identity",
+                        })?;
+                let reserved =
+                    suspended
+                        .generator_result
+                        .take()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "delegated-yield frame has no reserved iterator result",
+                        })?;
+                runtime.discard_reserved_iterator_result(reserved)?;
+                suspended.reserved_values = suspended.reserved_values.saturating_sub(1);
+                let return_to = suspended.return_to;
+                let native_returns = std::mem::take(&mut suspended.native_returns);
+                suspended.reserved_values = suspended
+                    .reserved_values
+                    .saturating_sub(native_continuation_values(&native_returns));
+                suspend_generator_frame(
+                    runtime,
+                    generator,
+                    suspended,
+                    GeneratorLifecycle::SuspendedYieldStar,
+                )?;
+                let mut result = value;
+                if !native_returns.is_empty() {
+                    match resume_suspended_native_returns(
+                        runtime,
+                        frames,
+                        active_frame_values,
+                        native_returns,
+                        result,
+                        return_to,
+                        compiler,
+                        execution_budget,
+                    )? {
+                        SuspendedNativeReturn::Value(value) => result = value,
+                        SuspendedNativeReturn::Continued => continue,
+                    }
+                }
+                if let Some(parent) = frames.last_mut() {
+                    push_call_result(
+                        parent,
+                        result,
+                        return_to.ok_or(EngineFault::RuntimeInvariant {
+                            message: "nested delegated generator resume has no caller continuation",
+                        })?,
+                    )?;
+                    continue;
+                }
+                if return_to.is_some() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "host delegated generator resume has a caller continuation",
                     }
                     .into());
                 }
