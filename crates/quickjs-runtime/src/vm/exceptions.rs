@@ -400,24 +400,11 @@ pub(super) fn dispatch_pending_exception(
                 });
                 break;
             }
-            if frame.native_returns.iter().any(|continuation| {
-                matches!(
-                    continuation,
-                    NativeContinuation::AggregateError(_)
-                        | NativeContinuation::FromEntries(_)
-                        | NativeContinuation::GroupBy(_)
-                        | NativeContinuation::ArrayStatic(_)
-                        | NativeContinuation::PromiseCombinator(_)
-                        | NativeContinuation::IteratorAppend(_)
-                        | NativeContinuation::IteratorClose(_)
-                        | NativeContinuation::AsyncFromSync(_)
-                        | NativeContinuation::AsyncFromSyncClose(_)
-                        | NativeContinuation::AsyncGeneratorReturnAwait { .. }
-                ) || matches!(
-                    continuation,
-                    NativeContinuation::Promise(state) if state.handles_abrupt()
-                )
-            }) {
+            if frame
+                .native_returns
+                .iter()
+                .any(NativeContinuation::handles_abrupt)
+            {
                 handler = Some(Handler::Native(index));
                 break;
             }

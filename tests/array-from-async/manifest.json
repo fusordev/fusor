@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "oracle": "Node.js with Array.fromAsync support",
+  "quickjs_release": "2026-06-04",
+  "quickjs_surface": "Array.fromAsync is absent",
+  "cases": [
+    {
+      "id": "surface-and-invalid-mapper-rejection-boundary",
+      "covers": ["surface", "metadata", "nonconstructable", "mapper-validation-order", "async-rejection"],
+      "body": "let state={result:'',done:null};let probed=false;let items={get [Symbol.asyncIterator](){probed=true;return undefined;}};let promise=Array.fromAsync(items,1);let construct='';try{Reflect.construct(Array.fromAsync,[]);}catch(error){construct=error.name;}state.result=(promise instanceof Promise)+':'+probed+':'+Array.fromAsync.name+':'+Array.fromAsync.length+':'+construct+'|';state.done=promise.catch(function(error){state.result=state.result+error.name+':'+probed;});return state;",
+      "expect": {"kind": "string", "value": "true:false:fromAsync:1:TypeError|TypeError:false"}
+    },
+    {
+      "id": "async-iterator-order-and-awaited-mapper",
+      "covers": ["async-iterator-precedence", "iterator-record-before-construct", "await-next", "done-before-value", "await-mapper", "strict-length"],
+      "body": "let state={result:'',done:null};let log=[];let step=0;let items={get [Symbol.asyncIterator](){log.push('async-get');return function(){log.push('async-call');return this.iterator;}},get [Symbol.iterator](){log.push('sync-get');return function(){throw 'wrong';}},iterator:{get next(){log.push('next-get');return function(){log.push('next');if(step++)return Promise.resolve({get done(){log.push('done:true');return true;},get value(){throw 'wrong';}});return Promise.resolve({get done(){log.push('done:false');return false;},get value(){log.push('value');return 3;}});}}}};function C(value){log.push('ctor:'+value);Object.defineProperty(this,'length',{set:function(length){log.push('length:'+length);},configurable:true});}let receiver={};state.done=Array.fromAsync.call(C,items,function(value,index){log.push('map:'+value+':'+index+':'+(this===receiver));return Promise.resolve(value*2);},receiver).then(function(result){state.result=log.join('|')+'#'+result[0];});return state;",
+      "expect": {"kind": "string", "value": "async-get|async-call|next-get|ctor:undefined|next|done:false|value|map:3:0:true|next|done:true|length:1#6"}
+    },
+    {
+      "id": "sync-fallback-awaits-yielded-values",
+      "covers": ["sync-fallback", "async-from-sync", "await-yielded-value", "mapper-index"],
+      "body": "let state={result:'',done:null};let log=[];let items={get [Symbol.asyncIterator](){log.push('async');return undefined;},get [Symbol.iterator](){log.push('sync');return function(){return [Promise.resolve(2),3][Symbol.iterator]();}}};state.done=Array.fromAsync(items,function(value,index){log.push('map:'+value+':'+index);return Promise.resolve(value+index);}).then(function(result){state.result=log.join('|')+'#'+result.join(',');});return state;",
+      "expect": {"kind": "string", "value": "async|sync|map:2:0|map:3:1#2,4"}
+    },
+    {
+      "id": "array-like-path-awaits-before-mapping",
+      "covers": ["array-like-fallback", "length-before-construct", "await-element", "await-mapper", "strict-length"],
+      "body": "let state={result:'',done:null};let log=[];let items={get [Symbol.asyncIterator](){log.push('async');return undefined;},get [Symbol.iterator](){log.push('sync');return undefined;},get length(){log.push('length');return 2;},get 0(){log.push('get0');return Promise.resolve('a');},get 1(){log.push('get1');return 'b';}};function C(length){log.push('ctor:'+length);Object.defineProperty(this,'length',{set:function(value){log.push('set:'+value);},configurable:true});}state.done=Array.fromAsync.call(C,items,function(value,index){log.push('map:'+value+':'+index);return Promise.resolve(value+index);}).then(function(result){state.result=log.join('|')+'#'+result[0]+','+result[1];});return state;",
+      "expect": {"kind": "string", "value": "async|sync|length|ctor:2|get0|map:a:0|get1|map:b:1|set:2#a0,b1"}
+    },
+    {
+      "id": "mapper-rejection-closes-async-iterator",
+      "covers": ["mapper-rejection", "async-iterator-close"],
+      "body": "let state={result:'',done:null};let closed=0;let items={[Symbol.asyncIterator]:function(){let sent=false;return {next:function(){if(sent)return Promise.resolve({done:true});sent=true;return Promise.resolve({done:false,value:1});},return:function(){closed++;return Promise.resolve({done:true});}};}};state.done=Array.fromAsync(items,function(){return Promise.reject('mapper');}).catch(function(error){state.result=error+'|'+closed;});return state;",
+      "expect": {"kind": "string", "value": "mapper|1"}
+    }
+  ]
+}

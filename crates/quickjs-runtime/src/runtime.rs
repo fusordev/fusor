@@ -1254,27 +1254,29 @@ impl PromiseStatic {
     }
 }
 
-/// The synchronous generic factories installed on the `Array` constructor.
+/// The generic factories installed on the `Array` constructor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ArrayStatic {
     From,
+    FromAsync,
     Of,
 }
 
 impl ArrayStatic {
-    pub(crate) const ALL: [Self; 2] = [Self::From, Self::Of];
+    pub(crate) const ALL: [Self; 3] = [Self::From, Self::FromAsync, Self::Of];
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::From => 1,
+            Self::From | Self::FromAsync => 1,
             Self::Of => 0,
         }
     }
 
-    pub(crate) const fn predefined_atom(self) -> PredefinedAtom {
+    pub(crate) const fn predefined_atom(self) -> Option<PredefinedAtom> {
         match self {
-            Self::From => PredefinedAtom::From,
-            Self::Of => PredefinedAtom::Of,
+            Self::From => Some(PredefinedAtom::From),
+            Self::FromAsync => None,
+            Self::Of => Some(PredefinedAtom::Of),
         }
     }
 }
@@ -1890,6 +1892,7 @@ pub struct Runtime {
     pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,
     pub(crate) async_function_states: HashMap<ObjectId, crate::vm::AsyncFunctionRecord>,
     pub(crate) async_generator_states: HashMap<ObjectId, crate::vm::AsyncGeneratorRecord>,
+    pub(crate) array_from_async_states: HashMap<ObjectId, crate::vm::ArrayFromAsyncRecord>,
     /// Next non-zero seed assigned after a realm transaction commits.
     next_math_random_seed: u64,
 }

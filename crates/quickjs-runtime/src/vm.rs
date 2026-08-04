@@ -74,6 +74,7 @@ mod aggregate_error;
 mod array_callbacks;
 mod array_copiers;
 mod array_flatten;
+mod array_from_async;
 mod array_join;
 mod array_mutators;
 mod array_search;
@@ -113,6 +114,7 @@ mod string_raw;
 mod string_replace;
 mod uri;
 
+pub(crate) use array_from_async::ArrayFromAsyncRecord;
 use async_function::{begin_async_await, suspend_async_function};
 
 #[allow(
@@ -120,12 +122,12 @@ use async_function::{begin_async_await, suspend_async_function};
     reason = "private VM sibling modules share one interpreter implementation namespace"
 )]
 use {
-    aggregate_error::*, array_callbacks::*, array_copiers::*, array_flatten::*, array_join::*,
-    array_mutators::*, array_search::*, array_sort::*, array_statics::*, async_from_sync::*,
-    async_generator::*, bigint_intrinsics::*, bindings::*, conversions::*,
-    define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*, exceptions::*,
-    execution::*, from_entries::*, generator::*, group_by::*, iterators::*, json_parse::*,
-    json_stringify::*, locale_string::*, math::*, math_sum_precise::*, native::*,
+    aggregate_error::*, array_callbacks::*, array_copiers::*, array_flatten::*,
+    array_from_async::*, array_join::*, array_mutators::*, array_search::*, array_sort::*,
+    array_statics::*, async_from_sync::*, async_generator::*, bigint_intrinsics::*, bindings::*,
+    conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*,
+    exceptions::*, execution::*, from_entries::*, generator::*, group_by::*, iterators::*,
+    json_parse::*, json_stringify::*, locale_string::*, math::*, math_sum_precise::*, native::*,
     object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*, stack::*,
     string_methods::*, string_raw::*, string_replace::*, uri::*,
 };
@@ -408,6 +410,7 @@ enum NativeContinuation {
     ArraySort(Box<ArraySortContinuation>),
     ArrayFlatten(Box<ArrayFlattenContinuation>),
     ArrayStatic(Box<ArrayStaticContinuation>),
+    ArrayFromAsync(Box<ArrayFromAsyncRecord>),
     StringRaw(Box<StringRawContinuation>),
     StringReplace(Box<StringReplaceContinuation>),
     LocaleString(Box<LocaleStringContinuation>),
@@ -471,6 +474,7 @@ impl NativeContinuation {
             Self::ArraySort(state) => state.retained_values(),
             Self::ArrayFlatten(state) => state.retained_values(),
             Self::ArrayStatic(state) => state.retained_values(),
+            Self::ArrayFromAsync(state) => state.retained_values(),
             Self::StringRaw(state) => state.retained_values(),
             Self::StringReplace(state) => state.retained_values(),
             Self::LocaleString(state) => state.retained_values(),
@@ -482,6 +486,31 @@ impl NativeContinuation {
             Self::AsyncAwait { .. } | Self::ReflectSet | Self::FunctionCall => 0,
             Self::AsyncGeneratorReturnAwait { .. } => 1,
         }
+    }
+
+    fn handles_abrupt(&self) -> bool {
+        matches!(
+            self,
+            Self::AggregateError(_)
+                | Self::FromEntries(_)
+                | Self::GroupBy(_)
+                | Self::ArrayStatic(_)
+                | Self::ArrayFromAsync(_)
+                | Self::PromiseCombinator(_)
+                | Self::IteratorAppend(_)
+                | Self::IteratorClose(_)
+                | Self::AsyncFromSync(_)
+                | Self::AsyncFromSyncClose(_)
+                | Self::AsyncGeneratorReturnAwait { .. }
+        ) || matches!(self, Self::Promise(state) if state.handles_abrupt())
+            || matches!(
+                self,
+                Self::OperatorPrimitive(state)
+                    if matches!(
+                        &state.target,
+                        OperatorPrimitiveTarget::ArrayFromAsyncLength { .. }
+                    )
+            )
     }
 }
 
@@ -1453,6 +1482,10 @@ enum OperatorPrimitiveTarget {
     ArrayFlattenValue(Box<ArrayFlattenContinuation>),
     /// An array-like `Array.from` length awaiting `ToNumber`.
     ArrayStaticLength(Box<ArrayStaticContinuation>),
+    /// An array-like `Array.fromAsync` length awaiting `ToNumber`.
+    ArrayFromAsyncLength {
+        operation: ObjectId,
+    },
     /// One `String.raw` length, literal, or substitution conversion.
     StringRawValue(Box<StringRawContinuation>),
     /// One `String.prototype.replace` fallback operand or callback result,
@@ -1498,7 +1531,8 @@ impl OperatorPrimitiveTarget {
                 new_target: Some(_),
             }
             | Self::MathBinaryRight { .. }
-            | Self::MathBinaryFinish { .. } => 1,
+            | Self::MathBinaryFinish { .. }
+            | Self::ArrayFromAsyncLength { .. } => 1,
             Self::ErrorConstructorMessage(state) => state.retained_values(),
             Self::JsonParseText(state) => state.retained_values(),
             Self::JsonStringifyReplacerItem(state)
@@ -1751,6 +1785,9 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArraySortValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFlattenValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayStaticLength(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
+            mark(CollectionRoot::Heap(HeapReference::Object(*operation)));
+        }
         OperatorPrimitiveTarget::StringRawValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::StringReplaceValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::LocaleStringValue(state) => state.trace_roots(mark),
@@ -1836,6 +1873,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ArraySort(state) => state.trace_roots(mark),
         NativeContinuation::ArrayFlatten(state) => state.trace_roots(mark),
         NativeContinuation::ArrayStatic(state) => state.trace_roots(mark),
+        NativeContinuation::ArrayFromAsync(state) => state.trace_roots(mark),
         NativeContinuation::StringRaw(state) => state.trace_roots(mark),
         NativeContinuation::StringReplace(state) => state.trace_roots(mark),
         NativeContinuation::LocaleString(state) => state.trace_roots(mark),

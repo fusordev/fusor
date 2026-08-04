@@ -238,6 +238,7 @@ fn visit_realm_name_order(
         visit(RealmNameId::NumberPredicate(predicate))?;
     }
     visit(RealmNameId::ArrayIsArray)?;
+    visit(RealmNameId::ArrayFromAsync)?;
     for (_, method) in STRING_FROM_STATICS {
         visit(RealmNameId::StringStatic(method))?;
     }
@@ -369,6 +370,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArrayReduction(method) => method.name(),
         RealmNameId::ArraySplice => "splice",
         RealmNameId::ArrayIsArray => "isArray",
+        RealmNameId::ArrayFromAsync => "fromAsync",
         RealmNameId::PromiseStatic(method) => method.name(),
         RealmNameId::ArraySort(method) => method.name(),
         RealmNameId::ArrayFlatten(method) => method.name(),
@@ -386,8 +388,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 183);
-        assert_eq!(plan.description_code_units(), 1_414);
+        assert_eq!(plan.len(), 184);
+        assert_eq!(plan.description_code_units(), 1_423);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! ECMAScript Promise core and runtime-owned job execution.
 
+use super::array_from_async::begin_array_from_async_resume;
 use super::async_function::begin_async_function_resume;
 use super::async_generator::begin_async_generator_await_resume;
 use super::{
@@ -1415,6 +1416,22 @@ pub(super) fn perform_async_generator_await(
     perform_promise_reactions(runtime, promise, fulfill_reaction, reject_reaction)
 }
 
+pub(super) fn perform_array_from_async_await(
+    runtime: &mut Runtime,
+    promise: ObjectId,
+    operation: ObjectId,
+) -> Result<(), NativeFailure> {
+    let fulfill_reaction = PromiseReaction {
+        kind: PromiseReactionKind::Fulfill,
+        target: PromiseReactionTarget::ArrayFromAsync { operation },
+    };
+    let reject_reaction = PromiseReaction {
+        kind: PromiseReactionKind::Reject,
+        target: PromiseReactionTarget::ArrayFromAsync { operation },
+    };
+    perform_promise_reactions(runtime, promise, fulfill_reaction, reject_reaction)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "all Promise reaction targets share one state transition and rejection-tracker order"
@@ -2207,6 +2224,13 @@ pub(super) fn begin_promise_job(
                     execution_budget,
                 )
             }
+            PromiseReactionTarget::ArrayFromAsync { operation } => begin_array_from_async_resume(
+                runtime,
+                operation,
+                reaction.kind,
+                argument,
+                execution_budget,
+            ),
         },
         PromiseJob::Thenable {
             promise,

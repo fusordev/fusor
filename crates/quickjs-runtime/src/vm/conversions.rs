@@ -1783,6 +1783,15 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::ArrayStaticLength(state) => {
             advance_array_static(runtime, *state, Some(value), return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
+            resume_array_from_async_length_conversion(
+                runtime,
+                operation,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::StringRawValue(state) => {
             advance_string_raw(runtime, *state, Some(value), return_to, execution_budget)
         }

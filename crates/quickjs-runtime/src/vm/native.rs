@@ -148,24 +148,9 @@ pub(super) fn prepend_native_continuations(
 pub(super) fn take_iterator_abrupt_handler(
     continuations: &mut Vec<NativeContinuation>,
 ) -> Option<NativeContinuation> {
-    let index = continuations.iter().rposition(|continuation| {
-        matches!(
-            continuation,
-            NativeContinuation::AggregateError(_)
-                | NativeContinuation::FromEntries(_)
-                | NativeContinuation::GroupBy(_)
-                | NativeContinuation::ArrayStatic(_)
-                | NativeContinuation::PromiseCombinator(_)
-                | NativeContinuation::IteratorAppend(_)
-                | NativeContinuation::IteratorClose(_)
-                | NativeContinuation::AsyncFromSync(_)
-                | NativeContinuation::AsyncFromSyncClose(_)
-                | NativeContinuation::AsyncGeneratorReturnAwait { .. }
-        ) || matches!(
-            continuation,
-            NativeContinuation::Promise(state) if state.handles_abrupt()
-        )
-    })?;
+    let index = continuations
+        .iter()
+        .rposition(NativeContinuation::handles_abrupt)?;
     let handler = continuations.remove(index);
     continuations.truncate(index);
     Some(handler)
@@ -203,6 +188,29 @@ pub(super) fn resume_iterator_abrupt_continuations(
             }
             NativeContinuation::ArrayStatic(state) => {
                 resume_array_static_abrupt(runtime, *state, pending, return_to, execution_budget)
+            }
+            NativeContinuation::ArrayFromAsync(state) => resume_array_from_async_abrupt(
+                runtime,
+                *state,
+                pending,
+                return_to,
+                execution_budget,
+            ),
+            NativeContinuation::OperatorPrimitive(state) => {
+                let OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } = state.target
+                else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "non-Array.fromAsync primitive continuation became an abrupt handler",
+                    }
+                    .into());
+                };
+                resume_array_from_async_length_conversion_abrupt(
+                    runtime,
+                    operation,
+                    pending,
+                    return_to,
+                    execution_budget,
+                )
             }
             NativeContinuation::Promise(state) => {
                 resume_promise_abrupt(runtime, state, pending, return_to, execution_budget)
@@ -348,13 +356,39 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
-            NativeContinuation::OperatorPrimitive(state) => advance_operator_primitive_conversion(
-                runtime,
-                state,
-                Some(value),
-                return_to,
-                execution_budget,
-            )?,
+            NativeContinuation::OperatorPrimitive(state) => {
+                let operation = match &state.target {
+                    OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => Some(*operation),
+                    _ => None,
+                };
+                match advance_operator_primitive_conversion(
+                    runtime,
+                    state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                ) {
+                    Ok(dispatch) => dispatch,
+                    Err(
+                        NativeFailure::Abrupt(pending)
+                        | NativeFailure::AbruptAfterTransient(pending),
+                    ) if operation.is_some() => resume_array_from_async_length_conversion_abrupt(
+                        runtime,
+                        operation.expect("guarded Array.fromAsync operation"),
+                        pending,
+                        return_to,
+                        execution_budget,
+                    )?,
+                    Err(NativeFailure::Execution(error)) if operation.is_some() => {
+                        abandon_array_from_async_length_conversion(
+                            runtime,
+                            operation.expect("guarded Array.fromAsync operation"),
+                        );
+                        return Err(NativeFailure::Execution(error));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             NativeContinuation::IntrinsicGet(IntrinsicGetContinuation::ArrayConstructor {
                 realm,
                 new_target,
@@ -532,6 +566,13 @@ pub(super) fn resume_native_continuations(
                 execution_budget,
             )?,
             NativeContinuation::ArrayStatic(state) => advance_array_static(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::ArrayFromAsync(state) => advance_array_from_async(
                 runtime,
                 *state,
                 Some(value.duplicate()),

@@ -36,8 +36,8 @@ use super::{
 };
 
 const REALM_OBJECT_SLOTS: u64 = 31;
-const REALM_PROPERTY_SLOTS: u64 = 908;
-const REALM_FUNCTION_SLOTS: u64 = 264;
+const REALM_PROPERTY_SLOTS: u64 = 911;
+const REALM_FUNCTION_SLOTS: u64 = 265;
 
 #[test]
 #[allow(
@@ -1274,9 +1274,9 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 183,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_414,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 183,
+            live_atoms: PREDEFINED_ATOM_COUNT + 184,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_423,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 184,
         }
     );
 
@@ -1930,9 +1930,9 @@ fn function_call_is_realm_owned_while_its_dynamic_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 183,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_414,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 183,
+            live_atoms: PREDEFINED_ATOM_COUNT + 184,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_423,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 184,
         }
     );
 }
@@ -1979,9 +1979,9 @@ fn function_apply_is_realm_owned_while_its_predefined_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 183,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_414,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 183,
+            live_atoms: PREDEFINED_ATOM_COUNT + 184,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_423,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 184,
         }
     );
 }

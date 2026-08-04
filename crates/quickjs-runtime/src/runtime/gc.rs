@@ -506,6 +506,14 @@ impl Runtime {
                                 &mut work,
                             );
                         }
+                        PromiseReactionTarget::ArrayFromAsync { operation } => {
+                            mark_heap_reference(
+                                HeapReference::Object(*operation),
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
                     }
                     mark_stored_value(
                         argument,
@@ -699,6 +707,17 @@ impl Runtime {
                             );
                         });
                     }
+                    if let Some(record) = self.array_from_async_states.get(&id) {
+                        record.trace_roots(&mut |root| {
+                            mark_collection_root(
+                                root,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut marked_cells,
+                                &mut work,
+                            );
+                        });
+                    }
                     if let Some(frame) = self
                         .generator_states
                         .get(&id)
@@ -817,6 +836,14 @@ impl Runtime {
                                                     &mut work,
                                                 );
                                             }
+                                            PromiseReactionTarget::ArrayFromAsync { operation } => {
+                                                mark_heap_reference(
+                                                    HeapReference::Object(*operation),
+                                                    &mut marked_functions,
+                                                    &mut marked_objects,
+                                                    &mut work,
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -928,6 +955,7 @@ impl Runtime {
             self.generator_states.remove(&id);
             self.async_function_states.remove(&id);
             self.async_generator_states.remove(&id);
+            self.array_from_async_states.remove(&id);
             if let Some(object) = self.objects.remove(id) {
                 self.object_properties = self
                     .object_properties

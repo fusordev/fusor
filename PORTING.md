@@ -124,7 +124,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Realm bootstrap is declared by validated intrinsic schemas. Atom and
   resource plans, typed shell allocation, ordered publication, and allocation-
   free reverse rollback are derived from that schema. A normalized snapshot
-  pins all 295 Realm-local identities and 908 ordered properties across Realms.
+  pins all 296 Realm-local identities and 911 ordered properties across Realms.
 - [ ] Add Proxy and remaining exotics, shape/transition interning, dense indexed
   storage, deterministic finalization, and complete reflection/diagnostics.
 
@@ -150,27 +150,27 @@ does not imply complete ECMAScript or QuickJS compatibility.
   plus `@@replace` protocol path of `replace`. All 13 Annex B `CreateHTML`
   wrappers and the identity-sharing `trimLeft`/`trimRight` aliases preserve
   specification coercion order and pinned own-key order. ICU4X data is pinned.
-- [x] `Array` construction, `isArray`, synchronous `from`/`of`, species,
+- [x] `Array` construction, `isArray`, `from`/`fromAsync`/`of`, species,
   iterators, mutators, searches, callbacks, reductions, sorting, flattening,
-  change-by-copy methods, locale rendering, and generic array-like behavior,
-  with holes and observable operation order preserved.
+  change-by-copy methods, locale rendering, and generic array-like behavior.
+  `fromAsync` follows the specification's iterator-record-before-construction
+  order, awaits iterator/array-like values and mapper results, performs only
+  the required exceptional async closes, and traces every suspension root.
 - [x] `%JSON%`: iterative `parse`/reviver and `stringify`, plus `rawJSON` and
   `isRawJSON`; lone surrogates, source records, getters/callbacks, cycles,
   replacers, indentation, and raw embedding are covered.
 - [x] `%Math%`: all methods and constants installed by the pinned profile,
   including realm-local `random`, exact-width conversions, and the iterator-
   based exact `sumPrecise` accumulator.
-- [x] Intrinsic Promise core: branded Promise objects, constructor executors,
-  one-shot generic capabilities, thenable assimilation, generic
-  `resolve`/`reject`, species-derived `then`/`catch`/`finally`, cleanup-result
-  assimilation, bounded FIFO jobs, and the full constructor static family:
-  `all`, `allSettled`, `any`, `try`, `race`, and `withResolvers`. Typed
-  continuations preserve combinator input order, generic capabilities,
-  thenable calls, remaining-element records, and abrupt iterator close. The
-  pinned corpus is 29/29 with 46/46 feature tags.
-- [ ] Complete RegExp-coupled String methods and `Array.fromAsync`; implement
-  RegExp, Date, Temporal, Proxy, collections, binary data/typed arrays, Atomics,
-  weak references, and finalization registries.
+- [x] Intrinsic Promise core includes branded objects, one-shot generic
+  capabilities, thenable assimilation, species-derived
+  `then`/`catch`/`finally`, bounded FIFO jobs, and `all`, `allSettled`, `any`,
+  `try`, `race`, and `withResolvers`. Typed continuations preserve input order,
+  shared remaining-element records, and abrupt iterator close. The pinned
+  corpus is 29/29 with 46/46 feature tags.
+- [ ] Complete RegExp-coupled String methods; implement RegExp, Date, Temporal,
+  Proxy, collections, binary data/typed arrays, Atomics, weak references, and
+  finalization registries.
 
 ### Jobs, asynchronous semantics, and modules
 
@@ -182,33 +182,24 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Host Promise rejection tracking reports `reject` at unhandled settlement
   and `handle` at the first later reaction. Borrowed callback values add no GC
   roots; hosts explicitly retain owned handles when needed.
-- [x] Synchronous generators preserve parameter timing, realm-local intrinsic
-  chains, reentrancy rejection, all suspension states, yielding `finally`,
-  nested iterator close, and `yield*` delegation across `next`/`return`/`throw`.
-  Suspended frames and cached delegate methods are GC-traced; iterator-result
-  admission remains failure-atomic. Dynamic `GeneratorFunction` preserves
-  source coercion order, syntax rejection, metadata, and `newTarget` prototype
-  selection through the same bounded compiler service.
+- [x] Synchronous generators preserve parameter timing, intrinsic chains,
+  reentrancy rejection, yielding `finally`, iterator close, and `yield*`
+  forwarding. Suspended frames and cached delegate methods are traced. Dynamic
+  `GeneratorFunction` uses the same bounded compiler service.
 - [x] Async functions start synchronously, always resume `await` through the
   intrinsic Promise queue, preserve rejection as an abrupt completion at the
   await site, and settle their returned Promise through thenable assimilation.
   `%AsyncFunction%`, `%AsyncFunction.prototype%`, methods, dynamic construction,
   suspended-frame GC edges, and non-constructability are pinned by QuickJS and
   Node differentials.
-- [x] Async generators use realm-local `%AsyncGeneratorFunction%`,
-  `%AsyncGenerator%`, and `%AsyncIteratorPrototype%` chains plus a typed FIFO
-  request queue. Calls defer the body; `next`/`return`/`throw` allocate intrinsic
-  Promise capabilities, await yielded and returned values, preserve synchronous
-  parameter timing and `catch`/`finally` order, drain completed requests, and
-  trace suspended frames, awaits, capabilities, and reactions through GC.
-  Dynamic construction preserves coercion order and `newTarget` fallback.
-- [x] Async-generator `yield*` prefers `@@asyncIterator`, falls back through the
-  realm-local `%AsyncFromSyncIteratorPrototype%`, caches `next`, awaits method
-  results before object validation, reads `done` before `value`, and preserves
-  raw true-async delegate values. Numeric resume modes forward
-  `next`/`return`/`throw`; sync fallback unwraps values through intrinsic
-  `PromiseResolve`, closes on rejection with original-error precedence, and
-  traces suspended wrappers and handlers through GC.
+- [x] Async generators use realm-local intrinsic chains and a typed FIFO request
+  queue. `next`/`return`/`throw` await yielded and returned values, preserve
+  synchronous parameter and `catch`/`finally` order, drain completed requests,
+  and trace suspended frames, capabilities, awaits, and reactions.
+- [x] Async-generator `yield*` prefers `@@asyncIterator`, wraps sync iterators,
+  caches `next`, awaits before object validation, reads `done` before `value`,
+  forwards every resume mode, and closes sync-fallback rejection with original-
+  error precedence. Suspended wrappers and handlers are traced.
 - [ ] Implement module linking/evaluation, cycles, resolver semantics, dynamic
   import, and top-level `await`. Module parsing alone is not an execution claim.
 - [ ] Finish the Rust embedding API, ESM REPL, `qjs`, Rust-native `qjsc`,
@@ -283,6 +274,7 @@ QuickJS `qjs` or `qjsc`. Current corpus results are:
 | Legacy `Object.prototype` | 15/15, 15/15 feature tags |
 | Annex B String HTML | 6/6, 18/18 feature tags |
 | Promise core | 29/29, 46/46 feature tags |
+| `Array.fromAsync` | 5/5 (Node; absent in pinned QuickJS) |
 | Synchronous generators | 18/18, 43/43 feature tags |
 | Async functions | 9/9, 18/18 feature tags |
 | Async generators | 18/18, 41/41 feature tags (QuickJS and Node) |

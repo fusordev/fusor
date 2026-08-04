@@ -121,6 +121,7 @@ pub(in crate::runtime) enum RealmNameId {
     ArrayReduction(ArrayReduction),
     ArraySplice,
     ArrayIsArray,
+    ArrayFromAsync,
     PromiseStatic(PromiseStatic),
     ArraySort(ArraySort),
     ArrayFlatten(ArrayFlatten),

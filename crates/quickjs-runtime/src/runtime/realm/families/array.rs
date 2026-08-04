@@ -69,9 +69,13 @@ pub(super) fn visit_method_functions(visit: FunctionSink<'_>) {
         visit(ordinary(kind, name, length));
     }
     for method in ArrayStatic::ALL {
+        let name = match method.predefined_atom() {
+            Some(name) => IntrinsicNameSpec::Predefined(name),
+            None => IntrinsicNameSpec::RealmName(RealmNameId::ArrayFromAsync),
+        };
         visit(ordinary(
             NativeFunctionKind::ArrayStatic(method),
-            IntrinsicNameSpec::Predefined(method.predefined_atom()),
+            name,
             method.length(),
         ));
     }
@@ -94,9 +98,13 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         NativeFunctionKind::ArrayIsArray,
     ));
     for method_id in ArrayStatic::ALL {
+        let key = match method_id.predefined_atom() {
+            Some(name) => IntrinsicKeySpec::PredefinedString(name),
+            None => IntrinsicKeySpec::InternedString(RealmNameId::ArrayFromAsync),
+        };
         visit(method(
             constructor,
-            IntrinsicKeySpec::PredefinedString(method_id.predefined_atom()),
+            key,
             NativeFunctionKind::ArrayStatic(method_id),
         ));
     }

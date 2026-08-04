@@ -104,12 +104,31 @@ fn assert_all(cases: &[(&str, &str)]) {
     }
 }
 
+fn start_and_read(start_body: &str) -> String {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let start = dynamic_function(&mut context, start_body);
+    let read = dynamic_function(&mut context, "return arguments[0].result;");
+    let state = context
+        .call(&start, &[], ExecutionLimits::default())
+        .expect("Array.fromAsync setup");
+    context
+        .call(&read, &[state], ExecutionLimits::default())
+        .expect("Array.fromAsync result read")
+        .as_string()
+        .expect("live result")
+        .expect("String result")
+        .to_utf8_lossy()
+        .expect("UTF-8")
+}
+
 #[test]
 fn array_factory_identities_descriptors_and_default_results_are_exact() {
     assert_all(&[
         (
             "Object.getOwnPropertyNames(Array).join(',')",
-            "length,name,isArray,from,of,prototype",
+            "length,name,isArray,from,fromAsync,of,prototype",
         ),
         ("Array.from.length+'|'+Array.from.name", "1|from"),
         ("Array.of.length+'|'+Array.of.name", "0|of"),
@@ -131,6 +150,209 @@ fn array_factory_identities_descriptors_and_default_results_are_exact() {
             "3|x|true|undefined|z",
         ),
     ]);
+}
+
+#[test]
+fn array_from_async_identity_and_async_rejection_boundary_are_exact() {
+    assert_all(&[
+        (
+            "Object.getOwnPropertyNames(Array).join(',')",
+            "length,name,isArray,from,fromAsync,of,prototype",
+        ),
+        (
+            "Array.fromAsync.length+'|'+Array.fromAsync.name",
+            "1|fromAsync",
+        ),
+        (
+            "(function(){try{Reflect.construct(Array.fromAsync,[]);return 'miss'}catch(e){return e instanceof TypeError}})()",
+            "true",
+        ),
+    ]);
+    assert_eq!(
+        start_and_read(
+            "let state={result:''};\
+             const items={get [Symbol.asyncIterator](){state.result=state.result+'probe';return undefined}};\
+             const promise=Array.fromAsync(items,1);\
+             state.result='returned:'+(promise instanceof Promise)+'|'+state.result;\
+             promise.catch(function(error){state.result=state.result+'|rejected:'+(error instanceof TypeError)});\
+             return state;"
+        ),
+        "returned:true||rejected:true"
+    );
+}
+
+#[test]
+fn array_from_async_prefers_async_iteration_and_awaits_results_in_spec_order() {
+    assert_eq!(
+        start_and_read(
+            "let state={result:''};let log=[];let step=0;\
+             const items={\
+               get [Symbol.asyncIterator](){log.push('async-get');return function(){log.push('async-call');return this.iterator}},\
+               get [Symbol.iterator](){log.push('sync-get');return function(){throw 'wrong'}},\
+               iterator:{get next(){log.push('next-get');return function(){log.push('next');if(step++)return Promise.resolve({get done(){log.push('done:true');return true},get value(){log.push('value:wrong');throw 'wrong'}});return Promise.resolve({get done(){log.push('done:false');return false},get value(){log.push('value');return 3}})}}}\
+             };\
+             function C(n){log.push('ctor:'+n);Object.defineProperty(this,'length',{set(value){log.push('length:'+value)},configurable:true})}\
+             const receiver={};\
+             Array.fromAsync.call(C,items,function(value,index){log.push('map:'+value+':'+index+':'+(this===receiver));return Promise.resolve(value*2)},receiver).then(function(result){state.result=log.join('|')+'#'+result[0]});\
+             return state;"
+        ),
+        "async-get|async-call|next-get|ctor:undefined|next|done:false|value|map:3:0:true|next|done:true|length:1#6"
+    );
+}
+
+#[test]
+fn array_from_async_sync_fallback_and_array_like_path_await_values() {
+    assert_eq!(
+        start_and_read(
+            "let state={result:''};let log=[];\
+             const sync={get [Symbol.asyncIterator](){log.push('async');return undefined},get [Symbol.iterator](){log.push('sync');return function(){return [Promise.resolve(2),3][Symbol.iterator]()}}};\
+             Array.fromAsync(sync,function(value,index){log.push('map:'+value+':'+index);return Promise.resolve(value+index)}).then(function(result){state.result=log.join('|')+'#'+result.join(',')});\
+             return state;"
+        ),
+        "async|sync|map:2:0|map:3:1#2,4"
+    );
+    assert_eq!(
+        start_and_read(
+            "let state={result:''};let log=[];\
+             const items={get [Symbol.asyncIterator](){log.push('async');return undefined},get [Symbol.iterator](){log.push('sync');return undefined},get length(){log.push('length');return 2},get 0(){log.push('get0');return Promise.resolve('a')},get 1(){log.push('get1');return 'b'}};\
+             function C(length){log.push('ctor:'+length);Object.defineProperty(this,'length',{set(value){log.push('set:'+value)},configurable:true})}\
+             Array.fromAsync.call(C,items,function(value,index){log.push('map:'+value+':'+index);return Promise.resolve(value+index)}).then(function(result){state.result=log.join('|')+'#'+result[0]+','+result[1]});\
+             return state;"
+        ),
+        "async|sync|length|ctor:2|get0|map:a:0|get1|map:b:1|set:2#a0,b1"
+    );
+}
+
+#[test]
+fn array_from_async_closes_mapper_and_definition_abruptions_only() {
+    assert_eq!(
+        start_and_read(
+            "let state={result:''};let closed=0;\
+             const items={[Symbol.asyncIterator](){let sent=false;return {next(){if(sent)return Promise.resolve({done:true});sent=true;return Promise.resolve({done:false,value:1})},return(){closed++;return Promise.resolve({done:true})}}}};\
+             Array.fromAsync(items,function(){return Promise.reject('mapper')}).catch(function(error){state.result=error+'|'+closed});\
+             return state;"
+        ),
+        "mapper|1"
+    );
+    assert_eq!(
+        start_and_read(
+            "let state={result:''};let closed=0;\
+             const items={[Symbol.asyncIterator](){return {next(){return Promise.reject('next')},return(){closed++;return Promise.resolve({done:true})}}}};\
+             Array.fromAsync(items).catch(function(error){state.result=error+'|'+closed});\
+             return state;"
+        ),
+        "next|0"
+    );
+    assert_eq!(
+        start_and_read(
+            "let state={result:''};let closed=0;\
+             const items={[Symbol.asyncIterator](){let sent=false;return {next(){if(sent)return Promise.resolve({done:true});sent=true;return Promise.resolve({done:false,value:1})},return(){closed++;return Promise.resolve({done:true})}}}};\
+             function C(){return Object.preventExtensions({})}\
+             Array.fromAsync.call(C,items).catch(function(error){state.result=(error instanceof TypeError)+'|'+closed});\
+             return state;"
+        ),
+        "true|1"
+    );
+}
+
+#[test]
+fn array_from_async_rejects_synchronous_get_and_conversion_abruptions() {
+    assert_eq!(
+        start_and_read(
+            "let state={result:''};\
+             const items={get [Symbol.asyncIterator](){throw 'get'}};\
+             let promise;try{promise=Array.fromAsync(items);state.result='returned:'+(promise instanceof Promise)}catch(error){state.result='threw:'+error}\
+             if(promise)promise.catch(function(error){state.result=state.result+'|rejected:'+error});\
+             return state;"
+        ),
+        "returned:true|rejected:get"
+    );
+    assert_eq!(
+        start_and_read(
+            "let state={result:''};\
+             const items={get [Symbol.asyncIterator](){return undefined},get [Symbol.iterator](){return undefined},length:{valueOf(){throw 'length'}}};\
+             let promise;try{promise=Array.fromAsync(items);state.result='returned:'+(promise instanceof Promise)}catch(error){state.result='threw:'+error}\
+             if(promise)promise.catch(function(error){state.result=state.result+'|rejected:'+error});\
+             return state;"
+        ),
+        "returned:true|rejected:length"
+    );
+}
+
+#[test]
+fn array_from_async_await_and_close_abruptions_preserve_exact_precedence() {
+    assert_eq!(
+        start_and_read(
+            "let state={result:''};let closed=0;\
+             const awaited=Promise.resolve({done:false,value:1});Object.defineProperty(awaited,'constructor',{get(){throw 'next-constructor'}});\
+             const items={[Symbol.asyncIterator](){return {next(){return awaited},return(){closed++;return Promise.resolve({done:true})}}}};\
+             Array.fromAsync(items).catch(function(error){state.result=error+'|'+closed});\
+             return state;"
+        ),
+        "next-constructor|0"
+    );
+    assert_eq!(
+        start_and_read(
+            "let state={result:''};let closed=0;\
+             const items={[Symbol.asyncIterator](){let sent=false;return {next(){if(sent)return Promise.resolve({done:true});sent=true;return Promise.resolve({done:false,value:1})},return(){closed++;return Promise.reject('close')}}}};\
+             Array.fromAsync(items,function(){return Promise.reject('mapper')}).catch(function(error){state.result=error+'|'+closed});\
+             return state;"
+        ),
+        "mapper|1"
+    );
+    assert_eq!(
+        start_and_read(
+            "let state={result:''};let closed=0;\
+             const items={[Symbol.asyncIterator](){return {next(){return Promise.resolve({done:true})},return(){closed++}}}};\
+             function C(){Object.defineProperty(this,'length',{set(){throw 'length'},configurable:true})}\
+             Array.fromAsync.call(C,items).catch(function(error){state.result=error+'|'+closed});\
+             return state;"
+        ),
+        "length|0"
+    );
+}
+
+#[test]
+fn suspended_array_from_async_survives_collection_with_all_iterator_roots() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let (resume, read, state) = {
+        let mut context = runtime.context(&realm).expect("context");
+        let start = dynamic_function(
+            &mut context,
+            "let state={result:'waiting'};let step=0;\
+             const items={[Symbol.asyncIterator](){return {next(){if(step++)return Promise.resolve({done:true});return {then:function(resolve){state.resume=resolve}}}}}};\
+             state.promise=Array.fromAsync(items,function(value){return value*2});\
+             state.promise.then(function(result){state.result='done:'+result[0]+':'+result.length});\
+             return state;",
+        );
+        let resume = dynamic_function(
+            &mut context,
+            "arguments[0].resume({done:false,value:4});return arguments[0];",
+        );
+        let read = dynamic_function(&mut context, "return arguments[0].result;");
+        let state = context
+            .call(&start, &[], ExecutionLimits::default())
+            .expect("suspended Array.fromAsync");
+        (resume, read, state)
+    };
+    runtime
+        .collect_cycles()
+        .expect("collect while Array.fromAsync is suspended");
+    let mut context = runtime.context(&realm).expect("context");
+    let state = context
+        .call(&resume, &[state], ExecutionLimits::default())
+        .expect("resume Array.fromAsync");
+    let result = context
+        .call(&read, &[state], ExecutionLimits::default())
+        .expect("read completed Array.fromAsync")
+        .as_string()
+        .expect("live result")
+        .expect("string result")
+        .to_utf8_lossy()
+        .expect("UTF-8");
+
+    assert_eq!(result, "done:8:1");
 }
 
 #[test]

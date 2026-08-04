@@ -557,6 +557,7 @@ impl Runtime {
             generator_states: HashMap::new(),
             async_function_states: HashMap::new(),
             async_generator_states: HashMap::new(),
+            array_from_async_states: HashMap::new(),
             next_math_random_seed: 1,
         })
     }

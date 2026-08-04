@@ -137,6 +137,17 @@ pub(super) fn begin_array_static(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    if method == ArrayStatic::FromAsync {
+        return begin_array_from_async(
+            runtime,
+            realm,
+            constructor,
+            arguments,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
     if method == ArrayStatic::Of {
         let items = arguments.into_remaining_values();
         let length = usize_to_u64(items.len());
@@ -810,7 +821,10 @@ fn take_array_static_completion(
     })
 }
 
-fn array_static_index_key(runtime: &mut Runtime, index: u64) -> Result<PropertyKey, NativeFailure> {
+pub(super) fn array_static_index_key(
+    runtime: &mut Runtime,
+    index: u64,
+) -> Result<PropertyKey, NativeFailure> {
     if let Ok(index) = u32::try_from(index)
         && let Some(index) = ArrayIndex::new(index)
     {
@@ -820,7 +834,7 @@ fn array_static_index_key(runtime: &mut Runtime, index: u64) -> Result<PropertyK
     Ok(runtime.property_key_from_string(&name)?)
 }
 
-fn array_static_mapper_arguments(
+pub(super) fn array_static_mapper_arguments(
     value: StoredValue,
     index: u64,
 ) -> Result<Vec<StoredValue>, NativeFailure> {
@@ -838,13 +852,15 @@ fn array_static_mapper_arguments(
     Ok(arguments)
 }
 
-fn array_static_single_argument(length: u64) -> Result<Vec<StoredValue>, NativeFailure> {
+pub(super) fn array_static_single_argument(length: u64) -> Result<Vec<StoredValue>, NativeFailure> {
     array_static_one_value(StoredValue::Number(JsNumber::from_f64(
         array_static_index_as_f64(length),
     )))
 }
 
-fn array_static_one_value(value: StoredValue) -> Result<Vec<StoredValue>, NativeFailure> {
+pub(super) fn array_static_one_value(
+    value: StoredValue,
+) -> Result<Vec<StoredValue>, NativeFailure> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(1)
@@ -860,7 +876,7 @@ fn array_static_one_value(value: StoredValue) -> Result<Vec<StoredValue>, Native
     clippy::cast_precision_loss,
     reason = "factory indices are rejected at 2^53 - 1, so every converted index is exactly representable in binary64"
 )]
-fn array_static_index_as_f64(index: u64) -> f64 {
+pub(super) fn array_static_index_as_f64(index: u64) -> f64 {
     index as f64
 }
 
