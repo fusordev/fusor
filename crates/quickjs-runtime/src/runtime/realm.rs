@@ -36,9 +36,9 @@ mod validation;
 
 use super::{
     Arc, Arena, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics, ArrayMutator,
-    ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic, AtomError, AtomTable,
-    BigIntIntrinsics, BooleanIntrinsics, Context, ErrorIntrinsic, ErrorIntrinsicKind,
-    ErrorIntrinsics, FunctionId, FunctionImplementation, GeneratorIntrinsics,
+    ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic, AsyncFunctionIntrinsics,
+    AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics, Context, ErrorIntrinsic,
+    ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation, GeneratorIntrinsics,
     GlobalNumericFunction, HandleError, HandleKind, HashMap, HeapFunction, HeapObject,
     HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod,
     MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberIntrinsics,
@@ -555,6 +555,7 @@ impl Runtime {
             promise_rejections: PromiseRejectionState::default(),
             promise_jobs: VecDeque::new(),
             generator_states: HashMap::new(),
+            async_function_states: HashMap::new(),
             next_math_random_seed: 1,
         })
     }
@@ -712,6 +713,10 @@ impl RealmBuildTransaction<'_> {
                 function_constructor: function(NativeFunctionKind::GeneratorFunctionConstructor),
                 function_prototype: object(IntrinsicObjectId::GeneratorFunctionPrototype),
                 generator_prototype: object(IntrinsicObjectId::GeneratorPrototype),
+            },
+            async_functions: AsyncFunctionIntrinsics {
+                function_constructor: function(NativeFunctionKind::AsyncFunctionConstructor),
+                function_prototype: object(IntrinsicObjectId::AsyncFunctionPrototype),
             },
         }
     }

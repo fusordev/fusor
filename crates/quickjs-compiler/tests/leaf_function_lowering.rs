@@ -426,11 +426,6 @@ fn strictness_is_retained_without_debug_or_eval_header_bits() {
 fn unsupported_leaf_shapes_fail_closed_at_source_spans() {
     let cases = [
         (
-            "async function f(arg) { let local = arg; return local; }",
-            UnsupportedLeafFeature::NonOrdinaryFunction,
-            "async function f(arg) { let local = arg; return local; }",
-        ),
-        (
             "function f(arg) { function nested() {} let local = arg; return local; }",
             UnsupportedLeafFeature::NestedExecutable,
             "function nested() {}",

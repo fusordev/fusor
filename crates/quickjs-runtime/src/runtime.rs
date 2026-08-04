@@ -53,6 +53,7 @@ use crate::{
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
 
+mod async_functions;
 mod iterators;
 mod limits;
 mod promises;
@@ -91,6 +92,7 @@ enum RealmIntrinsics {
         symbol: SymbolIntrinsics,
         iterators: IteratorIntrinsics,
         generators: GeneratorIntrinsics,
+        async_functions: AsyncFunctionIntrinsics,
     },
 }
 
@@ -254,6 +256,12 @@ struct GeneratorIntrinsics {
     function_constructor: FunctionId,
     function_prototype: ObjectId,
     generator_prototype: ObjectId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AsyncFunctionIntrinsics {
+    function_constructor: FunctionId,
+    function_prototype: ObjectId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1170,6 +1178,7 @@ pub(crate) enum NativeFunctionKind {
     StringPrototypeIterator,
     StringIteratorNext,
     GeneratorFunctionConstructor,
+    AsyncFunctionConstructor,
     GeneratorPrototypeNext,
     GeneratorPrototypeReturn,
     GeneratorPrototypeThrow,
@@ -1330,6 +1339,7 @@ impl NativeFunctionKind {
                 | Self::StringConstructor
                 | Self::ArrayConstructor
                 | Self::GeneratorFunctionConstructor
+                | Self::AsyncFunctionConstructor
                 | Self::PromiseConstructor
         )
     }
@@ -1856,6 +1866,7 @@ pub struct Runtime {
     pub(crate) promise_rejections: PromiseRejectionState,
     pub(crate) promise_jobs: VecDeque<PromiseJob>,
     pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,
+    pub(crate) async_function_states: HashMap<ObjectId, crate::vm::AsyncFunctionRecord>,
     /// Next non-zero seed assigned after a realm transaction commits.
     next_math_random_seed: u64,
 }
@@ -1981,7 +1992,10 @@ fn require_root_kind(
     let actual = authority.root().metadata().executable_kind();
     if actual == expected
         || (expected == CompilerExecutableKind::OrdinaryFunction
-            && actual == CompilerExecutableKind::GeneratorFunction)
+            && matches!(
+                actual,
+                CompilerExecutableKind::GeneratorFunction | CompilerExecutableKind::AsyncFunction
+            ))
     {
         return Ok(());
     }
@@ -1994,9 +2008,9 @@ fn require_root_kind(
         }
         CompilerExecutableKind::OrdinaryMethod
         | CompilerExecutableKind::GeneratorFunction
-        | CompilerExecutableKind::GeneratorMethod => {
-            "unsupported executable-kind admission request"
-        }
+        | CompilerExecutableKind::GeneratorMethod
+        | CompilerExecutableKind::AsyncFunction
+        | CompilerExecutableKind::AsyncMethod => "unsupported executable-kind admission request",
     };
     Err(InstallError::AuthorityInvariant { message })
 }
@@ -2084,6 +2098,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
             | FinalOpcode::ReturnAsync
+            | FinalOpcode::Await
             | FinalOpcode::InitialYield
             | FinalOpcode::Yield
             | FinalOpcode::YieldStar

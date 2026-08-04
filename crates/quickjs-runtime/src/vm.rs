@@ -79,6 +79,7 @@ mod array_mutators;
 mod array_search;
 mod array_sort;
 mod array_statics;
+mod async_function;
 mod bigint_intrinsics;
 mod bindings;
 mod conversions;
@@ -109,6 +110,8 @@ mod string_methods;
 mod string_raw;
 mod string_replace;
 mod uri;
+
+use async_function::{begin_async_await, suspend_async_function};
 
 #[allow(
     clippy::wildcard_imports,
@@ -294,6 +297,12 @@ pub(crate) struct GeneratorRecord {
     pub(crate) frame: Option<Frame>,
 }
 
+pub(crate) struct AsyncFunctionRecord {
+    pub(crate) frame: Frame,
+    pub(crate) awaiting: ObjectId,
+    pub(crate) origin: JsStackFrame,
+}
+
 /// The pinned `call (native)` / `apply (native)` entry `QuickJS` places
 /// between the target function and its caller when a bytecode function is
 /// reached through `Function.prototype.call` or `Function.prototype.apply`.
@@ -363,6 +372,9 @@ enum NativeContinuation {
     InstanceOf(InstanceOfContinuation),
     Promise(PromiseContinuation),
     PromiseCombinator(Box<PromiseCombinatorContinuation>),
+    AsyncAwait {
+        origin: JsStackFrame,
+    },
     /// Ignore an accessor setter's return value and complete `Reflect.set`
     /// with the internal-method success Boolean.
     ReflectSet,
@@ -415,7 +427,7 @@ impl NativeContinuation {
             Self::InstanceOf(state) => state.retained_values(),
             Self::Promise(state) => state.retained_values(),
             Self::PromiseCombinator(state) => state.retained_values(),
-            Self::ReflectSet | Self::FunctionCall => 0,
+            Self::AsyncAwait { .. } | Self::ReflectSet | Self::FunctionCall => 0,
         }
     }
 }
@@ -500,6 +512,9 @@ impl PromiseThenState {
 }
 
 enum PromiseContinuation {
+    AsyncFunctionSettlement {
+        capability: crate::object::PromiseCapability,
+    },
     ConstructorExecutor {
         promise: ObjectId,
         reject: FunctionId,
@@ -579,7 +594,8 @@ impl PromiseContinuation {
             | Self::FinallySpeciesGet(_)
             | Self::FinallyCallback { .. }
             | Self::FinallyResolvedThenGet { .. } => 2,
-            Self::ResolveThenGet { .. }
+            Self::AsyncFunctionSettlement { .. }
+            | Self::ResolveThenGet { .. }
             | Self::ReactionHandler { .. }
             | Self::TryCallback { .. }
             | Self::FinallyThenGet(_) => 3,
@@ -1811,7 +1827,9 @@ fn trace_native_continuation_roots(
         }
         NativeContinuation::Promise(state) => state.trace_roots(mark),
         NativeContinuation::PromiseCombinator(state) => state.trace_roots(mark),
-        NativeContinuation::ReflectSet | NativeContinuation::FunctionCall => {}
+        NativeContinuation::AsyncAwait { .. }
+        | NativeContinuation::ReflectSet
+        | NativeContinuation::FunctionCall => {}
     }
 }
 
@@ -1948,7 +1966,8 @@ fn native_dispatch_has_temporary_receiver(dispatch: &NativeDispatch) -> bool {
         | NativeDispatch::ForOfRecord { .. }
         | NativeDispatch::ForOfStep { .. }
         | NativeDispatch::ForOfClosed
-        | NativeDispatch::CopyDataPropertiesDone => false,
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => false,
         NativeDispatch::Frame(frame) => {
             native_continuations_have_temporary_receiver(&frame.native_returns)
         }
@@ -1970,6 +1989,7 @@ struct FramePlan {
     arguments_snapshot_use: ArgumentsSnapshotUse,
     strict: bool,
     receiver_access: ReceiverAccess,
+    asynchronous: bool,
     instruction: InstructionIndex,
 }
 
@@ -2146,6 +2166,10 @@ enum Step {
         return_to: CallReturn,
     },
     Abrupt(PendingException),
+    Await {
+        value: StoredValue,
+        source_pc: BytecodePc,
+    },
     InitialYield,
     Yield(StoredValue),
     YieldStar(StoredValue),
@@ -2981,7 +3005,8 @@ fn execute_frame_loop(
                             | NativeDispatch::ForOfRecord { .. }
                             | NativeDispatch::ForOfStep { .. }
                             | NativeDispatch::ForOfClosed
-                            | NativeDispatch::CopyDataPropertiesDone,
+                            | NativeDispatch::CopyDataPropertiesDone
+                            | NativeDispatch::AsyncAwait { .. },
                         ) => {
                             return Err(EngineFault::RuntimeInvariant {
                                 message:
@@ -3108,7 +3133,8 @@ fn execute_frame_loop(
                             | NativeDispatch::ForOfRecord { .. }
                             | NativeDispatch::ForOfStep { .. }
                             | NativeDispatch::ForOfClosed
-                            | NativeDispatch::CopyDataPropertiesDone,
+                            | NativeDispatch::CopyDataPropertiesDone
+                            | NativeDispatch::AsyncAwait { .. },
                         ) => {
                             return Err(EngineFault::RuntimeInvariant {
                                 message: "Promise resolving function produced a structured result",
@@ -3206,7 +3232,8 @@ fn execute_frame_loop(
                             | NativeDispatch::ForOfRecord { .. }
                             | NativeDispatch::ForOfStep { .. }
                             | NativeDispatch::ForOfClosed
-                            | NativeDispatch::CopyDataPropertiesDone,
+                            | NativeDispatch::CopyDataPropertiesDone
+                            | NativeDispatch::AsyncAwait { .. },
                         ) => {
                             return Err(EngineFault::RuntimeInvariant {
                                 message: "Promise capability executor produced a structured result",
@@ -3308,7 +3335,8 @@ fn execute_frame_loop(
                             | NativeDispatch::ForOfRecord { .. }
                             | NativeDispatch::ForOfStep { .. }
                             | NativeDispatch::ForOfClosed
-                            | NativeDispatch::CopyDataPropertiesDone,
+                            | NativeDispatch::CopyDataPropertiesDone
+                            | NativeDispatch::AsyncAwait { .. },
                         ) => {
                             return Err(EngineFault::RuntimeInvariant {
                                 message: "Promise finally function produced a structured result",
@@ -3411,7 +3439,8 @@ fn execute_frame_loop(
                             | NativeDispatch::ForOfRecord { .. }
                             | NativeDispatch::ForOfStep { .. }
                             | NativeDispatch::ForOfClosed
-                            | NativeDispatch::CopyDataPropertiesDone,
+                            | NativeDispatch::CopyDataPropertiesDone
+                            | NativeDispatch::AsyncAwait { .. },
                         ) => {
                             return Err(EngineFault::RuntimeInvariant {
                                 message: "Promise combinator element produced a structured result",
@@ -3591,7 +3620,8 @@ fn execute_frame_loop(
                         | NativeDispatch::ForOfRecord { .. }
                         | NativeDispatch::ForOfStep { .. }
                         | NativeDispatch::ForOfClosed
-                        | NativeDispatch::CopyDataPropertiesDone,
+                        | NativeDispatch::CopyDataPropertiesDone
+                        | NativeDispatch::AsyncAwait { .. },
                     ) => {
                         return Err(EngineFault::RuntimeInvariant {
                             message: "bytecode apply produced a structured continuation result",
@@ -3704,6 +3734,20 @@ fn execute_frame_loop(
                         }
                         parent.instruction = return_to.instruction;
                     }
+                    Ok(NativeDispatch::AsyncAwait { promise, origin }) => {
+                        match finish_async_suspension(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            promise,
+                            origin,
+                            compiler,
+                            execution_budget,
+                        )? {
+                            AsyncSuspension::Continued => {}
+                            AsyncSuspension::Root(value) => return Ok(value),
+                        }
+                    }
                     Ok(NativeDispatch::Frame(child)) => {
                         *active_frame_values =
                             active_frame_values.saturating_add(child.reserved_values);
@@ -3756,6 +3800,106 @@ fn execute_frame_loop(
                     compiler,
                     execution_budget,
                 )?;
+            }
+            Step::Await { value, source_pc } => {
+                let frame = frames.last().ok_or(EngineFault::RuntimeInvariant {
+                    message: "await has no executing async frame",
+                })?;
+                let origin = instruction_location(runtime, frame, source_pc)?;
+                let realm = code(runtime, frame.code)?.realm;
+                let return_to = CallReturn::discard(frame.instruction);
+                let active_frames = active_execution_frames(frames);
+                frames
+                    .try_reserve(1)
+                    .map_err(|_| ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::Frames,
+                        additional: 1,
+                    })?;
+                let dispatch = begin_async_await(
+                    runtime,
+                    realm,
+                    value,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                );
+                let dispatch = match dispatch {
+                    Ok(dispatch) => resolve_native_dispatch(
+                        runtime,
+                        dispatch,
+                        frames,
+                        active_frames,
+                        *active_frame_values,
+                        compiler,
+                        execution_budget,
+                    ),
+                    Err(error) => Err(error),
+                };
+                match dispatch {
+                    Ok(NativeDispatch::AsyncAwait { promise, origin }) => {
+                        match finish_async_suspension(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            promise,
+                            origin,
+                            compiler,
+                            execution_budget,
+                        )? {
+                            AsyncSuspension::Continued => {}
+                            AsyncSuspension::Root(value) => return Ok(value),
+                        }
+                    }
+                    Ok(NativeDispatch::Frame(child)) => {
+                        *active_frame_values =
+                            active_frame_values.saturating_add(child.reserved_values);
+                        frames.push(child);
+                    }
+                    Ok(NativeDispatch::Call(_)) => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "await PromiseResolve remained an unresolved call",
+                        }
+                        .into());
+                    }
+                    Ok(
+                        NativeDispatch::Immediate(_)
+                        | NativeDispatch::Pair(_, _)
+                        | NativeDispatch::ForOfRecord { .. }
+                        | NativeDispatch::ForOfStep { .. }
+                        | NativeDispatch::ForOfClosed
+                        | NativeDispatch::CopyDataPropertiesDone,
+                    ) => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "await PromiseResolve produced a non-suspension result",
+                        }
+                        .into());
+                    }
+                    Err(NativeFailure::Abrupt(pending)) => {
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
+                    }
+                    Err(NativeFailure::AbruptAfterTransient(pending)) => {
+                        let frame = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                            message: "transient await throw has no executing frame",
+                        })?;
+                        frame.transient_cleanup_pending = true;
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
+                    }
+                    Err(NativeFailure::Execution(error)) => return Err(error),
+                }
             }
             Step::InitialYield => {
                 let mut initial = frames.pop().ok_or(EngineFault::MissingInstruction {
@@ -4093,6 +4237,20 @@ fn execute_frame_loop(
                             parent.instruction = return_to.instruction;
                             continue;
                         }
+                        Ok(NativeDispatch::AsyncAwait { promise, origin }) => {
+                            match finish_async_suspension(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                promise,
+                                origin,
+                                compiler,
+                                execution_budget,
+                            )? {
+                                AsyncSuspension::Continued => continue,
+                                AsyncSuspension::Root(value) => return Ok(value),
+                            }
+                        }
                         Ok(NativeDispatch::Frame(child)) => {
                             *active_frame_values =
                                 active_frame_values.saturating_add(child.reserved_values);
@@ -4156,6 +4314,59 @@ fn execute_frame_loop(
 enum SuspendedNativeReturn {
     Value(StoredValue),
     Continued,
+}
+
+enum AsyncSuspension {
+    Continued,
+    Root(StoredValue),
+}
+
+fn finish_async_suspension(
+    runtime: &mut Runtime,
+    frames: &mut Vec<Frame>,
+    active_frame_values: &mut u64,
+    promise: ObjectId,
+    origin: JsStackFrame,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<AsyncSuspension, ExecutionError> {
+    let frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
+        message: "async suspension lost its executing frame",
+    })?;
+    *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
+    let (mut result, outer, return_to) = suspend_async_function(runtime, frame, promise, origin)?;
+    if !outer.is_empty() {
+        match resume_suspended_native_returns(
+            runtime,
+            frames,
+            active_frame_values,
+            outer,
+            result,
+            return_to,
+            compiler,
+            execution_budget,
+        )? {
+            SuspendedNativeReturn::Value(value) => result = value,
+            SuspendedNativeReturn::Continued => return Ok(AsyncSuspension::Continued),
+        }
+    }
+    if let Some(parent) = frames.last_mut() {
+        push_call_result(
+            parent,
+            result,
+            return_to.ok_or(EngineFault::RuntimeInvariant {
+                message: "nested async call has no caller continuation",
+            })?,
+        )?;
+        return Ok(AsyncSuspension::Continued);
+    }
+    if return_to.is_some() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "host async call retained a caller continuation",
+        }
+        .into());
+    }
+    Ok(AsyncSuspension::Root(result))
 }
 
 #[allow(
@@ -4272,6 +4483,20 @@ fn resume_suspended_native_returns(
             parent.instruction = return_to.instruction;
             Ok(SuspendedNativeReturn::Continued)
         }
+        Ok(NativeDispatch::AsyncAwait { promise, origin }) => Ok(
+            match finish_async_suspension(
+                runtime,
+                frames,
+                active_frame_values,
+                promise,
+                origin,
+                compiler,
+                execution_budget,
+            )? {
+                AsyncSuspension::Continued => SuspendedNativeReturn::Continued,
+                AsyncSuspension::Root(value) => SuspendedNativeReturn::Value(value),
+            },
+        ),
         Ok(NativeDispatch::Frame(child)) => {
             *active_frame_values = active_frame_values.saturating_add(child.reserved_values);
             frames.push(child);

@@ -183,7 +183,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     fn function_tree_layout(&self) -> Result<FunctionTreeLayout, LeafCompilationError> {
         let seed = FunctionTreeLayoutSeed::new(FunctionTreeLayoutSeedInput {
             plan: &self.planned.plan,
-            allow_realm_globals: crate::is_synchronous_dynamic_function_goal(self.unit.goal()),
+            allow_realm_globals: crate::is_supported_dynamic_function_goal(self.unit.goal()),
         })?;
         let mut function_declarations =
             vec![None; self.planned.plan.bindings().len()].into_boxed_slice();

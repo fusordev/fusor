@@ -1216,7 +1216,7 @@ impl CompilationContext<'_, '_, '_> {
                 span: Some(span),
             });
         }
-        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal()) {
+        if !crate::is_supported_dynamic_function_goal(self.unit.goal()) {
             return unsupported(UnsupportedLeafFeature::UnresolvedReference, span);
         }
         let global = tree_layout.realm_globals.for_unresolved(unresolved).ok_or(
@@ -1245,7 +1245,7 @@ impl CompilationContext<'_, '_, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
     ) -> Result<LoweredReference, LeafCompilationError> {
-        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal()) {
+        if !crate::is_supported_dynamic_function_goal(self.unit.goal()) {
             return unsupported(UnsupportedLeafFeature::GlobalEnvironment, span);
         }
         let global = tree_layout.realm_globals.for_binding(binding).ok_or(

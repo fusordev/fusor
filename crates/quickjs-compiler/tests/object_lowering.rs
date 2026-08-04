@@ -995,11 +995,6 @@ fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
             "key",
         ),
         (
-            "function make(){return {async \"method\"(){return 1;}};}",
-            UnsupportedLeafFeature::NonOrdinaryFunction,
-            "return 1",
-        ),
-        (
             "function make(){return this;}",
             UnsupportedLeafFeature::UnsupportedExpression,
             "this",

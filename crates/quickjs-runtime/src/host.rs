@@ -6,13 +6,15 @@ use quickjs_bytecode::VerifiedBytecode;
 
 use crate::{JsString, error::DynamicFunctionCompileFailure};
 
-/// Dynamic-function families executable by the synchronous runtime core.
+/// Dynamic-function families executable by the runtime core.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DynamicFunctionFamily {
     /// An ordinary dynamic `Function`.
     Function,
     /// A synchronous dynamic `GeneratorFunction`.
     GeneratorFunction,
+    /// A dynamic `AsyncFunction`.
+    AsyncFunction,
 }
 
 /// Owned source fragments for one supported dynamic-function compilation.
@@ -80,8 +82,7 @@ pub trait DynamicFunctionCompiler: Send + Sync + 'static {
     /// # Errors
     ///
     /// Returns either an exact JavaScript syntax failure or a shared engine
-    /// failure. Asynchronous constructor families remain outside this
-    /// synchronous contract.
+    /// failure.
     fn compile(
         &self,
         source: DynamicFunctionCompileRequest,

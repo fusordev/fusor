@@ -396,6 +396,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                                 )));
                             }
                         }
+                        Expression::AwaitExpression(await_expression) => {
+                            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                                FinalOpcode::Await,
+                                Operands::None,
+                                await_expression.span,
+                            )));
+                            work.push(ExpressionWork::Visit(&await_expression.argument));
+                        }
                         Expression::ThisExpression(this) => {
                             flow.emit(self.plan_this_expression(this.span, layout)?)?;
                         }
@@ -638,7 +646,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             },
         )?;
         let is_dynamic_function_authority =
-            crate::is_synchronous_dynamic_function_goal(self.unit.goal());
+            crate::is_supported_dynamic_function_goal(self.unit.goal());
         let is_object_method = self
             .planned
             .identities

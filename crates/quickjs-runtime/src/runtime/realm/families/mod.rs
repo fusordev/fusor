@@ -1,6 +1,7 @@
 //! Specification-ordered intrinsic family declarations.
 
 mod array;
+mod async_function;
 mod error;
 mod generator;
 mod globals;
@@ -123,12 +124,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 26,
+                expected: 27,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 255,
+                expected: 256,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -157,6 +158,7 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::StringIteratorPrototype
             | IntrinsicObjectId::GeneratorFunctionPrototype
             | IntrinsicObjectId::GeneratorPrototype
+            | IntrinsicObjectId::AsyncFunctionPrototype
             | IntrinsicObjectId::SymbolPrototype
             | IntrinsicObjectId::PromisePrototype
             | IntrinsicObjectId::Reflect
@@ -216,6 +218,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::StringIteratorNext
             | NativeFunctionKind::StringPrototypeIterator
             | NativeFunctionKind::GeneratorFunctionConstructor
+            | NativeFunctionKind::AsyncFunctionConstructor
             | NativeFunctionKind::GeneratorPrototypeNext
             | NativeFunctionKind::GeneratorPrototypeReturn
             | NativeFunctionKind::GeneratorPrototypeThrow
@@ -665,6 +668,7 @@ fn visit_object_specs(visit: ObjectSink<'_>) {
     array::visit_objects(visit);
     iterator::visit_objects(visit);
     generator::visit_objects(visit);
+    async_function::visit_objects(visit);
     symbol::visit_objects(visit);
     promise::visit_objects(visit);
     reflect::visit_objects(visit);
@@ -680,6 +684,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
     array::visit_kernel_functions(visit);
     iterator::visit_functions(visit);
     generator::visit_functions(visit);
+    async_function::visit_functions(visit);
     symbol::visit_functions(visit);
     promise::visit_functions(visit);
     reflect::visit_functions(visit);
@@ -697,6 +702,7 @@ fn visit_property_specs(visit: PropertySink<'_>) {
     array::visit_properties(visit);
     iterator::visit_properties(visit);
     generator::visit_properties(visit);
+    async_function::visit_properties(visit);
     symbol::visit_properties(visit);
     promise::visit_properties(visit);
     globals::visit_properties(visit);
@@ -809,8 +815,8 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 255);
-        assert_eq!(schema.constructor_prototypes.len(), 19);
+        assert_eq!(schema.specs().len(), 256);
+        assert_eq!(schema.constructor_prototypes.len(), 20);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]

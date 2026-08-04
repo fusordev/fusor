@@ -88,6 +88,10 @@ struct AtomSnapshot {
 }
 
 impl RealmSnapshot {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the normalized Realm snapshot enumerates every intrinsic identity in one audited table"
+    )]
     pub(super) fn capture(runtime: &Runtime, realm: RealmId) -> Self {
         let state = runtime.realms.get(realm).expect("snapshot Realm is live");
         let RealmIntrinsics::Ready {
@@ -101,6 +105,7 @@ impl RealmSnapshot {
             symbol,
             iterators,
             generators,
+            async_functions,
             ..
         } = state.intrinsics
         else {
@@ -139,6 +144,10 @@ impl RealmSnapshot {
                 "%GeneratorFunction.prototype%",
             ),
             (generators.generator_prototype, "%Generator.prototype%"),
+            (
+                async_functions.function_prototype,
+                "%AsyncFunction.prototype%",
+            ),
         ] {
             register_identity(HeapReference::Object(object), identity, &mut identities);
         }
@@ -411,9 +420,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 281;
-    const REALM_PROPERTIES: u64 = 874;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 7_765_413_786_881_728_849;
+    const REALM_NODES: usize = 283;
+    const REALM_PROPERTIES: u64 = 879;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 1_718_911_795_357_550_578;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {

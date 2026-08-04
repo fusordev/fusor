@@ -25,6 +25,7 @@
 
 //! Frame planning, construction, and verified-bytecode opcode execution.
 
+use super::async_function::allocate_async_function_settlement;
 use super::instanceof::begin_instance_of;
 
 #[allow(
@@ -135,6 +136,7 @@ pub(super) fn plan_frame(
     }
 
     let control_flow = verified.function().control_flow();
+    let asynchronous = control_flow.function_header().kind() == FunctionKind::Async;
     let domains = control_flow.domains();
     let argument_count = domains.argument_count() as usize;
     let local_count = domains.local_count() as usize;
@@ -162,6 +164,7 @@ pub(super) fn plan_frame(
         .checked_add(local_count)
         .and_then(|value| value.checked_add(stack_capacity))
         .and_then(|value| value.checked_add(1))
+        .and_then(|value| value.checked_add(if asynchronous { 3 } else { 0 }))
         .and_then(|value| {
             value.checked_add(if arguments_snapshot_use.is_needed() {
                 supplied_argument_count
@@ -205,6 +208,7 @@ pub(super) fn plan_frame(
         arguments_snapshot_use,
         strict,
         receiver_access,
+        asynchronous,
         instruction,
     })
 }
@@ -302,6 +306,7 @@ pub(super) fn create_frame(
             index: plan.code.index(),
             generation: plan.code.generation(),
         })?;
+    let realm = code.realm;
 
     let mut arguments = Vec::new();
     arguments
@@ -436,7 +441,18 @@ pub(super) fn create_frame(
             additional: plan.stack_capacity,
         })?;
 
-    let receiver = normalize_receiver(runtime, code.realm, plan.receiver_access, receiver)?;
+    let receiver = normalize_receiver(runtime, realm, plan.receiver_access, receiver)?;
+
+    let mut native_returns = Vec::new();
+    if plan.asynchronous {
+        native_returns
+            .try_reserve_exact(1)
+            .map_err(|_| ExecutionError::AllocationFailed {
+                resource: RuntimeResource::Frames,
+                additional: 1,
+            })?;
+        native_returns.push(allocate_async_function_settlement(runtime, realm)?);
+    }
 
     Ok(Frame {
         function: plan.function,
@@ -447,7 +463,7 @@ pub(super) fn create_frame(
         instruction: plan.instruction,
         return_to,
         dynamic_return,
-        native_returns: Vec::new(),
+        native_returns,
         transient_cleanup_pending: false,
         ordinary_constructor: false,
         native_caller: None,
@@ -2304,6 +2320,18 @@ pub(super) fn execute_one(
                 },
             )?;
             return Ok(Step::YieldStar(pop(frame)?));
+        }
+        FinalOpcode::Await => {
+            frame.instruction = verified_instruction.successors().fallthrough().ok_or(
+                EngineFault::InvalidSuccessor {
+                    function: frame.template,
+                    pc: source_pc,
+                },
+            )?;
+            return Ok(Step::Await {
+                value: pop(frame)?,
+                source_pc,
+            });
         }
         FinalOpcode::Return | FinalOpcode::ReturnAsync => return Ok(Step::Return(pop(frame)?)),
         FinalOpcode::ReturnUndef => return Ok(Step::Return(StoredValue::Undefined)),

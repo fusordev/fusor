@@ -52,6 +52,10 @@ impl OrdinaryDynamicFunctionCompiler for TestCompiler {
                 DynamicFunctionKind::GeneratorFunction,
                 Arc::from("<runtime GeneratorFunction>"),
             ),
+            DynamicFunctionFamily::AsyncFunction => (
+                DynamicFunctionKind::AsyncFunction,
+                Arc::from("<runtime AsyncFunction>"),
+            ),
         };
         let dynamic_source =
             DynamicFunctionSource::new(kind, &parameters, SourceFragment::new(&body_text));
@@ -147,6 +151,51 @@ fn reserved_frame_values(authority: &VerifiedBytecode, function: FunctionTemplat
 fn assert_number(value: &quickjs_runtime::JsValue, expected: i32) {
     let number = value.as_number().expect("live value").expect("number");
     assert!(number.strict_equals(JsNumber::from_i32(expected)));
+}
+
+fn assert_string(value: &quickjs_runtime::JsValue, expected: &str) {
+    let string = value.as_string().expect("live value").expect("string");
+    assert_eq!(string.to_utf8_lossy().expect("UTF-8"), expected);
+}
+
+#[test]
+fn async_function_constructor_has_exact_intrinsics_and_executes_await() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let C=(async function(){}).constructor;\
+         let f=new C('value','return await value;');\
+         let p=Object.getPrototypeOf(f);\
+         let cd=Object.getOwnPropertyDescriptor(p,'constructor');\
+         let pd=Object.getOwnPropertyDescriptor(C,'prototype');\
+         let nonconstructable=false;\
+         try{new f();}catch(error){nonconstructable=error instanceof TypeError;}\
+         let state={result:C.name+'|'+C.length+'|'+\
+             (Object.getPrototypeOf(C)===Function)+'|'+\
+             (Object.getPrototypeOf(p)===Function.prototype)+'|'+\
+             (f.prototype===undefined)+'|'+\
+             nonconstructable+'|'+\
+             cd.writable+','+cd.enumerable+','+cd.configurable+'|'+\
+             pd.writable+','+pd.enumerable+','+pd.configurable+'|'};\
+         f(7).then(function(value){state.result=state.result+value;});\
+         return state;",
+    );
+    let read = dynamic_function(&mut context, &["state"], "return state.result;");
+
+    let state = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("AsyncFunction construction");
+    let result = context
+        .call(&read, &[state], ExecutionLimits::default())
+        .expect("async result");
+
+    assert_string(
+        &result,
+        "AsyncFunction|1|true|true|true|true|false,false,true|false,false,false|7",
+    );
 }
 
 #[test]

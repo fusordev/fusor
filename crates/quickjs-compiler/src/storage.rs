@@ -920,7 +920,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 });
             }
             CompilationGoal::DynamicFunction(
-                DynamicFunctionKind::Function | DynamicFunctionKind::GeneratorFunction,
+                DynamicFunctionKind::Function
+                | DynamicFunctionKind::GeneratorFunction
+                | DynamicFunctionKind::AsyncFunction,
             ) => (
                 CompilationUnitKind::Script,
                 ExecutableKind::Script {
@@ -1664,7 +1666,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         match self.kind {
             CompilationUnitKind::Script => match kind {
                 DeclarationKind::Let | DeclarationKind::Const
-                    if crate::is_synchronous_dynamic_function_goal(self.unit.goal()) =>
+                    if crate::is_supported_dynamic_function_goal(self.unit.goal()) =>
                 {
                     Ok(StoragePlacement::Local)
                 }

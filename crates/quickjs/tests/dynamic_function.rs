@@ -959,23 +959,15 @@ fn runtime_failure_retains_the_wrapper_and_releases_internal_script_state() {
 }
 
 #[test]
-fn asynchronous_dynamic_function_families_are_rejected_before_parsing() {
-    for kind in [
-        DynamicFunctionKind::AsyncFunction,
-        DynamicFunctionKind::AsyncGeneratorFunction,
-    ] {
-        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-        let realm = runtime.create_realm().expect("realm");
-        let mut context = runtime.context(&realm).expect("context");
-        let input = DynamicFunctionSource::new(kind, &[], SourceFragment::new(""));
-        assert!(matches!(
-            construct_dynamic_function(
-                &mut context,
-                input,
-                DynamicFunctionLimits::default()
-            ),
-            Err(DynamicFunctionConstructionError::UnsupportedKind { kind: actual })
-                if actual == kind
-        ));
-    }
+fn dynamic_async_generator_is_rejected_before_parsing() {
+    let kind = DynamicFunctionKind::AsyncGeneratorFunction;
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let input = DynamicFunctionSource::new(kind, &[], SourceFragment::new(""));
+    assert!(matches!(
+        construct_dynamic_function(&mut context, input, DynamicFunctionLimits::default()),
+        Err(DynamicFunctionConstructionError::UnsupportedKind { kind: actual })
+            if actual == kind
+    ));
 }

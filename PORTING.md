@@ -83,6 +83,10 @@ does not imply complete ECMAScript or QuickJS compatibility.
   verified suspension programs. Typed iterator records preserve resume-mode
   forwarding, exact iterator-result identity, method absence, object
   validation, `finally`, and abrupt-close order.
+- [x] Async functions, methods, and dynamic `AsyncFunction` wrappers lower
+  `await` and async return to verified suspension programs. Calls allocate the
+  intrinsic Promise capability, run synchronously to the first suspension, and
+  resume through typed FIFO reactions; return/throw settle instead of escaping.
 - [x] Runtime execution uses explicit frame and continuation stacks for
   bytecode/native calls, constructors, abrupt completion, iterator closing,
   coercion re-entry, and verified stack traces. Bound receiver/argument
@@ -91,7 +95,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
   polled on the pinned 10,000-instruction counter and reports an uncatchable
   `ExecutionError::Interrupted`.
 - [ ] Complete remaining opcode families, debug/source tables, async
-  functions/generators, and direct/indirect `eval`. Raw or serialized
+  generators, and direct/indirect `eval`. Raw or serialized
   unverified bytecode and `eval` remain fail closed.
 
 ### Values, objects, and functions
@@ -104,7 +108,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
   object literal `__proto__`, Array exotic `length`, holes, and primitive String
   indexed properties.
 - [x] Ordinary functions/constructors, lexical capture and TDZ, dynamic
-  `Function` and synchronous `GeneratorFunction`, `call`/`apply`/`bind`,
+  `Function`, `GeneratorFunction`, and `AsyncFunction`, `call`/`apply`/`bind`,
   `instanceof`, rest/default/destructured parameters, separate parameter/body
   environments, strict and mapped `arguments` objects, `Function.prototype`
   legacy poison accessors backed by a shared `%ThrowTypeError%`, and admitted
@@ -115,7 +119,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Realm bootstrap is declared by validated intrinsic schemas. Atom and
   resource plans, typed shell allocation, ordered publication, and allocation-
   free reverse rollback are derived from that schema. A normalized snapshot
-  pins all 281 Realm-local identities and 874 ordered properties across Realms.
+  pins all 283 Realm-local identities and 879 ordered properties across Realms.
 - [ ] Add Proxy and remaining exotics, shape/transition interning, dense indexed
   storage, deterministic finalization, and complete reflection/diagnostics.
 
@@ -180,8 +184,14 @@ does not imply complete ECMAScript or QuickJS compatibility.
   admission remains failure-atomic. Dynamic `GeneratorFunction` preserves
   source coercion order, syntax rejection, metadata, and `newTarget` prototype
   selection through the same bounded compiler service.
-- [ ] Add async functions, async generators, and their dynamic constructors on
-  verified continuations.
+- [x] Async functions start synchronously, always resume `await` through the
+  intrinsic Promise queue, preserve rejection as an abrupt completion at the
+  await site, and settle their returned Promise through thenable assimilation.
+  `%AsyncFunction%`, `%AsyncFunction.prototype%`, methods, dynamic construction,
+  suspended-frame GC edges, and non-constructability are pinned by QuickJS and
+  Node differentials.
+- [ ] Add async generators and dynamic `AsyncGeneratorFunction` on verified
+  continuations.
 - [ ] Implement module linking/evaluation, cycles, resolver semantics, dynamic
   import, and top-level `await`. Module parsing alone is not an execution claim.
 - [ ] Finish the Rust embedding API, ESM REPL, `qjs`, Rust-native `qjsc`,
@@ -253,6 +263,7 @@ QuickJS `qjs` or `qjsc`. Current corpus results are:
 | Annex B String HTML | 6/6, 18/18 feature tags |
 | Promise core | 29/29, 46/46 feature tags |
 | Synchronous generators | 18/18, 43/43 feature tags |
+| Async functions | 9/9, 18/18 feature tags |
 
 The parser gate also fails for an uncovered pinned production, uncovered
 reachable diagnostic, falsely unreachable diagnostic, or changed oracle

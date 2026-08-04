@@ -25,6 +25,7 @@
 
 //! Native intrinsic dispatch and resumable Function.prototype.apply execution.
 
+use super::async_function::finish_async_await;
 use super::instanceof::{advance_instance_of, begin_function_has_instance};
 
 #[allow(
@@ -51,6 +52,10 @@ pub(super) enum NativeDispatch {
     },
     ForOfClosed,
     CopyDataPropertiesDone,
+    AsyncAwait {
+        promise: ObjectId,
+        origin: JsStackFrame,
+    },
     Frame(Frame),
     Call(NativeCall),
 }
@@ -237,6 +242,7 @@ pub(super) fn resume_iterator_abrupt_continuations(
                     | NativeDispatch::ForOfStep { .. }
                     | NativeDispatch::ForOfClosed
                     | NativeDispatch::CopyDataPropertiesDone
+                    | NativeDispatch::AsyncAwait { .. }
                         if !continuations.is_empty() =>
                     {
                         return Err(EngineFault::RuntimeInvariant {
@@ -249,7 +255,8 @@ pub(super) fn resume_iterator_abrupt_continuations(
                     | NativeDispatch::ForOfRecord { .. }
                     | NativeDispatch::ForOfStep { .. }
                     | NativeDispatch::ForOfClosed
-                    | NativeDispatch::CopyDataPropertiesDone => {}
+                    | NativeDispatch::CopyDataPropertiesDone
+                    | NativeDispatch::AsyncAwait { .. } => {}
                 }
                 return Ok(dispatch);
             }
@@ -539,6 +546,7 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::AsyncAwait { origin } => finish_async_await(&value, origin)?,
             NativeContinuation::ReflectSet => NativeDispatch::Immediate(StoredValue::Boolean(true)),
             NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
         };
@@ -548,7 +556,8 @@ pub(super) fn resume_native_continuations(
             | NativeDispatch::ForOfRecord { .. }
             | NativeDispatch::ForOfStep { .. }
             | NativeDispatch::ForOfClosed
-            | NativeDispatch::CopyDataPropertiesDone) => {
+            | NativeDispatch::CopyDataPropertiesDone
+            | NativeDispatch::AsyncAwait { .. }) => {
                 if continuations.is_empty() {
                     return Ok(dispatch);
                 }
@@ -753,7 +762,8 @@ fn resolve_native_dispatch_inner(
                 | NativeDispatch::ForOfRecord { .. }
                 | NativeDispatch::ForOfStep { .. }
                 | NativeDispatch::ForOfClosed
-                | NativeDispatch::CopyDataPropertiesDone => {
+                | NativeDispatch::CopyDataPropertiesDone
+                | NativeDispatch::AsyncAwait { .. } => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "Promise resolving function produced a structured result",
                     }
@@ -812,7 +822,8 @@ fn resolve_native_dispatch_inner(
                 | NativeDispatch::ForOfRecord { .. }
                 | NativeDispatch::ForOfStep { .. }
                 | NativeDispatch::ForOfClosed
-                | NativeDispatch::CopyDataPropertiesDone => {
+                | NativeDispatch::CopyDataPropertiesDone
+                | NativeDispatch::AsyncAwait { .. } => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "Promise capability executor produced a structured result",
                     }
@@ -875,7 +886,8 @@ fn resolve_native_dispatch_inner(
                 | NativeDispatch::ForOfRecord { .. }
                 | NativeDispatch::ForOfStep { .. }
                 | NativeDispatch::ForOfClosed
-                | NativeDispatch::CopyDataPropertiesDone => {
+                | NativeDispatch::CopyDataPropertiesDone
+                | NativeDispatch::AsyncAwait { .. } => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "Promise finally function produced a structured result",
                     }
@@ -939,7 +951,8 @@ fn resolve_native_dispatch_inner(
                 | NativeDispatch::ForOfRecord { .. }
                 | NativeDispatch::ForOfStep { .. }
                 | NativeDispatch::ForOfClosed
-                | NativeDispatch::CopyDataPropertiesDone => {
+                | NativeDispatch::CopyDataPropertiesDone
+                | NativeDispatch::AsyncAwait { .. } => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "Promise combinator element function produced a structured result",
                     }
@@ -1005,7 +1018,8 @@ fn resolve_native_dispatch_inner(
                 | NativeDispatch::ForOfRecord { .. }
                 | NativeDispatch::ForOfStep { .. }
                 | NativeDispatch::ForOfClosed
-                | NativeDispatch::CopyDataPropertiesDone => {
+                | NativeDispatch::CopyDataPropertiesDone
+                | NativeDispatch::AsyncAwait { .. } => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "native function produced a structured continuation result",
                     }
@@ -1151,7 +1165,8 @@ pub(super) fn execute_root_dispatch_with_budget(
             | NativeDispatch::ForOfRecord { .. }
             | NativeDispatch::ForOfStep { .. }
             | NativeDispatch::ForOfClosed
-            | NativeDispatch::CopyDataPropertiesDone,
+            | NativeDispatch::CopyDataPropertiesDone
+            | NativeDispatch::AsyncAwait { .. },
         ) => Err(EngineFault::RuntimeInvariant {
             message: "host native entry returned a structured continuation result",
         }
@@ -1342,7 +1357,8 @@ pub(super) fn dispatch_native_call_with_frames(
             )
         }
         NativeFunctionKind::OrdinaryFunctionConstructor
-        | NativeFunctionKind::GeneratorFunctionConstructor => {
+        | NativeFunctionKind::GeneratorFunctionConstructor
+        | NativeFunctionKind::AsyncFunctionConstructor => {
             let Some(compiler) = compiler else {
                 return Err(NativeFailure::Execution(
                     DynamicFunctionCompileFailure::Engine {

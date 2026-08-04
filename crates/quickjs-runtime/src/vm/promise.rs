@@ -1,5 +1,6 @@
 //! ECMAScript Promise core and runtime-owned job execution.
 
+use super::async_function::begin_async_function_resume;
 use super::{
     Arc, CallArguments, CallInputs, CallReturn, CollectionRoot, EngineFault, ExceptionKind,
     ExecutionBudget, ExecutionError, FunctionId, HeapFunction, HeapReference,
@@ -18,7 +19,8 @@ use super::{
     trace_stored_value_root, usize_to_u64,
 };
 use crate::object::{
-    HeapObject, PromiseCapability, PromiseReaction, PromiseReactionKind, PromiseState,
+    HeapObject, PromiseCapability, PromiseReaction, PromiseReactionKind, PromiseReactionTarget,
+    PromiseState,
 };
 use crate::promise_rejection::PromiseRejectionOperation;
 use crate::runtime::PromiseFinallyHandlerKind;
@@ -219,7 +221,7 @@ pub(super) fn begin_promise_static(
     clippy::too_many_arguments,
     reason = "PromiseResolve carries its constructor, resolution value, caller completion, source Realm, and execution authority"
 )]
-fn begin_promise_resolve_with_constructor(
+pub(super) fn begin_promise_resolve_with_constructor(
     runtime: &mut Runtime,
     realm: RealmId,
     constructor: FunctionId,
@@ -1170,7 +1172,8 @@ fn finish_promise_finally_callback(
         | NativeDispatch::ForOfRecord { .. }
         | NativeDispatch::ForOfStep { .. }
         | NativeDispatch::ForOfClosed
-        | NativeDispatch::CopyDataPropertiesDone => Err(EngineFault::RuntimeInvariant {
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
             message: "PromiseResolve produced a structured finally result",
         }
         .into()),
@@ -1364,14 +1367,47 @@ fn perform_promise_then(
 ) -> Result<(), NativeFailure> {
     let fulfill_reaction = PromiseReaction {
         kind: PromiseReactionKind::Fulfill,
-        handler: on_fulfilled,
-        capability: capability.clone(),
+        target: PromiseReactionTarget::Then {
+            handler: on_fulfilled,
+            capability: capability.clone(),
+        },
     };
     let reject_reaction = PromiseReaction {
         kind: PromiseReactionKind::Reject,
-        handler: on_rejected,
-        capability,
+        target: PromiseReactionTarget::Then {
+            handler: on_rejected,
+            capability,
+        },
     };
+    perform_promise_reactions(runtime, promise, fulfill_reaction, reject_reaction)
+}
+
+pub(super) fn perform_async_function_await(
+    runtime: &mut Runtime,
+    promise: ObjectId,
+    activation: ObjectId,
+) -> Result<(), NativeFailure> {
+    let fulfill_reaction = PromiseReaction {
+        kind: PromiseReactionKind::Fulfill,
+        target: PromiseReactionTarget::AsyncFunction { activation },
+    };
+    let reject_reaction = PromiseReaction {
+        kind: PromiseReactionKind::Reject,
+        target: PromiseReactionTarget::AsyncFunction { activation },
+    };
+    perform_promise_reactions(runtime, promise, fulfill_reaction, reject_reaction)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "all Promise reaction targets share one state transition and rejection-tracker order"
+)]
+fn perform_promise_reactions(
+    runtime: &mut Runtime,
+    promise: ObjectId,
+    fulfill_reaction: PromiseReaction,
+    reject_reaction: PromiseReaction,
+) -> Result<(), NativeFailure> {
     let disposition = match runtime
         .objects
         .get(promise)
@@ -1620,6 +1656,13 @@ pub(super) fn advance_promise_continuation(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match state {
+        PromiseContinuation::AsyncFunctionSettlement { capability } => call_capability_settlement(
+            capability,
+            true,
+            value,
+            return_to,
+            native_function_host_origin(),
+        ),
         PromiseContinuation::ConstructorExecutor { promise, .. } => {
             Ok(NativeDispatch::Immediate(StoredValue::Object(promise)))
         }
@@ -1768,6 +1811,13 @@ pub(super) fn resume_promise_abrupt(
     }
     let reason = pending_exception_value(runtime, pending)?;
     match state {
+        PromiseContinuation::AsyncFunctionSettlement { capability } => call_capability_settlement(
+            capability,
+            false,
+            reason,
+            return_to,
+            native_function_host_origin(),
+        ),
         PromiseContinuation::ConstructorExecutor { promise, reject } => {
             reject_through_resolving_function(runtime, reject, reason)?;
             Ok(NativeDispatch::Immediate(StoredValue::Object(promise)))
@@ -2074,7 +2124,9 @@ impl PromiseContinuation {
                 trace_stored_value_root(receiver, mark);
                 trace_stored_value_root(on_rejected, mark);
             }
-            Self::ReactionHandler { capability, .. } | Self::TryCallback { capability, .. } => {
+            Self::AsyncFunctionSettlement { capability }
+            | Self::ReactionHandler { capability, .. }
+            | Self::TryCallback { capability, .. } => {
                 trace_promise_capability(capability, mark);
             }
         }
@@ -2096,33 +2148,39 @@ pub(super) fn begin_promise_job(
     job: PromiseJob,
 ) -> Result<NativeDispatch, NativeFailure> {
     match job {
-        PromiseJob::Reaction { reaction, argument } => {
-            if let Some(handler) = reaction.handler {
-                return Ok(NativeDispatch::Call(NativeCall {
-                    function: handler,
-                    receiver: StoredValue::Undefined,
-                    arguments: promise_call_arguments([argument])?,
-                    return_to: None,
-                    origin: native_function_host_origin(),
-                    continuations: one_promise_continuation(
-                        PromiseContinuation::ReactionHandler {
-                            capability: reaction.capability,
-                        },
-                    )?,
-                    pre_call: None,
-                    new_target: None,
-                    native_caller: None,
-                }));
-            }
-            match reaction.kind {
-                PromiseReactionKind::Fulfill => {
-                    call_capability_job_settlement(&reaction.capability, true, argument)
+        PromiseJob::Reaction { reaction, argument } => match reaction.target {
+            PromiseReactionTarget::Then {
+                handler,
+                capability,
+            } => {
+                if let Some(handler) = handler {
+                    return Ok(NativeDispatch::Call(NativeCall {
+                        function: handler,
+                        receiver: StoredValue::Undefined,
+                        arguments: promise_call_arguments([argument])?,
+                        return_to: None,
+                        origin: native_function_host_origin(),
+                        continuations: one_promise_continuation(
+                            PromiseContinuation::ReactionHandler { capability },
+                        )?,
+                        pre_call: None,
+                        new_target: None,
+                        native_caller: None,
+                    }));
                 }
-                PromiseReactionKind::Reject => {
-                    call_capability_job_settlement(&reaction.capability, false, argument)
+                match reaction.kind {
+                    PromiseReactionKind::Fulfill => {
+                        call_capability_job_settlement(&capability, true, argument)
+                    }
+                    PromiseReactionKind::Reject => {
+                        call_capability_job_settlement(&capability, false, argument)
+                    }
                 }
             }
-        }
+            PromiseReactionTarget::AsyncFunction { activation } => {
+                begin_async_function_resume(runtime, activation, reaction.kind, argument)
+            }
+        },
         PromiseJob::Thenable {
             promise,
             realm,

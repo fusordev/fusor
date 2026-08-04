@@ -444,7 +444,8 @@ fn attach_group_by_after_key(
         | NativeDispatch::ForOfRecord { .. }
         | NativeDispatch::ForOfStep { .. }
         | NativeDispatch::ForOfClosed
-        | NativeDispatch::CopyDataPropertiesDone => Err(EngineFault::RuntimeInvariant {
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
             message: "groupBy key conversion produced a structured result",
         }
         .into()),

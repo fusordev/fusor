@@ -202,6 +202,7 @@ fn legacy_to_object(
         | NativeDispatch::ForOfStep { .. }
         | NativeDispatch::ForOfClosed
         | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. }
         | NativeDispatch::Frame(_)
         | NativeDispatch::Call(_) => Err(EngineFault::RuntimeInvariant {
             message: "ToObject produced a non-immediate result",
@@ -1236,6 +1237,7 @@ pub(super) fn begin_object_assign(
         | NativeDispatch::ForOfStep { .. }
         | NativeDispatch::ForOfClosed
         | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. }
         | NativeDispatch::Frame(_)
         | NativeDispatch::Call(_) => {
             return Err(EngineFault::RuntimeInvariant {
@@ -1530,7 +1532,8 @@ fn object_assign_after_nested(
         | NativeDispatch::ForOfRecord { .. }
         | NativeDispatch::ForOfStep { .. }
         | NativeDispatch::ForOfClosed
-        | NativeDispatch::CopyDataPropertiesDone => Err(EngineFault::RuntimeInvariant {
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
             message: "Array length conversion produced a structured result",
         }
         .into()),

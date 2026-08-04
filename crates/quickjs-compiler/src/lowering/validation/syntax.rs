@@ -21,7 +21,7 @@ impl CompilationContext<'_, '_, '_> {
                 InitializationPolicy::FunctionAtInstantiation
             )
         );
-        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal())
+        if !crate::is_supported_dynamic_function_goal(self.unit.goal())
             || declaration_kind != VariableDeclarationKind::Var
             || !merged_global_policy
             || storage.policy().writes() != WritePolicy::Mutable

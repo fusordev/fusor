@@ -28,6 +28,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::ids::ObjectId;
 use crate::{
     ArrayIndex, Atom, AtomKind, JsBigInt, JsNumber, JsString, PropertyKey, PropertyLayout,
     PropertyLayoutKind,
@@ -1079,8 +1080,18 @@ impl Clone for PromiseCapability {
 #[derive(Clone)]
 pub(crate) struct PromiseReaction {
     pub(crate) kind: PromiseReactionKind,
-    pub(crate) handler: Option<FunctionId>,
-    pub(crate) capability: PromiseCapability,
+    pub(crate) target: PromiseReactionTarget,
+}
+
+#[derive(Clone)]
+pub(crate) enum PromiseReactionTarget {
+    Then {
+        handler: Option<FunctionId>,
+        capability: PromiseCapability,
+    },
+    AsyncFunction {
+        activation: ObjectId,
+    },
 }
 
 pub(crate) enum PromiseState {

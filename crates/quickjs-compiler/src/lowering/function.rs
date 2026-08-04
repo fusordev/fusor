@@ -65,6 +65,7 @@ impl FunctionPlanningContext<'_> {
 enum FunctionTerminal {
     Ordinary,
     Generator,
+    Async,
     Script(LocalSlot),
 }
 
@@ -104,6 +105,8 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         let flow = PlannedControlFlow::new(limits);
         let terminal = if function.generator {
             FunctionTerminal::Generator
+        } else if function.r#async {
+            FunctionTerminal::Async
         } else {
             FunctionTerminal::Ordinary
         };
@@ -201,6 +204,9 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                     FunctionTerminal::Generator => {
                         "generator planning closes every scope and control region"
                     }
+                    FunctionTerminal::Async => {
+                        "async-function planning closes every scope and control region"
+                    }
                     FunctionTerminal::Script(_) => {
                         "Program planning closes every scope and control region"
                     }
@@ -210,7 +216,9 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         }
         match self.terminal {
             FunctionTerminal::Ordinary => self.flow.ensure_terminal(self.body_span)?,
-            FunctionTerminal::Generator => self.flow.ensure_generator_terminal(self.body_span)?,
+            FunctionTerminal::Generator | FunctionTerminal::Async => {
+                self.flow.ensure_generator_terminal(self.body_span)?;
+            }
             FunctionTerminal::Script(completion) => self
                 .flow
                 .ensure_script_terminal(completion, self.body_span)?,
@@ -239,13 +247,18 @@ impl CompilationContext<'_, '_, '_> {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "function form, metadata, storage, and verified flow are assembled at one audited boundary"
+    )]
     fn validate_function(
         &self,
         executable_id: ExecutableId,
         tree_layout: &FunctionTreeLayout,
         limits: VerificationLimits,
     ) -> Result<ValidatedFunction, LeafCompilationError> {
-        let (executable, function, form, generator) = self.selected_function(executable_id)?;
+        let (executable, function, form, generator, asynchronous) =
+            self.selected_function(executable_id)?;
         let layout = FrameLayout::new(FrameLayoutInput::new(&self.planned.plan, executable_id))?;
         let body = function
             .body
@@ -276,6 +289,8 @@ impl CompilationContext<'_, '_, '_> {
             OrdinaryFunctionForm::Function => (
                 if generator {
                     CompilerExecutableKind::GeneratorFunction
+                } else if asynchronous {
+                    CompilerExecutableKind::AsyncFunction
                 } else {
                     CompilerExecutableKind::OrdinaryFunction
                 },
@@ -291,6 +306,8 @@ impl CompilationContext<'_, '_, '_> {
             } => (
                 if generator {
                     CompilerExecutableKind::GeneratorMethod
+                } else if asynchronous {
+                    CompilerExecutableKind::AsyncMethod
                 } else {
                     CompilerExecutableKind::OrdinaryMethod
                 },
@@ -475,6 +492,20 @@ const fn executable_header(
         }
         CompilerExecutableKind::GeneratorMethod => {
             UnverifiedFunctionHeader::generator_method_with_variable_references(
+                strict,
+                defined_argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::AsyncFunction => {
+            UnverifiedFunctionHeader::async_source_function_with_variable_references(
+                strict,
+                defined_argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::AsyncMethod => {
+            UnverifiedFunctionHeader::async_method_with_variable_references(
                 strict,
                 defined_argument_count,
                 variable_reference_count,

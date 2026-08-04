@@ -268,7 +268,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         graph_limits: FunctionGraphVerificationLimits,
         bytecode_limits: BytecodeGraphVerificationLimits,
     ) -> Result<CompiledFunctionTree, LeafCompilationError> {
-        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal()) {
+        if !crate::is_supported_dynamic_function_goal(self.unit.goal()) {
             return unsupported(
                 UnsupportedLeafFeature::DynamicFunctionRequiresScriptRoot,
                 self.unit.program().span,

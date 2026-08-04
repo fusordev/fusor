@@ -168,6 +168,9 @@ impl UnverifiedFunctionHeader {
     const GENERATOR_SOURCE_FLAGS: u16 = (1 << 1) | (1 << 4) | (1 << 6) | (1 << 9) | (1 << 10);
     const GENERATOR_METHOD_FLAGS: u16 =
         (1 << 1) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
+    const ASYNC_SOURCE_FLAGS: u16 = (1 << 1) | (2 << 4) | (1 << 6) | (1 << 9) | (1 << 10);
+    const ASYNC_METHOD_FLAGS: u16 =
+        (1 << 1) | (2 << 4) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
     const DYNAMIC_FUNCTION_SCRIPT_FLAGS: u16 = 1 << 10;
 
     /// Creates an unverified function header.
@@ -299,6 +302,42 @@ impl UnverifiedFunctionHeader {
     ) -> Self {
         Self::new(
             Self::GENERATOR_METHOD_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates an async source-function header with retained debug source and
+    /// a typed capture layout.
+    ///
+    /// Async functions are callable but nonconstructable and do not expose an
+    /// own `prototype` property. `QuickJS` records that distinction in the
+    /// function kind rather than the ordinary `has_prototype` bit.
+    #[must_use]
+    pub const fn async_source_function_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::ASYNC_SOURCE_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates an async object-method header with retained debug source and a
+    /// typed capture layout.
+    #[must_use]
+    pub const fn async_method_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::ASYNC_METHOD_FLAGS,
             if strict { 1 } else { 0 },
             defined_argument_count,
             variable_reference_count,

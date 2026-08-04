@@ -823,7 +823,8 @@ pub(super) fn advance_define_properties(
                         | NativeDispatch::ForOfRecord { .. }
                         | NativeDispatch::ForOfStep { .. }
                         | NativeDispatch::ForOfClosed
-                        | NativeDispatch::CopyDataPropertiesDone => {
+                        | NativeDispatch::CopyDataPropertiesDone
+                        | NativeDispatch::AsyncAwait { .. } => {
                             return Err(EngineFault::RuntimeInvariant {
                                 message: "Array length descriptor conversion produced a structured result",
                             }

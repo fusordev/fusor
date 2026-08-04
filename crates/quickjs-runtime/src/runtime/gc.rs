@@ -30,7 +30,7 @@ use super::{
     HeapReference, ObjectId, ObjectRecord, PromiseJob, RealmIntrinsics, Runtime, RuntimeError,
     RuntimeResource, RuntimeUsage, SlotValue, StoredValue, usize_to_u64,
 };
-use crate::object::{PromiseCapability, PromiseState};
+use crate::object::{PromiseCapability, PromiseReactionTarget, PromiseState};
 
 #[derive(Clone, Copy)]
 pub(crate) enum CollectionRoot {
@@ -300,6 +300,7 @@ impl Runtime {
                 symbol,
                 iterators,
                 generators,
+                async_functions,
             } = realm.intrinsics
             {
                 mark_heap_reference(
@@ -432,6 +433,7 @@ impl Runtime {
                     iterators.string_iterator_prototype,
                     generators.function_prototype,
                     generators.generator_prototype,
+                    async_functions.function_prototype,
                 ] {
                     mark_heap_reference(
                         HeapReference::Object(prototype),
@@ -446,25 +448,46 @@ impl Runtime {
                     &mut marked_objects,
                     &mut work,
                 );
+                mark_heap_reference(
+                    HeapReference::Function(async_functions.function_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
             }
         }
         for job in &self.promise_jobs {
             match job {
                 PromiseJob::Reaction { reaction, argument } => {
-                    if let Some(handler) = reaction.handler {
-                        mark_heap_reference(
-                            HeapReference::Function(handler),
-                            &mut marked_functions,
-                            &mut marked_objects,
-                            &mut work,
-                        );
+                    match &reaction.target {
+                        PromiseReactionTarget::Then {
+                            handler,
+                            capability,
+                        } => {
+                            if let Some(handler) = handler {
+                                mark_heap_reference(
+                                    HeapReference::Function(*handler),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            mark_promise_capability(
+                                capability,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
+                        PromiseReactionTarget::AsyncFunction { activation } => {
+                            mark_heap_reference(
+                                HeapReference::Object(*activation),
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
                     }
-                    mark_promise_capability(
-                        &reaction.capability,
-                        &mut marked_functions,
-                        &mut marked_objects,
-                        &mut work,
-                    );
                     mark_stored_value(
                         argument,
                         &mut marked_functions,
@@ -640,6 +663,23 @@ impl Runtime {
                     }
                 }
                 GraphNode::Object(id) => {
+                    if let Some(record) = self.async_function_states.get(&id) {
+                        mark_heap_reference(
+                            HeapReference::Object(record.awaiting),
+                            &mut marked_functions,
+                            &mut marked_objects,
+                            &mut work,
+                        );
+                        crate::vm::trace_frame_roots(&record.frame, &mut |root| {
+                            mark_collection_root(
+                                root,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut marked_cells,
+                                &mut work,
+                            );
+                        });
+                    }
                     if let Some(frame) = self
                         .generator_states
                         .get(&id)
@@ -687,20 +727,35 @@ impl Runtime {
                                     for reaction in
                                         fulfill_reactions.iter().chain(reject_reactions.iter())
                                     {
-                                        if let Some(handler) = reaction.handler {
-                                            mark_heap_reference(
-                                                HeapReference::Function(handler),
-                                                &mut marked_functions,
-                                                &mut marked_objects,
-                                                &mut work,
-                                            );
+                                        match &reaction.target {
+                                            PromiseReactionTarget::Then {
+                                                handler,
+                                                capability,
+                                            } => {
+                                                if let Some(handler) = handler {
+                                                    mark_heap_reference(
+                                                        HeapReference::Function(*handler),
+                                                        &mut marked_functions,
+                                                        &mut marked_objects,
+                                                        &mut work,
+                                                    );
+                                                }
+                                                mark_promise_capability(
+                                                    capability,
+                                                    &mut marked_functions,
+                                                    &mut marked_objects,
+                                                    &mut work,
+                                                );
+                                            }
+                                            PromiseReactionTarget::AsyncFunction { activation } => {
+                                                mark_heap_reference(
+                                                    HeapReference::Object(*activation),
+                                                    &mut marked_functions,
+                                                    &mut marked_objects,
+                                                    &mut work,
+                                                );
+                                            }
                                         }
-                                        mark_promise_capability(
-                                            &reaction.capability,
-                                            &mut marked_functions,
-                                            &mut marked_objects,
-                                            &mut work,
-                                        );
                                     }
                                 }
                                 PromiseState::Fulfilled(value)
@@ -809,6 +864,7 @@ impl Runtime {
         }
         for id in dead_objects {
             self.generator_states.remove(&id);
+            self.async_function_states.remove(&id);
             if let Some(object) = self.objects.remove(id) {
                 self.object_properties = self
                     .object_properties

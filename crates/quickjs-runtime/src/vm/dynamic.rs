@@ -702,6 +702,9 @@ pub(super) fn dynamic_function_host_origin(kind: NativeFunctionKind) -> JsStackF
         NativeFunctionKind::GeneratorFunctionConstructor => {
             ("<native GeneratorFunction>", "GeneratorFunction", 17)
         }
+        NativeFunctionKind::AsyncFunctionConstructor => {
+            ("<native AsyncFunction>", "AsyncFunction", 13)
+        }
         _ => ("<native dynamic function>", "dynamic function", 16),
     };
     JsStackFrame::new(
@@ -725,9 +728,11 @@ fn retire_failed_dynamic_root(
 pub(super) fn dynamic_function_source_code_units(source: &OrdinaryDynamicFunctionSource) -> u64 {
     const FUNCTION_WRAPPER_CODE_UNITS: u64 = 28;
     const GENERATOR_WRAPPER_CODE_UNITS: u64 = 29;
+    const ASYNC_WRAPPER_CODE_UNITS: u64 = 34;
     let wrapper_units = match source.family() {
         DynamicFunctionFamily::Function => FUNCTION_WRAPPER_CODE_UNITS,
         DynamicFunctionFamily::GeneratorFunction => GENERATOR_WRAPPER_CODE_UNITS,
+        DynamicFunctionFamily::AsyncFunction => ASYNC_WRAPPER_CODE_UNITS,
     };
     let parameter_units = source.parameters().iter().fold(0_u64, |total, parameter| {
         total.saturating_add(u64::from(parameter.len()))
@@ -871,6 +876,9 @@ fn apply_dynamic_constructor_prototype(
                 }
                 DynamicFunctionFamily::GeneratorFunction => {
                     HeapReference::Object(runtime.realm_generator_function_prototype(realm)?)
+                }
+                DynamicFunctionFamily::AsyncFunction => {
+                    HeapReference::Object(runtime.realm_async_function_prototype(realm)?)
                 }
             }
         }

@@ -382,6 +382,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 let return_opcode = if matches!(
                     executable.kind(),
                     ExecutableKind::Function {
+                        asynchronous: true,
+                        generator: false,
+                    } | ExecutableKind::Function {
                         asynchronous: false,
                         generator: true,
                     }

@@ -10,7 +10,7 @@
 mod lowering;
 mod storage;
 
-pub(crate) const fn is_synchronous_dynamic_function_goal(
+pub(crate) const fn is_supported_dynamic_function_goal(
     goal: quickjs_frontend::CompilationGoal<'_>,
 ) -> bool {
     matches!(
@@ -18,6 +18,7 @@ pub(crate) const fn is_synchronous_dynamic_function_goal(
         quickjs_frontend::CompilationGoal::DynamicFunction(
             quickjs_frontend::DynamicFunctionKind::Function
                 | quickjs_frontend::DynamicFunctionKind::GeneratorFunction
+                | quickjs_frontend::DynamicFunctionKind::AsyncFunction
         )
     )
 }

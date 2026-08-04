@@ -35,9 +35,9 @@ use super::{
     usize_to_u64,
 };
 
-const REALM_OBJECT_SLOTS: u64 = 26;
-const REALM_PROPERTY_SLOTS: u64 = 874;
-const REALM_FUNCTION_SLOTS: u64 = 255;
+const REALM_OBJECT_SLOTS: u64 = 27;
+const REALM_PROPERTY_SLOTS: u64 = 879;
+const REALM_FUNCTION_SLOTS: u64 = 256;
 
 #[test]
 #[allow(
@@ -45,7 +45,10 @@ const REALM_FUNCTION_SLOTS: u64 = 255;
     reason = "one test audits every Promise-owned GC edge and its rooted then unrooted lifecycle"
 )]
 fn promise_state_and_pending_jobs_trace_all_owned_heap_edges() {
-    use crate::object::{PromiseCapability, PromiseReaction, PromiseReactionKind, PromiseState};
+    use crate::object::{
+        PromiseCapability, PromiseReaction, PromiseReactionKind, PromiseReactionTarget,
+        PromiseState,
+    };
 
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -203,11 +206,13 @@ fn promise_state_and_pending_jobs_trace_all_owned_heap_edges() {
     };
     fulfill_reactions.push(PromiseReaction {
         kind: PromiseReactionKind::Fulfill,
-        handler: None,
-        capability: PromiseCapability {
-            promise: StoredValue::Object(derived),
-            resolve,
-            reject,
+        target: PromiseReactionTarget::Then {
+            handler: None,
+            capability: PromiseCapability {
+                promise: StoredValue::Object(derived),
+                resolve,
+                reject,
+            },
         },
     });
     runtime
@@ -1185,6 +1190,7 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         symbol: _,
         iterators: _,
         generators: _,
+        async_functions: _,
         promise: _,
     } = state.intrinsics
     else {

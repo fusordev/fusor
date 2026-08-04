@@ -520,6 +520,10 @@ pub enum CompilerExecutableKind {
     GeneratorFunction,
     /// A synchronous generator object-literal method.
     GeneratorMethod,
+    /// A nonconstructable asynchronous function.
+    AsyncFunction,
+    /// An asynchronous object-literal method.
+    AsyncMethod,
     /// The constructor-realm global Script produced for dynamic `Function`.
     DynamicFunctionScript,
 }
@@ -2336,10 +2340,12 @@ fn verify_executable_kind(
     metadata: &UnverifiedFunctionMetadata,
 ) -> Result<(), BytecodeVerificationError> {
     match metadata.executable_kind {
-        CompilerExecutableKind::OrdinaryFunction | CompilerExecutableKind::GeneratorFunction => {
-            Ok(())
-        }
-        CompilerExecutableKind::OrdinaryMethod | CompilerExecutableKind::GeneratorMethod => {
+        CompilerExecutableKind::OrdinaryFunction
+        | CompilerExecutableKind::GeneratorFunction
+        | CompilerExecutableKind::AsyncFunction => Ok(()),
+        CompilerExecutableKind::OrdinaryMethod
+        | CompilerExecutableKind::GeneratorMethod
+        | CompilerExecutableKind::AsyncMethod => {
             let has_function_name_binding =
                 metadata.variables.iter().any(|definition| {
                     definition.policy.kind() == CompilerBindingKind::FunctionName
@@ -2462,6 +2468,52 @@ fn verify_header(
         CompilerExecutableKind::GeneratorMethod => {
             if header.kind() != FunctionKind::Generator
                 || !matches!(header.flags().bits(), 0x0750 | 0x0752)
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() > arguments
+                || (header.flags().has_simple_parameter_list()
+                    && header.defined_argument_count() != arguments)
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DefinedArgumentCountMismatch {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::AsyncFunction => {
+            if header.kind() != FunctionKind::Async
+                || !matches!(header.flags().bits(), 0x0660 | 0x0662)
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() > arguments
+                || (header.flags().has_simple_parameter_list()
+                    && header.defined_argument_count() != arguments)
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DefinedArgumentCountMismatch {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::AsyncMethod => {
+            if header.kind() != FunctionKind::Async
+                || !matches!(header.flags().bits(), 0x0760 | 0x0762)
                 || header.mode().bits() & !1 != 0
             {
                 return Err(BytecodeVerificationError::function(
@@ -3865,7 +3917,9 @@ fn verify_method_definitions(
             };
             if !matches!(
                 child_metadata.executable_kind,
-                CompilerExecutableKind::OrdinaryMethod | CompilerExecutableKind::GeneratorMethod
+                CompilerExecutableKind::OrdinaryMethod
+                    | CompilerExecutableKind::GeneratorMethod
+                    | CompilerExecutableKind::AsyncMethod
             ) {
                 continue;
             }
@@ -3918,7 +3972,9 @@ fn verify_method_definitions(
     for (index, (metadata, &definitions)) in metadata.iter().zip(&definition_counts).enumerate() {
         if !matches!(
             metadata.executable_kind,
-            CompilerExecutableKind::OrdinaryMethod | CompilerExecutableKind::GeneratorMethod
+            CompilerExecutableKind::OrdinaryMethod
+                | CompilerExecutableKind::GeneratorMethod
+                | CompilerExecutableKind::AsyncMethod
         ) {
             continue;
         }
@@ -4049,7 +4105,9 @@ fn inferred_function_name_pair(
         .and_then(|index| metadata.get(index))?;
     (matches!(
         child_metadata.executable_kind,
-        CompilerExecutableKind::OrdinaryFunction | CompilerExecutableKind::GeneratorFunction
+        CompilerExecutableKind::OrdinaryFunction
+            | CompilerExecutableKind::GeneratorFunction
+            | CompilerExecutableKind::AsyncFunction
     ) && child_metadata.function_name.is_none())
     .then_some(*child)
 }
@@ -4095,7 +4153,9 @@ fn method_definition_pair(
     let child_metadata = metadata.get(child_index)?;
     if !matches!(
         child_metadata.executable_kind,
-        CompilerExecutableKind::OrdinaryMethod | CompilerExecutableKind::GeneratorMethod
+        CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::GeneratorMethod
+            | CompilerExecutableKind::AsyncMethod
     ) {
         return None;
     }
@@ -5178,6 +5238,16 @@ fn verify_supported_opcodes(
         executable_kind,
         CompilerExecutableKind::GeneratorFunction | CompilerExecutableKind::GeneratorMethod
     );
+    let asynchronous = matches!(
+        executable_kind,
+        CompilerExecutableKind::AsyncFunction | CompilerExecutableKind::AsyncMethod
+    );
+    let method = matches!(
+        executable_kind,
+        CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::GeneratorMethod
+            | CompilerExecutableKind::AsyncMethod
+    );
     let mut initial_yield = None;
     let mapped_arguments_authority = flow
         .compiler_capture_layout()
@@ -5206,11 +5276,10 @@ fn verify_supported_opcodes(
         if !supported_compiler_opcode(opcode)
             || (matches!(
                 opcode,
-                FinalOpcode::InitialYield
-                    | FinalOpcode::Yield
-                    | FinalOpcode::YieldStar
-                    | FinalOpcode::ReturnAsync
+                FinalOpcode::InitialYield | FinalOpcode::Yield | FinalOpcode::YieldStar
             ) && !generator)
+            || (opcode == FinalOpcode::Await && !asynchronous)
+            || (opcode == FinalOpcode::ReturnAsync && !generator && !asynchronous)
             || (matches!(
                 opcode,
                 FinalOpcode::IteratorNext
@@ -5218,10 +5287,11 @@ fn verify_supported_opcodes(
                     | FinalOpcode::IteratorCheckObject
                     | FinalOpcode::ThrowError
             ) && !generator)
-            || (matches!(opcode, FinalOpcode::Return | FinalOpcode::ReturnUndef) && generator)
+            || (matches!(opcode, FinalOpcode::Return | FinalOpcode::ReturnUndef)
+                && (generator || asynchronous))
             || (opcode == FinalOpcode::PushThis
                 && !flow.function_header().mode().is_strict()
-                && executable_kind != CompilerExecutableKind::OrdinaryMethod
+                && !method
                 && authority_kind != CompilerExecutableKind::DynamicFunctionScript)
             || matches!(
                 (opcode, instruction.operands()),
@@ -5241,6 +5311,8 @@ fn verify_supported_opcodes(
                             | CompilerExecutableKind::OrdinaryMethod
                             | CompilerExecutableKind::GeneratorFunction
                             | CompilerExecutableKind::GeneratorMethod
+                            | CompilerExecutableKind::AsyncFunction
+                            | CompilerExecutableKind::AsyncMethod
                     )
                         || arguments_object_count != 1
                         || rest_parameter_count != 0
@@ -5257,6 +5329,8 @@ fn verify_supported_opcodes(
                                 | CompilerExecutableKind::OrdinaryMethod
                                 | CompilerExecutableKind::GeneratorFunction
                                 | CompilerExecutableKind::GeneratorMethod
+                                | CompilerExecutableKind::AsyncFunction
+                                | CompilerExecutableKind::AsyncMethod
                         )
                         || rest_parameter_count != 1
             )
@@ -5339,6 +5413,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
             | FinalOpcode::ReturnAsync
+            | FinalOpcode::Await
             | FinalOpcode::InitialYield
             | FinalOpcode::Yield
             | FinalOpcode::YieldStar

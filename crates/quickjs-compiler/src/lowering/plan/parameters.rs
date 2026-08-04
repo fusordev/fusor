@@ -622,8 +622,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal()) || executable.index() != 0
-        {
+        if !crate::is_supported_dynamic_function_goal(self.unit.goal()) || executable.index() != 0 {
             return Ok(());
         }
         let root = self

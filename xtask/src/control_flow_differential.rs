@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub(crate) const DEFAULT_CONTROL_FLOW_CORPUS: &str = "tests/control-flow/manifest.json";
+pub(crate) const DEFAULT_ASYNC_FUNCTION_CORPUS: &str = "tests/async-function/manifest.json";
 pub(crate) const DEFAULT_ERROR_CORPUS: &str = "tests/error/manifest.json";
 pub(crate) const DEFAULT_FUNCTION_APPLY_CORPUS: &str = "tests/function-apply/manifest.json";
 pub(crate) const DEFAULT_FUNCTION_BIND_CORPUS: &str = "tests/function-bind/manifest.json";
@@ -38,6 +39,8 @@ pub(crate) const DEFAULT_PROMISE_CORE_CORPUS: &str = "tests/promise-core/manifes
 pub(crate) const DEFAULT_STRING_HTML_CORPUS: &str = "tests/string-html/manifest.json";
 pub(crate) const MAX_CONTROL_FLOW_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const CANDIDATE_WORKER_COMMAND: &str = "__control-flow-candidate-worker";
+pub(crate) const ASYNC_FUNCTION_CANDIDATE_WORKER_COMMAND: &str =
+    "__async-function-candidate-worker";
 
 const EXPECTED_ORACLE_BANNER: &str = "QuickJS version 2026-06-04";
 const EXPECTED_MANIFEST_RELEASE: &str = "2026-06-04";
@@ -479,8 +482,30 @@ const GENERATOR_REQUIRED_COVERAGE: &[&str] = &[
     "zero-argument-close",
 ];
 
+const ASYNC_FUNCTION_REQUIRED_COVERAGE: &[&str] = &[
+    "await-fulfill",
+    "await-reject",
+    "await-always-defers",
+    "await-finally",
+    "await-thenable",
+    "dynamic-async-function",
+    "dynamic-new-target",
+    "dynamic-prototype-fallback",
+    "dynamic-source-order",
+    "fifo-job-order",
+    "function-prototype-chain",
+    "method",
+    "nonconstructable",
+    "parameter-abrupt-rejection",
+    "parameter-initialization",
+    "return-assimilation",
+    "sync-prefix",
+    "throw-rejects",
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeDifferentialSuite {
+    AsyncFunction,
     ControlFlow,
     Error,
     FunctionApply,
@@ -496,6 +521,7 @@ enum RuntimeDifferentialSuite {
 impl RuntimeDifferentialSuite {
     const fn label(self) -> &'static str {
         match self {
+            Self::AsyncFunction => "async-function",
             Self::ControlFlow => "control-flow",
             Self::Error => "error",
             Self::FunctionApply => "function-apply",
@@ -511,6 +537,7 @@ impl RuntimeDifferentialSuite {
 
     const fn required_coverage(self) -> &'static [&'static str] {
         match self {
+            Self::AsyncFunction => ASYNC_FUNCTION_REQUIRED_COVERAGE,
             Self::ControlFlow => REQUIRED_COVERAGE,
             Self::Error => ERROR_REQUIRED_COVERAGE,
             Self::FunctionApply => FUNCTION_APPLY_REQUIRED_COVERAGE,
@@ -527,6 +554,13 @@ impl RuntimeDifferentialSuite {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ControlFlowDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct AsyncFunctionDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -632,6 +666,17 @@ pub(crate) fn run_control_flow_differential(
         &options.corpus,
         options.timeout,
         RuntimeDifferentialSuite::ControlFlow,
+    )
+}
+
+pub(crate) fn run_async_function_differential(
+    options: &AsyncFunctionDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::AsyncFunction,
     )
 }
 
@@ -742,7 +787,7 @@ fn run_runtime_differential(
     validate_executable(oracle_path, &format!("{} oracle", suite.label()))?;
     validate_oracle_release(oracle_path, timeout)?;
     let corpus = load_corpus(corpus_path, suite)?;
-    let oracle = observe_oracle(oracle_path, &corpus.cases, timeout)?;
+    let oracle = observe_oracle(oracle_path, &corpus.cases, timeout, suite)?;
 
     for ((case, observed), index) in corpus.cases.iter().zip(&oracle).zip(0_usize..) {
         if observed != &case.expected {
@@ -756,7 +801,7 @@ fn run_runtime_differential(
         }
     }
 
-    let candidate = observe_candidate(&corpus.cases, timeout)?;
+    let candidate = observe_candidate(&corpus.cases, timeout, suite)?;
     let mut mismatch_count = 0_usize;
     let mut reported = Vec::new();
     for (((case, expected), actual), index) in corpus
@@ -1205,6 +1250,7 @@ fn observe_oracle(
     executable: &Path,
     cases: &[ControlFlowCase],
     timeout: Duration,
+    suite: RuntimeDifferentialSuite,
 ) -> Result<Vec<Observation>, String> {
     if cases.is_empty() || cases.len() > MAX_CASES {
         return Err(format!(
@@ -1220,12 +1266,13 @@ fn observe_oracle(
         )
     })?;
     for (index, case) in cases.iter().enumerate() {
-        let observation = observe_oracle_case(executable, case, timeout).map_err(|error| {
-            format!(
-                "runtime differential oracle case {index} `{}` failed: {error}",
-                case.id
-            )
-        })?;
+        let observation =
+            observe_oracle_case(executable, case, timeout, suite).map_err(|error| {
+                format!(
+                    "runtime differential oracle case {index} `{}` failed: {error}",
+                    case.id
+                )
+            })?;
         observations.push(observation);
     }
     Ok(observations)
@@ -1235,8 +1282,9 @@ fn observe_oracle_case(
     executable: &Path,
     case: &ControlFlowCase,
     timeout: Duration,
+    suite: RuntimeDifferentialSuite,
 ) -> Result<Observation, String> {
-    let source = build_oracle_source(case)?;
+    let source = build_oracle_source(case, suite)?;
     let temporary = TempOracleScript::create()?;
     let result = (|| {
         temporary.write_source(&source)?;
@@ -1272,7 +1320,10 @@ fn oracle_case_arguments(input: &Path) -> [&OsStr; 5] {
     ]
 }
 
-fn build_oracle_source(case: &ControlFlowCase) -> Result<String, String> {
+fn build_oracle_source(
+    case: &ControlFlowCase,
+    suite: RuntimeDifferentialSuite,
+) -> Result<String, String> {
     let mut source = String::from(
         "(function(){\
          const __Function=Function,__print=print,__json=JSON.stringify,__String=String;\
@@ -1290,11 +1341,17 @@ fn build_oracle_source(case: &ControlFlowCase) -> Result<String, String> {
            throw new TypeError(\"unsupported result type: \"+type);\
          }\
          function __run(index,body){let value,result;try{value=__Function(body)();}catch(error){result={kind:\"throw\",name:__String(error&&error.name),message:__String(error&&error.message)};__print(index+\"\\t\"+__json(result));return;}result=__normal(value);__print(index+\"\\t\"+__json(result));}\
+         function __runAsync(index,body){let value,result;try{value=__Function(body)();}catch(error){result={kind:\"throw\",name:__String(error&&error.name),message:__String(error&&error.message)};__print(index+\"\\t\"+__json(result));return;}Promise.resolve(value.done).then(function(){try{result=__normal(value.result);}catch(error){result={kind:\"throw\",name:__String(error&&error.name),message:__String(error&&error.message)};}__print(index+\"\\t\"+__json(result));},function(error){result={kind:\"throw\",name:__String(error&&error.name),message:__String(error&&error.message)};__print(index+\"\\t\"+__json(result));});}\
          const __scopeProbe=__Function(\"return typeof __Function+\\\":\\\"+typeof __run;\")();\
          if(__scopeProbe!==\"undefined:undefined\")throw new Error(\"oracle harness lexical scope leaked\");\n",
     );
     let body = js_string_literal(&case.body)?;
-    writeln!(source, "__run(0,{body});}})();")
+    let runner = if suite == RuntimeDifferentialSuite::AsyncFunction {
+        "__runAsync"
+    } else {
+        "__run"
+    };
+    writeln!(source, "{runner}(0,{body});}})();")
         .map_err(|_| "cannot write generated runtime differential oracle source".to_owned())?;
     if source.len() > MAX_GENERATED_ORACLE_SOURCE_BYTES {
         return Err(format!(
@@ -1497,6 +1554,7 @@ fn parse_oracle_stdout(stdout: &[u8], expected_count: usize) -> Result<Vec<Obser
 fn observe_candidate(
     cases: &[ControlFlowCase],
     timeout: Duration,
+    suite: RuntimeDifferentialSuite,
 ) -> Result<Vec<CandidateObservation>, String> {
     if cases.is_empty() || cases.len() > MAX_CASES {
         return Err(format!(
@@ -1512,7 +1570,12 @@ fn observe_candidate(
         .try_reserve_exact(cases.len())
         .map_err(|_| format!("cannot reserve {} candidate results", cases.len()))?;
     for case in cases {
-        let arguments = [OsStr::new(CANDIDATE_WORKER_COMMAND)];
+        let worker_command = if suite == RuntimeDifferentialSuite::AsyncFunction {
+            ASYNC_FUNCTION_CANDIDATE_WORKER_COMMAND
+        } else {
+            CANDIDATE_WORKER_COMMAND
+        };
+        let arguments = [OsStr::new(worker_command)];
         let observation = match run_program_with_arguments_bounded_input(
             &worker,
             &arguments,
@@ -1574,9 +1637,11 @@ fn parse_candidate_worker_stdout(stdout: &[u8]) -> Result<Observation, String> {
     parse_observation(&value, "candidate worker stdout")
 }
 
-pub(crate) fn run_control_flow_candidate_worker() -> Result<(), String> {
+pub(crate) fn run_control_flow_candidate_worker(read_async_result: bool) -> Result<(), String> {
     let body = read_candidate_worker_body(std::io::stdin().lock())?;
-    let attempt = catch_unwind(AssertUnwindSafe(|| observe_candidate_body(&body)));
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        observe_candidate_body(&body, read_async_result)
+    }));
     let observation = match attempt {
         Ok(Ok(observation)) => observation,
         Ok(Err(error)) => return Err(truncate(&error)),
@@ -1665,7 +1730,7 @@ fn encode_observation(observation: &Observation) -> Result<String, String> {
         .map_err(|error| format!("cannot encode candidate worker result: {error}"))
 }
 
-fn observe_candidate_body(body: &str) -> Result<Observation, String> {
+fn observe_candidate_body(body: &str, read_async_result: bool) -> Result<Observation, String> {
     validate_candidate_body(body, "candidate body")?;
     let runtime_limits = RuntimeLimits::default()
         .with_max_realms(1)
@@ -1717,7 +1782,12 @@ fn observe_candidate_body(body: &str) -> Result<Observation, String> {
         .into_value()
         .into_function()
         .map_err(|error| format!("dynamic Function facade returned a non-function: {error}"))?;
-    match call_with_dynamic_function_support(&mut context, &function, &[], limits) {
+    let completion = call_with_dynamic_function_support(&mut context, &function, &[], limits);
+    let completion = match completion {
+        Ok(state) if read_async_result => read_async_candidate_result(&mut context, state, limits)?,
+        other => other,
+    };
+    match completion {
         Ok(value) => normalize_candidate_value(&value),
         Err(ExecutionError::Exception(exception)) => {
             if let Some(kind) = exception.kind() {
@@ -1748,6 +1818,33 @@ fn observe_candidate_body(body: &str) -> Result<Observation, String> {
         }
         Err(error) => Err(format!("candidate execution failed: {error}")),
     }
+}
+
+fn read_async_candidate_result(
+    context: &mut quickjs_runtime::Context<'_>,
+    state: JsValue,
+    limits: DynamicFunctionLimits,
+) -> Result<Result<JsValue, ExecutionError>, String> {
+    let parameters = [SourceFragment::new("state")];
+    let reader = construct_dynamic_function(
+        context,
+        DynamicFunctionSource::new(
+            DynamicFunctionKind::Function,
+            &parameters,
+            SourceFragment::new("return state.result;"),
+        ),
+        limits,
+    )
+    .map_err(|error| format!("async result reader construction failed: {error}"))?
+    .into_value()
+    .into_function()
+    .map_err(|error| format!("async result reader is not a function: {error}"))?;
+    Ok(call_with_dynamic_function_support(
+        context,
+        &reader,
+        &[state],
+        limits,
+    ))
 }
 
 /// Observes an explicit JavaScript throw through ordinary property access, as
@@ -2204,6 +2301,21 @@ mod tests {
     }
 
     #[test]
+    fn checked_in_async_function_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/async-function/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in async-function manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::AsyncFunction,
+        )
+        .expect("checked-in async-function manifest");
+        assert_eq!(corpus.cases.len(), 9);
+        assert_eq!(super::ASYNC_FUNCTION_REQUIRED_COVERAGE.len(), 18);
+    }
+
+    #[test]
     fn checked_in_object_legacy_manifest_satisfies_the_strict_contract() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/object-legacy/manifest.json");
@@ -2498,7 +2610,8 @@ mod tests {
     #[test]
     fn oracle_source_iife_isolates_harness_bindings_and_embeds_the_body() {
         let corpus = parse(&complete_manifest()).expect("valid manifest");
-        let source = build_oracle_source(&corpus.cases[0]).expect("oracle source");
+        let source = build_oracle_source(&corpus.cases[0], RuntimeDifferentialSuite::ControlFlow)
+            .expect("oracle source");
         assert!(source.starts_with("(function(){const __Function=Function"));
         assert!(source.contains("__Function(body)()"));
         assert!(source.contains(

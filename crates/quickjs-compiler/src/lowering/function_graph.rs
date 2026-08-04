@@ -701,7 +701,7 @@ impl CompilationContext<'_, '_, '_> {
                     id,
                 )?)
             } else {
-                if !crate::is_synchronous_dynamic_function_goal(self.unit.goal())
+                if !crate::is_supported_dynamic_function_goal(self.unit.goal())
                     || executable.index() != 0
                 {
                     return Err(LeafCompilationError::SemanticInvariant {

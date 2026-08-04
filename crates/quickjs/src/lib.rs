@@ -188,6 +188,7 @@ impl DynamicFunctionCompiler for OxcDynamicFunctionCompiler {
         let kind = match source.family() {
             DynamicFunctionFamily::Function => DynamicFunctionKind::Function,
             DynamicFunctionFamily::GeneratorFunction => DynamicFunctionKind::GeneratorFunction,
+            DynamicFunctionFamily::AsyncFunction => DynamicFunctionKind::AsyncFunction,
         };
         let mut parameter_texts = Vec::new();
         parameter_texts
@@ -449,7 +450,9 @@ fn compile_dynamic_function_source(
 ) -> Result<CompiledDynamicFunctionSource, DynamicFunctionConstructionError> {
     if !matches!(
         source.kind(),
-        DynamicFunctionKind::Function | DynamicFunctionKind::GeneratorFunction
+        DynamicFunctionKind::Function
+            | DynamicFunctionKind::GeneratorFunction
+            | DynamicFunctionKind::AsyncFunction
     ) {
         return Err(DynamicFunctionConstructionError::UnsupportedKind {
             kind: source.kind(),
@@ -463,8 +466,8 @@ fn compile_dynamic_function_source(
             let source_name: Arc<str> = match source.kind() {
                 DynamicFunctionKind::Function => Arc::from("<dynamic Function>"),
                 DynamicFunctionKind::GeneratorFunction => Arc::from("<dynamic GeneratorFunction>"),
-                DynamicFunctionKind::AsyncFunction
-                | DynamicFunctionKind::AsyncGeneratorFunction => {
+                DynamicFunctionKind::AsyncFunction => Arc::from("<dynamic AsyncFunction>"),
+                DynamicFunctionKind::AsyncGeneratorFunction => {
                     return Err(DynamicFunctionCompilerError::Planning(
                         CompilerError::Unsupported {
                             feature: quickjs_compiler::UnsupportedFeature::DynamicFunctionKind(

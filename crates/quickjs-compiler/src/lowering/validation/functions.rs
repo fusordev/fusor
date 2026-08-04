@@ -16,8 +16,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     pub(in crate::lowering) fn selected_function(
         &self,
         executable_id: ExecutableId,
-    ) -> Result<(&Executable, &Function<'arena>, OrdinaryFunctionForm, bool), LeafCompilationError>
-    {
+    ) -> Result<
+        (
+            &Executable,
+            &Function<'arena>,
+            OrdinaryFunctionForm,
+            bool,
+            bool,
+        ),
+        LeafCompilationError,
+    > {
         let executable = self.planned.plan.executable(executable_id).ok_or(
             LeafCompilationError::InvalidExecutable {
                 executable: executable_id,
@@ -54,7 +62,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 executable.span(),
             );
         };
-        if function.r#async {
+        if function.r#async && function.generator {
             return unsupported(UnsupportedLeafFeature::NonOrdinaryFunction, function.span);
         }
         let is_declaration = function.r#type == FunctionType::FunctionDeclaration;
@@ -71,12 +79,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             });
         if executable.kind()
             != (ExecutableKind::Function {
-                asynchronous: false,
+                asynchronous: function.r#async,
                 generator: function.generator,
             })
         {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "synchronous Oxc function has matching executable metadata",
+                invariant: "Oxc function has matching executable metadata",
                 span: Some(function.span),
             });
         }
@@ -86,7 +94,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 function.span,
             );
         }
-        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal())
+        if !crate::is_supported_dynamic_function_goal(self.unit.goal())
             && let Some(reference) = self
                 .planned
                 .plan
@@ -98,14 +106,20 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 reference.span(),
             );
         }
-        Ok((executable, function, form, function.generator))
+        Ok((
+            executable,
+            function,
+            form,
+            function.generator,
+            function.r#async,
+        ))
     }
 
     pub(in crate::lowering) fn selected_dynamic_function_script(
         &self,
         executable_id: ExecutableId,
     ) -> Result<(&Executable, &Program<'arena>), LeafCompilationError> {
-        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal()) {
+        if !crate::is_supported_dynamic_function_goal(self.unit.goal()) {
             return unsupported(
                 UnsupportedLeafFeature::DynamicFunctionRequiresScriptRoot,
                 self.unit.program().span,
