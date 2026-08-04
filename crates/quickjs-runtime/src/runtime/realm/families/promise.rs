@@ -6,10 +6,11 @@ use super::{
 };
 use crate::runtime::realm::{
     CONSTRUCTOR_PROTOTYPE_PROPERTY, IDENTITY_PROPERTY, NativeFunctionKind, PredefinedAtom,
-    PropertyLayout,
+    PromiseStatic, PropertyLayout,
     schema::{
         IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec,
         IntrinsicObjectId, IntrinsicObjectKind, IntrinsicStringSpec, IntrinsicValueSpec,
+        RealmNameId,
     },
 };
 
@@ -61,6 +62,18 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     ] {
         visit(ordinary(kind, name, length));
     }
+    for method in PromiseStatic::ALL {
+        let name = if method == PromiseStatic::Try {
+            IntrinsicNameSpec::Predefined(PredefinedAtom::Try)
+        } else {
+            IntrinsicNameSpec::RealmName(RealmNameId::PromiseStatic(method))
+        };
+        visit(ordinary(
+            NativeFunctionKind::PromiseStatic(method),
+            name,
+            method.length(),
+        ));
+    }
 }
 
 pub(super) fn visit_properties(visit: PropertySink<'_>) {
@@ -76,6 +89,18 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             constructor,
             IntrinsicKeySpec::PredefinedString(key),
             function,
+        ));
+    }
+    for method_id in PromiseStatic::ALL {
+        let key = if method_id == PromiseStatic::Try {
+            IntrinsicKeySpec::PredefinedString(PredefinedAtom::Try)
+        } else {
+            IntrinsicKeySpec::InternedString(RealmNameId::PromiseStatic(method_id))
+        };
+        visit(method(
+            constructor,
+            key,
+            NativeFunctionKind::PromiseStatic(method_id),
         ));
     }
     visit(data(

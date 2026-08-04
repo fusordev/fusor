@@ -109,7 +109,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Realm bootstrap is declared by validated intrinsic schemas. Atom and
   resource plans, typed shell allocation, ordered publication, and allocation-
   free reverse rollback are derived from that schema. A normalized snapshot
-  pins all 269 Realm-local identities and 839 ordered properties across Realms.
+  pins all 275 Realm-local identities and 857 ordered properties across Realms.
 - [ ] Add Proxy and remaining exotics, shape/transition interning, dense indexed
   storage, deterministic finalization, and complete reflection/diagnostics.
 
@@ -148,9 +148,11 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Intrinsic Promise core: branded Promise objects, constructor executors,
   one-shot generic capabilities, thenable assimilation, generic
   `resolve`/`reject`, species-derived `then`/`catch`/`finally`, cleanup-result
-  assimilation, and bounded FIFO jobs. Abrupt completion and observable
-  `Get`/construct/call order follow the specification; the pinned corpus is
-  19/19 with 32/32 feature tags.
+  assimilation, bounded FIFO jobs, and the full constructor static family:
+  `all`, `allSettled`, `any`, `try`, `race`, and `withResolvers`. Typed
+  continuations preserve combinator input order, generic capabilities,
+  thenable calls, remaining-element records, and abrupt iterator close. The
+  pinned corpus is 29/29 with 46/46 feature tags.
 - [ ] Complete RegExp-coupled String methods and `Array.fromAsync`; implement
   RegExp, Date, Proxy, collections, binary data/typed arrays, Atomics, weak
   references, and finalization registries.
@@ -162,9 +164,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
   Jobs, pending reactions, results, and resolving functions are explicit GC
   edges; the turn shares one fuel/interrupt budget. Tokio never defines
   JavaScript job order.
-- [ ] Complete Promise combinators and rejection tracking; then add
-  generators, async functions/generators, and their dynamic constructors on
-  verified continuations.
+- [ ] Complete Promise rejection tracking; then add generators, async
+  functions/generators, and their dynamic constructors on verified
+  continuations.
 - [ ] Implement module linking/evaluation, cycles, resolver semantics, dynamic
   import, and top-level `await`. Module parsing alone is not an execution claim.
 - [ ] Finish the Rust embedding API, ESM REPL, `qjs`, Rust-native `qjsc`,
@@ -200,6 +202,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
   `BigInt.asUintN` when the width already spans it. ECMA-262 requires reduction
   modulo 2**bits and therefore a non-negative result; this port follows the
   specification.
+- `QJS-PROMISE-001`: pinned QuickJS lets a hostile synchronous `then` invoke
+  both `Promise.allSettled` element closures. ECMA-262 requires the pair to
+  share one `[[AlreadyCalled]]` record, so this port preserves the first call.
 
 ## Completion gates
 
@@ -231,7 +236,7 @@ QuickJS `qjs` or `qjsc`. Current corpus results are:
 | Error | 35/35, 59/59 feature tags |
 | Legacy `Object.prototype` | 15/15, 15/15 feature tags |
 | Annex B String HTML | 6/6, 18/18 feature tags |
-| Promise core | 19/19, 32/32 feature tags |
+| Promise core | 29/29, 46/46 feature tags |
 
 The parser gate also fails for an uncovered pinned production, uncovered
 reachable diagnostic, falsely unreachable diagnostic, or changed oracle

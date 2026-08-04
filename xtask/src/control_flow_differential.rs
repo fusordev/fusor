@@ -384,9 +384,16 @@ const STRING_HTML_REQUIRED_COVERAGE: &[&str] = &[
 ];
 
 const PROMISE_CORE_REQUIRED_COVERAGE: &[&str] = &[
+    "all-input-order",
+    "all-settled-records",
+    "any-error-order",
     "capability-callable",
     "capability-executor-once",
     "catch-invoke",
+    "combinator-empty",
+    "combinator-iterator-close",
+    "combinator-original-abrupt",
+    "combinator-resolve-order",
     "constructor-new",
     "constructor-sync",
     "executor-callable",
@@ -400,10 +407,15 @@ const PROMISE_CORE_REQUIRED_COVERAGE: &[&str] = &[
     "generic-resolve",
     "new-target-prototype",
     "promise-brand",
+    "promise-static-metadata",
+    "promise-static-surface",
+    "promise-try",
+    "promise-try-abrupt",
     "prototype-abrupt",
     "prototype-fallback",
     "prototype-order",
     "reaction-deferred",
+    "race-invoke",
     "resolve-identity",
     "resolve-constructor-abrupt",
     "resolve-constructor-get",
@@ -416,6 +428,8 @@ const PROMISE_CORE_REQUIRED_COVERAGE: &[&str] = &[
     "then-capability",
     "then-brand",
     "thenable-get",
+    "with-resolvers",
+    "with-resolvers-generic",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2136,7 +2150,7 @@ mod tests {
             RuntimeDifferentialSuite::PromiseCore,
         )
         .expect("checked-in Promise core manifest");
-        assert_eq!(corpus.cases.len(), 19);
+        assert_eq!(corpus.cases.len(), 29);
     }
 
     #[test]

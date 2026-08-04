@@ -8,8 +8,8 @@
 use super::{
     ArrayCallback, ArrayCopier, ArrayFlatten, ArrayMutator, ArrayReduction, ArraySearch, ArraySort,
     ArrayStatic, ErrorIntrinsicKind, GlobalNumericFunction, LocaleStringMethod, MathMethod,
-    NativeFunctionKind, NumberFormat, NumberPredicate, PredefinedAtom, PropertyLayout,
-    ReflectMethod, StringMethod, UriFunction,
+    NativeFunctionKind, NumberFormat, NumberPredicate, PredefinedAtom, PromiseStatic,
+    PropertyLayout, ReflectMethod, StringMethod, UriFunction,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -107,6 +107,7 @@ pub(in crate::runtime) enum RealmNameId {
     ArrayReduction(ArrayReduction),
     ArraySplice,
     ArrayIsArray,
+    PromiseStatic(PromiseStatic),
     ArraySort(ArraySort),
     ArrayFlatten(ArrayFlatten),
     MathMethod(MathMethod),

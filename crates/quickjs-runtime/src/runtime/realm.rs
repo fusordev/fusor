@@ -42,9 +42,9 @@ use super::{
     HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
     IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, MathMethod, NativeFunction,
     NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord,
-    PredefinedAtom, PromiseIntrinsics, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId,
-    RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError,
-    RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringHtmlMethod,
+    PredefinedAtom, PromiseIntrinsics, PromiseStatic, PropertyKey, PropertyLayout, Realm,
+    RealmHandle, RealmId, RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime,
+    RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringHtmlMethod,
     StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction, VecDeque, check_limit,
     predefined_string, usize_to_u64,
 };

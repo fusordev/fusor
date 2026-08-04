@@ -115,6 +115,66 @@
       "covers": ["finally-surface", "finally-validation"],
       "body": "let names = Object.getOwnPropertyNames(Promise.prototype).join('|');\nlet metadata = Promise.prototype.finally.length + ':' + Promise.prototype.finally.name;\nlet rejectedPrimitive = false;\ntry { Promise.prototype.finally.call(1, function () {}); } catch (error) { rejectedPrimitive = error.name === 'TypeError'; }\nreturn names + '#' + metadata + '#' + rejectedPrimitive;",
       "expect": {"kind": "string", "value": "then|catch|finally|constructor#1:finally#true"}
+    },
+    {
+      "id": "promise-static-surface-and-metadata",
+      "covers": ["promise-static-surface", "promise-static-metadata"],
+      "body": "let names = Object.getOwnPropertyNames(Promise).join('|');\nlet metadata = [Promise.all, Promise.allSettled, Promise.any, Promise.try, Promise.race, Promise.withResolvers].map(function (method) { return method.name + ':' + method.length; }).join('|');\nreturn names + '#' + metadata;",
+      "expect": {"kind": "string", "value": "length|name|resolve|reject|all|allSettled|any|try|race|withResolvers|prototype#all:1|allSettled:1|any:1|try:1|race:1|withResolvers:0"}
+    },
+    {
+      "id": "promise-try-is-generic-and-routes-abrupt-completions",
+      "covers": ["promise-try", "promise-try-abrupt"],
+      "body": "let log = '';\nfunction C(executor) { let out = {}; executor(function (value) { out.value = value; }, function (reason) { out.reason = reason; }); return out; }\nlet fulfilled = Promise.try.call(C, function (a, b) { 'use strict'; log = (this === undefined) + ':' + a + ':' + b; return a + b; }, 2, 3);\nlet abrupt = Promise.try.call(C, function () { throw 'boom'; });\nlet invalid = Promise.try.call(C, 0);\nreturn log + '|' + fulfilled.value + ':' + abrupt.reason + ':' + invalid.reason.name;",
+      "expect": {"kind": "string", "value": "true:2:3|5:boom:TypeError"}
+    },
+    {
+      "id": "promise-with-resolvers-uses-a-generic-capability",
+      "covers": ["with-resolvers", "with-resolvers-generic"],
+      "body": "function C(executor) { let out = { marker: 1 }; executor(function (value) { out.value = value; }, function (reason) { out.reason = reason; }); return out; }\nlet record = Promise.withResolvers.call(C);\nlet descriptor = Object.getOwnPropertyDescriptor(record, 'promise');\nrecord.resolve(7);\nreturn Object.keys(record).join('|') + ':' + (record.promise.marker === 1) + ':' + record.promise.value + ':' + descriptor.writable + ':' + descriptor.enumerable + ':' + descriptor.configurable;",
+      "expect": {"kind": "string", "value": "promise|resolve|reject:true:7:true:true:true"}
+    },
+    {
+      "id": "empty-combinators-settle-or-remain-pending-exactly",
+      "covers": ["combinator-empty"],
+      "body": "function C(executor) { let out = { settled: false }; executor(function (value) { out.settled = true; out.value = value; }, function (reason) { out.settled = true; out.reason = reason; }); return out; }\nC.resolve = function (value) { return value; };\nlet all = Promise.all.call(C, []);\nlet settled = Promise.allSettled.call(C, []);\nlet any = Promise.any.call(C, []);\nlet race = Promise.race.call(C, []);\nreturn all.value.length + ':' + settled.value.length + ':' + any.reason.name + ':' + any.reason.errors.length + ':' + race.settled;",
+      "expect": {"kind": "string", "value": "0:0:AggregateError:0:false"}
+    },
+    {
+      "id": "promise-all-preserves-input-order-with-synchronous-thenables",
+      "covers": ["all-input-order"],
+      "body": "let log = '';\nfunction C(executor) { let out = {}; executor(function (value) { out.value = value; }, function (reason) { out.reason = reason; }); return out; }\nC.resolve = function (value) { log += 'resolve:' + value + '|'; return { then: function (onFulfilled) { log += 'then:' + value + '|'; onFulfilled(value * 2); } }; };\nlet out = Promise.all.call(C, [2, 1]);\nreturn log + '#' + out.value.join(',');",
+      "expect": {"kind": "string", "value": "resolve:2|then:2|resolve:1|then:1|#4,2"}
+    },
+    {
+      "id": "promise-all-settled-builds-ordered-records",
+      "covers": ["all-settled-records"],
+      "body": "function C(executor) { let out = {}; executor(function (value) { out.value = value; }, function (reason) { out.reason = reason; }); return out; }\nC.resolve = function (value) { return { then: function (onFulfilled, onRejected) { if (value === 1) onFulfilled('ok'); else onRejected('bad'); } }; };\nlet out = Promise.allSettled.call(C, [1, 2]);\nreturn out.value[0].status + ':' + out.value[0].value + ':' + Object.keys(out.value[0]).join(',') + '|' + out.value[1].status + ':' + out.value[1].reason + ':' + Object.keys(out.value[1]).join(',');",
+      "expect": {"kind": "string", "value": "fulfilled:ok:status,value|rejected:bad:status,reason"}
+    },
+    {
+      "id": "promise-any-retains-reasons-in-input-order",
+      "covers": ["any-error-order"],
+      "body": "let rejectors = [];\nfunction C(executor) { let out = {}; executor(function (value) { out.value = value; }, function (reason) { out.reason = reason; }); return out; }\nC.resolve = function () { return { then: function (onFulfilled, onRejected) { rejectors.push(onRejected); } }; };\nlet out = Promise.any.call(C, ['first', 'second']);\nrejectors[1]('second');\nrejectors[0]('first');\nlet descriptor = Object.getOwnPropertyDescriptor(out.reason, 'errors');\nreturn out.reason.name + ':' + out.reason.errors.join(',') + ':' + Object.getOwnPropertyNames(out.reason).join(',') + ':' + descriptor.writable + ':' + descriptor.enumerable + ':' + descriptor.configurable;",
+      "expect": {"kind": "string", "value": "AggregateError:first,second:errors:true:false:true"}
+    },
+    {
+      "id": "promise-race-invokes-each-resolved-thenable",
+      "covers": ["race-invoke"],
+      "body": "let log = '';\nfunction C(executor) { let out = {}; executor(function (value) { log += 'settle:' + value + '|'; out.value = value; }, function (reason) { out.reason = reason; }); return out; }\nC.resolve = function (value) { return { then: function (onFulfilled) { log += 'then:' + value + '|'; onFulfilled(value); } }; };\nlet out = Promise.race.call(C, [1, 2]);\nreturn log + '#' + out.value;",
+      "expect": {"kind": "string", "value": "then:1|settle:1|then:2|settle:2|#2"}
+    },
+    {
+      "id": "promise-combinator-closes-after-resolve-abrupt",
+      "covers": ["combinator-resolve-order", "combinator-iterator-close"],
+      "body": "let log = '';\nfunction C(executor) { log += 'construct|'; let out = {}; executor(function (value) { out.value = value; }, function (reason) { log += 'reject:' + reason + '|'; out.reason = reason; }); return out; }\nObject.defineProperty(C, 'resolve', { get: function () { log += 'resolve-get|'; return function (value) { log += 'resolve-call:' + value + '|'; throw 'boom'; }; } });\nlet iterable = { get [Symbol.iterator]() { log += 'iterator-get|'; return function () { log += 'iterator-call|'; let done = false; return { next: function () { log += 'next|'; if (done) return { done: true }; done = true; return { value: 1, done: false }; }, return: function () { log += 'return|'; return {}; } }; }; } };\nlet out = Promise.all.call(C, iterable);\nreturn log + '#' + out.reason;",
+      "expect": {"kind": "string", "value": "construct|resolve-get|iterator-get|iterator-call|next|resolve-call:1|return|reject:boom|#boom"}
+    },
+    {
+      "id": "promise-combinator-close-preserves-original-abrupt",
+      "covers": ["combinator-original-abrupt"],
+      "body": "let log = '';\nfunction C(executor) { let out = {}; executor(function (value) { out.value = value; }, function (reason) { out.reason = reason; }); return out; }\nC.resolve = function () { throw 'original'; };\nlet iterable = { [Symbol.iterator]: function () { let done = false; return { next: function () { if (done) return { done: true }; done = true; return { value: 1, done: false }; }, get return() { log += 'return-get|'; throw 'close-throw'; } }; } };\nlet out = Promise.all.call(C, iterable);\nreturn log + out.reason;",
+      "expect": {"kind": "string", "value": "return-get|original"}
     }
   ]
 }

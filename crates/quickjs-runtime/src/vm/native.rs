@@ -150,6 +150,7 @@ pub(super) fn take_iterator_abrupt_handler(
                 | NativeContinuation::FromEntries(_)
                 | NativeContinuation::GroupBy(_)
                 | NativeContinuation::ArrayStatic(_)
+                | NativeContinuation::PromiseCombinator(_)
                 | NativeContinuation::IteratorAppend(_)
                 | NativeContinuation::IteratorClose(_)
         ) || matches!(
@@ -197,6 +198,13 @@ pub(super) fn resume_iterator_abrupt_continuations(
             NativeContinuation::Promise(state) => {
                 resume_promise_abrupt(runtime, state, pending, return_to, execution_budget)
             }
+            NativeContinuation::PromiseCombinator(state) => resume_promise_combinator_abrupt(
+                runtime,
+                *state,
+                pending,
+                return_to,
+                execution_budget,
+            ),
             handler => {
                 resume_iterator_abrupt(runtime, handler, pending, return_to, execution_budget)
             }
@@ -521,6 +529,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::PromiseCombinator(state) => advance_promise_combinator(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::ReflectSet => NativeDispatch::Immediate(StoredValue::Boolean(true)),
             NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
         };
@@ -639,6 +654,7 @@ fn resolve_native_dispatch_inner(
         let resolving = node.promise_resolving().cloned();
         let capability_executor = node.promise_capability_executor().cloned();
         let promise_finally = node.promise_finally().cloned();
+        let promise_combinator_element = node.promise_combinator_element().cloned();
         if native.is_none()
             && let Some(bound) = node.bound()
         {
@@ -859,6 +875,70 @@ fn resolve_native_dispatch_inner(
                 | NativeDispatch::CopyDataPropertiesDone => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "Promise finally function produced a structured result",
+                    }
+                    .into());
+                }
+            };
+            continue;
+        }
+        if let Some(element) = promise_combinator_element {
+            apply_native_pre_call(runtime, call.pre_call.as_ref())?;
+            let outcome = dispatch_promise_combinator_element(
+                runtime,
+                &element,
+                call.arguments,
+                call.return_to,
+                call.origin,
+            );
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(
+                    NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending),
+                ) => {
+                    dispatch = resume_iterator_abrupt_continuations(
+                        runtime,
+                        call.continuations,
+                        pending,
+                        call.return_to,
+                        active_root_frames,
+                        active_frames,
+                        active_frame_values,
+                        compiler,
+                        execution_budget,
+                    )?;
+                    continue;
+                }
+                Err(NativeFailure::Execution(error)) => {
+                    return Err(NativeFailure::Execution(error));
+                }
+            };
+            dispatch = match outcome {
+                NativeDispatch::Immediate(value) => resume_native_continuations(
+                    runtime,
+                    call.continuations,
+                    value,
+                    call.return_to,
+                    active_root_frames,
+                    active_frames,
+                    active_frame_values,
+                    compiler,
+                    execution_budget,
+                )?,
+                NativeDispatch::Call(mut inner) => {
+                    prepend_native_continuations(&mut inner, call.continuations)?;
+                    NativeDispatch::Call(inner)
+                }
+                NativeDispatch::Frame(mut frame) => {
+                    attach_native_continuations(&mut frame, call.continuations)?;
+                    NativeDispatch::Frame(frame)
+                }
+                NativeDispatch::Pair(_, _)
+                | NativeDispatch::ForOfRecord { .. }
+                | NativeDispatch::ForOfStep { .. }
+                | NativeDispatch::ForOfClosed
+                | NativeDispatch::CopyDataPropertiesDone => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Promise combinator element function produced a structured result",
                     }
                     .into());
                 }
@@ -2398,6 +2478,15 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::PromiseReject => {
             begin_promise_reject(runtime, native, inputs, return_to, origin)
         }
+        NativeFunctionKind::PromiseStatic(method) => begin_promise_static(
+            runtime,
+            native,
+            method,
+            inputs,
+            return_to,
+            origin,
+            execution_budget,
+        ),
         NativeFunctionKind::PromisePrototypeThen => {
             begin_promise_then(runtime, native, inputs, return_to, origin, execution_budget)
         }

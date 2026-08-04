@@ -6,16 +6,16 @@ use super::{
     IntrinsicGetContinuation, JsStackFrame, JsString, NativeCall, NativeContinuation,
     NativeDispatch, NativeFailure, NativeFunction, ObjectId, OrdinaryDynamicFunctionCompiler,
     PendingException, PendingExceptionPayload, PredefinedAtom, PromiseCapabilityCapture,
-    PromiseCapabilityExecutor, PromiseCapabilityPurpose, PromiseContinuation,
-    PromiseFinallyFunction, PromiseFinallyState, PromiseFinallyThenState, PromiseFinallyThunkKind,
-    PromiseJob, PromiseResolvingFunction, PromiseResolvingKind, PromiseThenState,
-    PropertyReadOutcome, Rc, RealmId, RefCell, Runtime, RuntimeResource, StoredValue,
-    attach_native_continuations, charge_heap_property_lookup, check_execution_limit,
-    execute_root_dispatch_with_budget, function_is_constructor,
-    intrinsic_getter_call_with_reserved_continuation, native_function_host_origin,
-    prepend_native_continuations, read_heap_property_for_receiver, read_static_property,
-    reserve_intrinsic_get_continuation, resolve_native_dispatch, trace_stored_value_root,
-    usize_to_u64,
+    PromiseCapabilityExecutor, PromiseCapabilityPurpose, PromiseCombinatorKind,
+    PromiseContinuation, PromiseFinallyFunction, PromiseFinallyState, PromiseFinallyThenState,
+    PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction, PromiseResolvingKind,
+    PromiseStatic, PromiseThenState, PropertyReadOutcome, Rc, RealmId, RefCell, Runtime,
+    RuntimeResource, StoredValue, attach_native_continuations, begin_promise_combinator,
+    charge_heap_property_lookup, check_execution_limit, execute_root_dispatch_with_budget,
+    function_is_constructor, intrinsic_getter_call_with_reserved_continuation,
+    native_function_host_origin, prepend_native_continuations, read_heap_property_for_receiver,
+    read_static_property, reserve_intrinsic_get_continuation, resolve_native_dispatch,
+    trace_stored_value_root, usize_to_u64,
 };
 use crate::object::{
     HeapObject, PromiseCapability, PromiseReaction, PromiseReactionKind, PromiseState,
@@ -148,6 +148,72 @@ pub(super) fn begin_promise_resolve(
     )
 }
 
+pub(super) fn begin_promise_static(
+    runtime: &mut Runtime,
+    native: NativeFunction,
+    method: PromiseStatic,
+    mut inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+    _execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = origin.unwrap_or_else(native_function_host_origin);
+    let constructor =
+        promise_constructor_receiver(runtime, native.realm, &inputs.receiver, &origin)?;
+    match method {
+        PromiseStatic::Try => {
+            let callback = inputs.arguments.take_first_or_undefined();
+            let arguments = inputs.arguments.into_remaining_values();
+            begin_new_promise_capability(
+                runtime,
+                constructor,
+                native.realm,
+                PromiseCapabilityPurpose::Try {
+                    callback,
+                    arguments,
+                },
+                return_to,
+                origin,
+            )
+        }
+        PromiseStatic::WithResolvers => begin_new_promise_capability(
+            runtime,
+            constructor,
+            native.realm,
+            PromiseCapabilityPurpose::WithResolvers,
+            return_to,
+            origin,
+        ),
+        PromiseStatic::All
+        | PromiseStatic::AllSettled
+        | PromiseStatic::Any
+        | PromiseStatic::Race => {
+            let iterable = inputs.arguments.take_first_or_undefined();
+            let kind = match method {
+                PromiseStatic::All => PromiseCombinatorKind::All,
+                PromiseStatic::AllSettled => PromiseCombinatorKind::AllSettled,
+                PromiseStatic::Any => PromiseCombinatorKind::Any,
+                PromiseStatic::Race => PromiseCombinatorKind::Race,
+                PromiseStatic::Try | PromiseStatic::WithResolvers => {
+                    unreachable!("non-combinator Promise static was matched above")
+                }
+            };
+            begin_new_promise_capability(
+                runtime,
+                constructor,
+                native.realm,
+                PromiseCapabilityPurpose::Combinator {
+                    constructor,
+                    kind,
+                    iterable,
+                },
+                return_to,
+                origin,
+            )
+        }
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "PromiseResolve carries its constructor, resolution value, caller completion, source Realm, and execution authority"
@@ -276,6 +342,10 @@ fn begin_new_promise_capability(
     }))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "NewPromiseCapability completion carries its capture, purpose, result, Realm, caller completion, source origin, and execution authority"
+)]
 fn finish_new_promise_capability(
     runtime: &mut Runtime,
     capture: &Rc<RefCell<PromiseCapabilityCapture>>,
@@ -284,6 +354,7 @@ fn finish_new_promise_capability(
     purpose: PromiseCapabilityPurpose,
     promise: StoredValue,
     return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if !matches!(promise, StoredValue::Function(_) | StoredValue::Object(_)) {
         return promise_type_error(
@@ -325,10 +396,68 @@ fn finish_new_promise_capability(
             perform_promise_then(runtime, promise, on_fulfilled, on_rejected, capability)?;
             Ok(NativeDispatch::Immediate(result))
         }
+        PromiseCapabilityPurpose::Try {
+            callback,
+            arguments,
+        } => begin_promise_try_callback(
+            runtime, realm, capability, &callback, arguments, return_to, origin,
+        ),
+        PromiseCapabilityPurpose::Combinator {
+            constructor,
+            kind,
+            iterable,
+        } => begin_promise_combinator(
+            runtime,
+            realm,
+            constructor,
+            kind,
+            iterable,
+            capability,
+            return_to,
+            origin,
+            execution_budget,
+        ),
+        PromiseCapabilityPurpose::WithResolvers => Ok(NativeDispatch::Immediate(
+            StoredValue::Object(runtime.allocate_promise_capability_record(realm, capability)?),
+        )),
     }
 }
 
-fn call_capability_settlement(
+fn begin_promise_try_callback(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    capability: PromiseCapability,
+    callback: &StoredValue,
+    arguments: Vec<StoredValue>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(callback) = callback else {
+        let reason = StoredValue::Object(runtime.materialize_error_object(
+            realm,
+            ExceptionKind::TypeError,
+            JsString::from_utf8("Promise.try callback is not callable")?,
+            None,
+        )?);
+        return call_capability_settlement(capability, false, reason, return_to, origin);
+    };
+    Ok(NativeDispatch::Call(NativeCall {
+        function: *callback,
+        receiver: StoredValue::Undefined,
+        arguments: CallArguments::from_values(arguments),
+        return_to,
+        origin: origin.clone(),
+        continuations: one_promise_continuation(PromiseContinuation::TryCallback {
+            capability,
+            origin,
+        })?,
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    }))
+}
+
+pub(super) fn call_capability_settlement(
     capability: PromiseCapability,
     resolve: bool,
     argument: StoredValue,
@@ -350,6 +479,31 @@ fn call_capability_settlement(
         continuations: one_promise_continuation(PromiseContinuation::CapabilitySettlement {
             promise: capability.promise,
         })?,
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    }))
+}
+
+pub(super) fn call_promise_capability_direct(
+    capability: &PromiseCapability,
+    resolve: bool,
+    argument: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let function = if resolve {
+        capability.resolve
+    } else {
+        capability.reject
+    };
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver: StoredValue::Undefined,
+        arguments: promise_call_arguments([argument])?,
+        return_to,
+        origin,
+        continuations: Vec::new(),
         pre_call: None,
         new_target: None,
         native_caller: None,
@@ -1433,7 +1587,14 @@ pub(super) fn advance_promise_continuation(
             origin,
             purpose,
         } => finish_new_promise_capability(
-            runtime, &capture, realm, origin, purpose, value, return_to,
+            runtime,
+            &capture,
+            realm,
+            origin,
+            purpose,
+            value,
+            return_to,
+            execution_budget,
         ),
         PromiseContinuation::CapabilitySettlement { promise } => {
             Ok(NativeDispatch::Immediate(promise))
@@ -1515,6 +1676,9 @@ pub(super) fn advance_promise_continuation(
         PromiseContinuation::ThenableCall { .. } => {
             Ok(NativeDispatch::Immediate(StoredValue::Undefined))
         }
+        PromiseContinuation::TryCallback { capability, origin } => {
+            call_capability_settlement(capability, true, value, return_to, origin)
+        }
     }
 }
 
@@ -1522,7 +1686,7 @@ pub(super) fn resume_promise_abrupt(
     runtime: &mut Runtime,
     state: PromiseContinuation,
     pending: PendingException,
-    _return_to: Option<CallReturn>,
+    return_to: Option<CallReturn>,
     _execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if matches!(
@@ -1574,11 +1738,14 @@ pub(super) fn resume_promise_abrupt(
             reject_through_resolving_function(runtime, reject, reason)?;
             Ok(NativeDispatch::Immediate(StoredValue::Undefined))
         }
+        PromiseContinuation::TryCallback { capability, origin } => {
+            call_capability_settlement(capability, false, reason, return_to, origin)
+        }
         PromiseContinuation::CatchThenGet { .. } => unreachable!("checked before materializing"),
     }
 }
 
-fn pending_exception_value(
+pub(super) fn pending_exception_value(
     runtime: &mut Runtime,
     pending: PendingException,
 ) -> Result<StoredValue, NativeFailure> {
@@ -1707,7 +1874,7 @@ fn one_promise_continuation(
     Ok(continuations)
 }
 
-fn promise_call_arguments<const N: usize>(
+pub(super) fn promise_call_arguments<const N: usize>(
     values: [StoredValue; N],
 ) -> Result<CallArguments, NativeFailure> {
     let mut arguments = Vec::new();
@@ -1778,6 +1945,24 @@ impl PromiseContinuation {
                             mark(CollectionRoot::Heap(HeapReference::Function(*handler)));
                         }
                     }
+                    PromiseCapabilityPurpose::Try {
+                        callback,
+                        arguments,
+                    } => {
+                        trace_stored_value_root(callback, mark);
+                        for argument in arguments {
+                            trace_stored_value_root(argument, mark);
+                        }
+                    }
+                    PromiseCapabilityPurpose::Combinator {
+                        constructor,
+                        iterable,
+                        ..
+                    } => {
+                        mark(CollectionRoot::Heap(HeapReference::Function(*constructor)));
+                        trace_stored_value_root(iterable, mark);
+                    }
+                    PromiseCapabilityPurpose::WithResolvers => {}
                 }
             }
             Self::CapabilitySettlement { promise } => {
@@ -1825,14 +2010,17 @@ impl PromiseContinuation {
                 trace_stored_value_root(receiver, mark);
                 trace_stored_value_root(on_rejected, mark);
             }
-            Self::ReactionHandler { capability, .. } => {
+            Self::ReactionHandler { capability, .. } | Self::TryCallback { capability, .. } => {
                 trace_promise_capability(capability, mark);
             }
         }
     }
 }
 
-fn trace_promise_capability(capability: &PromiseCapability, mark: &mut dyn FnMut(CollectionRoot)) {
+pub(super) fn trace_promise_capability(
+    capability: &PromiseCapability,
+    mark: &mut dyn FnMut(CollectionRoot),
+) {
     trace_stored_value_root(&capability.promise, mark);
     for function in [capability.resolve, capability.reject] {
         mark(CollectionRoot::Heap(HeapReference::Function(function)));

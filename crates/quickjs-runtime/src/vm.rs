@@ -61,10 +61,11 @@ use crate::{
         InstalledCode, InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod,
         MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
         PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
-        PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
-        PromiseResolvingKind, RealmGlobalBindingState, ReflectMethod, SetPrototypeOutcome,
-        StringArgument, StringMethod, UriFunction, array_length_from_number, check_execution_limit,
-        global_declaration_error, usize_to_u64,
+        PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
+        PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
+        PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
+        ReflectMethod, SetPrototypeOutcome, StringArgument, StringMethod, UriFunction,
+        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -99,6 +100,7 @@ mod math_sum_precise;
 mod native;
 mod object_intrinsics;
 mod promise;
+mod promise_combinators;
 mod properties;
 mod reflect;
 mod stack;
@@ -117,8 +119,8 @@ use {
     bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*,
     errors::*, exceptions::*, execution::*, from_entries::*, group_by::*, iterators::*,
     json_parse::*, json_stringify::*, locale_string::*, math::*, math_sum_precise::*, native::*,
-    object_intrinsics::*, promise::*, properties::*, reflect::*, stack::*, string_methods::*,
-    string_raw::*, string_replace::*, uri::*,
+    object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*, stack::*,
+    string_methods::*, string_raw::*, string_replace::*, uri::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -340,6 +342,7 @@ enum NativeContinuation {
     DefineProperties(Box<DefinePropertiesContinuation>),
     InstanceOf(InstanceOfContinuation),
     Promise(PromiseContinuation),
+    PromiseCombinator(Box<PromiseCombinatorContinuation>),
     /// Ignore an accessor setter's return value and complete `Reflect.set`
     /// with the internal-method success Boolean.
     ReflectSet,
@@ -390,6 +393,7 @@ impl NativeContinuation {
             Self::DefineProperties(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
             Self::Promise(state) => state.retained_values(),
+            Self::PromiseCombinator(state) => state.retained_values(),
             Self::ReflectSet | Self::FunctionCall => 0,
         }
     }
@@ -407,6 +411,16 @@ enum PromiseCapabilityPurpose {
         on_fulfilled: Option<FunctionId>,
         on_rejected: Option<FunctionId>,
     },
+    Try {
+        callback: StoredValue,
+        arguments: Vec<StoredValue>,
+    },
+    Combinator {
+        constructor: FunctionId,
+        kind: PromiseCombinatorKind,
+        iterable: StoredValue,
+    },
+    WithResolvers,
 }
 
 impl PromiseCapabilityPurpose {
@@ -420,6 +434,15 @@ impl PromiseCapabilityPurpose {
             } => 1_u64
                 .saturating_add(u64::from(on_fulfilled.is_some()))
                 .saturating_add(u64::from(on_rejected.is_some())),
+            Self::Try {
+                callback,
+                arguments,
+            } => usize_to_u64(arguments.len())
+                .saturating_add(u64::from(callback.heap_reference().is_some())),
+            Self::Combinator { iterable, .. } => {
+                1_u64.saturating_add(u64::from(iterable.heap_reference().is_some()))
+            }
+            Self::WithResolvers => 0,
         }
     }
 }
@@ -518,6 +541,10 @@ enum PromiseContinuation {
         promise: ObjectId,
         reject: FunctionId,
     },
+    TryCallback {
+        capability: crate::object::PromiseCapability,
+        origin: JsStackFrame,
+    },
 }
 
 impl PromiseContinuation {
@@ -533,6 +560,7 @@ impl PromiseContinuation {
             | Self::FinallyResolvedThenGet { .. } => 2,
             Self::ResolveThenGet { .. }
             | Self::ReactionHandler { .. }
+            | Self::TryCallback { .. }
             | Self::FinallyThenGet(_) => 3,
             Self::NewCapabilityConstruct {
                 capture, purpose, ..
@@ -1727,6 +1755,7 @@ fn trace_native_continuation_roots(
             trace_instance_of_roots(state, mark);
         }
         NativeContinuation::Promise(state) => state.trace_roots(mark),
+        NativeContinuation::PromiseCombinator(state) => state.trace_roots(mark),
         NativeContinuation::ReflectSet | NativeContinuation::FunctionCall => {}
     }
 }
@@ -2387,6 +2416,57 @@ impl Context<'_> {
                     completion,
                 );
             }
+            if let Some(element) = node.promise_combinator_element().cloned() {
+                let materialized = if let Some(arguments) = owned_arguments {
+                    arguments
+                } else {
+                    let mut stored: Vec<StoredValue> = Vec::new();
+                    stored.try_reserve_exact(arguments.len()).map_err(|_| {
+                        ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::FrameValues,
+                            additional: arguments.len(),
+                        }
+                    })?;
+                    for argument in arguments {
+                        stored.push(argument.stored()?.duplicate());
+                    }
+                    stored
+                };
+                let prepared_frames = Vec::new();
+                let dispatch = dispatch_promise_combinator_element(
+                    self.runtime,
+                    &element,
+                    CallArguments::from_values(materialized),
+                    None,
+                    native_function_host_origin(),
+                );
+                let dispatch = match dispatch {
+                    Ok(dispatch) => resolve_native_dispatch(
+                        self.runtime,
+                        dispatch,
+                        &prepared_frames,
+                        0,
+                        0,
+                        compiler,
+                        &mut execution_budget,
+                    ),
+                    Err(error) => Err(error),
+                };
+                let completion = execute_root_dispatch_with_budget(
+                    self.runtime,
+                    dispatch,
+                    prepared_frames,
+                    compiler,
+                    &mut execution_budget,
+                )
+                .and_then(|value| self.runtime.public_value(value));
+                return complete_host_turn(
+                    self.runtime,
+                    compiler,
+                    &mut execution_budget,
+                    completion,
+                );
+            }
             let Some(bound) = node.bound() else {
                 break;
             };
@@ -2620,6 +2700,7 @@ fn execute_frame_loop(
                 let mut resolving = None;
                 let mut capability_executor = None;
                 let mut promise_finally = None;
+                let mut promise_combinator_element = None;
                 loop {
                     let node =
                         runtime
@@ -2644,6 +2725,10 @@ fn execute_frame_loop(
                     }
                     if let Some(value) = node.promise_finally().cloned() {
                         promise_finally = Some(value);
+                        break;
+                    }
+                    if let Some(value) = node.promise_combinator_element().cloned() {
+                        promise_combinator_element = Some(value);
                         break;
                     }
                     let Some(bound) = node.bound() else {
@@ -3129,6 +3214,109 @@ fn execute_frame_loop(
                         ) => {
                             return Err(EngineFault::RuntimeInvariant {
                                 message: "Promise finally function produced a structured result",
+                            }
+                            .into());
+                        }
+                        Err(
+                            NativeFailure::Abrupt(pending)
+                            | NativeFailure::AbruptAfterTransient(pending),
+                        ) => {
+                            dispatch_pending_exception(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                pending,
+                                compiler,
+                                execution_budget,
+                            )?;
+                        }
+                        Err(NativeFailure::Execution(error)) => return Err(error),
+                    }
+                    continue;
+                }
+                if let Some(element) = promise_combinator_element {
+                    if construction {
+                        let pending = PendingException {
+                            realm: operation_realm,
+                            payload: PendingExceptionPayload::EngineError {
+                                kind: ExceptionKind::TypeError,
+                                message: function_not_constructor_message(runtime, function)?,
+                            },
+                            origin,
+                        };
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
+                        continue;
+                    }
+                    let active_frames = active_execution_frames(frames);
+                    frames
+                        .try_reserve(1)
+                        .map_err(|_| ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::Frames,
+                            additional: 1,
+                        })?;
+                    let inputs = take_call_inputs(
+                        frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?,
+                        function,
+                        inputs,
+                    )?;
+                    let dispatch = dispatch_promise_combinator_element(
+                        runtime,
+                        &element,
+                        inputs.arguments,
+                        Some(return_to),
+                        origin,
+                    );
+                    let dispatch = match dispatch {
+                        Ok(dispatch) => resolve_native_dispatch(
+                            runtime,
+                            dispatch,
+                            frames,
+                            active_frames,
+                            *active_frame_values,
+                            compiler,
+                            execution_budget,
+                        ),
+                        Err(error) => Err(error),
+                    };
+                    match dispatch {
+                        Ok(NativeDispatch::Immediate(value)) => {
+                            let parent =
+                                frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                                    function: FunctionTemplateId::new(0),
+                                    instruction: 0,
+                                })?;
+                            push_call_result(parent, value, return_to)?;
+                        }
+                        Ok(NativeDispatch::Frame(child)) => {
+                            *active_frame_values =
+                                active_frame_values.saturating_add(child.reserved_values);
+                            frames.push(child);
+                        }
+                        Ok(NativeDispatch::Call(_)) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "Promise combinator element dispatch remained unresolved",
+                            }
+                            .into());
+                        }
+                        Ok(
+                            NativeDispatch::Pair(_, _)
+                            | NativeDispatch::ForOfRecord { .. }
+                            | NativeDispatch::ForOfStep { .. }
+                            | NativeDispatch::ForOfClosed
+                            | NativeDispatch::CopyDataPropertiesDone,
+                        ) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "Promise combinator element produced a structured result",
                             }
                             .into());
                         }

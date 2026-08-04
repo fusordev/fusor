@@ -46,8 +46,8 @@ use crate::{
     interrupt::InterruptState,
     object::{
         ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, ForInIterator, ForInSnapshot,
-        HeapObject, IntegrityLevel, KeyPhases, ObjectRecord, OwnProperty, PromiseReaction,
-        PropertyDeletion, StringIterator,
+        HeapObject, IntegrityLevel, KeyPhases, ObjectRecord, OwnProperty, PromiseCapability,
+        PromiseReaction, PropertyDeletion, StringIterator,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
@@ -1163,10 +1163,52 @@ pub(crate) enum NativeFunctionKind {
     PromiseConstructor,
     PromiseResolve,
     PromiseReject,
+    PromiseStatic(PromiseStatic),
     PromiseSpeciesGetter,
     PromisePrototypeThen,
     PromisePrototypeCatch,
     PromisePrototypeFinally,
+}
+
+/// The remaining methods installed on the `Promise` constructor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseStatic {
+    All,
+    AllSettled,
+    Any,
+    Try,
+    Race,
+    WithResolvers,
+}
+
+impl PromiseStatic {
+    /// Pinned `QuickJS` 2026-06-04 own-property publication order.
+    pub(crate) const ALL: [Self; 6] = [
+        Self::All,
+        Self::AllSettled,
+        Self::Any,
+        Self::Try,
+        Self::Race,
+        Self::WithResolvers,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::AllSettled => "allSettled",
+            Self::Any => "any",
+            Self::Try => "try",
+            Self::Race => "race",
+            Self::WithResolvers => "withResolvers",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::WithResolvers => 0,
+            Self::All | Self::AllSettled | Self::Any | Self::Try | Self::Race => 1,
+        }
+    }
 }
 
 /// The synchronous generic factories installed on the `Array` constructor.
@@ -1292,6 +1334,7 @@ pub(crate) enum FunctionImplementation {
     PromiseResolving(PromiseResolvingFunction),
     PromiseCapabilityExecutor(PromiseCapabilityExecutor),
     PromiseFinally(PromiseFinallyFunction),
+    PromiseCombinatorElement(PromiseCombinatorElementFunction),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1399,6 +1442,49 @@ impl Clone for PromiseFinallyFunction {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseCombinatorKind {
+    All,
+    AllSettled,
+    Any,
+    Race,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseCombinatorElementKind {
+    AllResolve,
+    AllSettledResolve,
+    AllSettledReject,
+    AnyReject,
+}
+
+pub(crate) struct PromiseCombinatorShared {
+    pub(crate) kind: PromiseCombinatorKind,
+    pub(crate) capability: PromiseCapability,
+    pub(crate) values: Vec<Option<StoredValue>>,
+    pub(crate) remaining: u64,
+}
+
+pub(crate) struct PromiseCombinatorElementFunction {
+    pub(crate) realm: RealmId,
+    pub(crate) kind: PromiseCombinatorElementKind,
+    pub(crate) index: usize,
+    pub(crate) shared: Rc<RefCell<PromiseCombinatorShared>>,
+    pub(crate) already_called: Rc<Cell<bool>>,
+}
+
+impl Clone for PromiseCombinatorElementFunction {
+    fn clone(&self) -> Self {
+        Self {
+            realm: self.realm,
+            kind: self.kind,
+            index: self.index,
+            shared: Rc::clone(&self.shared),
+            already_called: Rc::clone(&self.already_called),
+        }
+    }
+}
+
 pub(crate) enum PromiseJob {
     Reaction {
         reaction: PromiseReaction,
@@ -1451,6 +1537,11 @@ impl HeapFunction {
                     message: "Promise finally function reached the bytecode execution path",
                 })
             }
+            FunctionImplementation::PromiseCombinatorElement(_) => {
+                Err(crate::EngineFault::RuntimeInvariant {
+                    message: "Promise combinator element function reached the bytecode execution path",
+                })
+            }
         }
     }
 
@@ -1460,7 +1551,8 @@ impl HeapFunction {
             | FunctionImplementation::Bound(_)
             | FunctionImplementation::PromiseResolving(_)
             | FunctionImplementation::PromiseCapabilityExecutor(_)
-            | FunctionImplementation::PromiseFinally(_) => None,
+            | FunctionImplementation::PromiseFinally(_)
+            | FunctionImplementation::PromiseCombinatorElement(_) => None,
             FunctionImplementation::Native(function) => Some(function),
         }
     }
@@ -1471,7 +1563,8 @@ impl HeapFunction {
             | FunctionImplementation::Native(_)
             | FunctionImplementation::PromiseResolving(_)
             | FunctionImplementation::PromiseCapabilityExecutor(_)
-            | FunctionImplementation::PromiseFinally(_) => None,
+            | FunctionImplementation::PromiseFinally(_)
+            | FunctionImplementation::PromiseCombinatorElement(_) => None,
             FunctionImplementation::Bound(bound) => Some(bound),
         }
     }
@@ -1483,7 +1576,8 @@ impl HeapFunction {
             | FunctionImplementation::Native(_)
             | FunctionImplementation::Bound(_)
             | FunctionImplementation::PromiseCapabilityExecutor(_)
-            | FunctionImplementation::PromiseFinally(_) => None,
+            | FunctionImplementation::PromiseFinally(_)
+            | FunctionImplementation::PromiseCombinatorElement(_) => None,
         }
     }
 
@@ -1494,7 +1588,8 @@ impl HeapFunction {
             | FunctionImplementation::Native(_)
             | FunctionImplementation::Bound(_)
             | FunctionImplementation::PromiseResolving(_)
-            | FunctionImplementation::PromiseFinally(_) => None,
+            | FunctionImplementation::PromiseFinally(_)
+            | FunctionImplementation::PromiseCombinatorElement(_) => None,
         }
     }
 
@@ -1505,7 +1600,20 @@ impl HeapFunction {
             | FunctionImplementation::Native(_)
             | FunctionImplementation::Bound(_)
             | FunctionImplementation::PromiseResolving(_)
-            | FunctionImplementation::PromiseCapabilityExecutor(_) => None,
+            | FunctionImplementation::PromiseCapabilityExecutor(_)
+            | FunctionImplementation::PromiseCombinatorElement(_) => None,
+        }
+    }
+
+    pub(crate) fn promise_combinator_element(&self) -> Option<&PromiseCombinatorElementFunction> {
+        match &self.implementation {
+            FunctionImplementation::PromiseCombinatorElement(function) => Some(function),
+            FunctionImplementation::Bytecode(_)
+            | FunctionImplementation::Native(_)
+            | FunctionImplementation::Bound(_)
+            | FunctionImplementation::PromiseResolving(_)
+            | FunctionImplementation::PromiseCapabilityExecutor(_)
+            | FunctionImplementation::PromiseFinally(_) => None,
         }
     }
 }

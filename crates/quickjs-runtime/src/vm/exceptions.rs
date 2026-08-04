@@ -403,6 +403,7 @@ pub(super) fn dispatch_pending_exception(
                         | NativeContinuation::FromEntries(_)
                         | NativeContinuation::GroupBy(_)
                         | NativeContinuation::ArrayStatic(_)
+                        | NativeContinuation::PromiseCombinator(_)
                         | NativeContinuation::IteratorAppend(_)
                         | NativeContinuation::IteratorClose(_)
                 ) || matches!(

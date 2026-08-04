@@ -95,10 +95,9 @@ fn compiler_control_flow_certificate_has_a_complete_stable_snapshot() {
     let verified = verify_compiler_control_flow(body, VerificationLimits::default())
         .expect("the characterization body must verify");
 
-    assert_eq!(
-        snapshot_verified_control_flow(&verified),
-        include_str!("support/snapshots/compiler-control-flow.txt")
-    );
+    let expected =
+        include_str!("support/snapshots/compiler-control-flow.txt").replace("\r\n", "\n");
+    assert_eq!(snapshot_verified_control_flow(&verified), expected);
 }
 
 #[test]

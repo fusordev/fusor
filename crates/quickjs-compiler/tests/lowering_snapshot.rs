@@ -75,7 +75,8 @@ fn complete_lowering_artifacts_have_a_stable_snapshot() {
         &compile_dynamic_function_tree(),
     ));
 
-    let expected = include_str!("support/snapshots/complete-lowering-artifacts.txt");
+    let expected =
+        include_str!("support/snapshots/complete-lowering-artifacts.txt").replace("\r\n", "\n");
     if snapshot != expected {
         let first_difference = snapshot
             .bytes()

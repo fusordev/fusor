@@ -886,7 +886,8 @@ pub(super) fn function_is_constructor(
             FunctionImplementation::Native(native) => return Ok(native.kind.is_constructor()),
             FunctionImplementation::PromiseResolving(_)
             | FunctionImplementation::PromiseCapabilityExecutor(_)
-            | FunctionImplementation::PromiseFinally(_) => return Ok(false),
+            | FunctionImplementation::PromiseFinally(_)
+            | FunctionImplementation::PromiseCombinatorElement(_) => return Ok(false),
             FunctionImplementation::Bound(bound) => {
                 if remaining == 0 {
                     return Err(EngineFault::RuntimeInvariant {

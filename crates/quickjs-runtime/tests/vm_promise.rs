@@ -108,7 +108,7 @@ fn turn_result(setup: &str, projection: &str) -> Result<String, ExecutionError> 
 fn promise_core_surface_and_constructor_validation_match_the_specification() {
     assert_eq!(
         rendered("Object.getOwnPropertyNames(Promise).join('|')"),
-        "length|name|resolve|reject|prototype"
+        "length|name|resolve|reject|all|allSettled|any|try|race|withResolvers|prototype"
     );
     assert_eq!(
         rendered("Object.getOwnPropertyNames(Promise.prototype).join('|')"),
@@ -116,8 +116,10 @@ fn promise_core_surface_and_constructor_validation_match_the_specification() {
     );
     assert_eq!(rendered("Promise.length+':'+Promise.name"), "1:Promise");
     assert_eq!(
-        rendered("Promise.resolve.length+':'+Promise.reject.length"),
-        "1:1"
+        rendered(
+            "Promise.resolve.length+':'+Promise.reject.length+':'+Promise.all.length+':'+Promise.allSettled.length+':'+Promise.any.length+':'+Promise.try.length+':'+Promise.race.length+':'+Promise.withResolvers.length"
+        ),
+        "1:1:1:1:1:1:1:0"
     );
     assert_eq!(
         rendered(
@@ -168,6 +170,148 @@ fn promise_core_surface_and_constructor_validation_match_the_specification() {
         )
         .expect("directly caught Promise brand error"),
         "TypeError"
+    );
+}
+
+#[test]
+fn promise_try_resolves_callback_results_and_rejects_abrupt_completions() {
+    let actual = turn_result(
+        "let box={log:''};\n\
+         Promise.try(function(a,b){\n\
+             'use strict';\n\
+             box.log=box.log+'call:'+(this===undefined)+':'+a+':'+b+'|';\n\
+             return a+b;\n\
+         },2,3).then(function(value){box.log=box.log+'ok:'+value+'|';});\n\
+         Promise.try(function(){throw 'boom';})\n\
+             .catch(function(reason){box.log=box.log+'bad:'+reason+'|';});\n\
+         return box;",
+        "return arguments[0].log;",
+    )
+    .expect("Promise.try turn");
+    assert_eq!(actual, "call:true:2:3|ok:5|bad:boom|");
+
+    let invalid = turn_result(
+        "let box={sync:true,name:''};\n\
+         Promise.try(0).catch(function(error){box.name=error.name;});\n\
+         box.sync=box.name==='';\n\
+         return box;",
+        "return arguments[0].sync+':'+arguments[0].name;",
+    )
+    .expect("Promise.try non-callable callback");
+    assert_eq!(invalid, "true:TypeError");
+}
+
+#[test]
+fn promise_with_resolvers_returns_one_generic_capability_record() {
+    assert_eq!(
+        rendered(
+            "(function(){let record=Promise.withResolvers();let descriptor=Object.getOwnPropertyDescriptor(record,'promise');return Object.keys(record).join('|')+':'+record.promise.constructor.name+':'+record.resolve.length+':'+record.reject.length+':'+descriptor.writable+':'+descriptor.enumerable+':'+descriptor.configurable;})()"
+        ),
+        "promise|resolve|reject:Promise:1:1:true:true:true"
+    );
+
+    let actual = turn_result(
+        "let box={value:'pending'};\n\
+         let record=Promise.withResolvers();\n\
+         record.promise.then(function(value){box.value=value;});\n\
+         record.resolve(9);\n\
+         record.reject('late');\n\
+         return box;",
+        "return String(arguments[0].value);",
+    )
+    .expect("Promise.withResolvers turn");
+    assert_eq!(actual, "9");
+}
+
+#[test]
+fn promise_combinators_settle_in_input_order_and_empty_cases_are_exact() {
+    let actual = turn_result(
+        "let box={log:'',race:false};\n\
+         Promise.all([Promise.resolve(1),2])\n\
+             .then(function(values){box.log=box.log+'all:'+values.join(',')+'|';});\n\
+         Promise.allSettled([Promise.resolve(3),Promise.reject('x')])\n\
+             .then(function(values){box.log=box.log+'settled:'+values[0].status+':'+values[0].value+':'+values[1].status+':'+values[1].reason+'|';});\n\
+         Promise.any([Promise.reject('a'),Promise.resolve(4)])\n\
+             .then(function(value){box.log=box.log+'any:'+value+'|';});\n\
+         Promise.race([Promise.resolve(5),Promise.resolve(6)])\n\
+             .then(function(value){box.log=box.log+'race:'+value+'|';});\n\
+         Promise.race([]).then(function(){box.race=true;},function(){box.race=true;});\n\
+         return box;",
+        "return arguments[0].log+'#'+arguments[0].race;",
+    )
+    .expect("Promise combinator turn");
+    assert_eq!(
+        actual,
+        "all:1,2|settled:fulfilled:3:rejected:x|any:4|race:5|#false"
+    );
+
+    let empty = turn_result(
+        "let box={all:'',settled:'',any:''};\n\
+         Promise.all([]).then(function(value){box.all=String(value.length);});\n\
+         Promise.allSettled([]).then(function(value){box.settled=String(value.length);});\n\
+         Promise.any([]).catch(function(error){\n\
+             let descriptor=Object.getOwnPropertyDescriptor(error,'errors');\n\
+             box.any=error.name+':'+Object.keys(error).join(',')+':'+descriptor.writable+':'+descriptor.enumerable+':'+descriptor.configurable+':'+error.errors.length;\n\
+         });\n\
+         return box;",
+        "return arguments[0].all+'|'+arguments[0].settled+'|'+arguments[0].any;",
+    )
+    .expect("empty Promise combinators");
+    assert_eq!(empty, "0|0|AggregateError::true:false:true:0");
+}
+
+#[test]
+fn promise_all_settled_element_pair_shares_one_already_called_record() {
+    assert_eq!(
+        rendered(
+            "(function(){function C(executor){let out={};executor(function(value){out.value=value;},function(reason){out.reason=reason;});return out;}C.resolve=function(value){return {then:function(onFulfilled,onRejected){onFulfilled(value);onRejected('late');}};};let out=Promise.allSettled.call(C,[1]);let item=out.value[0];let descriptor=Object.getOwnPropertyDescriptor(item,'status');return item.status+':'+item.value+':'+Object.keys(item).join(',')+':'+descriptor.writable+':'+descriptor.enumerable+':'+descriptor.configurable+':'+String(out.reason);})()"
+        ),
+        "fulfilled:1:status,value:true:true:true:undefined"
+    );
+}
+
+#[test]
+fn promise_combinator_element_metadata_and_any_error_order_follow_the_specification() {
+    assert_eq!(
+        rendered(
+            "(function(){function C(executor){let out={};executor(function(value){out.value=value;},function(reason){out.reason=reason;});return out;}let log='';C.resolve=function(value){let promise={then:function(onFulfilled,onRejected){log=log+(this===promise)+':'+onFulfilled.name+':'+onFulfilled.length+':'+onRejected.name+':'+onRejected.length;onFulfilled(value);}};return promise;};Promise.allSettled.call(C,[1]);return log;})()"
+        ),
+        "true::1::1"
+    );
+
+    let actual = turn_result(
+        "let box={value:''};\n\
+         Promise.any([Promise.reject('first'),Promise.reject('second')])\n\
+             .catch(function(error){\n\
+                 let descriptor=Object.getOwnPropertyDescriptor(error,'errors');\n\
+                 box.value=error.name+':'+error.errors.join(',')+':'+Object.getOwnPropertyNames(error).join(',')+':'+descriptor.writable+':'+descriptor.enumerable+':'+descriptor.configurable;\n\
+             });\n\
+         return box;",
+        "return arguments[0].value;",
+    )
+    .expect("Promise.any rejection order");
+    assert_eq!(actual, "AggregateError:first,second:errors:true:false:true");
+}
+
+#[test]
+fn promise_combinators_get_resolve_before_the_iterator_and_close_on_abrupt() {
+    assert_eq!(
+        rendered(
+            "(function(){let log='';function C(executor){log=log+'construct|';let out={};executor(function(value){log=log+'resolve-result|';out.value=value;},function(reason){log=log+'reject-result:'+reason+'|';out.reason=reason;});return out;}Object.defineProperty(C,'resolve',{get:function(){log=log+'resolve-get|';return function(value){log=log+'resolve-call:'+value+'|';throw 'boom';};}});let iterable={get [Symbol.iterator](){log=log+'iterator-get|';return function(){log=log+'iterator-call|';let done=false;return {next:function(){log=log+'next|';if(done)return {done:true};done=true;return {value:1,done:false};},return:function(){log=log+'return|';return {};}};};}};let out=Promise.all.call(C,iterable);return log+'#'+out.reason;})()"
+        ),
+        "construct|resolve-get|iterator-get|iterator-call|next|resolve-call:1|return|reject-result:boom|#boom"
+    );
+    assert_eq!(
+        rendered(
+            "(function(){let log='';function C(executor){let out={};executor(function(value){out.value=value;},function(reason){log=log+'reject:'+reason+'|';out.reason=reason;});return out;}C.resolve=function(){return {get then(){log=log+'then-get|';throw 'then';}};};let iterable={[Symbol.iterator]:function(){let done=false;return {next:function(){if(done)return {done:true};done=true;return {value:1,done:false};},return:function(){log=log+'return|';return {};}};}};let out=Promise.all.call(C,iterable);return log+'#'+out.reason;})()"
+        ),
+        "then-get|return|reject:then|#then"
+    );
+    assert_eq!(
+        rendered(
+            "(function(){let log='';function C(executor){let out={};executor(function(){throw 'resolve-throw';},function(reason){out.reason=reason;});return out;}C.resolve=function(value){return value;};let empty=Promise.all.call(C,[]);let iterable={[Symbol.iterator]:function(){let done=false;return {next:function(){if(done)return {done:true};done=true;return {value:1,done:false};},get return(){log=log+'return-get|';throw 'close-throw';}};}};C.resolve=function(){throw 'original';};let abrupt=Promise.all.call(C,iterable);return empty.reason+'|'+log+abrupt.reason;})()"
+        ),
+        "resolve-throw|return-get|original"
     );
 }
 

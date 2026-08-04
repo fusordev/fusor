@@ -603,6 +603,25 @@ impl Runtime {
                                 }
                             }
                         }
+                        if let FunctionImplementation::PromiseCombinatorElement(element) =
+                            &function.implementation
+                        {
+                            let shared = element.shared.borrow();
+                            mark_promise_capability(
+                                &shared.capability,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                            for value in shared.values.iter().flatten() {
+                                mark_stored_value(
+                                    value,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                        }
                         mark_object_record(
                             &function.object,
                             &mut marked_functions,

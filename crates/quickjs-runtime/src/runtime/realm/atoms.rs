@@ -8,8 +8,8 @@ use super::{
     BIGINT_INTERNED_STATICS, DYNAMIC_SYMBOL_STATIC_PROPERTIES, JsString, MATH_CONSTANTS,
     MathMethod, NUMBER_FORMAT_METHODS, NUMBER_PREDICATE_STATICS, NUMBER_VALUE_STATICS,
     NativeFunctionKind, OBJECT_PROTOTYPE_LEGACY_ACCESSORS, OBJECT_PROTOTYPE_REFLECTION,
-    OBJECT_STATIC_METHODS, Runtime, RuntimeError, RuntimeResource, STRING_FROM_STATICS,
-    STRING_PROTOTYPE_METHODS, URI_FUNCTIONS, allocation_failed,
+    OBJECT_STATIC_METHODS, PromiseStatic, Runtime, RuntimeError, RuntimeResource,
+    STRING_FROM_STATICS, STRING_PROTOTYPE_METHODS, URI_FUNCTIONS, allocation_failed,
     families::RealmIntrinsicSchema,
     schema::{
         IntrinsicDescriptorSpec, IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicStringSpec,
@@ -279,6 +279,9 @@ fn visit_realm_name_order(
     for (_, function) in URI_FUNCTIONS {
         visit(RealmNameId::Uri(function))?;
     }
+    for method in PromiseStatic::ALL {
+        visit(RealmNameId::PromiseStatic(method))?;
+    }
     for method in ARRAY_SORT_METHODS {
         visit(RealmNameId::ArraySort(method))?;
     }
@@ -366,6 +369,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArrayReduction(method) => method.name(),
         RealmNameId::ArraySplice => "splice",
         RealmNameId::ArrayIsArray => "isArray",
+        RealmNameId::PromiseStatic(method) => method.name(),
         RealmNameId::ArraySort(method) => method.name(),
         RealmNameId::ArrayFlatten(method) => method.name(),
         RealmNameId::MathMethod(method) => method.name(),
@@ -382,8 +386,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 178);
-        assert_eq!(plan.description_code_units(), 1_381);
+        assert_eq!(plan.len(), 183);
+        assert_eq!(plan.description_code_units(), 1_414);
     }
 
     #[test]
