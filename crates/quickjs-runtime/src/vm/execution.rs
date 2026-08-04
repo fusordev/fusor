@@ -1830,7 +1830,7 @@ pub(super) fn execute_one(
                 }
             }
         }
-        FinalOpcode::ForOfStart => {
+        FinalOpcode::ForOfStart | FinalOpcode::ForAwaitOfStart => {
             let iterable = pop(frame)?;
             let realm = code(runtime, frame.code)?.realm;
             let return_to =
@@ -1841,7 +1841,16 @@ pub(super) fn execute_one(
                     },
                 )?);
             let origin = instruction_location(runtime, frame, source_pc)?;
-            return native_step(
+            let dispatch = if opcode == FinalOpcode::ForAwaitOfStart {
+                begin_for_await_of_start(
+                    runtime,
+                    iterable,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                )
+            } else {
                 begin_for_of_start(
                     runtime,
                     iterable,
@@ -1849,9 +1858,9 @@ pub(super) fn execute_one(
                     Some(return_to),
                     origin,
                     execution_budget,
-                ),
-                return_to,
-            );
+                )
+            };
+            return native_step(dispatch, return_to);
         }
         FinalOpcode::ForOfNext => {
             let Operands::U8(offset) = operands else {
@@ -2320,6 +2329,15 @@ pub(super) fn execute_one(
                 },
             )?;
             return Ok(Step::YieldStar(pop(frame)?));
+        }
+        FinalOpcode::AsyncYieldStar => {
+            frame.instruction = verified_instruction.successors().fallthrough().ok_or(
+                EngineFault::InvalidSuccessor {
+                    function: frame.template,
+                    pc: source_pc,
+                },
+            )?;
+            return Ok(Step::AsyncYieldStar(pop(frame)?));
         }
         FinalOpcode::Await => {
             frame.instruction = verified_instruction.successors().fallthrough().ok_or(

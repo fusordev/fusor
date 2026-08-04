@@ -2,12 +2,13 @@
 
 use super::{
     ArrayState, Cell, ErrorIntrinsicKind, FunctionId, FunctionImplementation, HeapFunction,
-    HeapObject, HeapReference, JsNumber, JsString, ObjectId, ObjectRecord, PredefinedAtom,
-    PromiseCapabilityCapture, PromiseCapabilityExecutor, PromiseCombinatorElementFunction,
-    PromiseCombinatorElementKind, PromiseCombinatorKind, PromiseCombinatorShared,
-    PromiseFinallyFunction, PromiseFinallyHandlerKind, PromiseFinallyThunkKind,
-    PromiseResolvingFunction, PromiseResolvingKind, PropertyKey, PropertyLayout, Rc, RealmId,
-    RefCell, Runtime, RuntimeResource, StoredValue, check_execution_limit, usize_to_u64,
+    HeapObject, HeapReference, JsNumber, JsString, NativeFunction, NativeFunctionKind, ObjectId,
+    ObjectRecord, PredefinedAtom, PromiseCapabilityCapture, PromiseCapabilityExecutor,
+    PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
+    PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyHandlerKind,
+    PromiseFinallyThunkKind, PromiseResolvingFunction, PromiseResolvingKind, PropertyKey,
+    PropertyLayout, Rc, RealmId, RefCell, Runtime, RuntimeResource, StoredValue,
+    check_execution_limit, usize_to_u64,
 };
 use crate::object::PromiseCapability;
 
@@ -89,6 +90,105 @@ fn promise_any_error_records(
 }
 
 impl Runtime {
+    pub(crate) fn allocate_async_from_sync_handlers(
+        &mut self,
+        realm: RealmId,
+        done: bool,
+        close_iterator: Option<StoredValue>,
+    ) -> Result<(FunctionId, Option<FunctionId>), crate::ExecutionError> {
+        let function_count = 1_usize.saturating_add(usize::from(close_iterator.is_some()));
+        let property_count = function_count.saturating_mul(3);
+        check_execution_limit(
+            RuntimeResource::HeapFunctions,
+            self.limits.max_heap_functions,
+            usize_to_u64(self.functions.len()).saturating_add(usize_to_u64(function_count)),
+        )?;
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties
+                .saturating_add(usize_to_u64(property_count)),
+        )?;
+        self.functions.try_reserve(function_count).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: function_count,
+            }
+        })?;
+        let prototype = self.realm_function_prototype(realm)?;
+        let length_key = self.predefined_property_key(PredefinedAtom::Length);
+        let name_key = self.predefined_property_key(PredefinedAtom::Name);
+        let capture_layout = PropertyLayout::data(false, false, false);
+        let mut unwrap_record =
+            promise_builtin_function_record(prototype, 1, &length_key, &name_key)?;
+        unwrap_record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::Done),
+                capture_layout,
+                StoredValue::Boolean(done),
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: property_count,
+            })?;
+        let close_record = close_iterator
+            .map(|iterator| {
+                let mut record =
+                    promise_builtin_function_record(prototype, 1, &length_key, &name_key)?;
+                record
+                    .append_data(
+                        self.predefined_property_key(PredefinedAtom::Value),
+                        capture_layout,
+                        iterator,
+                    )
+                    .map_err(|_| crate::ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::ObjectProperties,
+                        additional: property_count,
+                    })?;
+                Ok::<ObjectRecord, crate::ExecutionError>(record)
+            })
+            .transpose()?;
+        let unwrap = self
+            .functions
+            .try_insert(HeapFunction {
+                implementation: FunctionImplementation::Native(NativeFunction {
+                    realm,
+                    kind: NativeFunctionKind::AsyncFromSyncIteratorUnwrap,
+                }),
+                object: unwrap_record,
+                public_roots: 0,
+            })
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: 1,
+            })?;
+        let close = match close_record {
+            None => None,
+            Some(close_record) => {
+                let Ok(close) = self.functions.try_insert(HeapFunction {
+                    implementation: FunctionImplementation::Native(NativeFunction {
+                        realm,
+                        kind: NativeFunctionKind::AsyncFromSyncIteratorClose,
+                    }),
+                    object: close_record,
+                    public_roots: 0,
+                }) else {
+                    debug_assert!(self.functions.remove(unwrap).is_some());
+                    return Err(crate::ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::HeapFunctions,
+                        additional: 1,
+                    });
+                };
+                Some(close)
+            }
+        };
+        self.object_properties = self
+            .object_properties
+            .saturating_add(usize_to_u64(property_count));
+        self.collection_pending = true;
+        Ok((unwrap, close))
+    }
+
     pub(crate) fn allocate_promise_combinator_elements(
         &mut self,
         realm: RealmId,

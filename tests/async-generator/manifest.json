@@ -73,6 +73,42 @@
       "covers": ["dynamic-async-generator-function", "dynamic-new-target", "dynamic-prototype-fallback", "dynamic-source-order"],
       "body": "let log='';let parameter={toString:function(){log=log+'parameter|';return 'value';}};let body={toString:function(){log=log+'body|';return 'yield await value+1;';}};let C=(async function*(){}).constructor;let generated=C(parameter,body);let Custom=function Custom(){};let expected={marker:1};Custom.prototype=expected;let first=Reflect.construct(C,['yield 1;'],Custom);Custom.prototype=0;let second=Reflect.construct(C,['yield 2;'],Custom);let state={result:log+generated.name+':'+generated.length+'|'+(Object.getPrototypeOf(generated)===C.prototype)+'|'+(Object.getPrototypeOf(first)===expected)+'|'+(Object.getPrototypeOf(second)===C.prototype)+'|',done:null};state.done=generated(5).next().then(function(a){state.result=state.result+a.value+':'+a.done+'|';return first().next();}).then(function(b){state.result=state.result+b.value+':'+b.done+'|';return second().next();}).then(function(c){state.result=state.result+c.value+':'+c.done;});return state;",
       "expect": {"kind": "string", "value": "parameter|body|anonymous:1|true|true|true|6:false|1:false|2:false"}
+    },
+    {
+      "id": "yield-star-prefers-async-iterator-and-forwards-resume-values",
+      "covers": ["yield-star", "async-iterator-precedence", "delegate-next", "next-resume-value"],
+      "body": "let state={result:'',done:null,count:0};let iterable={[Symbol.iterator]:function(){state.result=state.result+'sync|';return {next:function(){return {value:'wrong',done:true};}};},[Symbol.asyncIterator]:function(){state.result=state.result+'async|';return {next:function(value){state.count=state.count+1;state.result=state.result+'next:'+value+'|';return Promise.resolve(state.count===1?{value:3,done:false}:{value:9,done:true});}};}};async function* outer(){return yield* iterable;}let iterator=outer();state.done=iterator.next().then(function(first){state.result=state.result+'first:'+first.value+':'+first.done+'|';return iterator.next(7);}).then(function(final){state.result=state.result+'final:'+final.value+':'+final.done;});return state;",
+      "expect": {"kind": "string", "value": "async|next:undefined|first:3:false|next:7|final:9:true"}
+    },
+    {
+      "id": "yield-star-async-result-value-is-not-assimilated",
+      "covers": ["yield-star", "raw-delegate-value"],
+      "body": "let state={result:'',done:null};let value={then:function(resolve){state.result=state.result+'assimilated|';resolve(3);}};let iterable={[Symbol.asyncIterator]:function(){return {next:function(){return Promise.resolve({value:value,done:false});}};}};async function* outer(){yield* iterable;}state.done=outer().next().then(function(result){state.result=state.result+'same:'+(result.value===value);});return state;",
+      "expect": {"kind": "string", "value": "same:true"}
+    },
+    {
+      "id": "yield-star-sync-fallback-unwraps-values-in-done-value-order",
+      "covers": ["yield-star", "async-from-sync", "done-before-value", "value-assimilation"],
+      "body": "let state={result:'',done:null};let result={get done(){state.result=state.result+'done|';return false;},get value(){state.result=state.result+'value|';return {then:function(resolve){state.result=state.result+'then|';resolve(4);}};}};let iterable={[Symbol.iterator]:function(){return {next:function(){return result;}};}};async function* outer(){yield* iterable;}state.done=outer().next().then(function(value){state.result=state.result+'yield:'+value.value+':'+value.done;});return state;",
+      "expect": {"kind": "string", "value": "done|value|then|yield:4:false"}
+    },
+    {
+      "id": "yield-star-sync-rejection-closes-and-preserves-reason",
+      "covers": ["yield-star", "async-from-sync", "iterator-close", "rejection-precedence"],
+      "body": "let state={result:'',done:null};let iterable={[Symbol.iterator]:function(){return {next:function(){return {value:Promise.reject('bad'),done:false};},return:function(){state.result=state.result+'close|';return {done:true};}};}};async function* outer(){yield* iterable;}state.done=outer().next().catch(function(reason){state.result=state.result+'reason:'+reason;});return state;",
+      "expect": {"kind": "string", "value": "close|reason:bad"}
+    },
+    {
+      "id": "yield-star-sync-promise-resolve-abrupt-close",
+      "covers": ["yield-star", "async-from-sync", "value-promise-resolve-abrupt", "rejection-precedence"],
+      "body": "let state={result:'',done:null};let value=Promise.resolve(1);value.__defineGetter__('constructor',function(){state.result=state.result+'getter|';throw 'bad';});let iterable={[Symbol.iterator]:function(){return {next:function(){return {value:value,done:false};},return:function(){state.result=state.result+'close|';throw 'ignored';}};}};async function* outer(){yield* iterable;}state.done=outer().next().catch(function(reason){state.result=state.result+'reason:'+reason;});return state;",
+      "expect": {"kind": "string", "value": "getter|close|reason:bad"}
+    },
+    {
+      "id": "yield-star-missing-throw-awaits-close-before-type-error",
+      "covers": ["yield-star", "missing-throw", "async-iterator-close", "throw-forwarding"],
+      "body": "let state={result:'',done:null};let iterable={[Symbol.asyncIterator]:function(){return {next:function(){return Promise.resolve({value:1,done:false});},return:function(){state.result=state.result+'close:'+arguments.length+'|';return Promise.resolve({done:true}).then(function(value){state.result=state.result+'await-close|';return value;});}};}};async function* outer(){yield* iterable;}let iterator=outer();state.done=iterator.next().then(function(){return iterator.throw('boom').catch(function(error){state.result=state.result+'error:'+error.name;});});return state;",
+      "expect": {"kind": "string", "value": "close:0|await-close|error:TypeError"}
     }
   ]
 }

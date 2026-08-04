@@ -111,6 +111,7 @@ pub(super) fn validate_static_semantics(
                 && matches!(
                     decoded.instruction().opcode(),
                     FinalOpcode::ForOfStart
+                        | FinalOpcode::ForAwaitOfStart
                         | FinalOpcode::ForOfNext
                         | FinalOpcode::IteratorClose
                         | FinalOpcode::IteratorNext

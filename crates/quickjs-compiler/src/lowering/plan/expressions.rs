@@ -368,14 +368,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                                 }
                             );
                             if yield_expression.delegate {
-                                if async_generator {
-                                    return unsupported(
-                                        UnsupportedLeafFeature::UnsupportedExpression,
-                                        yield_expression.span,
-                                    );
-                                }
                                 Self::plan_delegated_yield(
                                     yield_expression,
+                                    async_generator,
                                     constants,
                                     abrupt_markers,
                                     flow,
@@ -525,6 +520,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     )]
     fn plan_delegated_yield<'expression>(
         yield_expression: &'expression oxc_ast::ast::YieldExpression<'arena>,
+        async_generator: bool,
         constants: &CompiledConstantPool,
         abrupt_markers: &[AbruptMarker],
         flow: &mut PlannedControlFlow,
@@ -553,12 +549,24 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         };
         let mut sequence = vec![
             ExpressionWork::Visit(argument),
-            emit(FinalOpcode::ForOfStart, Operands::None),
+            emit(
+                if async_generator {
+                    FinalOpcode::ForAwaitOfStart
+                } else {
+                    FinalOpcode::ForOfStart
+                },
+                Operands::None,
+            ),
             emit(FinalOpcode::Drop, Operands::None),
             emit(FinalOpcode::Undefined, Operands::None),
             emit(FinalOpcode::Undefined, Operands::None),
             ExpressionWork::Bind(loop_label.clone()),
             emit(FinalOpcode::IteratorNext, Operands::None),
+        ];
+        if async_generator {
+            sequence.push(emit(FinalOpcode::Await, Operands::None));
+        }
+        sequence.extend([
             emit(FinalOpcode::IteratorCheckObject, Operands::None),
             emit(FinalOpcode::GetField2, Operands::Atom(done_atom)),
             ExpressionWork::Branch {
@@ -567,7 +575,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 span,
             },
             ExpressionWork::Bind(yield_label.clone()),
-            emit(FinalOpcode::YieldStar, Operands::None),
+        ]);
+        if async_generator {
+            sequence.push(emit(FinalOpcode::GetField, Operands::Atom(value_atom)));
+            sequence.push(emit(FinalOpcode::AsyncYieldStar, Operands::None));
+        } else {
+            sequence.push(emit(FinalOpcode::YieldStar, Operands::None));
+        }
+        sequence.extend([
             emit(FinalOpcode::Dup, Operands::None),
             ExpressionWork::Branch {
                 kind: BranchKind::IfTrue,
@@ -594,6 +609,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 target: return_done.clone(),
                 span,
             },
+        ]);
+        if async_generator {
+            sequence.push(emit(FinalOpcode::Await, Operands::None));
+        }
+        sequence.extend([
             emit(FinalOpcode::IteratorCheckObject, Operands::None),
             emit(FinalOpcode::GetField2, Operands::Atom(done_atom)),
             ExpressionWork::Branch {
@@ -606,7 +626,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             emit(FinalOpcode::Nip, Operands::None),
             emit(FinalOpcode::Nip, Operands::None),
             emit(FinalOpcode::Nip, Operands::None),
-        ];
+        ]);
         Self::append_yield_return_cleanup(abrupt_markers, span, &mut sequence);
         sequence.extend([
             emit(FinalOpcode::ReturnAsync, Operands::None),
@@ -617,6 +637,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 target: missing_throw.clone(),
                 span,
             },
+        ]);
+        if async_generator {
+            sequence.push(emit(FinalOpcode::Await, Operands::None));
+        }
+        sequence.extend([
             emit(FinalOpcode::IteratorCheckObject, Operands::None),
             emit(FinalOpcode::GetField2, Operands::Atom(done_atom)),
             ExpressionWork::Branch {
@@ -636,6 +661,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 target: missing_throw_closed.clone(),
                 span,
             },
+        ]);
+        if async_generator {
+            sequence.push(emit(FinalOpcode::Await, Operands::None));
+        }
+        sequence.extend([
             emit(FinalOpcode::IteratorCheckObject, Operands::None),
             ExpressionWork::Bind(missing_throw_closed),
             emit(FinalOpcode::Drop, Operands::None),

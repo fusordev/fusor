@@ -303,6 +303,7 @@ fn exception_caller_frames(
                 | FinalOpcode::Apply
                 | FinalOpcode::Append
                 | FinalOpcode::ForOfStart
+                | FinalOpcode::ForAwaitOfStart
                 | FinalOpcode::ForOfNext
                 | FinalOpcode::IteratorClose
                 | FinalOpcode::IteratorNext
@@ -409,6 +410,8 @@ pub(super) fn dispatch_pending_exception(
                         | NativeContinuation::PromiseCombinator(_)
                         | NativeContinuation::IteratorAppend(_)
                         | NativeContinuation::IteratorClose(_)
+                        | NativeContinuation::AsyncFromSync(_)
+                        | NativeContinuation::AsyncFromSyncClose(_)
                         | NativeContinuation::AsyncGeneratorReturnAwait { .. }
                 ) || matches!(
                     continuation,

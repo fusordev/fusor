@@ -158,6 +158,8 @@ pub(super) fn take_iterator_abrupt_handler(
                 | NativeContinuation::PromiseCombinator(_)
                 | NativeContinuation::IteratorAppend(_)
                 | NativeContinuation::IteratorClose(_)
+                | NativeContinuation::AsyncFromSync(_)
+                | NativeContinuation::AsyncFromSyncClose(_)
                 | NativeContinuation::AsyncGeneratorReturnAwait { .. }
         ) || matches!(
             continuation,
@@ -171,6 +173,7 @@ pub(super) fn take_iterator_abrupt_handler(
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "abrupt native recovery carries the same explicit frame roots, compiler authority, and execution budget as ordinary continuation resumption"
 )]
 pub(super) fn resume_iterator_abrupt_continuations(
@@ -225,6 +228,12 @@ pub(super) fn resume_iterator_abrupt_continuations(
                 return_to,
                 execution_budget,
             ),
+            NativeContinuation::AsyncFromSync(state) => {
+                resume_async_from_sync_abrupt(runtime, state, pending, return_to, execution_budget)
+            }
+            NativeContinuation::AsyncFromSyncClose(state) => {
+                resume_async_from_sync_close_abrupt(runtime, state)
+            }
             handler => {
                 resume_iterator_abrupt(runtime, handler, pending, return_to, execution_budget)
             }
@@ -410,6 +419,12 @@ pub(super) fn resume_native_continuations(
             }
             NativeContinuation::ForOfClose(state) => {
                 advance_for_of_close(state, &value, return_to)?
+            }
+            NativeContinuation::AsyncFromSync(state) => {
+                advance_async_from_sync(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::AsyncFromSyncClose(state) => {
+                advance_async_from_sync_close(runtime, state, value, return_to)?
             }
             NativeContinuation::YieldStarIteratorCall(state) => {
                 advance_yield_star_iterator_call(runtime, state, value, return_to)?
@@ -2336,6 +2351,38 @@ pub(super) fn dispatch_native_call_with_frames(
         | NativeFunctionKind::AsyncIteratorPrototypeAsyncIterator => {
             Ok(NativeDispatch::Immediate(inputs.receiver))
         }
+        NativeFunctionKind::AsyncFromSyncIteratorNext
+        | NativeFunctionKind::AsyncFromSyncIteratorReturn
+        | NativeFunctionKind::AsyncFromSyncIteratorThrow => {
+            let mode = match native.kind {
+                NativeFunctionKind::AsyncFromSyncIteratorNext => AsyncFromSyncMode::Next,
+                NativeFunctionKind::AsyncFromSyncIteratorReturn => AsyncFromSyncMode::Return,
+                NativeFunctionKind::AsyncFromSyncIteratorThrow => AsyncFromSyncMode::Throw,
+                _ => unreachable!("Async-from-Sync method arm is exhaustively selected"),
+            };
+            begin_async_from_sync_iterator_method(
+                runtime,
+                inputs.receiver,
+                inputs.arguments,
+                mode,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::AsyncFromSyncIteratorUnwrap => {
+            dispatch_async_from_sync_unwrap(runtime, function, inputs.arguments, native.realm)
+        }
+        NativeFunctionKind::AsyncFromSyncIteratorClose => dispatch_async_from_sync_close(
+            runtime,
+            function,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::SymbolConstructor => {
             let mut arguments = inputs.arguments;
             let Some(argument) = arguments.take_first() else {

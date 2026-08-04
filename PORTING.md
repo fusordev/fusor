@@ -88,10 +88,10 @@ does not imply complete ECMAScript or QuickJS compatibility.
   intrinsic Promise capability, run synchronously to the first suspension, and
   resume through typed FIFO reactions; return/throw settle instead of escaping.
 - [x] Async generator functions, methods, and dynamic
-  `AsyncGeneratorFunction` wrappers lower direct `await`, `yield`, and return to
-  verified suspension programs. Admission requires every direct async yield to
-  be immediately dominated by its compiler-owned await; async `yield*` remains
-  typed fail closed.
+  `AsyncGeneratorFunction` wrappers lower `await`, `yield`, return, and async
+  `yield*` to verified suspension programs. Admission distinguishes raw
+  delegated values from ordinary awaited yields and requires typed async-
+  iterator records throughout every resume path.
 - [x] Runtime execution uses explicit frame and continuation stacks for
   bytecode/native calls, constructors, abrupt completion, iterator closing,
   coercion re-entry, and verified stack traces. Bound receiver/argument
@@ -99,9 +99,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Deterministic fuel and host interrupts are separate. The interrupt hook is
   polled on the pinned 10,000-instruction counter and reports an uncatchable
   `ExecutionError::Interrupted`.
-- [ ] Complete remaining opcode families, debug/source tables, async-generator
-  delegation, and direct/indirect `eval`. Raw or serialized unverified bytecode,
-  async `yield*`, and `eval` remain fail closed.
+- [ ] Complete remaining opcode families, debug/source tables, and
+  direct/indirect `eval`. Raw or serialized unverified bytecode and `eval`
+  remain fail closed.
 
 ### Values, objects, and functions
 
@@ -124,7 +124,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Realm bootstrap is declared by validated intrinsic schemas. Atom and
   resource plans, typed shell allocation, ordered publication, and allocation-
   free reverse rollback are derived from that schema. A normalized snapshot
-  pins all 291 Realm-local identities and 899 ordered properties across Realms.
+  pins all 295 Realm-local identities and 908 ordered properties across Realms.
 - [ ] Add Proxy and remaining exotics, shape/transition interning, dense indexed
   storage, deterministic finalization, and complete reflection/diagnostics.
 
@@ -202,8 +202,13 @@ does not imply complete ECMAScript or QuickJS compatibility.
   parameter timing and `catch`/`finally` order, drain completed requests, and
   trace suspended frames, awaits, capabilities, and reactions through GC.
   Dynamic construction preserves coercion order and `newTarget` fallback.
-- [ ] Implement async-generator `yield*` over the async-iterator protocol;
-  compiler and verifier reject it before execution meanwhile.
+- [x] Async-generator `yield*` prefers `@@asyncIterator`, falls back through the
+  realm-local `%AsyncFromSyncIteratorPrototype%`, caches `next`, awaits method
+  results before object validation, reads `done` before `value`, and preserves
+  raw true-async delegate values. Numeric resume modes forward
+  `next`/`return`/`throw`; sync fallback unwraps values through intrinsic
+  `PromiseResolve`, closes on rejection with original-error precedence, and
+  traces suspended wrappers and handlers through GC.
 - [ ] Implement module linking/evaluation, cycles, resolver semantics, dynamic
   import, and top-level `await`. Module parsing alone is not an execution claim.
 - [ ] Finish the Rust embedding API, ESM REPL, `qjs`, Rust-native `qjsc`,
@@ -242,6 +247,10 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - `QJS-PROMISE-001`: pinned QuickJS lets a hostile synchronous `then` invoke
   both `Promise.allSettled` element closures. ECMA-262 requires the pair to
   share one `[[AlreadyCalled]]` record, so this port preserves the first call.
+- `QJS-ASYNC-GENERATOR-001`: when an active async `yield*` delegate handles
+  `.return()` with `{ done: true, value: thenable }`, pinned QuickJS assimilates
+  `value`. ECMA-262 and Node preserve that property value unchanged; this port
+  follows the specification.
 
 ## Completion gates
 
@@ -276,7 +285,7 @@ QuickJS `qjs` or `qjsc`. Current corpus results are:
 | Promise core | 29/29, 46/46 feature tags |
 | Synchronous generators | 18/18, 43/43 feature tags |
 | Async functions | 9/9, 18/18 feature tags |
-| Async generators | 12/12, 28/28 feature tags (QuickJS and Node) |
+| Async generators | 18/18, 41/41 feature tags (QuickJS and Node) |
 
 The parser gate also fails for an uncovered pinned production, uncovered
 reachable diagnostic, falsely unreachable diagnostic, or changed oracle

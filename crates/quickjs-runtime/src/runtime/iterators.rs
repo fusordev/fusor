@@ -31,6 +31,7 @@ use super::{
     RealmIntrinsics, Runtime, RuntimeResource, StoredValue, StringIterator, check_execution_limit,
     stale_heap_reference, usize_to_u64,
 };
+use crate::object::OwnProperty;
 
 pub(crate) struct PreparedIteratorResultPlan {
     result: ObjectRecord,
@@ -63,6 +64,98 @@ pub(crate) struct ArrayIteratorSnapshot {
 }
 
 impl Runtime {
+    pub(crate) fn allocate_async_from_sync_iterator(
+        &mut self,
+        realm: RealmId,
+        iterator: StoredValue,
+        next: StoredValue,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties.saturating_add(2),
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let prototype = self.realm_async_from_sync_iterator_prototype(realm)?;
+        let mut record = ObjectRecord::empty(Some(HeapReference::Object(prototype)));
+        record
+            .try_reserve_data(2)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 2,
+            })?;
+        let internal = PropertyLayout::data(false, false, false);
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::Value),
+                internal,
+                iterator,
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 2,
+            })?;
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::Next),
+                internal,
+                next,
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 2,
+            })?;
+        let wrapper = self
+            .objects
+            .try_insert(HeapObject::ordinary(record))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.object_properties = self.object_properties.saturating_add(2);
+        self.collection_pending = true;
+        Ok(wrapper)
+    }
+
+    pub(crate) fn async_from_sync_iterator_record(
+        &self,
+        realm: RealmId,
+        wrapper: ObjectId,
+    ) -> Result<Option<(StoredValue, StoredValue)>, crate::EngineFault> {
+        let expected = self.realm_async_from_sync_iterator_prototype(realm)?;
+        let Some(object) = self.objects.get(wrapper) else {
+            return Err(stale_heap_reference(HeapReference::Object(wrapper)));
+        };
+        if object.record.prototype() != Some(HeapReference::Object(expected)) {
+            return Ok(None);
+        }
+        let value = match object
+            .record
+            .own_property(&self.predefined_property_key(PredefinedAtom::Value))
+        {
+            Some(OwnProperty::Data { value, .. }) => value,
+            Some(OwnProperty::Accessor { .. }) | None => return Ok(None),
+        };
+        let next = match object
+            .record
+            .own_property(&self.predefined_property_key(PredefinedAtom::Next))
+        {
+            Some(OwnProperty::Data { value, .. }) => value,
+            Some(OwnProperty::Accessor { .. }) | None => return Ok(None),
+        };
+        Ok(Some((value, next)))
+    }
+
     pub(crate) fn preflight_iterator_result_allocation(
         &mut self,
         additional_objects: usize,

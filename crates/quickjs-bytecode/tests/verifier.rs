@@ -930,8 +930,27 @@ fn synchronous_for_of_markers_are_compiler_only_structural_inputs() {
     );
     assert_eq!(error.opcode(), Some(FinalOpcode::ForOfStart));
 
+    let error = verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            encode(&[
+                (FinalOpcode::ForAwaitOfStart, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ]),
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect_err("async iterator construction still requires its compiler-owned input");
+    assert_eq!(
+        error.kind(),
+        &VerificationErrorKind::StackUnderflow {
+            required: 1,
+            available: 0,
+        }
+    );
+
     for (opcode, operands) in [
-        (FinalOpcode::ForAwaitOfStart, Operands::None),
         (FinalOpcode::ForAwaitOfNext, Operands::None),
         (FinalOpcode::IteratorGetValueDone, Operands::None),
     ] {

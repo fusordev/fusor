@@ -137,6 +137,10 @@ impl RealmSnapshot {
                 "%AsyncIterator.prototype%",
             ),
             (
+                iterators.async_from_sync_iterator_prototype,
+                "%AsyncFromSyncIterator.prototype%",
+            ),
+            (
                 iterators.array_iterator_prototype,
                 "%ArrayIterator.prototype%",
             ),
@@ -433,9 +437,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 291;
-    const REALM_PROPERTIES: u64 = 899;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 9_849_697_095_605_130_222;
+    const REALM_NODES: usize = 295;
+    const REALM_PROPERTIES: u64 = 908;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 10_688_462_690_904_235_245;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {

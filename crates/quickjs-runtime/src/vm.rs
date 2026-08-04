@@ -79,6 +79,7 @@ mod array_mutators;
 mod array_search;
 mod array_sort;
 mod array_statics;
+mod async_from_sync;
 mod async_function;
 mod async_generator;
 mod bigint_intrinsics;
@@ -120,13 +121,13 @@ use async_function::{begin_async_await, suspend_async_function};
 )]
 use {
     aggregate_error::*, array_callbacks::*, array_copiers::*, array_flatten::*, array_join::*,
-    array_mutators::*, array_search::*, array_sort::*, array_statics::*, async_generator::*,
-    bigint_intrinsics::*, bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*,
-    error_stack::*, errors::*, exceptions::*, execution::*, from_entries::*, generator::*,
-    group_by::*, iterators::*, json_parse::*, json_stringify::*, locale_string::*, math::*,
-    math_sum_precise::*, native::*, object_intrinsics::*, promise::*, promise_combinators::*,
-    properties::*, reflect::*, stack::*, string_methods::*, string_raw::*, string_replace::*,
-    uri::*,
+    array_mutators::*, array_search::*, array_sort::*, array_statics::*, async_from_sync::*,
+    async_generator::*, bigint_intrinsics::*, bindings::*, conversions::*,
+    define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*, exceptions::*,
+    execution::*, from_entries::*, generator::*, group_by::*, iterators::*, json_parse::*,
+    json_stringify::*, locale_string::*, math::*, math_sum_precise::*, native::*,
+    object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*, stack::*,
+    string_methods::*, string_raw::*, string_replace::*, uri::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -309,6 +310,7 @@ pub(crate) struct AsyncFunctionRecord {
 pub(crate) enum AsyncGeneratorLifecycle {
     SuspendedStart,
     SuspendedYield,
+    SuspendedYieldStar,
     Executing,
     DrainingQueue,
     Completed,
@@ -332,6 +334,7 @@ pub(crate) struct AsyncGeneratorAwait {
 pub(crate) enum AsyncGeneratorAwaitKind {
     Body,
     ReturnResume,
+    ReturnResumeYieldStar,
     ReturnComplete,
 }
 
@@ -387,6 +390,8 @@ enum NativeContinuation {
     ForOfStart(ForOfStartContinuation),
     ForOfNext(ForOfNextContinuation),
     ForOfClose(ForOfCloseContinuation),
+    AsyncFromSync(AsyncFromSyncContinuation),
+    AsyncFromSyncClose(AsyncFromSyncCloseContinuation),
     YieldStarIteratorCall(YieldStarIteratorCallContinuation),
     IteratorAppend(IteratorAppendContinuation),
     IteratorClose(IteratorCloseContinuation),
@@ -448,6 +453,8 @@ impl NativeContinuation {
             Self::ForOfStart(state) => state.retained_values(),
             Self::ForOfNext(state) => state.retained_values(),
             Self::ForOfClose(state) => state.retained_values(),
+            Self::AsyncFromSync(state) => state.retained_values(),
+            Self::AsyncFromSyncClose(state) => state.retained_values(),
             Self::YieldStarIteratorCall(state) => state.retained_values(),
             Self::IteratorAppend(state) => state.retained_values(),
             Self::IteratorClose(state) => state.retained_values(),
@@ -781,6 +788,7 @@ struct ArrayIteratorNextContinuation {
 #[derive(Clone, Copy)]
 enum ForOfStartStage {
     IteratorMethod,
+    AsyncIteratorMethod,
     Iterator,
     NextMethod,
 }
@@ -788,6 +796,7 @@ enum ForOfStartStage {
 struct ForOfStartContinuation {
     iterable: StoredValue,
     iterator: Option<StoredValue>,
+    async_from_sync: bool,
     realm: RealmId,
     stage: ForOfStartStage,
     origin: JsStackFrame,
@@ -840,6 +849,75 @@ enum YieldStarIteratorCallMode {
     Return,
     Throw,
     Close,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AsyncFromSyncMode {
+    Next,
+    Return,
+    Throw,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AsyncFromSyncStage {
+    Method,
+    Call,
+    Done,
+    Value,
+    PromiseResolve,
+    MissingThrowReturnMethod,
+    MissingThrowReturnCall,
+}
+
+struct AsyncFromSyncContinuation {
+    wrapper: ObjectId,
+    iterator: StoredValue,
+    next: StoredValue,
+    input: Option<StoredValue>,
+    result: Option<StoredValue>,
+    capability: crate::object::PromiseCapability,
+    realm: RealmId,
+    mode: AsyncFromSyncMode,
+    stage: AsyncFromSyncStage,
+    done: bool,
+    origin: JsStackFrame,
+}
+
+impl AsyncFromSyncContinuation {
+    fn retained_values(&self) -> u64 {
+        6_u64
+            .saturating_add(u64::from(self.input.is_some()))
+            .saturating_add(u64::from(self.result.is_some()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AsyncFromSyncCloseStage {
+    ReturnMethod,
+    ReturnCall,
+}
+
+struct AsyncFromSyncCloseContinuation {
+    iterator: StoredValue,
+    reason: StoredValue,
+    target: AsyncFromSyncCloseTarget,
+    realm: RealmId,
+    stage: AsyncFromSyncCloseStage,
+    origin: JsStackFrame,
+}
+
+impl AsyncFromSyncCloseContinuation {
+    fn retained_values(&self) -> u64 {
+        2_u64.saturating_add(match &self.target {
+            AsyncFromSyncCloseTarget::RejectedPromise => 0,
+            AsyncFromSyncCloseTarget::Capability(_) => 3,
+        })
+    }
+}
+
+enum AsyncFromSyncCloseTarget {
+    RejectedPromise,
+    Capability(crate::object::PromiseCapability),
 }
 
 #[derive(Clone, Copy)]
@@ -1833,6 +1911,37 @@ fn trace_native_continuation_roots(
         NativeContinuation::ForOfClose(state) => {
             trace_stored_value_root(&state.iterator, mark);
         }
+        NativeContinuation::AsyncFromSync(state) => {
+            mark(CollectionRoot::Heap(HeapReference::Object(state.wrapper)));
+            trace_stored_value_root(&state.iterator, mark);
+            trace_stored_value_root(&state.next, mark);
+            if let Some(input) = &state.input {
+                trace_stored_value_root(input, mark);
+            }
+            if let Some(result) = &state.result {
+                trace_stored_value_root(result, mark);
+            }
+            trace_stored_value_root(&state.capability.promise, mark);
+            mark(CollectionRoot::Heap(HeapReference::Function(
+                state.capability.resolve,
+            )));
+            mark(CollectionRoot::Heap(HeapReference::Function(
+                state.capability.reject,
+            )));
+        }
+        NativeContinuation::AsyncFromSyncClose(state) => {
+            trace_stored_value_root(&state.iterator, mark);
+            trace_stored_value_root(&state.reason, mark);
+            if let AsyncFromSyncCloseTarget::Capability(capability) = &state.target {
+                trace_stored_value_root(&capability.promise, mark);
+                mark(CollectionRoot::Heap(HeapReference::Function(
+                    capability.resolve,
+                )));
+                mark(CollectionRoot::Heap(HeapReference::Function(
+                    capability.reject,
+                )));
+            }
+        }
         NativeContinuation::YieldStarIteratorCall(state) => {
             trace_stored_value_root(&state.iterator, mark);
             if let Some(input) = &state.input {
@@ -2222,6 +2331,7 @@ enum Step {
     InitialYield,
     Yield(StoredValue),
     YieldStar(StoredValue),
+    AsyncYieldStar(StoredValue),
     Return(StoredValue),
 }
 
@@ -4040,6 +4150,7 @@ fn execute_frame_loop(
                         generator,
                         suspended,
                         value,
+                        AsyncGeneratorLifecycle::SuspendedYield,
                         execution_budget,
                     )
                     .map_err(native_failure_to_execution)?
@@ -4151,6 +4262,90 @@ fn execute_frame_loop(
                     .into());
                 }
                 return Ok(result);
+            }
+            Step::AsyncYieldStar(value) => {
+                let suspended = frames.pop().ok_or(EngineFault::MissingInstruction {
+                    function: FunctionTemplateId::new(0),
+                    instruction: 0,
+                })?;
+                *active_frame_values =
+                    active_frame_values.saturating_sub(suspended.reserved_values);
+                let generator =
+                    suspended
+                        .generator_resume
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "delegated async-yield frame has no generator resume identity",
+                        })?;
+                if !runtime.async_generator_states.contains_key(&generator)
+                    || suspended.generator_result.is_some()
+                    || !suspended.native_returns.is_empty()
+                {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "delegated async-yield frame has invalid suspension state",
+                    }
+                    .into());
+                }
+                match finish_async_generator_yield(
+                    runtime,
+                    generator,
+                    suspended,
+                    value,
+                    AsyncGeneratorLifecycle::SuspendedYieldStar,
+                    execution_budget,
+                )
+                .map_err(native_failure_to_execution)?
+                {
+                    AsyncGeneratorYieldOutcome::Frame(next) => {
+                        *active_frame_values =
+                            active_frame_values.saturating_add(next.reserved_values);
+                        frames.push(next);
+                    }
+                    AsyncGeneratorYieldOutcome::Dispatch(dispatch) => {
+                        let active_frames = active_execution_frames(frames);
+                        let dispatch = resolve_native_dispatch(
+                            runtime,
+                            dispatch,
+                            frames,
+                            active_frames,
+                            *active_frame_values,
+                            compiler,
+                            execution_budget,
+                        )
+                        .map_err(native_failure_to_execution)?;
+                        match dispatch {
+                            NativeDispatch::Frame(next) => {
+                                *active_frame_values =
+                                    active_frame_values.saturating_add(next.reserved_values);
+                                frames.push(next);
+                            }
+                            NativeDispatch::Immediate(result) if frames.is_empty() => {
+                                return Ok(result);
+                            }
+                            NativeDispatch::Immediate(_)
+                            | NativeDispatch::Pair(_, _)
+                            | NativeDispatch::ForOfRecord { .. }
+                            | NativeDispatch::ForOfStep { .. }
+                            | NativeDispatch::ForOfClosed
+                            | NativeDispatch::CopyDataPropertiesDone
+                            | NativeDispatch::AsyncAwait { .. }
+                            | NativeDispatch::Call(_) => {
+                                return Err(EngineFault::RuntimeInvariant {
+                                    message: "queued delegated async-generator return produced an invalid dispatch",
+                                }
+                                .into());
+                            }
+                        }
+                    }
+                    AsyncGeneratorYieldOutcome::Suspended if frames.is_empty() => {
+                        return Ok(StoredValue::Undefined);
+                    }
+                    AsyncGeneratorYieldOutcome::Suspended => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "delegated async-generator yield retained an execution parent",
+                        }
+                        .into());
+                    }
+                }
             }
             Step::YieldStar(value) => {
                 if !matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {

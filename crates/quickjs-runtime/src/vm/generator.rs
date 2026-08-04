@@ -383,7 +383,18 @@ pub(super) fn complete_active_generator_resumes(
     frames: &[Frame],
 ) -> Result<(), ExecutionError> {
     for generator in frames.iter().filter_map(|frame| frame.generator_resume) {
-        complete_generator_resume(runtime, generator)?;
+        if runtime.generator_states.contains_key(&generator) {
+            complete_generator_resume(runtime, generator)?;
+        } else if runtime.async_generator_states.contains_key(&generator) {
+            complete_async_generator_resume(runtime, generator)?;
+        } else {
+            return Err(EngineFault::StaleHeapEdge {
+                edge: "generator state",
+                index: generator.index(),
+                generation: generator.generation(),
+            }
+            .into());
+        }
     }
     Ok(())
 }

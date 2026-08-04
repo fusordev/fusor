@@ -4847,7 +4847,7 @@ fn verify_linear_append_inputs(
         // models the three-slot record, which this pass never tracks); the
         // destructuring rest collector therefore keeps its fresh array and
         // cursor alive across the loop.
-        FinalOpcode::ForOfStart | FinalOpcode::ForOfNext => true,
+        FinalOpcode::ForOfStart | FinalOpcode::ForAwaitOfStart | FinalOpcode::ForOfNext => true,
         _ => false,
     };
     if exact_transition {
@@ -5342,10 +5342,15 @@ fn verify_supported_opcodes(
         if !supported_compiler_opcode(opcode)
             || (matches!(
                 opcode,
-                FinalOpcode::InitialYield | FinalOpcode::Yield | FinalOpcode::YieldStar
+                FinalOpcode::InitialYield
+                    | FinalOpcode::Yield
+                    | FinalOpcode::YieldStar
+                    | FinalOpcode::AsyncYieldStar
             ) && !generator)
             || (opcode == FinalOpcode::Await && !asynchronous)
+            || (opcode == FinalOpcode::ForAwaitOfStart && !async_generator)
             || (opcode == FinalOpcode::YieldStar && async_generator)
+            || (opcode == FinalOpcode::AsyncYieldStar && !async_generator)
             || (opcode == FinalOpcode::Yield && async_generator && {
                 let target = usize_to_u32(instruction_index);
                 let immediately_awaited = instruction_index.checked_sub(1).is_some_and(|prior| {
@@ -5509,6 +5514,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::InitialYield
             | FinalOpcode::Yield
             | FinalOpcode::YieldStar
+            | FinalOpcode::AsyncYieldStar
             | FinalOpcode::IteratorNext
             | FinalOpcode::IteratorCall
             | FinalOpcode::IteratorCheckObject
@@ -5556,6 +5562,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ForInStart
             | FinalOpcode::ForInNext
             | FinalOpcode::ForOfStart
+            | FinalOpcode::ForAwaitOfStart
             | FinalOpcode::ForOfNext
             | FinalOpcode::IteratorClose
             | FinalOpcode::IfFalse
@@ -5689,6 +5696,7 @@ enum InternalStackValue {
     YieldStarIteratorResult(BytecodePc),
     YieldStarDone(BytecodePc),
     YieldStarYieldResult(BytecodePc),
+    YieldStarYieldValue(BytecodePc),
     YieldStarFinalResult(BytecodePc),
     YieldStarResumeValue(BytecodePc),
     YieldStarResumeMode(BytecodePc),
@@ -5764,6 +5772,7 @@ impl JavaScriptStackValue {
             | InternalStackValue::YieldStarIteratorResult(_)
             | InternalStackValue::YieldStarDone(_)
             | InternalStackValue::YieldStarYieldResult(_)
+            | InternalStackValue::YieldStarYieldValue(_)
             | InternalStackValue::YieldStarFinalResult(_)
             | InternalStackValue::YieldStarResumeValue(_)
             | InternalStackValue::YieldStarResumeMode(_)
@@ -5851,6 +5860,7 @@ impl InternalStackValue {
                 | Self::YieldStarIteratorResult(_)
                 | Self::YieldStarDone(_)
                 | Self::YieldStarYieldResult(_)
+                | Self::YieldStarYieldValue(_)
                 | Self::YieldStarFinalResult(_)
                 | Self::YieldStarResumeValue(_)
                 | Self::YieldStarResumeMode(_)
@@ -6101,6 +6111,7 @@ fn verify_internal_operand_stack(
             FinalOpcode::ForInStart
                 | FinalOpcode::ForInNext
                 | FinalOpcode::ForOfStart
+                | FinalOpcode::ForAwaitOfStart
                 | FinalOpcode::ForOfNext
                 | FinalOpcode::IteratorClose
                 | FinalOpcode::Rot3r
@@ -6806,7 +6817,7 @@ fn transfer_internal_operand_stack(
                 ret_finalizer: None,
             });
         }
-        FinalOpcode::ForOfStart => {
+        FinalOpcode::ForOfStart | FinalOpcode::ForAwaitOfStart => {
             invalidate_internal_value_provenance(state);
             let Some(input) = state.last_mut() else {
                 return Err(for_of_stack_error(id, decoded.pc(), opcode));
@@ -6939,6 +6950,23 @@ fn transfer_internal_operand_stack(
         FinalOpcode::GetField
             if matches!(
                 state.last(),
+                Some(InternalStackValue::YieldStarYieldResult(_))
+            ) =>
+        {
+            let Some(InternalStackValue::YieldStarYieldResult(site)) = state.last().copied() else {
+                unreachable!("delegated yield result guard established the value")
+            };
+            *state.last_mut().expect("matched delegated yield result") =
+                InternalStackValue::YieldStarYieldValue(site);
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::GetField
+            if matches!(
+                state.last(),
                 Some(
                     InternalStackValue::YieldStarIteratorResult(_)
                         | InternalStackValue::YieldStarFinalResult(_)
@@ -6952,8 +6980,21 @@ fn transfer_internal_operand_stack(
                 ret_finalizer: None,
             });
         }
-        FinalOpcode::YieldStar => {
-            let Some(InternalStackValue::YieldStarYieldResult(site)) = state.last().copied() else {
+        FinalOpcode::YieldStar | FinalOpcode::AsyncYieldStar => {
+            let expected = match opcode {
+                FinalOpcode::YieldStar => state.last().copied().and_then(|value| match value {
+                    InternalStackValue::YieldStarYieldResult(site) => Some(site),
+                    _ => None,
+                }),
+                FinalOpcode::AsyncYieldStar => {
+                    state.last().copied().and_then(|value| match value {
+                        InternalStackValue::YieldStarYieldValue(site) => Some(site),
+                        _ => None,
+                    })
+                }
+                _ => unreachable!("matched delegated yield opcode"),
+            };
+            let Some(site) = expected else {
                 return Err(for_of_stack_error(id, decoded.pc(), opcode));
             };
             *state.last_mut().expect("matched delegated result") =
@@ -6968,6 +7009,18 @@ fn transfer_internal_operand_stack(
                 )
             })?;
             state.push(InternalStackValue::YieldStarResumeMode(site));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::Await
+            if matches!(
+                state.last(),
+                Some(InternalStackValue::YieldStarIteratorResult(_))
+            ) =>
+        {
             return Ok(InternalStackTransfer {
                 normal_completion: true,
                 iteration_branch_value: None,
@@ -8097,6 +8150,7 @@ fn internal_stack_error(
     } else if matches!(
         opcode,
         FinalOpcode::ForOfStart
+            | FinalOpcode::ForAwaitOfStart
             | FinalOpcode::ForOfNext
             | FinalOpcode::IteratorClose
             | FinalOpcode::Rot3r
@@ -9267,7 +9321,10 @@ fn collect_requirements(
                 push_requirement(requirements, ExecutionRequirement::Arrays);
                 push_requirement(requirements, ExecutionRequirement::Iterators);
             }
-            FinalOpcode::ForOfStart | FinalOpcode::ForOfNext | FinalOpcode::IteratorClose => {
+            FinalOpcode::ForOfStart
+            | FinalOpcode::ForAwaitOfStart
+            | FinalOpcode::ForOfNext
+            | FinalOpcode::IteratorClose => {
                 push_requirement(requirements, ExecutionRequirement::Iterators);
             }
             FinalOpcode::Object

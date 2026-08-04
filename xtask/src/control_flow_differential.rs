@@ -505,7 +505,10 @@ const ASYNC_FUNCTION_REQUIRED_COVERAGE: &[&str] = &[
 ];
 
 const ASYNC_GENERATOR_REQUIRED_COVERAGE: &[&str] = &[
+    "async-from-sync",
+    "async-iterator-close",
     "async-iterator-identity",
+    "async-iterator-precedence",
     "await-fulfill",
     "await-reject",
     "call-deferred",
@@ -516,11 +519,15 @@ const ASYNC_GENERATOR_REQUIRED_COVERAGE: &[&str] = &[
     "dynamic-new-target",
     "dynamic-prototype-fallback",
     "dynamic-source-order",
+    "delegate-next",
+    "done-before-value",
     "fifo-request-queue",
     "function-prototype-chain",
     "instance-prototype-chain",
     "invalid-receiver-rejects",
+    "iterator-close",
     "method",
+    "missing-throw",
     "next-promise",
     "next-resume-value",
     "nonconstructable",
@@ -530,9 +537,15 @@ const ASYNC_GENERATOR_REQUIRED_COVERAGE: &[&str] = &[
     "return-finally",
     "return-promise-resolve-abrupt",
     "return-reject",
+    "raw-delegate-value",
+    "rejection-precedence",
     "throw-catch",
+    "throw-forwarding",
     "uncaught-throw",
+    "value-assimilation",
+    "value-promise-resolve-abrupt",
     "yield-await-assimilation",
+    "yield-star",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2383,8 +2396,8 @@ mod tests {
             RuntimeDifferentialSuite::AsyncGenerator,
         )
         .expect("checked-in async-generator manifest");
-        assert_eq!(corpus.cases.len(), 12);
-        assert_eq!(super::ASYNC_GENERATOR_REQUIRED_COVERAGE.len(), 28);
+        assert_eq!(corpus.cases.len(), 18);
+        assert_eq!(super::ASYNC_GENERATOR_REQUIRED_COVERAGE.len(), 41);
     }
 
     #[test]

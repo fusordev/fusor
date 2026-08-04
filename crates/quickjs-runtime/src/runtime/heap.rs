@@ -154,6 +154,66 @@ impl Runtime {
         }
     }
 
+    pub(crate) fn realm_async_from_sync_iterator_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        match state.intrinsics {
+            RealmIntrinsics::Initializing => Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm iterator intrinsics are not initialized",
+            }),
+            RealmIntrinsics::Ready { iterators, .. } => {
+                let prototype = iterators.async_from_sync_iterator_prototype;
+                if self.objects.get(prototype).is_none() {
+                    return Err(crate::EngineFault::StaleHeapEdge {
+                        edge: "AsyncFromSyncIteratorPrototype intrinsic",
+                        index: prototype.index(),
+                        generation: prototype.generation(),
+                    });
+                }
+                Ok(prototype)
+            }
+        }
+    }
+
+    pub(crate) fn realm_async_from_sync_iterator_next(
+        &self,
+        realm: RealmId,
+    ) -> Result<FunctionId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        match state.intrinsics {
+            RealmIntrinsics::Initializing => Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm iterator intrinsics are not initialized",
+            }),
+            RealmIntrinsics::Ready { iterators, .. } => {
+                let function = iterators.async_from_sync_iterator_next;
+                if self.functions.get(function).is_none() {
+                    return Err(crate::EngineFault::StaleHeapEdge {
+                        edge: "AsyncFromSyncIterator next intrinsic",
+                        index: function.index(),
+                        generation: function.generation(),
+                    });
+                }
+                Ok(function)
+            }
+        }
+    }
+
     pub(crate) fn realm_boolean_prototype(
         &self,
         realm: RealmId,

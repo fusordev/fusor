@@ -258,6 +258,26 @@ pub(super) fn create_async_generator(
     Ok(StoredValue::Object(object))
 }
 
+pub(super) fn complete_async_generator_resume(
+    runtime: &mut Runtime,
+    generator: ObjectId,
+) -> Result<(), ExecutionError> {
+    let record =
+        runtime
+            .async_generator_states
+            .get_mut(&generator)
+            .ok_or(EngineFault::StaleHeapEdge {
+                edge: "async-generator state",
+                index: generator.index(),
+                generation: generator.generation(),
+            })?;
+    record.state = AsyncGeneratorLifecycle::Completed;
+    record.frame = None;
+    record.awaiting = None;
+    runtime.collection_pending = true;
+    Ok(())
+}
+
 fn resume_front_request(
     runtime: &mut Runtime,
     generator: ObjectId,
@@ -298,7 +318,18 @@ fn resume_front_request(
     record.state = AsyncGeneratorLifecycle::Executing;
     frame.generator_resume = Some(generator);
     frame.return_to = return_to;
-    if state == AsyncGeneratorLifecycle::SuspendedYield {
+    if state == AsyncGeneratorLifecycle::SuspendedYieldStar {
+        let resume_mode = match mode {
+            GeneratorResumeMode::Next => 0,
+            GeneratorResumeMode::Return => 1,
+            GeneratorResumeMode::Throw => 2,
+        };
+        push(&mut frame, argument);
+        push(
+            &mut frame,
+            StoredValue::Number(JsNumber::from_i32(resume_mode)),
+        );
+    } else if state == AsyncGeneratorLifecycle::SuspendedYield {
         match mode {
             GeneratorResumeMode::Next | GeneratorResumeMode::Return => {
                 push(&mut frame, argument);
@@ -422,7 +453,11 @@ pub(super) fn begin_async_generator_resume(
         }
         return drain_completed_queue(runtime, generator, promise, execution_budget);
     }
-    if state == AsyncGeneratorLifecycle::SuspendedYield && mode == GeneratorResumeMode::Return {
+    if matches!(
+        state,
+        AsyncGeneratorLifecycle::SuspendedYield | AsyncGeneratorLifecycle::SuspendedYieldStar
+    ) && mode == GeneratorResumeMode::Return
+    {
         let record = runtime.async_generator_states.get_mut(&generator).ok_or(
             EngineFault::StaleHeapEdge {
                 edge: "async-generator state",
@@ -434,7 +469,11 @@ pub(super) fn begin_async_generator_resume(
         return begin_async_generator_return_await(
             runtime,
             generator,
-            AsyncGeneratorAwaitKind::ReturnResume,
+            if state == AsyncGeneratorLifecycle::SuspendedYieldStar {
+                AsyncGeneratorAwaitKind::ReturnResumeYieldStar
+            } else {
+                AsyncGeneratorAwaitKind::ReturnResume
+            },
             promise,
             return_value,
             return_to,
@@ -502,6 +541,10 @@ pub(super) fn suspend_async_generator_await(
     Ok((result, return_to))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exhaustive await-kind transition preserves distinct body, return, delegated-return, and completion semantics"
+)]
 pub(super) fn begin_async_generator_await_resume(
     runtime: &mut Runtime,
     generator: ObjectId,
@@ -571,6 +614,24 @@ pub(super) fn begin_async_generator_await_resume(
                     });
                 }
             }
+            runtime.collection_pending = true;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        AsyncGeneratorAwaitKind::ReturnResumeYieldStar => {
+            let mut frame = record.frame.take().ok_or(EngineFault::RuntimeInvariant {
+                message: "async-generator delegated return reaction lost its suspended frame",
+            })?;
+            frame.generator_resume = Some(generator);
+            record.state = AsyncGeneratorLifecycle::Executing;
+            let resume_mode = match kind {
+                crate::object::PromiseReactionKind::Fulfill => 1,
+                crate::object::PromiseReactionKind::Reject => 2,
+            };
+            push(&mut frame, argument);
+            push(
+                &mut frame,
+                StoredValue::Number(JsNumber::from_i32(resume_mode)),
+            );
             runtime.collection_pending = true;
             Ok(NativeDispatch::Frame(frame))
         }
@@ -698,7 +759,7 @@ pub(super) fn resume_async_generator_return_await_abrupt(
             message: "body await used the async-generator return abrupt continuation",
         }
         .into()),
-        AsyncGeneratorAwaitKind::ReturnResume => {
+        AsyncGeneratorAwaitKind::ReturnResume | AsyncGeneratorAwaitKind::ReturnResumeYieldStar => {
             let record = runtime.async_generator_states.get_mut(&generator).ok_or(
                 EngineFault::StaleHeapEdge {
                     edge: "async-generator state",
@@ -717,7 +778,13 @@ pub(super) fn resume_async_generator_return_await_abrupt(
             })?;
             frame.generator_resume = Some(generator);
             frame.return_to = return_to;
-            frame.resume_abrupt = Some(pending);
+            if kind == AsyncGeneratorAwaitKind::ReturnResumeYieldStar {
+                let reason = pending_exception_value(runtime, pending)?;
+                push(&mut frame, reason);
+                push(&mut frame, StoredValue::Number(JsNumber::from_i32(2)));
+            } else {
+                frame.resume_abrupt = Some(pending);
+            }
             runtime.collection_pending = true;
             Ok(NativeDispatch::Frame(frame))
         }
@@ -809,8 +876,18 @@ pub(super) fn finish_async_generator_yield(
     generator: ObjectId,
     mut frame: Frame,
     value: StoredValue,
+    suspension: AsyncGeneratorLifecycle,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<AsyncGeneratorYieldOutcome, NativeFailure> {
+    if !matches!(
+        suspension,
+        AsyncGeneratorLifecycle::SuspendedYield | AsyncGeneratorLifecycle::SuspendedYieldStar
+    ) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "async-generator yield received an invalid suspension kind",
+        }
+        .into());
+    }
     frame.generator_resume = None;
     frame.return_to = None;
     let request = runtime
@@ -836,7 +913,7 @@ pub(super) fn finish_async_generator_yield(
                 index: generator.index(),
                 generation: generator.generation(),
             })?;
-    record.state = AsyncGeneratorLifecycle::SuspendedYield;
+    record.state = suspension;
     record.frame = Some(frame);
     if record.queue.is_empty() {
         return Ok(AsyncGeneratorYieldOutcome::Suspended);
@@ -856,7 +933,11 @@ pub(super) fn finish_async_generator_yield(
         let dispatch = begin_async_generator_return_await(
             runtime,
             generator,
-            AsyncGeneratorAwaitKind::ReturnResume,
+            if suspension == AsyncGeneratorLifecycle::SuspendedYieldStar {
+                AsyncGeneratorAwaitKind::ReturnResumeYieldStar
+            } else {
+                AsyncGeneratorAwaitKind::ReturnResume
+            },
             StoredValue::Undefined,
             value,
             None,

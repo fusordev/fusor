@@ -1359,7 +1359,7 @@ enum PromiseThenDisposition {
     clippy::too_many_lines,
     reason = "the three Promise-state branches keep HostPromiseRejectionTracker ordering visible"
 )]
-fn perform_promise_then(
+pub(super) fn perform_promise_then(
     runtime: &mut Runtime,
     promise: ObjectId,
     on_fulfilled: Option<FunctionId>,

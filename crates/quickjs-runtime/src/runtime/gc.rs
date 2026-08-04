@@ -431,6 +431,7 @@ impl Runtime {
                 for prototype in [
                     iterators.iterator_prototype,
                     iterators.async_iterator_prototype,
+                    iterators.async_from_sync_iterator_prototype,
                     iterators.array_iterator_prototype,
                     iterators.string_iterator_prototype,
                     generators.function_prototype,

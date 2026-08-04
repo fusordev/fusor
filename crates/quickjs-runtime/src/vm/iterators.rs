@@ -489,6 +489,7 @@ pub(super) fn begin_for_of_start(
     let state = ForOfStartContinuation {
         iterable,
         iterator: None,
+        async_from_sync: false,
         realm,
         stage: ForOfStartStage::IteratorMethod,
         origin,
@@ -502,6 +503,31 @@ pub(super) fn begin_for_of_start(
     )
 }
 
+pub(super) fn begin_for_await_of_start(
+    runtime: &mut Runtime,
+    iterable: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let state = ForOfStartContinuation {
+        iterable,
+        iterator: None,
+        async_from_sync: false,
+        realm,
+        stage: ForOfStartStage::AsyncIteratorMethod,
+        origin,
+    };
+    read_for_of_start_property(
+        runtime,
+        state,
+        &runtime.predefined_symbol_property_key(PredefinedAtom::SymbolAsyncIterator),
+        return_to,
+        execution_budget,
+    )
+}
+
 pub(super) fn advance_for_of_start(
     runtime: &mut Runtime,
     mut state: ForOfStartContinuation,
@@ -510,7 +536,20 @@ pub(super) fn advance_for_of_start(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match state.stage {
-        ForOfStartStage::IteratorMethod => {
+        ForOfStartStage::AsyncIteratorMethod
+            if matches!(completion, StoredValue::Undefined | StoredValue::Null) =>
+        {
+            state.async_from_sync = true;
+            state.stage = ForOfStartStage::IteratorMethod;
+            read_for_of_start_property(
+                runtime,
+                state,
+                &runtime.predefined_symbol_property_key(PredefinedAtom::SymbolIterator),
+                return_to,
+                execution_budget,
+            )
+        }
+        ForOfStartStage::IteratorMethod | ForOfStartStage::AsyncIteratorMethod => {
             let StoredValue::Function(method) = completion else {
                 return Err(iterator_exception(
                     state.realm,
@@ -556,6 +595,16 @@ pub(super) fn advance_for_of_start(
             let iterator = state.iterator.ok_or(EngineFault::RuntimeInvariant {
                 message: "for-of next lookup completed without an iterator",
             })?;
+            if state.async_from_sync {
+                let wrapper =
+                    runtime.allocate_async_from_sync_iterator(state.realm, iterator, completion)?;
+                return Ok(NativeDispatch::ForOfRecord {
+                    iterator: StoredValue::Object(wrapper),
+                    next: StoredValue::Function(
+                        runtime.realm_async_from_sync_iterator_next(state.realm)?,
+                    ),
+                });
+            }
             Ok(NativeDispatch::ForOfRecord {
                 iterator,
                 next: completion,
@@ -573,6 +622,7 @@ fn read_for_of_start_property(
 ) -> Result<NativeDispatch, NativeFailure> {
     let (base, property_name) = match state.stage {
         ForOfStartStage::IteratorMethod => (&state.iterable, "Symbol.iterator"),
+        ForOfStartStage::AsyncIteratorMethod => (&state.iterable, "Symbol.asyncIterator"),
         ForOfStartStage::NextMethod => {
             let iterator = state
                 .iterator

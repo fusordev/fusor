@@ -248,6 +248,8 @@ struct SymbolIntrinsics {
 struct IteratorIntrinsics {
     iterator_prototype: ObjectId,
     async_iterator_prototype: ObjectId,
+    async_from_sync_iterator_prototype: ObjectId,
+    async_from_sync_iterator_next: FunctionId,
     array_iterator_prototype: ObjectId,
     string_iterator_prototype: ObjectId,
     array_values: FunctionId,
@@ -1177,6 +1179,11 @@ pub(crate) enum NativeFunctionKind {
     SymbolKeyFor,
     IteratorPrototypeIterator,
     AsyncIteratorPrototypeAsyncIterator,
+    AsyncFromSyncIteratorNext,
+    AsyncFromSyncIteratorReturn,
+    AsyncFromSyncIteratorThrow,
+    AsyncFromSyncIteratorUnwrap,
+    AsyncFromSyncIteratorClose,
     ArrayPrototypeJoin,
     ArrayPrototypeToString,
     /// One no-`Intl` `toLocaleString` implementation.
@@ -2124,6 +2131,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::InitialYield
             | FinalOpcode::Yield
             | FinalOpcode::YieldStar
+            | FinalOpcode::AsyncYieldStar
             | FinalOpcode::ThrowError
             | FinalOpcode::GetLoc
             | FinalOpcode::PutLoc
@@ -2147,6 +2155,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ForInStart
             | FinalOpcode::ForInNext
             | FinalOpcode::ForOfStart
+            | FinalOpcode::ForAwaitOfStart
             | FinalOpcode::ForOfNext
             | FinalOpcode::IteratorClose
             | FinalOpcode::IteratorNext

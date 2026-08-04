@@ -22,6 +22,13 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         object_prototype(),
         IntrinsicObjectKind::Ordinary,
     ));
+    visit(object(
+        IntrinsicObjectId::AsyncFromSyncIteratorPrototype,
+        PrototypeSpec::Intrinsic(IntrinsicIdentity::Object(
+            IntrinsicObjectId::AsyncIteratorPrototype,
+        )),
+        IntrinsicObjectKind::Ordinary,
+    ));
     let iterator_prototype = PrototypeSpec::Intrinsic(IntrinsicIdentity::Object(
         IntrinsicObjectId::IteratorPrototype,
     ));
@@ -74,6 +81,22 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     ] {
         visit(ordinary(kind, name, 0));
     }
+    for (kind, name) in [
+        (
+            NativeFunctionKind::AsyncFromSyncIteratorNext,
+            PredefinedAtom::Next,
+        ),
+        (
+            NativeFunctionKind::AsyncFromSyncIteratorReturn,
+            PredefinedAtom::Return,
+        ),
+        (
+            NativeFunctionKind::AsyncFromSyncIteratorThrow,
+            PredefinedAtom::Throw,
+        ),
+    ] {
+        visit(ordinary(kind, IntrinsicNameSpec::Predefined(name), 1));
+    }
 }
 
 pub(super) fn visit_properties(visit: PropertySink<'_>) {
@@ -87,6 +110,28 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolAsyncIterator),
         NativeFunctionKind::AsyncIteratorPrototypeAsyncIterator,
     ));
+    let async_from_sync =
+        IntrinsicIdentity::Object(IntrinsicObjectId::AsyncFromSyncIteratorPrototype);
+    for (key, function) in [
+        (
+            PredefinedAtom::Next,
+            NativeFunctionKind::AsyncFromSyncIteratorNext,
+        ),
+        (
+            PredefinedAtom::Return,
+            NativeFunctionKind::AsyncFromSyncIteratorReturn,
+        ),
+        (
+            PredefinedAtom::Throw,
+            NativeFunctionKind::AsyncFromSyncIteratorThrow,
+        ),
+    ] {
+        visit(method(
+            async_from_sync,
+            IntrinsicKeySpec::PredefinedString(key),
+            function,
+        ));
+    }
 
     let array_iterator = IntrinsicIdentity::Object(IntrinsicObjectId::ArrayIteratorPrototype);
     visit(method(

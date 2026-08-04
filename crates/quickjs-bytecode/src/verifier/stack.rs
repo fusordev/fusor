@@ -44,7 +44,7 @@ pub(super) fn analyze_ordinary_stack(
     let has_catch_marker = instructions.iter().any(|instruction| {
         matches!(
             instruction.decoded.instruction().opcode(),
-            FinalOpcode::Catch | FinalOpcode::ForOfStart
+            FinalOpcode::Catch | FinalOpcode::ForOfStart | FinalOpcode::ForAwaitOfStart
         )
     });
     let has_gosub = instructions

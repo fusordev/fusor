@@ -35,9 +35,9 @@ use super::{
     usize_to_u64,
 };
 
-const REALM_OBJECT_SLOTS: u64 = 30;
-const REALM_PROPERTY_SLOTS: u64 = 899;
-const REALM_FUNCTION_SLOTS: u64 = 261;
+const REALM_OBJECT_SLOTS: u64 = 31;
+const REALM_PROPERTY_SLOTS: u64 = 908;
+const REALM_FUNCTION_SLOTS: u64 = 264;
 
 #[test]
 #[allow(
@@ -281,6 +281,74 @@ fn promise_capability_executor_limits_are_atomic_and_inclusive() {
         runtime.usage().object_properties(),
         before.object_properties() + 2
     );
+}
+
+#[test]
+fn async_from_sync_handler_limits_are_atomic_and_inclusive() {
+    for (limits, resource, limit, observed) in [
+        (
+            RuntimeLimits::default().with_max_heap_functions(REALM_FUNCTION_SLOTS + 1),
+            RuntimeResource::HeapFunctions,
+            REALM_FUNCTION_SLOTS + 1,
+            REALM_FUNCTION_SLOTS + 2,
+        ),
+        (
+            RuntimeLimits::default().with_max_object_properties(REALM_PROPERTY_SLOTS + 5),
+            RuntimeResource::ObjectProperties,
+            REALM_PROPERTY_SLOTS + 5,
+            REALM_PROPERTY_SLOTS + 6,
+        ),
+    ] {
+        let mut runtime = Runtime::try_new(limits).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let iterator = StoredValue::Object(
+            runtime
+                .realm_object_prototype(realm.0.id)
+                .expect("Object.prototype"),
+        );
+        let before = runtime.usage();
+        assert!(matches!(
+            runtime.allocate_async_from_sync_handlers(realm.0.id, false, Some(iterator)),
+            Err(ExecutionError::LimitExceeded {
+                resource: actual_resource,
+                limit: actual_limit,
+                observed: actual_observed,
+            }) if actual_resource == resource
+                && actual_limit == limit
+                && actual_observed == observed
+        ));
+        assert_eq!(runtime.usage(), before);
+    }
+
+    let mut runtime = Runtime::try_new(
+        RuntimeLimits::default()
+            .with_max_heap_functions(REALM_FUNCTION_SLOTS + 2)
+            .with_max_object_properties(REALM_PROPERTY_SLOTS + 6),
+    )
+    .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let iterator = StoredValue::Object(
+        runtime
+            .realm_object_prototype(realm.0.id)
+            .expect("Object.prototype"),
+    );
+    let before = runtime.usage();
+    runtime
+        .allocate_async_from_sync_handlers(realm.0.id, false, Some(iterator))
+        .expect("inclusive Async-from-Sync handler allocation");
+    assert_eq!(
+        runtime.usage().heap_functions(),
+        before.heap_functions() + 2
+    );
+    assert_eq!(
+        runtime.usage().object_properties(),
+        before.object_properties() + 6
+    );
+    let report = runtime
+        .collect_cycles()
+        .expect("collect unrooted Async-from-Sync handlers");
+    assert_eq!(report.functions(), 2);
+    assert_eq!(runtime.usage(), before);
 }
 
 #[test]
@@ -658,7 +726,7 @@ fn array_spread_opcodes_are_admitted_without_public_iterator_markers() {
         )
         .expect("deferred throw-error form")
     ));
-    assert!(!is_supported_opcode(FinalOpcode::ForAwaitOfStart));
+    assert!(is_supported_opcode(FinalOpcode::ForAwaitOfStart));
 }
 
 #[test]

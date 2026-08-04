@@ -160,20 +160,42 @@ fn async_generator_method_uses_the_async_generator_header() {
 }
 
 #[test]
-fn async_generator_delegation_remains_typed_fail_closed() {
-    with_parsed_program(
-        "async function* outer(iterable) { yield* iterable; }",
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage plan");
-            let executable = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some("outer"))
-                .expect("async generator");
-            context
-                .compile_leaf(&executable, VerificationLimits::default())
-                .expect_err("async yield delegation stays fail closed");
-        },
-    )
-    .expect("frontend");
+fn async_generator_delegation_uses_the_verified_async_iterator_protocol_loop() {
+    let compiled = compile(
+        "async function* outer(iterable) { return yield* iterable; }",
+        "outer",
+    );
+    let opcodes = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        compiled.control_flow().function_header().kind(),
+        FunctionKind::AsyncGenerator
+    );
+    for required in [
+        FinalOpcode::ForAwaitOfStart,
+        FinalOpcode::IteratorNext,
+        FinalOpcode::Await,
+        FinalOpcode::IteratorCheckObject,
+        FinalOpcode::AsyncYieldStar,
+        FinalOpcode::IteratorCall,
+    ] {
+        assert!(
+            opcodes.contains(&required),
+            "delegated async yield did not emit {required:?}: {opcodes:?}"
+        );
+    }
+    let async_yield = opcodes
+        .iter()
+        .position(|opcode| *opcode == FinalOpcode::AsyncYieldStar)
+        .expect("delegated async yield opcode");
+    assert_eq!(
+        opcodes.get(async_yield.checked_sub(1).expect("preceding value read")),
+        Some(&FinalOpcode::GetField),
+        "the typed verifier requires async yield* to extract value before suspension"
+    );
 }
