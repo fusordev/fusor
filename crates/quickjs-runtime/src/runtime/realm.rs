@@ -38,16 +38,18 @@ use super::{
     Arc, Arena, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics, ArrayMutator,
     ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic, AsyncFunctionIntrinsics,
     AsyncGeneratorIntrinsics, AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics, Context,
-    ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation,
-    GeneratorIntrinsics, GlobalNumericFunction, HandleError, HandleKind, HashMap, HeapFunction,
-    HeapObject, HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString,
-    LocaleStringMethod, MapIntrinsics, MapMethod, MathMethod, NativeFunction, NativeFunctionKind,
-    NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom,
-    PromiseIntrinsics, PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Realm,
-    RealmHandle, RealmId, RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime,
-    RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, SetIntrinsics, SetMethod,
-    StoredValue, StringHtmlMethod, StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction,
-    VecDeque, WeakMapIntrinsics, WeakSetIntrinsics, check_limit, predefined_string, usize_to_u64,
+    ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FinalizationRegistryIntrinsics,
+    FunctionId, FunctionImplementation, GeneratorIntrinsics, GlobalNumericFunction, HandleError,
+    HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
+    IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, MapIntrinsics, MapMethod,
+    MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberIntrinsics,
+    NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PromiseIntrinsics,
+    PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId,
+    RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError,
+    RuntimeIdentity, RuntimeLimits, RuntimeResource, SetIntrinsics, SetMethod, StoredValue,
+    StringHtmlMethod, StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction, VecDeque,
+    WeakMapIntrinsics, WeakRefIntrinsics, WeakSetIntrinsics, check_limit, predefined_string,
+    usize_to_u64,
 };
 
 use allocation::IntrinsicRecords;
@@ -555,6 +557,8 @@ impl Runtime {
             interrupts: InterruptState::default(),
             promise_rejections: PromiseRejectionState::default(),
             promise_jobs: VecDeque::new(),
+            finalization_jobs: VecDeque::new(),
+            kept_alive: Vec::new(),
             generator_states: HashMap::new(),
             async_function_states: HashMap::new(),
             async_generator_states: HashMap::new(),
@@ -715,6 +719,14 @@ impl RealmBuildTransaction<'_> {
             weak_set: WeakSetIntrinsics {
                 prototype: object(IntrinsicObjectId::WeakSetPrototype),
                 constructor: function(NativeFunctionKind::WeakSetConstructor),
+            },
+            weak_ref: WeakRefIntrinsics {
+                prototype: object(IntrinsicObjectId::WeakRefPrototype),
+                constructor: function(NativeFunctionKind::WeakRefConstructor),
+            },
+            finalization_registry: FinalizationRegistryIntrinsics {
+                prototype: object(IntrinsicObjectId::FinalizationRegistryPrototype),
+                constructor: function(NativeFunctionKind::FinalizationRegistryConstructor),
             },
             promise: PromiseIntrinsics {
                 prototype: object(IntrinsicObjectId::PromisePrototype),

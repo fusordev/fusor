@@ -461,6 +461,13 @@ pub(super) fn finish_intrinsic_get(
             message: "Promise prototype getter resumed without its caller completion",
         }
         .into()),
+        IntrinsicGetContinuation::WeakRefConstructor { .. }
+        | IntrinsicGetContinuation::FinalizationRegistryConstructor { .. } => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "weak-reference prototype getter resumed without its caller completion",
+            }
+            .into())
+        }
         IntrinsicGetContinuation::ObjectPrototypeToString {
             default_tag,
             temporary_receiver,

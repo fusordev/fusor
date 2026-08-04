@@ -41,6 +41,7 @@ pub(crate) const DEFAULT_STRING_HTML_CORPUS: &str = "tests/string-html/manifest.
 pub(crate) const DEFAULT_MAP_CORPUS: &str = "tests/map/manifest.json";
 pub(crate) const DEFAULT_SET_CORPUS: &str = "tests/set/manifest.json";
 pub(crate) const DEFAULT_WEAK_COLLECTIONS_CORPUS: &str = "tests/weak-collections/manifest.json";
+pub(crate) const DEFAULT_WEAK_REFERENCES_CORPUS: &str = "tests/weak-references/manifest.json";
 pub(crate) const MAX_CONTROL_FLOW_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const CANDIDATE_WORKER_COMMAND: &str = "__control-flow-candidate-worker";
 pub(crate) const ASYNC_FUNCTION_CANDIDATE_WORKER_COMMAND: &str =
@@ -449,6 +450,22 @@ const WEAK_COLLECTIONS_REQUIRED_COVERAGE: &[&str] = &[
     "weak-symbol-key",
 ];
 
+const WEAK_REFERENCES_REQUIRED_COVERAGE: &[&str] = &[
+    "finalization-registry-brand-first",
+    "finalization-registry-constructor-new",
+    "finalization-registry-register",
+    "finalization-registry-surface",
+    "finalization-registry-unregister",
+    "finalization-registry-validation",
+    "weak-ref-brand-first",
+    "weak-ref-constructor-new",
+    "weak-ref-new-target",
+    "weak-ref-object-target",
+    "weak-ref-registered-symbol-rejection",
+    "weak-ref-surface",
+    "weak-ref-symbol-target",
+];
+
 const PROMISE_CORE_REQUIRED_COVERAGE: &[&str] = &[
     "all-input-order",
     "all-settled-records",
@@ -626,6 +643,7 @@ enum RuntimeDifferentialSuite {
     Map,
     Set,
     WeakCollections,
+    WeakReferences,
 }
 
 impl RuntimeDifferentialSuite {
@@ -646,6 +664,7 @@ impl RuntimeDifferentialSuite {
             Self::Map => "map",
             Self::Set => "set",
             Self::WeakCollections => "weak-collections",
+            Self::WeakReferences => "weak-references",
         }
     }
 
@@ -666,6 +685,7 @@ impl RuntimeDifferentialSuite {
             Self::Map => MAP_REQUIRED_COVERAGE,
             Self::Set => SET_REQUIRED_COVERAGE,
             Self::WeakCollections => WEAK_COLLECTIONS_REQUIRED_COVERAGE,
+            Self::WeakReferences => WEAK_REFERENCES_REQUIRED_COVERAGE,
         }
     }
 
@@ -774,6 +794,13 @@ pub(crate) struct SetDifferentialOptions {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct WeakCollectionsDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct WeakReferencesDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -964,6 +991,17 @@ pub(crate) fn run_weak_collections_differential(
         &options.corpus,
         options.timeout,
         RuntimeDifferentialSuite::WeakCollections,
+    )
+}
+
+pub(crate) fn run_weak_references_differential(
+    options: &WeakReferencesDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::WeakReferences,
     )
 }
 
@@ -2606,6 +2644,21 @@ mod tests {
         .expect("checked-in weak-collections manifest");
         assert_eq!(corpus.cases.len(), 6);
         assert_eq!(super::WEAK_COLLECTIONS_REQUIRED_COVERAGE.len(), 15);
+    }
+
+    #[test]
+    fn checked_in_weak_references_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/weak-references/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in weak-references manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::WeakReferences,
+        )
+        .expect("checked-in weak-references manifest");
+        assert_eq!(corpus.cases.len(), 5);
+        assert_eq!(super::WEAK_REFERENCES_REQUIRED_COVERAGE.len(), 13);
     }
 
     #[test]

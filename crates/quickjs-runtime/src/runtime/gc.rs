@@ -205,6 +205,8 @@ impl Runtime {
             public_roots: self.public_roots,
             pending_releases: usize_to_u64(self.mailbox.pending_len()),
             pending_promise_jobs: usize_to_u64(self.promise_jobs.len()),
+            pending_finalization_jobs: usize_to_u64(self.finalization_jobs.len()),
+            kept_alive: usize_to_u64(self.kept_alive.len()),
         }
     }
 
@@ -325,6 +327,8 @@ impl Runtime {
                 set,
                 weak_map,
                 weak_set,
+                weak_ref,
+                finalization_registry,
                 promise,
                 symbol,
                 iterators,
@@ -450,6 +454,10 @@ impl Runtime {
                     HeapReference::Function(weak_map.constructor),
                     HeapReference::Object(weak_set.prototype),
                     HeapReference::Function(weak_set.constructor),
+                    HeapReference::Object(weak_ref.prototype),
+                    HeapReference::Function(weak_ref.constructor),
+                    HeapReference::Object(finalization_registry.prototype),
+                    HeapReference::Function(finalization_registry.constructor),
                 ] {
                     mark_heap_reference(
                         reference,
@@ -533,6 +541,9 @@ impl Runtime {
                 );
             }
         }
+        for value in &self.kept_alive {
+            mark_stored_value(value, &mut marked_functions, &mut marked_objects, &mut work);
+        }
         for job in &self.promise_jobs {
             match job {
                 PromiseJob::Reaction { reaction, argument } => {
@@ -614,6 +625,14 @@ impl Runtime {
                     );
                 }
             }
+        }
+        for registry in &self.finalization_jobs {
+            mark_heap_reference(
+                HeapReference::Object(*registry),
+                &mut marked_functions,
+                &mut marked_objects,
+                &mut work,
+            );
         }
         trace_additional_roots(&mut |root| {
             let live = match root {
@@ -924,6 +943,22 @@ impl Runtime {
                                     &mut work,
                                 );
                             }
+                            if let Some(state) = object.finalization_registry_state() {
+                                mark_heap_reference(
+                                    HeapReference::Function(state.cleanup_callback()),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                                for value in object.finalization_retained_values() {
+                                    mark_stored_value(
+                                        value,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
+                            }
                             if let Some(state) = object.promise_state() {
                                 match state {
                                     PromiseState::Pending {
@@ -1117,6 +1152,57 @@ impl Runtime {
                 additional: dead_functions.len(),
             })?;
 
+        let mut finalization_jobs = Vec::new();
+        for object in marked_objects.iter().copied() {
+            let Some(state) = self
+                .objects
+                .get(object)
+                .and_then(crate::object::HeapObject::finalization_registry_state)
+            else {
+                continue;
+            };
+            if state.cleanup_pending() {
+                continue;
+            }
+            let needs_cleanup = state.has_cleanup_cell()
+                || state.cells().any(|cell| {
+                    cell.target().is_some_and(|target| {
+                        !weak_key_is_live(
+                            target,
+                            &marked_functions,
+                            &marked_objects,
+                            &marked_weak_symbols,
+                            &ephemeron_symbol_owners,
+                        )
+                    })
+                });
+            if !needs_cleanup {
+                continue;
+            }
+            finalization_jobs
+                .try_reserve(1)
+                .map_err(|_| RuntimeError::AllocationFailed {
+                    resource: RuntimeResource::Collection,
+                    additional: 1,
+                })?;
+            finalization_jobs.push(object);
+        }
+        let pending_jobs = usize_to_u64(self.finalization_jobs.len())
+            .saturating_add(usize_to_u64(finalization_jobs.len()));
+        if pending_jobs > self.limits.max_pending_finalization_jobs {
+            return Err(RuntimeError::LimitExceeded {
+                resource: RuntimeResource::FinalizationJobs,
+                limit: self.limits.max_pending_finalization_jobs,
+                observed: pending_jobs,
+            });
+        }
+        self.finalization_jobs
+            .try_reserve(finalization_jobs.len())
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::FinalizationJobs,
+                additional: finalization_jobs.len(),
+            })?;
+
         // All collection allocations have succeeded. The transaction may now
         // prune dead weak keys before removing the ordinary dead sets.
         let mut reclaimed_weak_entries = 0_usize;
@@ -1148,6 +1234,54 @@ impl Runtime {
                         )
                     }));
             }
+            if let Some(state) = heap_object.weak_ref_state_mut()
+                && state.target().is_some_and(|target| {
+                    !weak_key_is_live(
+                        target,
+                        &marked_functions,
+                        &marked_objects,
+                        &marked_weak_symbols,
+                        &ephemeron_symbol_owners,
+                    )
+                })
+            {
+                state.clear();
+            }
+            if let Some(state) = heap_object.finalization_registry_state_mut() {
+                for cell in state.cells_mut() {
+                    if cell.target().is_some_and(|target| {
+                        !weak_key_is_live(
+                            target,
+                            &marked_functions,
+                            &marked_objects,
+                            &marked_weak_symbols,
+                            &ephemeron_symbol_owners,
+                        )
+                    }) {
+                        cell.clear_target();
+                    }
+                    if cell.unregister_token().is_some_and(|token| {
+                        !weak_key_is_live(
+                            token,
+                            &marked_functions,
+                            &marked_objects,
+                            &marked_weak_symbols,
+                            &ephemeron_symbol_owners,
+                        )
+                    }) {
+                        cell.clear_unregister_token();
+                    }
+                }
+            }
+        }
+        for registry in finalization_jobs {
+            let state = self
+                .objects
+                .get_mut(registry)
+                .and_then(crate::object::HeapObject::finalization_registry_state_mut)
+                .expect("preflighted live FinalizationRegistry remains present");
+            state.set_cleanup_pending(true);
+            self.finalization_jobs.push_back(registry);
         }
         self.collection_entries = self
             .collection_entries

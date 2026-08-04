@@ -2260,6 +2260,63 @@ pub(super) fn begin_promise_job(
     }
 }
 
+fn drain_finalization_registry_job(
+    runtime: &mut Runtime,
+    registry: ObjectId,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), ExecutionError> {
+    loop {
+        let mut callback_arguments = Vec::new();
+        callback_arguments
+            .try_reserve_exact(1)
+            .map_err(|_| ExecutionError::AllocationFailed {
+                resource: RuntimeResource::FrameValues,
+                additional: 1,
+            })?;
+        let Some((_realm, callback, held_value)) =
+            runtime.take_finalization_cleanup_value(registry)?
+        else {
+            break;
+        };
+        let prepared_frames = Vec::new();
+        callback_arguments.push(held_value);
+        let dispatch = resolve_native_dispatch(
+            runtime,
+            NativeDispatch::Call(NativeCall {
+                function: callback,
+                receiver: StoredValue::Undefined,
+                arguments: CallArguments::from_values(callback_arguments),
+                return_to: None,
+                origin: native_function_host_origin(),
+                continuations: Vec::new(),
+                pre_call: None,
+                new_target: None,
+                native_caller: None,
+            }),
+            &prepared_frames,
+            0,
+            0,
+            compiler,
+            execution_budget,
+        );
+        match execute_root_dispatch_with_budget(
+            runtime,
+            dispatch,
+            prepared_frames,
+            compiler,
+            execution_budget,
+        ) {
+            Ok(_) => {}
+            Err(ExecutionError::Exception(_)) => break,
+            Err(error) => return Err(error),
+        }
+        runtime.kept_alive.clear();
+    }
+    runtime.finish_finalization_cleanup_job(registry)?;
+    Ok(())
+}
+
 pub(super) fn drain_promise_jobs(
     runtime: &mut Runtime,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
@@ -2287,28 +2344,51 @@ pub(super) fn drain_promise_jobs(
             compiler,
             execution_budget,
         )?;
+        runtime.kept_alive.clear();
     }
     Ok(())
 }
 
-/// Completes one host turn and performs its Promise-job checkpoint. Ordinary
-/// JavaScript abrupt completion does not suppress already-enqueued jobs;
-/// uncatchable host/runtime failures remain immediate cancellation boundaries.
+fn drain_host_jobs(
+    runtime: &mut Runtime,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), ExecutionError> {
+    loop {
+        drain_promise_jobs(runtime, compiler, execution_budget)?;
+        let Some(registry) = runtime.finalization_jobs.pop_front() else {
+            return Ok(());
+        };
+        drain_finalization_registry_job(runtime, registry, compiler, execution_budget)?;
+        runtime.kept_alive.clear();
+    }
+}
+
+/// Completes one host turn and performs its Promise-job checkpoint plus queued
+/// finalization cleanup jobs. Ordinary JavaScript abrupt completion does not
+/// suppress already-enqueued jobs; uncatchable host/runtime failures remain
+/// immediate cancellation boundaries.
 pub(super) fn complete_host_turn<T>(
     runtime: &mut Runtime,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     execution_budget: &mut ExecutionBudget,
     completion: Result<T, ExecutionError>,
 ) -> Result<T, ExecutionError> {
+    runtime.kept_alive.clear();
     match completion {
         Ok(value) => {
-            drain_promise_jobs(runtime, compiler, execution_budget)?;
+            drain_host_jobs(runtime, compiler, execution_budget)?;
+            runtime.kept_alive.clear();
             Ok(value)
         }
         Err(error @ ExecutionError::Exception(_)) => {
-            drain_promise_jobs(runtime, compiler, execution_budget)?;
+            drain_host_jobs(runtime, compiler, execution_budget)?;
+            runtime.kept_alive.clear();
             Err(error)
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            runtime.kept_alive.clear();
+            Err(error)
+        }
     }
 }

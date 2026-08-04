@@ -18,6 +18,7 @@ mod set;
 mod string;
 mod symbol;
 mod weak_collections;
+mod weak_references;
 
 use super::schema::{
     ConstructorPrototypeSpec, FamilyCardinality, IntrinsicDescriptorSpec, IntrinsicFunctionId,
@@ -128,12 +129,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 37,
+                expected: 39,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 311,
+                expected: 316,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -175,6 +176,8 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::SetIteratorPrototype
             | IntrinsicObjectId::WeakMapPrototype
             | IntrinsicObjectId::WeakSetPrototype
+            | IntrinsicObjectId::WeakRefPrototype
+            | IntrinsicObjectId::FinalizationRegistryPrototype
             | IntrinsicObjectId::Reflect
             | IntrinsicObjectId::Json
             | IntrinsicObjectId::Math
@@ -277,11 +280,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::SetSpeciesGetter
             | NativeFunctionKind::SetPrototype(_)
             | NativeFunctionKind::SetIteratorNext
-            | NativeFunctionKind::WeakMapConstructor
-            | NativeFunctionKind::WeakMapPrototype(_)
-            | NativeFunctionKind::WeakSetConstructor
-            | NativeFunctionKind::WeakSetPrototype(_)
-    )
+    ) || is_weak_collection_function(id)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -448,7 +447,10 @@ fn special_reference_batch(
         NativeFunctionKind::PromiseConstructor => Some(DeclarativeBatch::PromiseGlobals),
         NativeFunctionKind::MapConstructor => Some(DeclarativeBatch::MapGlobals),
         NativeFunctionKind::SetConstructor => Some(DeclarativeBatch::SetGlobals),
-        NativeFunctionKind::WeakMapConstructor | NativeFunctionKind::WeakSetConstructor => {
+        NativeFunctionKind::WeakMapConstructor
+        | NativeFunctionKind::WeakSetConstructor
+        | NativeFunctionKind::WeakRefConstructor
+        | NativeFunctionKind::FinalizationRegistryConstructor => {
             Some(DeclarativeBatch::WeakCollectionGlobals)
         }
         NativeFunctionKind::OrdinaryFunctionConstructor | NativeFunctionKind::ObjectConstructor => {
@@ -557,7 +559,10 @@ const fn is_set_function(id: IntrinsicFunctionId) -> bool {
 const fn is_weak_collection_identity(id: IntrinsicIdentity) -> bool {
     match id {
         IntrinsicIdentity::Object(
-            IntrinsicObjectId::WeakMapPrototype | IntrinsicObjectId::WeakSetPrototype,
+            IntrinsicObjectId::WeakMapPrototype
+            | IntrinsicObjectId::WeakSetPrototype
+            | IntrinsicObjectId::WeakRefPrototype
+            | IntrinsicObjectId::FinalizationRegistryPrototype,
         ) => true,
         IntrinsicIdentity::Function(id) => is_weak_collection_function(id),
         IntrinsicIdentity::Object(_) => false,
@@ -571,6 +576,10 @@ const fn is_weak_collection_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::WeakMapPrototype(_)
             | NativeFunctionKind::WeakSetConstructor
             | NativeFunctionKind::WeakSetPrototype(_)
+            | NativeFunctionKind::WeakRefConstructor
+            | NativeFunctionKind::WeakRefPrototypeDeref
+            | NativeFunctionKind::FinalizationRegistryConstructor
+            | NativeFunctionKind::FinalizationRegistryPrototype(_)
     )
 }
 
@@ -813,6 +822,7 @@ fn visit_object_specs(visit: ObjectSink<'_>) {
     map::visit_objects(visit);
     set::visit_objects(visit);
     weak_collections::visit_objects(visit);
+    weak_references::visit_objects(visit);
     reflect::visit_objects(visit);
     json::visit_objects(visit);
     math::visit_objects(visit);
@@ -833,6 +843,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
     map::visit_functions(visit);
     set::visit_functions(visit);
     weak_collections::visit_functions(visit);
+    weak_references::visit_functions(visit);
     reflect::visit_functions(visit);
     json::visit_functions(visit);
     math::visit_functions(visit);
@@ -855,6 +866,7 @@ fn visit_property_specs(visit: PropertySink<'_>) {
     map::visit_properties(visit);
     set::visit_properties(visit);
     weak_collections::visit_properties(visit);
+    weak_references::visit_properties(visit);
     globals::visit_properties(visit);
     reflect::visit_properties(visit);
     json::visit_properties(visit);
@@ -965,8 +977,8 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 311);
-        assert_eq!(schema.constructor_prototypes.len(), 25);
+        assert_eq!(schema.specs().len(), 316);
+        assert_eq!(schema.constructor_prototypes.len(), 27);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]

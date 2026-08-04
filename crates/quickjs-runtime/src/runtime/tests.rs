@@ -35,9 +35,78 @@ use super::{
     usize_to_u64,
 };
 
-const REALM_OBJECT_SLOTS: u64 = 37;
-const REALM_PROPERTY_SLOTS: u64 = 1_066;
-const REALM_FUNCTION_SLOTS: u64 = 311;
+const REALM_OBJECT_SLOTS: u64 = 39;
+const REALM_PROPERTY_SLOTS: u64 = 1_087;
+const REALM_FUNCTION_SLOTS: u64 = 316;
+
+#[test]
+fn finalization_job_limit_failure_does_not_clear_weak_targets() {
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_pending_finalization_jobs(0))
+            .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+    let weak_ref_prototype = runtime
+        .realm_weak_ref_prototype(realm_id)
+        .expect("WeakRef.prototype");
+    let registry_prototype = runtime
+        .realm_finalization_registry_prototype(realm_id)
+        .expect("FinalizationRegistry.prototype");
+    let cleanup_callback = runtime
+        .realm_function_prototype(realm_id)
+        .expect("cleanup callback fixture");
+    let target = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("target");
+    let target_value = StoredValue::Object(target);
+    let weak_ref = runtime
+        .allocate_weak_ref_object(HeapReference::Object(weak_ref_prototype), &target_value)
+        .expect("WeakRef");
+    let registry = runtime
+        .allocate_finalization_registry_object(
+            HeapReference::Object(registry_prototype),
+            realm_id,
+            cleanup_callback,
+        )
+        .expect("FinalizationRegistry");
+    runtime
+        .finalization_registry_register(registry, &target_value, StoredValue::Undefined, None)
+        .expect("registration");
+
+    let error = runtime
+        .collect_cycles_with_roots(|mark| {
+            mark(CollectionRoot::Heap(HeapReference::Object(weak_ref)));
+            mark(CollectionRoot::Heap(HeapReference::Object(registry)));
+        })
+        .expect_err("cleanup job exceeds the exact zero-job limit");
+    assert!(matches!(
+        error,
+        RuntimeError::LimitExceeded {
+            resource: RuntimeResource::FinalizationJobs,
+            limit: 0,
+            observed: 1,
+        }
+    ));
+    assert!(
+        runtime
+            .objects
+            .get(weak_ref)
+            .and_then(crate::object::HeapObject::weak_ref_state)
+            .and_then(crate::object::WeakRefState::target)
+            .is_some()
+    );
+    let registry_state = runtime
+        .objects
+        .get(registry)
+        .and_then(crate::object::HeapObject::finalization_registry_state)
+        .expect("registry state");
+    assert!(!registry_state.cleanup_pending());
+    assert!(registry_state.cells().all(|cell| cell.target().is_some()));
+    assert!(runtime.finalization_jobs.is_empty());
+}
 
 #[test]
 fn map_entry_limit_is_inclusive_atomic_and_counts_retained_tombstones() {
@@ -1827,6 +1896,8 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         set: _,
         weak_map: _,
         weak_set: _,
+        weak_ref: _,
+        finalization_registry: _,
     } = state.intrinsics
     else {
         panic!("realm intrinsics remained uninitialized");
@@ -1840,9 +1911,9 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 194,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_540,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 194,
+            live_atoms: PREDEFINED_ATOM_COUNT + 197,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_563,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 197,
         }
     );
 
@@ -2496,9 +2567,9 @@ fn function_call_is_realm_owned_while_its_dynamic_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 194,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_540,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 194,
+            live_atoms: PREDEFINED_ATOM_COUNT + 197,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_563,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 197,
         }
     );
 }
@@ -2545,9 +2616,9 @@ fn function_apply_is_realm_owned_while_its_predefined_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 194,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_540,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 194,
+            live_atoms: PREDEFINED_ATOM_COUNT + 197,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_563,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 197,
         }
     );
 }

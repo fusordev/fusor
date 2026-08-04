@@ -56,17 +56,18 @@ use crate::{
     runtime::{
         ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayFlatten, ArrayLengthWriteOutcome,
         ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayStatic, BindingCell,
-        BoundFunction, BytecodeFunction, CollectionRoot, EnvironmentBinding, ForInAdvance,
-        FrameBindingAddress, FunctionImplementation, GlobalNumericFunction, HeapFunction,
-        InstalledCode, InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod,
-        MapMethod, MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
-        PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
-        PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
-        PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
-        PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
-        ReflectMethod, SetMethod, SetPrototypeOutcome, StringArgument, StringMethod, UriFunction,
-        WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
-        global_declaration_error, usize_to_u64,
+        BoundFunction, BytecodeFunction, CollectionRoot, EnvironmentBinding,
+        FinalizationRegistryMethod, ForInAdvance, FrameBindingAddress, FunctionImplementation,
+        GlobalNumericFunction, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
+        InstalledTemplate, LocaleStringMethod, MapMethod, MathMethod, NativeFunction,
+        NativeFunctionKind, NumberFormat, NumberPredicate, PreparedIteratorResultPlan,
+        PromiseCapabilityCapture, PromiseCapabilityExecutor, PromiseCombinatorElementFunction,
+        PromiseCombinatorElementKind, PromiseCombinatorKind, PromiseCombinatorShared,
+        PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
+        PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, SetMethod,
+        SetPrototypeOutcome, StringArgument, StringMethod, UriFunction, WeakMapMethod,
+        WeakSetMethod, array_length_from_number, check_execution_limit, global_declaration_error,
+        usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -117,6 +118,7 @@ mod string_raw;
 mod string_replace;
 mod uri;
 mod weak_collections;
+mod weak_references;
 
 pub(crate) use array_from_async::ArrayFromAsyncRecord;
 use async_function::{begin_async_await, suspend_async_function};
@@ -134,7 +136,7 @@ use {
     json_parse::*, json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*,
     native::*, object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*,
     set::*, stack::*, string_methods::*, string_raw::*, string_replace::*, uri::*,
-    weak_collections::*,
+    weak_collections::*, weak_references::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -774,6 +776,15 @@ enum IntrinsicGetContinuation {
         executor: FunctionId,
         origin: JsStackFrame,
     },
+    WeakRefConstructor {
+        new_target: FunctionId,
+        target: StoredValue,
+    },
+    FinalizationRegistryConstructor {
+        realm: RealmId,
+        new_target: FunctionId,
+        cleanup_callback: FunctionId,
+    },
     ObjectPrototypeToString {
         default_tag: ObjectPrototypeTag,
         temporary_receiver: Option<ObjectId>,
@@ -791,7 +802,9 @@ impl IntrinsicGetContinuation {
             }
             Self::MapConstructor { .. }
             | Self::SetConstructor { .. }
-            | Self::PromiseConstructor { .. } => 2,
+            | Self::PromiseConstructor { .. }
+            | Self::WeakRefConstructor { .. }
+            | Self::FinalizationRegistryConstructor { .. } => 2,
             Self::ObjectPrototypeToString {
                 temporary_receiver, ..
             } => u64::from(temporary_receiver.is_some()),
@@ -1964,6 +1977,22 @@ fn trace_native_continuation_roots(
             } => {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
                 mark(CollectionRoot::Heap(HeapReference::Function(*executor)));
+            }
+            IntrinsicGetContinuation::WeakRefConstructor {
+                new_target, target, ..
+            } => {
+                mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
+                trace_stored_value_root(target, mark);
+            }
+            IntrinsicGetContinuation::FinalizationRegistryConstructor {
+                new_target,
+                cleanup_callback,
+                ..
+            } => {
+                mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
+                mark(CollectionRoot::Heap(HeapReference::Function(
+                    *cleanup_callback,
+                )));
             }
             IntrinsicGetContinuation::ObjectPrototypeToString {
                 temporary_receiver, ..

@@ -61,6 +61,7 @@ mod promises;
 mod sets;
 mod symbols;
 mod weak_collections;
+mod weak_references;
 pub(crate) use iterators::PreparedIteratorResultPlan;
 pub use limits::{RuntimeLimits, RuntimeUsage};
 
@@ -95,6 +96,8 @@ enum RealmIntrinsics {
         set: SetIntrinsics,
         weak_map: WeakMapIntrinsics,
         weak_set: WeakSetIntrinsics,
+        weak_ref: WeakRefIntrinsics,
+        finalization_registry: FinalizationRegistryIntrinsics,
         promise: PromiseIntrinsics,
         symbol: SymbolIntrinsics,
         iterators: IteratorIntrinsics,
@@ -257,6 +260,18 @@ struct WeakMapIntrinsics {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct WeakSetIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WeakRefIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FinalizationRegistryIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
 }
@@ -1239,6 +1254,10 @@ pub(crate) enum NativeFunctionKind {
     WeakMapPrototype(WeakMapMethod),
     WeakSetConstructor,
     WeakSetPrototype(WeakSetMethod),
+    WeakRefConstructor,
+    WeakRefPrototypeDeref,
+    FinalizationRegistryConstructor,
+    FinalizationRegistryPrototype(FinalizationRegistryMethod),
     StringPrototypeIterator,
     StringIteratorNext,
     GeneratorFunctionConstructor,
@@ -1435,6 +1454,25 @@ pub(crate) enum WeakSetMethod {
     Delete,
 }
 
+/// Methods installed on `%FinalizationRegistry.prototype%` in pinned
+/// `QuickJS` order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FinalizationRegistryMethod {
+    Register,
+    Unregister,
+}
+
+impl FinalizationRegistryMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::Register, Self::Unregister];
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Register => 2,
+            Self::Unregister => 1,
+        }
+    }
+}
+
 impl WeakSetMethod {
     pub(crate) const ALL: [Self; 3] = [Self::Add, Self::Has, Self::Delete];
 
@@ -1599,6 +1637,8 @@ impl NativeFunctionKind {
                 | Self::SetConstructor
                 | Self::WeakMapConstructor
                 | Self::WeakSetConstructor
+                | Self::WeakRefConstructor
+                | Self::FinalizationRegistryConstructor
         )
     }
 }
@@ -2124,6 +2164,8 @@ pub struct Runtime {
     pub(crate) interrupts: InterruptState,
     pub(crate) promise_rejections: PromiseRejectionState,
     pub(crate) promise_jobs: VecDeque<PromiseJob>,
+    pub(crate) finalization_jobs: VecDeque<ObjectId>,
+    pub(crate) kept_alive: Vec<StoredValue>,
     pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,
     pub(crate) async_function_states: HashMap<ObjectId, crate::vm::AsyncFunctionRecord>,
     pub(crate) async_generator_states: HashMap<ObjectId, crate::vm::AsyncGeneratorRecord>,

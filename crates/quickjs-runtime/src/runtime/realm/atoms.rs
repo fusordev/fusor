@@ -199,16 +199,7 @@ impl Runtime {
 fn visit_realm_name_order(
     mut visit: impl FnMut(RealmNameId) -> Result<(), RuntimeError>,
 ) -> Result<(), RuntimeError> {
-    for id in [
-        RealmNameId::Call,
-        RealmNameId::Entries,
-        RealmNameId::KeyFor,
-        RealmNameId::Description,
-        RealmNameId::IsError,
-        RealmNameId::Bind,
-    ] {
-        visit(id)?;
-    }
+    visit_core_name_order(&mut visit)?;
     for (_, symbol) in DYNAMIC_SYMBOL_STATIC_PROPERTIES {
         visit(RealmNameId::SymbolStatic(symbol))?;
     }
@@ -300,6 +291,25 @@ fn visit_realm_name_order(
     Ok(())
 }
 
+fn visit_core_name_order(
+    visit: &mut impl FnMut(RealmNameId) -> Result<(), RuntimeError>,
+) -> Result<(), RuntimeError> {
+    for id in [
+        RealmNameId::Call,
+        RealmNameId::Entries,
+        RealmNameId::KeyFor,
+        RealmNameId::Description,
+        RealmNameId::IsError,
+        RealmNameId::Bind,
+        RealmNameId::Deref,
+        RealmNameId::Register,
+        RealmNameId::Unregister,
+    ] {
+        visit(id)?;
+    }
+    Ok(())
+}
+
 fn visit_map_name_order(
     visit: &mut impl FnMut(RealmNameId) -> Result<(), RuntimeError>,
 ) -> Result<(), RuntimeError> {
@@ -348,6 +358,9 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::Description => "description",
         RealmNameId::IsError => "isError",
         RealmNameId::Bind => "bind",
+        RealmNameId::Deref => "deref",
+        RealmNameId::Register => "register",
+        RealmNameId::Unregister => "unregister",
         RealmNameId::Reflect => "Reflect",
         RealmNameId::JsonIsRawJson => "isRawJSON",
         RealmNameId::JsonParse => "parse",
@@ -432,8 +445,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 195);
-        assert_eq!(plan.description_code_units(), 1_543);
+        assert_eq!(plan.len(), 198);
+        assert_eq!(plan.description_code_units(), 1_566);
     }
 
     #[test]

@@ -451,6 +451,10 @@ pub(super) fn resume_native_continuations(
                 &value,
                 execution_budget,
             )?,
+            NativeContinuation::IntrinsicGet(
+                state @ (IntrinsicGetContinuation::WeakRefConstructor { .. }
+                | IntrinsicGetContinuation::FinalizationRegistryConstructor { .. }),
+            ) => finish_weak_reference_constructor_get(runtime, state, &value)?,
             NativeContinuation::IntrinsicGet(state) => {
                 finish_intrinsic_get(runtime, state, value, active_root_frames, &continuations)?
             }
@@ -2510,6 +2514,30 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::WeakRefConstructor => {
+            let target = inputs.arguments.take_first_or_undefined();
+            begin_weak_ref_constructor(
+                runtime,
+                native.realm,
+                inputs.new_target,
+                target,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::FinalizationRegistryConstructor => {
+            let cleanup_callback = inputs.arguments.take_first_or_undefined();
+            begin_finalization_registry_constructor(
+                runtime,
+                native.realm,
+                inputs.new_target,
+                &cleanup_callback,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::ArraySpeciesGetter
         | NativeFunctionKind::PromiseSpeciesGetter
         | NativeFunctionKind::MapSpeciesGetter
@@ -2715,6 +2743,27 @@ pub(super) fn dispatch_native_call_with_frames(
             },
             execution_budget,
         ),
+        NativeFunctionKind::WeakRefPrototypeDeref => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            dispatch_weak_ref_deref(
+                runtime,
+                &inputs.receiver,
+                native.realm,
+                &origin,
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::FinalizationRegistryPrototype(method) => {
+            dispatch_finalization_registry_method(
+                runtime,
+                method,
+                &inputs.receiver,
+                inputs.arguments,
+                native.realm,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::MapIteratorNext => begin_map_iterator_next(
             runtime,
             &inputs.receiver,

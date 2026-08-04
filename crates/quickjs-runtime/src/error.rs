@@ -167,6 +167,10 @@ pub enum RuntimeResource {
     ReleaseMailbox,
     /// Jobs retained by the runtime-owned ECMAScript Promise FIFO.
     PromiseJobs,
+    /// Cleanup jobs retained for live `FinalizationRegistry` objects.
+    FinalizationJobs,
+    /// Weak targets retained until the current ECMAScript job completes.
+    KeptAlive,
 }
 
 impl fmt::Display for RuntimeResource {
@@ -193,6 +197,8 @@ impl fmt::Display for RuntimeResource {
             Self::Collection => "runtime collection",
             Self::ReleaseMailbox => "release mailbox",
             Self::PromiseJobs => "Promise jobs",
+            Self::FinalizationJobs => "finalization jobs",
+            Self::KeptAlive => "kept-alive weak targets",
         })
     }
 }

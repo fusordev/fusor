@@ -113,6 +113,10 @@ impl WeakAtom {
     pub(crate) fn strong_count(&self) -> usize {
         self.0.strong_count()
     }
+
+    pub(crate) fn upgrade(&self) -> Option<Atom> {
+        self.0.upgrade().map(Atom)
+    }
 }
 
 impl PartialEq for WeakAtom {

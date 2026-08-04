@@ -17,17 +17,18 @@ use control_flow_differential::{
     DEFAULT_FUNCTION_APPLY_CORPUS, DEFAULT_FUNCTION_BIND_CORPUS, DEFAULT_GENERATOR_CORPUS,
     DEFAULT_ITERATOR_CORPUS, DEFAULT_MAP_CORPUS, DEFAULT_OBJECT_LEGACY_CORPUS,
     DEFAULT_PROMISE_CORE_CORPUS, DEFAULT_SET_CORPUS, DEFAULT_STRING_HTML_CORPUS,
-    DEFAULT_WEAK_COLLECTIONS_CORPUS, ErrorDifferentialOptions, FunctionApplyDifferentialOptions,
-    FunctionBindDifferentialOptions, GeneratorDifferentialOptions, IteratorDifferentialOptions,
-    MAX_CONTROL_FLOW_TIMEOUT_MS, MapDifferentialOptions, ObjectLegacyDifferentialOptions,
-    PromiseCoreDifferentialOptions, SetDifferentialOptions, StringHtmlDifferentialOptions,
-    WeakCollectionsDifferentialOptions, run_async_function_differential,
+    DEFAULT_WEAK_COLLECTIONS_CORPUS, DEFAULT_WEAK_REFERENCES_CORPUS, ErrorDifferentialOptions,
+    FunctionApplyDifferentialOptions, FunctionBindDifferentialOptions,
+    GeneratorDifferentialOptions, IteratorDifferentialOptions, MAX_CONTROL_FLOW_TIMEOUT_MS,
+    MapDifferentialOptions, ObjectLegacyDifferentialOptions, PromiseCoreDifferentialOptions,
+    SetDifferentialOptions, StringHtmlDifferentialOptions, WeakCollectionsDifferentialOptions,
+    WeakReferencesDifferentialOptions, run_async_function_differential,
     run_async_generator_differential, run_call_spread_differential,
     run_control_flow_candidate_worker, run_control_flow_differential, run_error_differential,
     run_function_apply_differential, run_function_bind_differential, run_generator_differential,
     run_iterator_differential, run_map_differential, run_object_legacy_differential,
     run_promise_core_differential, run_set_differential, run_string_html_differential,
-    run_weak_collections_differential,
+    run_weak_collections_differential, run_weak_references_differential,
 };
 use dynamic_function_differential::{
     DynamicFunctionDifferentialOptions, run_dynamic_function_differential,
@@ -233,6 +234,16 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Ok(Args::WeakReferencesDifferential(options)) => {
+            match run_weak_references_differential(&options) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::FAILURE,
+                Err(error) => {
+                    eprintln!("xtask: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Ok(Args::ControlFlowCandidateWorker { read_async_result }) => {
             match run_control_flow_candidate_worker(read_async_result) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -273,6 +284,7 @@ Usage:
   cargo xtask map-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask set-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask weak-collections-differential --oracle QJS_PATH [OPTIONS]
+  cargo xtask weak-references-differential --oracle QJS_PATH [OPTIONS]
 
 Options:
   --corpus PATH       Corpus directory (runtime default: {DEFAULT_CORPUS};
@@ -292,7 +304,8 @@ Options:
                       Annex B String HTML manifest default: {DEFAULT_STRING_HTML_CORPUS};
                       Map manifest default: {DEFAULT_MAP_CORPUS};
                       Set manifest default: {DEFAULT_SET_CORPUS};
-                      weak collections manifest default: {DEFAULT_WEAK_COLLECTIONS_CORPUS})
+                      weak collections manifest default: {DEFAULT_WEAK_COLLECTIONS_CORPUS};
+                      weak references manifest default: {DEFAULT_WEAK_REFERENCES_CORPUS})
   --timeout-ms N      Per-process timeout (default: {DEFAULT_TIMEOUT_MS})
   -h, --help          Show this help
 
@@ -327,6 +340,8 @@ Set --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
 its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
 Weak collections --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
 its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
+Weak references --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
+its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
 "
     );
 }
@@ -353,6 +368,7 @@ enum Args {
     MapDifferential(MapDifferentialOptions),
     SetDifferential(SetDifferentialOptions),
     WeakCollectionsDifferential(WeakCollectionsDifferentialOptions),
+    WeakReferencesDifferential(WeakReferencesDifferentialOptions),
     ControlFlowCandidateWorker { read_async_result: bool },
 }
 
@@ -390,6 +406,10 @@ impl Args {
         if contains_help(&arguments) {
             return Ok(Self::Help);
         }
+        Self::parse_command(&command, arguments)
+    }
+
+    fn parse_command(command: &OsStr, arguments: Vec<std::ffi::OsString>) -> Result<Self, String> {
         match command.to_string_lossy().as_ref() {
             "differential" => {
                 parse_differential_options(arguments.into_iter()).map(Self::Differential)
@@ -456,6 +476,10 @@ impl Args {
             "weak-collections-differential" => {
                 parse_weak_collections_differential_options(arguments.into_iter())
                     .map(Self::WeakCollectionsDifferential)
+            }
+            "weak-references-differential" => {
+                parse_weak_references_differential_options(arguments.into_iter())
+                    .map(Self::WeakReferencesDifferential)
             }
             unknown => Err(format!("unknown task `{unknown}`")),
         }
@@ -1088,6 +1112,41 @@ fn parse_weak_collections_differential_options(
     })
 }
 
+fn parse_weak_references_differential_options(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<WeakReferencesDifferentialOptions, String> {
+    let mut oracle = None;
+    let mut corpus = PathBuf::from(DEFAULT_WEAK_REFERENCES_CORPUS);
+    let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    while let Some(option) = arguments.next() {
+        match option.to_string_lossy().as_ref() {
+            "--oracle" => oracle = Some(required_path(&mut arguments, "--oracle")?),
+            "--corpus" => corpus = required_path(&mut arguments, "--corpus")?,
+            "--timeout-ms" => {
+                timeout = required_timeout(&mut arguments)?;
+                let milliseconds = timeout.as_millis();
+                if milliseconds == 0 || milliseconds > u128::from(MAX_CONTROL_FLOW_TIMEOUT_MS) {
+                    return Err(format!(
+                        "weak-references --timeout-ms must be between 1 and {MAX_CONTROL_FLOW_TIMEOUT_MS}"
+                    ));
+                }
+            }
+            unknown => {
+                return Err(format!(
+                    "unknown weak-references-differential option `{unknown}`"
+                ));
+            }
+        }
+    }
+
+    Ok(WeakReferencesDifferentialOptions {
+        oracle: oracle.ok_or("missing required --oracle PATH")?,
+        corpus,
+        timeout,
+    })
+}
+
 fn required_timeout(
     arguments: &mut impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<Duration, String> {
@@ -1435,6 +1494,7 @@ mod tests {
     use crate::control_flow_differential::SetDifferentialOptions;
     use crate::control_flow_differential::StringHtmlDifferentialOptions;
     use crate::control_flow_differential::WeakCollectionsDifferentialOptions;
+    use crate::control_flow_differential::WeakReferencesDifferentialOptions;
     use crate::dynamic_function_differential::DynamicFunctionDifferentialOptions;
     use crate::number_radix_differential::NumberRadixDifferentialOptions;
     use std::ffi::{OsStr, OsString};
@@ -2101,6 +2161,44 @@ mod tests {
             assert_eq!(
                 Args::parse(arguments),
                 Err("weak-collections --timeout-ms must be between 1 and 60000".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn weak_references_differential_uses_the_pinned_corpus_by_default() {
+        let arguments = ["weak-references-differential", "--oracle", "/tmp/qjs"]
+            .into_iter()
+            .map(OsString::from);
+
+        assert_eq!(
+            Args::parse(arguments),
+            Ok(Args::WeakReferencesDifferential(
+                WeakReferencesDifferentialOptions {
+                    oracle: PathBuf::from("/tmp/qjs"),
+                    corpus: PathBuf::from("tests/weak-references/manifest.json"),
+                    timeout: Duration::from_secs(5),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_unbounded_weak_references_timeouts() {
+        for timeout in ["0", "60001"] {
+            let arguments = [
+                "weak-references-differential",
+                "--oracle",
+                "/tmp/qjs",
+                "--timeout-ms",
+                timeout,
+            ]
+            .into_iter()
+            .map(OsString::from);
+
+            assert_eq!(
+                Args::parse(arguments),
+                Err("weak-references --timeout-ms must be between 1 and 60000".to_owned())
             );
         }
     }

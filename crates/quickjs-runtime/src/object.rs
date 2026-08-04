@@ -34,7 +34,7 @@ use crate::{
     ArrayIndex, Atom, AtomKind, JsBigInt, JsNumber, JsString, PropertyKey, PropertyLayout,
     PropertyLayoutKind,
     atom::WeakAtom,
-    ids::{BindingCellId, FunctionId},
+    ids::{BindingCellId, FunctionId, RealmId},
     value::{HeapReference, StoredValue},
 };
 
@@ -587,6 +587,143 @@ impl WeakMapState {
 /// Non-enumerable `[[WeakSetData]]` indexed by non-owning language identities.
 pub(crate) struct WeakSetState {
     entries: HashSet<WeakKey>,
+}
+
+/// The non-owning `[[WeakRefTarget]]` slot of one `WeakRef` instance.
+pub(crate) struct WeakRefState {
+    target: Option<WeakKey>,
+}
+
+impl WeakRefState {
+    pub(crate) fn new(target: &StoredValue) -> Self {
+        Self {
+            target: Some(WeakKey::from_value(target).expect("WeakRef targets are validated")),
+        }
+    }
+
+    pub(crate) const fn target(&self) -> Option<&WeakKey> {
+        self.target.as_ref()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.target = None;
+    }
+}
+
+/// One `FinalizationRegistry` cell. Targets and unregister tokens are weak;
+/// held values remain strong until unregister or cleanup removes the cell.
+pub(crate) struct FinalizationCell {
+    target: Option<WeakKey>,
+    held_value: StoredValue,
+    unregister_token: Option<WeakKey>,
+}
+
+impl FinalizationCell {
+    pub(crate) const fn target(&self) -> Option<&WeakKey> {
+        self.target.as_ref()
+    }
+
+    pub(crate) const fn unregister_token(&self) -> Option<&WeakKey> {
+        self.unregister_token.as_ref()
+    }
+
+    pub(crate) fn clear_target(&mut self) {
+        self.target = None;
+    }
+
+    pub(crate) fn clear_unregister_token(&mut self) {
+        self.unregister_token = None;
+    }
+}
+
+/// `[[Realm]]`, `[[CleanupCallback]]`, and ordered `[[Cells]]` for one
+/// `FinalizationRegistry` instance.
+pub(crate) struct FinalizationRegistryState {
+    realm: RealmId,
+    cleanup_callback: FunctionId,
+    cells: Vec<FinalizationCell>,
+    cleanup_pending: bool,
+}
+
+impl FinalizationRegistryState {
+    pub(crate) const fn new(realm: RealmId, cleanup_callback: FunctionId) -> Self {
+        Self {
+            realm,
+            cleanup_callback,
+            cells: Vec::new(),
+            cleanup_pending: false,
+        }
+    }
+
+    pub(crate) const fn realm(&self) -> RealmId {
+        self.realm
+    }
+
+    pub(crate) const fn cleanup_callback(&self) -> FunctionId {
+        self.cleanup_callback
+    }
+
+    pub(crate) const fn cleanup_pending(&self) -> bool {
+        self.cleanup_pending
+    }
+
+    pub(crate) fn set_cleanup_pending(&mut self, pending: bool) {
+        self.cleanup_pending = pending;
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.cells.len()
+    }
+
+    pub(crate) fn cells(&self) -> impl Iterator<Item = &FinalizationCell> {
+        self.cells.iter()
+    }
+
+    pub(crate) fn cells_mut(&mut self) -> impl Iterator<Item = &mut FinalizationCell> {
+        self.cells.iter_mut()
+    }
+
+    pub(crate) fn held_values(&self) -> impl Iterator<Item = &StoredValue> {
+        self.cells.iter().map(|cell| &cell.held_value)
+    }
+
+    pub(crate) fn try_register(
+        &mut self,
+        target: &StoredValue,
+        held_value: StoredValue,
+        unregister_token: Option<&StoredValue>,
+    ) -> Result<(), TryReserveError> {
+        self.cells.try_reserve(1)?;
+        self.cells.push(FinalizationCell {
+            target: Some(
+                WeakKey::from_value(target).expect("FinalizationRegistry targets are validated"),
+            ),
+            held_value,
+            unregister_token: unregister_token.map(|token| {
+                WeakKey::from_value(token)
+                    .expect("FinalizationRegistry unregister tokens are validated")
+            }),
+        });
+        Ok(())
+    }
+
+    pub(crate) fn unregister(&mut self, token: &StoredValue) -> usize {
+        let token = WeakKey::from_value(token)
+            .expect("FinalizationRegistry unregister tokens are validated");
+        let previous = self.cells.len();
+        self.cells
+            .retain(|cell| cell.unregister_token.as_ref() != Some(&token));
+        previous.saturating_sub(self.cells.len())
+    }
+
+    pub(crate) fn take_cleanup_value(&mut self) -> Option<StoredValue> {
+        let position = self.cells.iter().position(|cell| cell.target.is_none())?;
+        Some(self.cells.remove(position).held_value)
+    }
+
+    pub(crate) fn has_cleanup_cell(&self) -> bool {
+        self.cells.iter().any(|cell| cell.target.is_none())
+    }
 }
 
 impl WeakSetState {
@@ -1541,6 +1678,10 @@ pub(crate) enum HeapObjectKind {
     WeakMap(WeakMapState),
     /// An ECMAScript `WeakSet` object with weak `[[WeakSetData]]`.
     WeakSet(WeakSetState),
+    /// An ECMAScript `WeakRef` object with non-owning `[[WeakRefTarget]]`.
+    WeakRef(WeakRefState),
+    /// An ECMAScript `FinalizationRegistry` with strongly held cleanup state.
+    FinalizationRegistry(FinalizationRegistryState),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1630,7 +1771,9 @@ impl HeapObjectKind {
             | Self::Set(_)
             | Self::SetIterator(_)
             | Self::WeakMap(_)
-            | Self::WeakSet(_) => None,
+            | Self::WeakSet(_)
+            | Self::WeakRef(_)
+            | Self::FinalizationRegistry(_) => None,
             Self::BoxedPrimitive(value) => Some(value),
         }
     }
@@ -1652,7 +1795,9 @@ impl HeapObjectKind {
             | Self::Set(_)
             | Self::SetIterator(_)
             | Self::WeakMap(_)
-            | Self::WeakSet(_) => None,
+            | Self::WeakSet(_)
+            | Self::WeakRef(_)
+            | Self::FinalizationRegistry(_) => None,
         }
     }
 
@@ -1673,7 +1818,9 @@ impl HeapObjectKind {
             | Self::Set(_)
             | Self::SetIterator(_)
             | Self::WeakMap(_)
-            | Self::WeakSet(_) => None,
+            | Self::WeakSet(_)
+            | Self::WeakRef(_)
+            | Self::FinalizationRegistry(_) => None,
         }
     }
 
@@ -1694,7 +1841,9 @@ impl HeapObjectKind {
             | Self::Set(_)
             | Self::SetIterator(_)
             | Self::WeakMap(_)
-            | Self::WeakSet(_) => None,
+            | Self::WeakSet(_)
+            | Self::WeakRef(_)
+            | Self::FinalizationRegistry(_) => None,
         }
     }
 
@@ -1715,7 +1864,9 @@ impl HeapObjectKind {
             | Self::Set(_)
             | Self::SetIterator(_)
             | Self::WeakMap(_)
-            | Self::WeakSet(_) => None,
+            | Self::WeakSet(_)
+            | Self::WeakRef(_)
+            | Self::FinalizationRegistry(_) => None,
         }
     }
 
@@ -1736,7 +1887,9 @@ impl HeapObjectKind {
             | Self::Set(_)
             | Self::SetIterator(_)
             | Self::WeakMap(_)
-            | Self::WeakSet(_) => None,
+            | Self::WeakSet(_)
+            | Self::WeakRef(_)
+            | Self::FinalizationRegistry(_) => None,
         }
     }
 
@@ -1757,7 +1910,9 @@ impl HeapObjectKind {
             | Self::Set(_)
             | Self::SetIterator(_)
             | Self::WeakMap(_)
-            | Self::WeakSet(_) => None,
+            | Self::WeakSet(_)
+            | Self::WeakRef(_)
+            | Self::FinalizationRegistry(_) => None,
         }
     }
 
@@ -1778,7 +1933,9 @@ impl HeapObjectKind {
             | Self::Set(_)
             | Self::SetIterator(_)
             | Self::WeakMap(_)
-            | Self::WeakSet(_) => None,
+            | Self::WeakSet(_)
+            | Self::WeakRef(_)
+            | Self::FinalizationRegistry(_) => None,
         }
     }
 
@@ -1799,7 +1956,9 @@ impl HeapObjectKind {
             | Self::Set(_)
             | Self::SetIterator(_)
             | Self::WeakMap(_)
-            | Self::WeakSet(_) => None,
+            | Self::WeakSet(_)
+            | Self::WeakRef(_)
+            | Self::FinalizationRegistry(_) => None,
         }
     }
 
@@ -1883,6 +2042,36 @@ impl HeapObjectKind {
     pub(crate) const fn weak_set_mut(&mut self) -> Option<&mut WeakSetState> {
         match self {
             Self::WeakSet(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn weak_ref(&self) -> Option<&WeakRefState> {
+        match self {
+            Self::WeakRef(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn weak_ref_mut(&mut self) -> Option<&mut WeakRefState> {
+        match self {
+            Self::WeakRef(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn finalization_registry(&self) -> Option<&FinalizationRegistryState> {
+        match self {
+            Self::FinalizationRegistry(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn finalization_registry_mut(
+        &mut self,
+    ) -> Option<&mut FinalizationRegistryState> {
+        match self {
+            Self::FinalizationRegistry(state) => Some(state),
             _ => None,
         }
     }
@@ -2052,6 +2241,27 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn weak_ref(record: ObjectRecord, state: WeakRefState) -> Self {
+        Self {
+            kind: HeapObjectKind::WeakRef(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn finalization_registry(
+        record: ObjectRecord,
+        state: FinalizationRegistryState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::FinalizationRegistry(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     #[allow(
         dead_code,
         reason = "kind inspection supports class-sensitive object behavior beyond the first Boolean consumer"
@@ -2106,7 +2316,9 @@ impl HeapObject {
             | HeapObjectKind::Set(_)
             | HeapObjectKind::SetIterator(_)
             | HeapObjectKind::WeakMap(_)
-            | HeapObjectKind::WeakSet(_) => None,
+            | HeapObjectKind::WeakSet(_)
+            | HeapObjectKind::WeakRef(_)
+            | HeapObjectKind::FinalizationRegistry(_) => None,
         }
     }
 
@@ -2127,7 +2339,9 @@ impl HeapObject {
             | HeapObjectKind::Set(_)
             | HeapObjectKind::SetIterator(_)
             | HeapObjectKind::WeakMap(_)
-            | HeapObjectKind::WeakSet(_) => None,
+            | HeapObjectKind::WeakSet(_)
+            | HeapObjectKind::WeakRef(_)
+            | HeapObjectKind::FinalizationRegistry(_) => None,
         }
         .into_iter()
         .flatten()
@@ -2150,7 +2364,9 @@ impl HeapObject {
             | HeapObjectKind::Set(_)
             | HeapObjectKind::SetIterator(_)
             | HeapObjectKind::WeakMap(_)
-            | HeapObjectKind::WeakSet(_) => None,
+            | HeapObjectKind::WeakSet(_)
+            | HeapObjectKind::WeakRef(_)
+            | HeapObjectKind::FinalizationRegistry(_) => None,
         }
     }
 
@@ -2171,7 +2387,9 @@ impl HeapObject {
             | HeapObjectKind::Set(_)
             | HeapObjectKind::SetIterator(_)
             | HeapObjectKind::WeakMap(_)
-            | HeapObjectKind::WeakSet(_) => 0,
+            | HeapObjectKind::WeakSet(_)
+            | HeapObjectKind::WeakRef(_)
+            | HeapObjectKind::FinalizationRegistry(_) => 0,
         }
     }
 
@@ -2256,6 +2474,28 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn weak_ref_state(&self) -> Option<&WeakRefState> {
+        self.kind.weak_ref()
+    }
+
+    #[must_use]
+    pub(crate) const fn weak_ref_state_mut(&mut self) -> Option<&mut WeakRefState> {
+        self.kind.weak_ref_mut()
+    }
+
+    #[must_use]
+    pub(crate) const fn finalization_registry_state(&self) -> Option<&FinalizationRegistryState> {
+        self.kind.finalization_registry()
+    }
+
+    #[must_use]
+    pub(crate) const fn finalization_registry_state_mut(
+        &mut self,
+    ) -> Option<&mut FinalizationRegistryState> {
+        self.kind.finalization_registry_mut()
+    }
+
+    #[must_use]
     pub(crate) const fn for_in_state(&self) -> Option<&ForInIterator> {
         self.kind.for_in_iterator()
     }
@@ -2305,6 +2545,10 @@ impl HeapObject {
         self.weak_map_state()
             .map_or(0, WeakMapState::len)
             .saturating_add(self.weak_set_state().map_or(0, WeakSetState::len))
+            .saturating_add(
+                self.finalization_registry_state()
+                    .map_or(0, FinalizationRegistryState::len),
+            )
     }
 
     pub(crate) fn map_retained_values(&self) -> impl Iterator<Item = &StoredValue> {
@@ -2317,6 +2561,12 @@ impl HeapObject {
         self.set_state()
             .into_iter()
             .flat_map(SetState::retained_values)
+    }
+
+    pub(crate) fn finalization_retained_values(&self) -> impl Iterator<Item = &StoredValue> {
+        self.finalization_registry_state()
+            .into_iter()
+            .flat_map(FinalizationRegistryState::held_values)
     }
 
     #[must_use]

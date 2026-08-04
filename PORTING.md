@@ -87,9 +87,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 348 Realm-local identities and 1,066 ordered properties.
+  snapshot pins 355 Realm-local identities and 1,087 ordered properties.
 - [ ] Add Proxy and remaining exotics, shape/transition interning, dense indexed
-  storage, deterministic finalization, and complete reflection/diagnostics.
+  storage, and complete reflection/diagnostics.
 
 ### Built-ins
 
@@ -113,18 +113,24 @@ does not imply complete ECMAScript or QuickJS compatibility.
   ephemeron GC for chains, cycles, and Symbol values. Shared corpus: 6/6,
   15/15 feature tags against QuickJS and Node; pinned upserts have focused VM
   coverage because Node v24.19 does not expose them.
+- [x] `WeakRef`/`FinalizationRegistry`: exact pinned surfaces and brand/order
+  checks; objects and non-registered Symbols as targets/tokens; resumable
+  `newTarget.prototype`; kept-alive dereferences; ordered unregisterable cells;
+  and failure-atomic GC-to-host-job cleanup. Shared deterministic corpus: 5/5,
+  13/13 feature tags against QuickJS and Node; explicit collector regressions
+  cover deferred cleanup, ordering, liveness, and resource ceilings.
 - [x] Iterative `%JSON%` plus `rawJSON`; complete pinned `%Math%`, including
   exact `sumPrecise`; and intrinsic Promise core/combinators with bounded FIFO
   jobs and typed close/order continuations (29/29, 46/46 feature tags).
 - [ ] Complete RegExp-coupled String methods; implement RegExp, Date, Temporal,
-  Proxy, binary data/typed arrays, Atomics, weak references, and finalization
-  registries.
+  Proxy, binary data/typed arrays, and Atomics.
 
 ### Jobs, asynchronous semantics, and modules
 
 - [x] A bounded runtime-owned FIFO job queue, with complete GC edges and one
-  turn budget, drains nested Promise work to a fixed point; Tokio never defines
-  JavaScript order. Host rejection tracking reports first reject/late handle.
+  turn budget, drains nested Promise work and finalization cleanup
+  deterministically; Tokio never defines JavaScript order. Host rejection
+  tracking reports first reject/late handle.
 - [x] Sync generators, async functions, async generators, and async `yield*`
   preserve parameter timing, intrinsic chains, reentrancy, resume modes,
   thenable assimilation, iterator validation/close order, `catch`/`finally`,
@@ -208,6 +214,7 @@ QuickJS `qjs` or `qjsc`. Current corpus results are:
 | Map | 6/6, 13/13 feature tags (QuickJS and Node) |
 | Set | 8/8, 21/21 feature tags (QuickJS and Node) |
 | Weak collections | 6/6, 15/15 feature tags (QuickJS and Node) |
+| Weak references | 5/5, 13/13 feature tags (QuickJS and Node) |
 | Synchronous generators | 18/18, 43/43 feature tags |
 | Async functions | 9/9, 18/18 feature tags |
 | Async generators | 18/18, 41/41 feature tags (QuickJS and Node) |
