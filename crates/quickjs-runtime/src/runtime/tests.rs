@@ -35,9 +35,9 @@ use super::{
     usize_to_u64,
 };
 
-const REALM_OBJECT_SLOTS: u64 = 35;
-const REALM_PROPERTY_SLOTS: u64 = 1_027;
-const REALM_FUNCTION_SLOTS: u64 = 300;
+const REALM_OBJECT_SLOTS: u64 = 37;
+const REALM_PROPERTY_SLOTS: u64 = 1_066;
+const REALM_FUNCTION_SLOTS: u64 = 311;
 
 #[test]
 fn map_entry_limit_is_inclusive_atomic_and_counts_retained_tombstones() {
@@ -180,6 +180,291 @@ fn deleted_map_entries_release_key_and_value_edges_but_retain_slot_charge() {
 
     let report = runtime.collect_cycles().expect("unrooted Map collection");
     assert_eq!(report.objects(), 1);
+    assert_eq!(runtime.usage(), baseline);
+}
+
+#[test]
+fn weak_collection_entry_limit_is_inclusive_and_delete_releases_the_charge() {
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_collection_entries(1)).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+    let weak_map_prototype = runtime
+        .realm_weak_map_prototype(realm_id)
+        .expect("WeakMap.prototype");
+    let weak_map = runtime
+        .allocate_weak_map_object(HeapReference::Object(weak_map_prototype))
+        .expect("WeakMap");
+    let first = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("first key");
+    let second = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("second key");
+
+    runtime
+        .weak_map_set(
+            weak_map,
+            &StoredValue::Object(first),
+            StoredValue::Boolean(true),
+        )
+        .expect("first entry reaches the inclusive limit");
+    runtime
+        .weak_map_set(
+            weak_map,
+            &StoredValue::Object(first),
+            StoredValue::Boolean(false),
+        )
+        .expect("updating an entry consumes no new slot");
+    assert_eq!(runtime.usage().collection_entries(), 1);
+
+    let before_failure = runtime.usage();
+    assert!(matches!(
+        runtime.weak_map_set(
+            weak_map,
+            &StoredValue::Object(second),
+            StoredValue::Undefined,
+        ),
+        Err(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::CollectionEntries,
+            limit: 1,
+            observed: 2,
+        })
+    ));
+    assert_eq!(runtime.usage(), before_failure);
+    assert!(
+        runtime
+            .weak_map_delete(weak_map, &StoredValue::Object(first))
+            .expect("delete")
+    );
+    assert_eq!(runtime.usage().collection_entries(), 0);
+    runtime
+        .weak_map_set(
+            weak_map,
+            &StoredValue::Object(second),
+            StoredValue::Undefined,
+        )
+        .expect("released charge can be reused");
+    assert_eq!(runtime.usage().collection_entries(), 1);
+}
+
+#[test]
+fn rooted_weak_map_does_not_keep_an_unrooted_key_or_value_alive() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+    let weak_map_prototype = runtime
+        .realm_weak_map_prototype(realm_id)
+        .expect("WeakMap.prototype");
+    let baseline = runtime.usage();
+    let weak_map = runtime
+        .allocate_weak_map_object(HeapReference::Object(weak_map_prototype))
+        .expect("WeakMap");
+    let key = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("key");
+    let value = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("value");
+    runtime
+        .weak_map_set(
+            weak_map,
+            &StoredValue::Object(key),
+            StoredValue::Object(value),
+        )
+        .expect("entry");
+
+    let report = runtime
+        .collect_cycles_with_roots(|mark| {
+            mark(CollectionRoot::Heap(HeapReference::Object(weak_map)));
+        })
+        .expect("rooted WeakMap collection");
+    assert_eq!(report.objects(), 2);
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 1);
+    assert_eq!(runtime.usage().collection_entries(), 0);
+    assert_eq!(
+        runtime
+            .objects
+            .get(weak_map)
+            .and_then(crate::object::HeapObject::weak_map_state)
+            .expect("live WeakMap")
+            .len(),
+        0
+    );
+
+    let report = runtime
+        .collect_cycles()
+        .expect("unrooted WeakMap collection");
+    assert_eq!(report.objects(), 1);
+    assert_eq!(runtime.usage(), baseline);
+}
+
+#[test]
+fn weak_map_ephemerons_reach_a_fixed_point_and_drop_unrooted_cycles() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+    let weak_map_prototype = runtime
+        .realm_weak_map_prototype(realm_id)
+        .expect("WeakMap.prototype");
+    let baseline = runtime.usage();
+    let weak_map = runtime
+        .allocate_weak_map_object(HeapReference::Object(weak_map_prototype))
+        .expect("WeakMap");
+    let first = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("first");
+    let second = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("second");
+    let third = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("third");
+    runtime
+        .weak_map_set(
+            weak_map,
+            &StoredValue::Object(first),
+            StoredValue::Object(second),
+        )
+        .expect("first ephemeron");
+    runtime
+        .weak_map_set(
+            weak_map,
+            &StoredValue::Object(second),
+            StoredValue::Object(third),
+        )
+        .expect("second ephemeron");
+
+    runtime
+        .collect_cycles_with_roots(|mark| {
+            for object in [weak_map, first] {
+                mark(CollectionRoot::Heap(HeapReference::Object(object)));
+            }
+        })
+        .expect("rooted ephemeron chain");
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 4);
+    assert_eq!(runtime.usage().collection_entries(), 2);
+
+    let report = runtime
+        .collect_cycles_with_roots(|mark| {
+            mark(CollectionRoot::Heap(HeapReference::Object(weak_map)));
+        })
+        .expect("unrooted ephemeron chain");
+    assert_eq!(report.objects(), 3);
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 1);
+    assert_eq!(runtime.usage().collection_entries(), 0);
+
+    let cycle_left = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("cycle left");
+    let cycle_right = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("cycle right");
+    runtime
+        .weak_map_set(
+            weak_map,
+            &StoredValue::Object(cycle_left),
+            StoredValue::Object(cycle_right),
+        )
+        .expect("cycle left entry");
+    runtime
+        .weak_map_set(
+            weak_map,
+            &StoredValue::Object(cycle_right),
+            StoredValue::Object(cycle_left),
+        )
+        .expect("cycle right entry");
+    let report = runtime
+        .collect_cycles_with_roots(|mark| {
+            mark(CollectionRoot::Heap(HeapReference::Object(weak_map)));
+        })
+        .expect("unrooted ephemeron cycle");
+    assert_eq!(report.objects(), 2);
+    assert_eq!(runtime.usage().collection_entries(), 0);
+}
+
+#[test]
+fn weak_set_and_symbol_keys_are_weak_collection_roots_only_when_live_elsewhere() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+    let weak_map_prototype = runtime
+        .realm_weak_map_prototype(realm_id)
+        .expect("WeakMap.prototype");
+    let weak_set_prototype = runtime
+        .realm_weak_set_prototype(realm_id)
+        .expect("WeakSet.prototype");
+    let baseline = runtime.usage();
+    let weak_map = runtime
+        .allocate_weak_map_object(HeapReference::Object(weak_map_prototype))
+        .expect("WeakMap");
+    let weak_set = runtime
+        .allocate_weak_set_object(HeapReference::Object(weak_set_prototype))
+        .expect("WeakSet");
+    let set_value = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("WeakSet value");
+    let map_value = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("WeakMap value");
+    let symbol = runtime
+        .atoms
+        .new_unique_symbol(None)
+        .expect("unique Symbol");
+    runtime
+        .weak_set_add(weak_set, &StoredValue::Object(set_value))
+        .expect("WeakSet entry");
+    runtime
+        .weak_map_set(
+            weak_map,
+            &StoredValue::Symbol(symbol.clone()),
+            StoredValue::Object(map_value),
+        )
+        .expect("Symbol-keyed WeakMap entry");
+
+    let report = runtime
+        .collect_cycles_with_roots(|mark| {
+            for object in [weak_map, weak_set] {
+                mark(CollectionRoot::Heap(HeapReference::Object(object)));
+            }
+        })
+        .expect("live Symbol key collection");
+    assert_eq!(report.objects(), 1);
+    assert_eq!(runtime.usage().collection_entries(), 1);
+    assert!(
+        runtime
+            .objects
+            .get(weak_map)
+            .and_then(crate::object::HeapObject::weak_map_state)
+            .expect("WeakMap state")
+            .contains_key(&StoredValue::Symbol(symbol.clone()))
+    );
+
+    drop(symbol);
+    let report = runtime
+        .collect_cycles_with_roots(|mark| {
+            for object in [weak_map, weak_set] {
+                mark(CollectionRoot::Heap(HeapReference::Object(object)));
+            }
+        })
+        .expect("dead Symbol key collection");
+    assert_eq!(report.objects(), 1);
+    assert_eq!(runtime.usage().collection_entries(), 0);
+
+    let report = runtime.collect_cycles().expect("unrooted weak collections");
+    assert_eq!(report.objects(), 2);
     assert_eq!(runtime.usage(), baseline);
 }
 
@@ -1540,6 +1825,8 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         promise: _,
         map: _,
         set: _,
+        weak_map: _,
+        weak_set: _,
     } = state.intrinsics
     else {
         panic!("realm intrinsics remained uninitialized");

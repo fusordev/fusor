@@ -33,6 +33,50 @@ use super::*;
 use crate::object::{MapIteratorKind, MapState};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MapCollectionKind {
+    Map,
+    WeakMap,
+}
+
+impl MapCollectionKind {
+    const fn constructor_error(self) -> &'static str {
+        match self {
+            Self::Map => "Map constructor requires 'new'",
+            Self::WeakMap => "WeakMap constructor requires 'new'",
+        }
+    }
+}
+
+pub(super) struct MapConstructorRequest {
+    kind: MapCollectionKind,
+    realm: RealmId,
+    new_target: Option<FunctionId>,
+    iterable: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+}
+
+impl MapConstructorRequest {
+    pub(super) const fn new(
+        kind: MapCollectionKind,
+        realm: RealmId,
+        new_target: Option<FunctionId>,
+        iterable: StoredValue,
+        return_to: Option<CallReturn>,
+        origin: JsStackFrame,
+    ) -> Self {
+        Self {
+            kind,
+            realm,
+            new_target,
+            iterable,
+            return_to,
+            origin,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MapConstructorStage {
     Adder,
     IteratorMethod,
@@ -127,6 +171,7 @@ impl MapForEachContinuation {
 }
 
 pub(super) struct MapComputedContinuation {
+    kind: MapCollectionKind,
     map: ObjectId,
     key: StoredValue,
     origin: JsStackFrame,
@@ -145,15 +190,19 @@ impl MapComputedContinuation {
 
 pub(super) fn begin_map_constructor(
     runtime: &mut Runtime,
-    realm: RealmId,
-    new_target: Option<FunctionId>,
-    iterable: StoredValue,
-    return_to: Option<CallReturn>,
-    origin: JsStackFrame,
+    request: MapConstructorRequest,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    let MapConstructorRequest {
+        kind,
+        realm,
+        new_target,
+        iterable,
+        return_to,
+        origin,
+    } = request;
     let Some(new_target) = new_target else {
-        return map_type_error(realm, origin, "Map constructor requires 'new'");
+        return map_type_error(realm, origin, kind.constructor_error());
     };
     let receiver = StoredValue::Function(new_target);
     charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
@@ -166,6 +215,7 @@ pub(super) fn begin_map_constructor(
     )? {
         PropertyReadOutcome::Value(value) => finish_map_constructor_after_prototype_get(
             runtime,
+            kind,
             realm,
             new_target,
             iterable,
@@ -178,6 +228,7 @@ pub(super) fn begin_map_constructor(
             function,
             receiver,
             IntrinsicGetContinuation::MapConstructor {
+                kind,
                 realm,
                 new_target,
                 iterable,
@@ -199,6 +250,7 @@ pub(super) fn begin_map_constructor(
 )]
 pub(super) fn finish_map_constructor_after_prototype_get(
     runtime: &mut Runtime,
+    kind: MapCollectionKind,
     realm: RealmId,
     new_target: FunctionId,
     iterable: StoredValue,
@@ -212,10 +264,16 @@ pub(super) fn finish_map_constructor_after_prototype_get(
         StoredValue::Object(object) => HeapReference::Object(*object),
         _ => {
             let target_realm = runtime.function_realm(new_target)?;
-            HeapReference::Object(runtime.realm_map_prototype(target_realm)?)
+            HeapReference::Object(match kind {
+                MapCollectionKind::Map => runtime.realm_map_prototype(target_realm)?,
+                MapCollectionKind::WeakMap => runtime.realm_weak_map_prototype(target_realm)?,
+            })
         }
     };
-    let target = runtime.allocate_map_object(prototype)?;
+    let target = match kind {
+        MapCollectionKind::Map => runtime.allocate_map_object(prototype)?,
+        MapCollectionKind::WeakMap => runtime.allocate_weak_map_object(prototype)?,
+    };
     if matches!(iterable, StoredValue::Undefined | StoredValue::Null) {
         return Ok(NativeDispatch::Immediate(StoredValue::Object(target)));
     }
@@ -636,9 +694,14 @@ pub(super) fn dispatch_map_method(
             if let Some(value) = map_state(runtime, map)?.get(&key) {
                 return Ok(NativeDispatch::Immediate(value.duplicate()));
             }
-            let callback_argument = key.duplicate();
-            let state = MapComputedContinuation { map, key, origin };
-            suspend_map_computed(callback, try_values([callback_argument])?, state, return_to)
+            begin_map_computed_call(
+                MapCollectionKind::Map,
+                map,
+                key,
+                callback,
+                origin,
+                return_to,
+            )
         }
         MapMethod::ForEach => {
             let callback = arguments.take_first_or_undefined();
@@ -673,16 +736,32 @@ pub(super) fn resume_map_computed(
     state: MapComputedContinuation,
     completion: StoredValue,
 ) -> Result<NativeDispatch, NativeFailure> {
-    runtime.map_set(state.map, state.key, completion.duplicate())?;
+    match state.kind {
+        MapCollectionKind::Map => {
+            runtime.map_set(state.map, state.key, completion.duplicate())?;
+        }
+        MapCollectionKind::WeakMap => {
+            runtime.weak_map_set(state.map, &state.key, completion.duplicate())?;
+        }
+    }
     Ok(NativeDispatch::Immediate(completion))
 }
 
-fn suspend_map_computed(
+pub(super) fn begin_map_computed_call(
+    kind: MapCollectionKind,
+    map: ObjectId,
+    key: StoredValue,
     callback: FunctionId,
-    arguments: Vec<StoredValue>,
-    state: MapComputedContinuation,
+    origin: JsStackFrame,
     return_to: Option<CallReturn>,
 ) -> Result<NativeDispatch, NativeFailure> {
+    let arguments = try_values([key.duplicate()])?;
+    let state = MapComputedContinuation {
+        kind,
+        map,
+        key,
+        origin,
+    };
     let origin = state.origin.clone();
     let mut continuations = Vec::new();
     continuations

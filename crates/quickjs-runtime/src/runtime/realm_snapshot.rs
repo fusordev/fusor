@@ -103,6 +103,8 @@ impl RealmSnapshot {
             array,
             map,
             set,
+            weak_map,
+            weak_set,
             promise,
             symbol,
             iterators,
@@ -135,6 +137,8 @@ impl RealmSnapshot {
             (map.iterator_prototype, "%MapIterator.prototype%"),
             (set.prototype, "%Set.prototype%"),
             (set.iterator_prototype, "%SetIterator.prototype%"),
+            (weak_map.prototype, "%WeakMap.prototype%"),
+            (weak_set.prototype, "%WeakSet.prototype%"),
             (promise.prototype, "%Promise.prototype%"),
             (symbol.prototype, "%Symbol.prototype%"),
             (iterators.iterator_prototype, "%Iterator.prototype%"),
@@ -443,9 +447,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 335;
-    const REALM_PROPERTIES: u64 = 1_027;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 17_367_734_821_846_123_057;
+    const REALM_NODES: usize = 348;
+    const REALM_PROPERTIES: u64 = 1_066;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 3_317_373_021_699_529_028;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {

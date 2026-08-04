@@ -33,9 +33,53 @@ use crate::ids::ObjectId;
 use crate::{
     ArrayIndex, Atom, AtomKind, JsBigInt, JsNumber, JsString, PropertyKey, PropertyLayout,
     PropertyLayoutKind,
+    atom::WeakAtom,
     ids::{BindingCellId, FunctionId},
     value::{HeapReference, StoredValue},
 };
+
+/// A key with ECMAScript language identity that does not keep that identity
+/// alive.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub(crate) enum WeakKey {
+    Symbol(WeakAtom),
+    Function(FunctionId),
+    Object(ObjectId),
+}
+
+impl WeakKey {
+    pub(crate) fn from_value(value: &StoredValue) -> Option<Self> {
+        match value {
+            StoredValue::Symbol(symbol) if symbol.kind() == AtomKind::Symbol => {
+                Some(Self::Symbol(WeakAtom::from_atom(symbol)))
+            }
+            StoredValue::Function(function) => Some(Self::Function(*function)),
+            StoredValue::Object(object) => Some(Self::Object(*object)),
+            StoredValue::Undefined
+            | StoredValue::Null
+            | StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_) => None,
+        }
+    }
+
+    pub(crate) const fn heap_reference(&self) -> Option<HeapReference> {
+        match self {
+            Self::Symbol(_) => None,
+            Self::Function(function) => Some(HeapReference::Function(*function)),
+            Self::Object(object) => Some(HeapReference::Object(*object)),
+        }
+    }
+
+    pub(crate) const fn symbol(&self) -> Option<&WeakAtom> {
+        match self {
+            Self::Symbol(symbol) => Some(symbol),
+            Self::Function(_) | Self::Object(_) => None,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct ShapeProperty {
@@ -484,6 +528,104 @@ pub(crate) struct SetIterator {
     iterated: Option<ObjectId>,
     kind: SetIteratorKind,
     next: usize,
+}
+
+/// Non-enumerable `[[WeakMapData]]` indexed by non-owning language identities.
+pub(crate) struct WeakMapState {
+    entries: HashMap<WeakKey, StoredValue>,
+}
+
+impl WeakMapState {
+    pub(crate) fn empty() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn get(&self, key: &StoredValue) -> Option<&StoredValue> {
+        WeakKey::from_value(key).and_then(|key| self.entries.get(&key))
+    }
+
+    pub(crate) fn contains_key(&self, key: &StoredValue) -> bool {
+        WeakKey::from_value(key).is_some_and(|key| self.entries.contains_key(&key))
+    }
+
+    pub(crate) fn try_set(
+        &mut self,
+        key: &StoredValue,
+        value: StoredValue,
+    ) -> Result<MapSetOutcome, TryReserveError> {
+        let key = WeakKey::from_value(key).expect("WeakMap keys are validated before storage");
+        if let Some(entry) = self.entries.get_mut(&key) {
+            *entry = value;
+            return Ok(MapSetOutcome::Updated);
+        }
+        self.entries.try_reserve(1)?;
+        self.entries.insert(key, value);
+        Ok(MapSetOutcome::Inserted)
+    }
+
+    pub(crate) fn delete(&mut self, key: &StoredValue) -> bool {
+        WeakKey::from_value(key).is_some_and(|key| self.entries.remove(&key).is_some())
+    }
+
+    pub(crate) fn ephemeron_entries(&self) -> impl Iterator<Item = (&WeakKey, &StoredValue)> {
+        self.entries.iter()
+    }
+
+    pub(crate) fn retain_keys(&mut self, mut keep: impl FnMut(&WeakKey) -> bool) -> usize {
+        let previous = self.entries.len();
+        self.entries.retain(|key, _| keep(key));
+        previous.saturating_sub(self.entries.len())
+    }
+}
+
+/// Non-enumerable `[[WeakSetData]]` indexed by non-owning language identities.
+pub(crate) struct WeakSetState {
+    entries: HashSet<WeakKey>,
+}
+
+impl WeakSetState {
+    pub(crate) fn empty() -> Self {
+        Self {
+            entries: HashSet::new(),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn contains(&self, value: &StoredValue) -> bool {
+        WeakKey::from_value(value).is_some_and(|key| self.entries.contains(&key))
+    }
+
+    pub(crate) fn try_add(
+        &mut self,
+        value: &StoredValue,
+    ) -> Result<MapSetOutcome, TryReserveError> {
+        let key = WeakKey::from_value(value).expect("WeakSet values are validated before storage");
+        if self.entries.contains(&key) {
+            return Ok(MapSetOutcome::Updated);
+        }
+        self.entries.try_reserve(1)?;
+        self.entries.insert(key);
+        Ok(MapSetOutcome::Inserted)
+    }
+
+    pub(crate) fn delete(&mut self, value: &StoredValue) -> bool {
+        WeakKey::from_value(value).is_some_and(|key| self.entries.remove(&key))
+    }
+
+    pub(crate) fn retain_keys(&mut self, mut keep: impl FnMut(&WeakKey) -> bool) -> usize {
+        let previous = self.entries.len();
+        self.entries.retain(|key| keep(key));
+        previous.saturating_sub(self.entries.len())
+    }
 }
 
 impl SetIterator {
@@ -1395,6 +1537,10 @@ pub(crate) enum HeapObjectKind {
     /// An ECMAScript Set object with ordered `[[SetData]]`.
     Set(SetState),
     SetIterator(SetIterator),
+    /// An ECMAScript `WeakMap` object with ephemeron `[[WeakMapData]]`.
+    WeakMap(WeakMapState),
+    /// An ECMAScript `WeakSet` object with weak `[[WeakSetData]]`.
+    WeakSet(WeakSetState),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1482,7 +1628,9 @@ impl HeapObjectKind {
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
-            | Self::SetIterator(_) => None,
+            | Self::SetIterator(_)
+            | Self::WeakMap(_)
+            | Self::WeakSet(_) => None,
             Self::BoxedPrimitive(value) => Some(value),
         }
     }
@@ -1502,7 +1650,9 @@ impl HeapObjectKind {
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
-            | Self::SetIterator(_) => None,
+            | Self::SetIterator(_)
+            | Self::WeakMap(_)
+            | Self::WeakSet(_) => None,
         }
     }
 
@@ -1521,7 +1671,9 @@ impl HeapObjectKind {
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
-            | Self::SetIterator(_) => None,
+            | Self::SetIterator(_)
+            | Self::WeakMap(_)
+            | Self::WeakSet(_) => None,
         }
     }
 
@@ -1540,7 +1692,9 @@ impl HeapObjectKind {
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
-            | Self::SetIterator(_) => None,
+            | Self::SetIterator(_)
+            | Self::WeakMap(_)
+            | Self::WeakSet(_) => None,
         }
     }
 
@@ -1559,7 +1713,9 @@ impl HeapObjectKind {
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
-            | Self::SetIterator(_) => None,
+            | Self::SetIterator(_)
+            | Self::WeakMap(_)
+            | Self::WeakSet(_) => None,
         }
     }
 
@@ -1578,7 +1734,9 @@ impl HeapObjectKind {
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
-            | Self::SetIterator(_) => None,
+            | Self::SetIterator(_)
+            | Self::WeakMap(_)
+            | Self::WeakSet(_) => None,
         }
     }
 
@@ -1597,7 +1755,9 @@ impl HeapObjectKind {
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
-            | Self::SetIterator(_) => None,
+            | Self::SetIterator(_)
+            | Self::WeakMap(_)
+            | Self::WeakSet(_) => None,
         }
     }
 
@@ -1616,7 +1776,9 @@ impl HeapObjectKind {
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
-            | Self::SetIterator(_) => None,
+            | Self::SetIterator(_)
+            | Self::WeakMap(_)
+            | Self::WeakSet(_) => None,
         }
     }
 
@@ -1635,7 +1797,9 @@ impl HeapObjectKind {
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
-            | Self::SetIterator(_) => None,
+            | Self::SetIterator(_)
+            | Self::WeakMap(_)
+            | Self::WeakSet(_) => None,
         }
     }
 
@@ -1691,6 +1855,34 @@ impl HeapObjectKind {
     pub(crate) const fn set_iterator_mut(&mut self) -> Option<&mut SetIterator> {
         match self {
             Self::SetIterator(iterator) => Some(iterator),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn weak_map(&self) -> Option<&WeakMapState> {
+        match self {
+            Self::WeakMap(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn weak_map_mut(&mut self) -> Option<&mut WeakMapState> {
+        match self {
+            Self::WeakMap(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn weak_set(&self) -> Option<&WeakSetState> {
+        match self {
+            Self::WeakSet(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn weak_set_mut(&mut self) -> Option<&mut WeakSetState> {
+        match self {
+            Self::WeakSet(state) => Some(state),
             _ => None,
         }
     }
@@ -1842,6 +2034,24 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn weak_map(record: ObjectRecord, state: WeakMapState) -> Self {
+        Self {
+            kind: HeapObjectKind::WeakMap(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn weak_set(record: ObjectRecord, state: WeakSetState) -> Self {
+        Self {
+            kind: HeapObjectKind::WeakSet(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     #[allow(
         dead_code,
         reason = "kind inspection supports class-sensitive object behavior beyond the first Boolean consumer"
@@ -1894,7 +2104,9 @@ impl HeapObject {
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
-            | HeapObjectKind::SetIterator(_) => None,
+            | HeapObjectKind::SetIterator(_)
+            | HeapObjectKind::WeakMap(_)
+            | HeapObjectKind::WeakSet(_) => None,
         }
     }
 
@@ -1913,7 +2125,9 @@ impl HeapObject {
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
-            | HeapObjectKind::SetIterator(_) => None,
+            | HeapObjectKind::SetIterator(_)
+            | HeapObjectKind::WeakMap(_)
+            | HeapObjectKind::WeakSet(_) => None,
         }
         .into_iter()
         .flatten()
@@ -1934,7 +2148,9 @@ impl HeapObject {
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
-            | HeapObjectKind::SetIterator(_) => None,
+            | HeapObjectKind::SetIterator(_)
+            | HeapObjectKind::WeakMap(_)
+            | HeapObjectKind::WeakSet(_) => None,
         }
     }
 
@@ -1953,7 +2169,9 @@ impl HeapObject {
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
-            | HeapObjectKind::SetIterator(_) => 0,
+            | HeapObjectKind::SetIterator(_)
+            | HeapObjectKind::WeakMap(_)
+            | HeapObjectKind::WeakSet(_) => 0,
         }
     }
 
@@ -2018,6 +2236,26 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn weak_map_state(&self) -> Option<&WeakMapState> {
+        self.kind.weak_map()
+    }
+
+    #[must_use]
+    pub(crate) const fn weak_map_state_mut(&mut self) -> Option<&mut WeakMapState> {
+        self.kind.weak_map_mut()
+    }
+
+    #[must_use]
+    pub(crate) const fn weak_set_state(&self) -> Option<&WeakSetState> {
+        self.kind.weak_set()
+    }
+
+    #[must_use]
+    pub(crate) const fn weak_set_state_mut(&mut self) -> Option<&mut WeakSetState> {
+        self.kind.weak_set_mut()
+    }
+
+    #[must_use]
     pub(crate) const fn for_in_state(&self) -> Option<&ForInIterator> {
         self.kind.for_in_iterator()
     }
@@ -2060,6 +2298,13 @@ impl HeapObject {
     #[must_use]
     pub(crate) fn set_entry_count(&self) -> usize {
         self.set_state().map_or(0, SetState::retained_len)
+    }
+
+    #[must_use]
+    pub(crate) fn weak_collection_entry_count(&self) -> usize {
+        self.weak_map_state()
+            .map_or(0, WeakMapState::len)
+            .saturating_add(self.weak_set_state().map_or(0, WeakSetState::len))
     }
 
     pub(crate) fn map_retained_values(&self) -> impl Iterator<Item = &StoredValue> {

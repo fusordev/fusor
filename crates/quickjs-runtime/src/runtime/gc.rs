@@ -26,11 +26,14 @@
 //! Runtime usage accounting, deferred root releases, and iterative cycle collection.
 
 use super::{
-    AtomUsage, BindingCellId, EnvironmentBinding, FunctionId, FunctionImplementation, HashSet,
-    HeapReference, ObjectId, ObjectRecord, PromiseJob, RealmIntrinsics, Runtime, RuntimeError,
-    RuntimeResource, RuntimeUsage, SlotValue, StoredValue, usize_to_u64,
+    AtomUsage, BindingCellId, EnvironmentBinding, FunctionId, FunctionImplementation, HashMap,
+    HashSet, HeapReference, ObjectId, ObjectRecord, PromiseJob, RealmIntrinsics, Runtime,
+    RuntimeError, RuntimeResource, RuntimeUsage, SlotValue, StoredValue, usize_to_u64,
 };
-use crate::object::{PromiseCapability, PromiseReactionTarget, PromiseState};
+use crate::{
+    atom::WeakAtom,
+    object::{PromiseCapability, PromiseReactionTarget, PromiseState, WeakKey},
+};
 
 #[derive(Clone, Copy)]
 pub(crate) enum CollectionRoot {
@@ -91,6 +94,27 @@ fn mark_stored_value(
 ) {
     if let Some(reference) = value.heap_reference() {
         mark_heap_reference(reference, marked_functions, marked_objects, work);
+    }
+}
+
+fn weak_key_is_live(
+    key: &WeakKey,
+    marked_functions: &HashSet<FunctionId>,
+    marked_objects: &HashSet<ObjectId>,
+    marked_symbols: &HashSet<WeakAtom>,
+    ephemeron_symbol_owners: &HashMap<WeakAtom, usize>,
+) -> bool {
+    match key.heap_reference() {
+        Some(HeapReference::Function(function)) => marked_functions.contains(&function),
+        Some(HeapReference::Object(object)) => marked_objects.contains(&object),
+        None => key.symbol().is_some_and(|symbol| {
+            marked_symbols.contains(symbol)
+                || symbol.strong_count()
+                    > ephemeron_symbol_owners
+                        .get(symbol)
+                        .copied()
+                        .unwrap_or_default()
+        }),
     }
 }
 
@@ -299,6 +323,8 @@ impl Runtime {
                 array,
                 map,
                 set,
+                weak_map,
+                weak_set,
                 promise,
                 symbol,
                 iterators,
@@ -411,6 +437,19 @@ impl Runtime {
                     HeapReference::Object(map.prototype),
                     HeapReference::Object(map.iterator_prototype),
                     HeapReference::Function(map.constructor),
+                ] {
+                    mark_heap_reference(
+                        reference,
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
+                for reference in [
+                    HeapReference::Object(weak_map.prototype),
+                    HeapReference::Function(weak_map.constructor),
+                    HeapReference::Object(weak_set.prototype),
+                    HeapReference::Function(weak_set.constructor),
                 ] {
                     mark_heap_reference(
                         reference,
@@ -599,177 +638,193 @@ impl Runtime {
             );
         });
 
-        while let Some(node) = work.pop() {
-            match node {
-                GraphNode::Function(id) => {
-                    if let Some(function) = self.functions.get(id) {
-                        if let FunctionImplementation::Bytecode(bytecode) = &function.implementation
-                        {
-                            for binding in bytecode.environment.iter().copied() {
-                                if let EnvironmentBinding::Captured(cell) = binding
-                                    && marked_cells.insert(cell)
-                                {
-                                    work.push(GraphNode::Cell(cell));
-                                }
-                            }
+        // A Symbol value stored behind an ephemeron must not make a Symbol key
+        // live by Arc ownership alone. Count those conditional owners once;
+        // live ephemerons add their Symbol values to `marked_weak_symbols`
+        // during the fixed-point scan below.
+        let mut ephemeron_symbol_owners = HashMap::new();
+        for (_, object) in self.objects.iter() {
+            let Some(state) = object.weak_map_state() else {
+                continue;
+            };
+            for (_, value) in state.ephemeron_entries() {
+                let StoredValue::Symbol(symbol) = value else {
+                    continue;
+                };
+                let identity = WeakAtom::from_atom(symbol);
+                if !ephemeron_symbol_owners.contains_key(&identity) {
+                    ephemeron_symbol_owners.try_reserve(1).map_err(|_| {
+                        RuntimeError::AllocationFailed {
+                            resource: RuntimeResource::Collection,
+                            additional: 1,
                         }
-                        if let FunctionImplementation::Bound(bound) = &function.implementation {
-                            mark_heap_reference(
-                                HeapReference::Function(bound.target),
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut work,
-                            );
-                            mark_stored_value(
-                                &bound.bound_this,
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut work,
-                            );
-                            for argument in &bound.bound_arguments {
-                                mark_stored_value(
-                                    argument,
-                                    &mut marked_functions,
-                                    &mut marked_objects,
-                                    &mut work,
-                                );
-                            }
-                        }
-                        if let FunctionImplementation::PromiseResolving(resolving) =
-                            &function.implementation
-                        {
-                            mark_heap_reference(
-                                HeapReference::Object(resolving.promise),
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut work,
-                            );
-                        }
-                        if let FunctionImplementation::PromiseCapabilityExecutor(executor) =
-                            &function.implementation
-                        {
-                            let capture = executor.capture.borrow();
-                            for value in [capture.resolve.as_ref(), capture.reject.as_ref()]
-                                .into_iter()
-                                .flatten()
+                    })?;
+                }
+                let owners = ephemeron_symbol_owners.entry(identity).or_insert(0_usize);
+                *owners = owners.saturating_add(1);
+            }
+        }
+        let mut marked_weak_symbols = HashSet::new();
+        marked_weak_symbols
+            .try_reserve(ephemeron_symbol_owners.len())
+            .map_err(|_| RuntimeError::AllocationFailed {
+                resource: RuntimeResource::Collection,
+                additional: ephemeron_symbol_owners.len(),
+            })?;
+
+        loop {
+            while let Some(node) = work.pop() {
+                match node {
+                    GraphNode::Function(id) => {
+                        if let Some(function) = self.functions.get(id) {
+                            if let FunctionImplementation::Bytecode(bytecode) =
+                                &function.implementation
                             {
-                                mark_stored_value(
-                                    value,
-                                    &mut marked_functions,
-                                    &mut marked_objects,
-                                    &mut work,
-                                );
-                            }
-                        }
-                        if let FunctionImplementation::PromiseFinally(finally) =
-                            &function.implementation
-                        {
-                            match finally {
-                                super::PromiseFinallyFunction::Handler {
-                                    on_finally,
-                                    constructor,
-                                    ..
-                                } => {
-                                    for function in [on_finally, constructor] {
-                                        mark_heap_reference(
-                                            HeapReference::Function(*function),
-                                            &mut marked_functions,
-                                            &mut marked_objects,
-                                            &mut work,
-                                        );
+                                for binding in bytecode.environment.iter().copied() {
+                                    if let EnvironmentBinding::Captured(cell) = binding
+                                        && marked_cells.insert(cell)
+                                    {
+                                        work.push(GraphNode::Cell(cell));
                                     }
                                 }
-                                super::PromiseFinallyFunction::Thunk { completion, .. } => {
+                            }
+                            if let FunctionImplementation::Bound(bound) = &function.implementation {
+                                mark_heap_reference(
+                                    HeapReference::Function(bound.target),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                                mark_stored_value(
+                                    &bound.bound_this,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                                for argument in &bound.bound_arguments {
                                     mark_stored_value(
-                                        completion,
+                                        argument,
                                         &mut marked_functions,
                                         &mut marked_objects,
                                         &mut work,
                                     );
                                 }
                             }
-                        }
-                        if let FunctionImplementation::PromiseCombinatorElement(element) =
-                            &function.implementation
-                        {
-                            let shared = element.shared.borrow();
-                            mark_promise_capability(
-                                &shared.capability,
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut work,
-                            );
-                            for value in shared.values.iter().flatten() {
-                                mark_stored_value(
-                                    value,
+                            if let FunctionImplementation::PromiseResolving(resolving) =
+                                &function.implementation
+                            {
+                                mark_heap_reference(
+                                    HeapReference::Object(resolving.promise),
                                     &mut marked_functions,
                                     &mut marked_objects,
                                     &mut work,
                                 );
                             }
+                            if let FunctionImplementation::PromiseCapabilityExecutor(executor) =
+                                &function.implementation
+                            {
+                                let capture = executor.capture.borrow();
+                                for value in [capture.resolve.as_ref(), capture.reject.as_ref()]
+                                    .into_iter()
+                                    .flatten()
+                                {
+                                    mark_stored_value(
+                                        value,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
+                            }
+                            if let FunctionImplementation::PromiseFinally(finally) =
+                                &function.implementation
+                            {
+                                match finally {
+                                    super::PromiseFinallyFunction::Handler {
+                                        on_finally,
+                                        constructor,
+                                        ..
+                                    } => {
+                                        for function in [on_finally, constructor] {
+                                            mark_heap_reference(
+                                                HeapReference::Function(*function),
+                                                &mut marked_functions,
+                                                &mut marked_objects,
+                                                &mut work,
+                                            );
+                                        }
+                                    }
+                                    super::PromiseFinallyFunction::Thunk { completion, .. } => {
+                                        mark_stored_value(
+                                            completion,
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
+                                    }
+                                }
+                            }
+                            if let FunctionImplementation::PromiseCombinatorElement(element) =
+                                &function.implementation
+                            {
+                                let shared = element.shared.borrow();
+                                mark_promise_capability(
+                                    &shared.capability,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                                for value in shared.values.iter().flatten() {
+                                    mark_stored_value(
+                                        value,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
+                            }
+                            mark_object_record(
+                                &function.object,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
                         }
-                        mark_object_record(
-                            &function.object,
-                            &mut marked_functions,
-                            &mut marked_objects,
-                            &mut work,
-                        );
                     }
-                }
-                GraphNode::Object(id) => {
-                    if let Some(record) = self.async_function_states.get(&id) {
-                        mark_heap_reference(
-                            HeapReference::Object(record.awaiting),
-                            &mut marked_functions,
-                            &mut marked_objects,
-                            &mut work,
-                        );
-                        crate::vm::trace_frame_roots(&record.frame, &mut |root| {
-                            mark_collection_root(
-                                root,
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut marked_cells,
-                                &mut work,
-                            );
-                        });
-                    }
-                    if let Some(record) = self.array_from_async_states.get(&id) {
-                        record.trace_roots(&mut |root| {
-                            mark_collection_root(
-                                root,
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut marked_cells,
-                                &mut work,
-                            );
-                        });
-                    }
-                    if let Some(frame) = self
-                        .generator_states
-                        .get(&id)
-                        .and_then(|generator| generator.frame.as_ref())
-                    {
-                        crate::vm::trace_frame_roots(frame, &mut |root| {
-                            mark_collection_root(
-                                root,
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut marked_cells,
-                                &mut work,
-                            );
-                        });
-                    }
-                    if let Some(record) = self.async_generator_states.get(&id) {
-                        if let Some(awaiting) = &record.awaiting {
+                    GraphNode::Object(id) => {
+                        if let Some(record) = self.async_function_states.get(&id) {
                             mark_heap_reference(
-                                HeapReference::Object(awaiting.promise),
+                                HeapReference::Object(record.awaiting),
                                 &mut marked_functions,
                                 &mut marked_objects,
                                 &mut work,
                             );
+                            crate::vm::trace_frame_roots(&record.frame, &mut |root| {
+                                mark_collection_root(
+                                    root,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut marked_cells,
+                                    &mut work,
+                                );
+                            });
                         }
-                        if let Some(frame) = &record.frame {
+                        if let Some(record) = self.array_from_async_states.get(&id) {
+                            record.trace_roots(&mut |root| {
+                                mark_collection_root(
+                                    root,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut marked_cells,
+                                    &mut work,
+                                );
+                            });
+                        }
+                        if let Some(frame) = self
+                            .generator_states
+                            .get(&id)
+                            .and_then(|generator| generator.frame.as_ref())
+                        {
                             crate::vm::trace_frame_roots(frame, &mut |root| {
                                 mark_collection_root(
                                     root,
@@ -780,164 +835,232 @@ impl Runtime {
                                 );
                             });
                         }
-                        for request in &record.queue {
-                            mark_stored_value(
-                                &request.value,
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut work,
-                            );
-                            mark_promise_capability(
-                                &request.capability,
+                        if let Some(record) = self.async_generator_states.get(&id) {
+                            if let Some(awaiting) = &record.awaiting {
+                                mark_heap_reference(
+                                    HeapReference::Object(awaiting.promise),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(frame) = &record.frame {
+                                crate::vm::trace_frame_roots(frame, &mut |root| {
+                                    mark_collection_root(
+                                        root,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut marked_cells,
+                                        &mut work,
+                                    );
+                                });
+                            }
+                            for request in &record.queue {
+                                mark_stored_value(
+                                    &request.value,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                                mark_promise_capability(
+                                    &request.capability,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                        }
+                        if let Some(object) = self.objects.get(id) {
+                            for cell in object.arguments_cells() {
+                                if marked_cells.insert(cell) {
+                                    work.push(GraphNode::Cell(cell));
+                                }
+                            }
+                            if let Some(current) = object.for_in_current() {
+                                mark_heap_reference(
+                                    current,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(current) = object.array_iterator_current() {
+                                mark_heap_reference(
+                                    current,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(current) = object.map_iterator_current() {
+                                mark_heap_reference(
+                                    HeapReference::Object(current),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(current) = object.set_iterator_current() {
+                                mark_heap_reference(
+                                    HeapReference::Object(current),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            for value in object.map_retained_values() {
+                                mark_stored_value(
+                                    value,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            for value in object.set_retained_values() {
+                                mark_stored_value(
+                                    value,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(state) = object.promise_state() {
+                                match state {
+                                    PromiseState::Pending {
+                                        fulfill_reactions,
+                                        reject_reactions,
+                                        ..
+                                    } => {
+                                        for reaction in
+                                            fulfill_reactions.iter().chain(reject_reactions.iter())
+                                        {
+                                            match &reaction.target {
+                                                PromiseReactionTarget::Then {
+                                                    handler,
+                                                    capability,
+                                                } => {
+                                                    if let Some(handler) = handler {
+                                                        mark_heap_reference(
+                                                            HeapReference::Function(*handler),
+                                                            &mut marked_functions,
+                                                            &mut marked_objects,
+                                                            &mut work,
+                                                        );
+                                                    }
+                                                    mark_promise_capability(
+                                                        capability,
+                                                        &mut marked_functions,
+                                                        &mut marked_objects,
+                                                        &mut work,
+                                                    );
+                                                }
+                                                PromiseReactionTarget::AsyncFunction {
+                                                    activation,
+                                                } => {
+                                                    mark_heap_reference(
+                                                        HeapReference::Object(*activation),
+                                                        &mut marked_functions,
+                                                        &mut marked_objects,
+                                                        &mut work,
+                                                    );
+                                                }
+                                                PromiseReactionTarget::AsyncGenerator {
+                                                    generator,
+                                                } => {
+                                                    mark_heap_reference(
+                                                        HeapReference::Object(*generator),
+                                                        &mut marked_functions,
+                                                        &mut marked_objects,
+                                                        &mut work,
+                                                    );
+                                                }
+                                                PromiseReactionTarget::ArrayFromAsync {
+                                                    operation,
+                                                } => {
+                                                    mark_heap_reference(
+                                                        HeapReference::Object(*operation),
+                                                        &mut marked_functions,
+                                                        &mut marked_objects,
+                                                        &mut work,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    PromiseState::Fulfilled(value)
+                                    | PromiseState::Rejected { reason: value, .. } => {
+                                        mark_stored_value(
+                                            value,
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
+                                    }
+                                }
+                            }
+                            mark_object_record(
+                                &object.record,
                                 &mut marked_functions,
                                 &mut marked_objects,
                                 &mut work,
                             );
                         }
                     }
-                    if let Some(object) = self.objects.get(id) {
-                        for cell in object.arguments_cells() {
-                            if marked_cells.insert(cell) {
-                                work.push(GraphNode::Cell(cell));
+                    GraphNode::Cell(id) => {
+                        if let Some(cell) = self.cells.get(id) {
+                            match &cell.value {
+                                SlotValue::Uninitialized => {}
+                                SlotValue::Value(value) => mark_stored_value(
+                                    value,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                ),
                             }
                         }
-                        if let Some(current) = object.for_in_current() {
-                            mark_heap_reference(
-                                current,
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut work,
-                            );
-                        }
-                        if let Some(current) = object.array_iterator_current() {
-                            mark_heap_reference(
-                                current,
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut work,
-                            );
-                        }
-                        if let Some(current) = object.map_iterator_current() {
-                            mark_heap_reference(
-                                HeapReference::Object(current),
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut work,
-                            );
-                        }
-                        if let Some(current) = object.set_iterator_current() {
-                            mark_heap_reference(
-                                HeapReference::Object(current),
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut work,
-                            );
-                        }
-                        for value in object.map_retained_values() {
-                            mark_stored_value(
-                                value,
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut work,
-                            );
-                        }
-                        for value in object.set_retained_values() {
-                            mark_stored_value(
-                                value,
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut work,
-                            );
-                        }
-                        if let Some(state) = object.promise_state() {
-                            match state {
-                                PromiseState::Pending {
-                                    fulfill_reactions,
-                                    reject_reactions,
-                                    ..
-                                } => {
-                                    for reaction in
-                                        fulfill_reactions.iter().chain(reject_reactions.iter())
-                                    {
-                                        match &reaction.target {
-                                            PromiseReactionTarget::Then {
-                                                handler,
-                                                capability,
-                                            } => {
-                                                if let Some(handler) = handler {
-                                                    mark_heap_reference(
-                                                        HeapReference::Function(*handler),
-                                                        &mut marked_functions,
-                                                        &mut marked_objects,
-                                                        &mut work,
-                                                    );
-                                                }
-                                                mark_promise_capability(
-                                                    capability,
-                                                    &mut marked_functions,
-                                                    &mut marked_objects,
-                                                    &mut work,
-                                                );
-                                            }
-                                            PromiseReactionTarget::AsyncFunction { activation } => {
-                                                mark_heap_reference(
-                                                    HeapReference::Object(*activation),
-                                                    &mut marked_functions,
-                                                    &mut marked_objects,
-                                                    &mut work,
-                                                );
-                                            }
-                                            PromiseReactionTarget::AsyncGenerator { generator } => {
-                                                mark_heap_reference(
-                                                    HeapReference::Object(*generator),
-                                                    &mut marked_functions,
-                                                    &mut marked_objects,
-                                                    &mut work,
-                                                );
-                                            }
-                                            PromiseReactionTarget::ArrayFromAsync { operation } => {
-                                                mark_heap_reference(
-                                                    HeapReference::Object(*operation),
-                                                    &mut marked_functions,
-                                                    &mut marked_objects,
-                                                    &mut work,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                PromiseState::Fulfilled(value)
-                                | PromiseState::Rejected { reason: value, .. } => {
-                                    mark_stored_value(
-                                        value,
-                                        &mut marked_functions,
-                                        &mut marked_objects,
-                                        &mut work,
-                                    );
-                                }
-                            }
-                        }
-                        mark_object_record(
-                            &object.record,
+                    }
+                }
+            }
+
+            let marked_before = marked_functions
+                .len()
+                .saturating_add(marked_objects.len())
+                .saturating_add(marked_weak_symbols.len());
+            for (object, heap_object) in self.objects.iter() {
+                if !marked_objects.contains(&object) {
+                    continue;
+                }
+                let Some(state) = heap_object.weak_map_state() else {
+                    continue;
+                };
+                for (key, value) in state.ephemeron_entries() {
+                    if !weak_key_is_live(
+                        key,
+                        &marked_functions,
+                        &marked_objects,
+                        &marked_weak_symbols,
+                        &ephemeron_symbol_owners,
+                    ) {
+                        continue;
+                    }
+                    if let StoredValue::Symbol(symbol) = value {
+                        marked_weak_symbols.insert(WeakAtom::from_atom(symbol));
+                    } else {
+                        mark_stored_value(
+                            value,
                             &mut marked_functions,
                             &mut marked_objects,
                             &mut work,
                         );
                     }
                 }
-                GraphNode::Cell(id) => {
-                    if let Some(cell) = self.cells.get(id) {
-                        match &cell.value {
-                            SlotValue::Uninitialized => {}
-                            SlotValue::Value(value) => mark_stored_value(
-                                value,
-                                &mut marked_functions,
-                                &mut marked_objects,
-                                &mut work,
-                            ),
-                        }
-                    }
-                }
+            }
+            let marked_after = marked_functions
+                .len()
+                .saturating_add(marked_objects.len())
+                .saturating_add(marked_weak_symbols.len());
+            if marked_after == marked_before {
+                break;
             }
         }
 
@@ -993,6 +1116,43 @@ impl Runtime {
                 resource: RuntimeResource::Collection,
                 additional: dead_functions.len(),
             })?;
+
+        // All collection allocations have succeeded. The transaction may now
+        // prune dead weak keys before removing the ordinary dead sets.
+        let mut reclaimed_weak_entries = 0_usize;
+        for object in marked_objects.iter().copied() {
+            let Some(heap_object) = self.objects.get_mut(object) else {
+                continue;
+            };
+            if let Some(state) = heap_object.weak_map_state_mut() {
+                reclaimed_weak_entries =
+                    reclaimed_weak_entries.saturating_add(state.retain_keys(|key| {
+                        weak_key_is_live(
+                            key,
+                            &marked_functions,
+                            &marked_objects,
+                            &marked_weak_symbols,
+                            &ephemeron_symbol_owners,
+                        )
+                    }));
+            }
+            if let Some(state) = heap_object.weak_set_state_mut() {
+                reclaimed_weak_entries =
+                    reclaimed_weak_entries.saturating_add(state.retain_keys(|key| {
+                        weak_key_is_live(
+                            key,
+                            &marked_functions,
+                            &marked_objects,
+                            &marked_weak_symbols,
+                            &ephemeron_symbol_owners,
+                        )
+                    }));
+            }
+        }
+        self.collection_entries = self
+            .collection_entries
+            .saturating_sub(usize_to_u64(reclaimed_weak_entries));
+
         for id in dead_functions {
             let removed = self.functions.remove(id);
             if let Some(function) = removed {
@@ -1025,7 +1185,8 @@ impl Runtime {
                 self.collection_entries = self.collection_entries.saturating_sub(usize_to_u64(
                     object
                         .map_entry_count()
-                        .saturating_add(object.set_entry_count()),
+                        .saturating_add(object.set_entry_count())
+                        .saturating_add(object.weak_collection_entry_count()),
                 ));
             }
         }

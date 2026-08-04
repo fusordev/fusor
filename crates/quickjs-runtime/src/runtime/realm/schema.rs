@@ -42,13 +42,15 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     MapIteratorPrototype,
     SetPrototype,
     SetIteratorPrototype,
+    WeakMapPrototype,
+    WeakSetPrototype,
     Reflect,
     Json,
     Math,
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 35] = [
+    pub(in crate::runtime) const ALL: [Self; 37] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -81,6 +83,8 @@ impl IntrinsicObjectId {
         Self::MapIteratorPrototype,
         Self::SetPrototype,
         Self::SetIteratorPrototype,
+        Self::WeakMapPrototype,
+        Self::WeakSetPrototype,
         Self::Reflect,
         Self::Json,
         Self::Math,

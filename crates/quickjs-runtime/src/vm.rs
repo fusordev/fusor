@@ -65,7 +65,8 @@ use crate::{
         PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
         PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
         ReflectMethod, SetMethod, SetPrototypeOutcome, StringArgument, StringMethod, UriFunction,
-        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
+        WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
+        global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -115,6 +116,7 @@ mod string_methods;
 mod string_raw;
 mod string_replace;
 mod uri;
+mod weak_collections;
 
 pub(crate) use array_from_async::ArrayFromAsyncRecord;
 use async_function::{begin_async_await, suspend_async_function};
@@ -132,6 +134,7 @@ use {
     json_parse::*, json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*,
     native::*, object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*,
     set::*, stack::*, string_methods::*, string_raw::*, string_replace::*, uri::*,
+    weak_collections::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -752,12 +755,14 @@ enum IntrinsicGetContinuation {
         origin: JsStackFrame,
     },
     MapConstructor {
+        kind: MapCollectionKind,
         realm: RealmId,
         new_target: FunctionId,
         iterable: StoredValue,
         origin: JsStackFrame,
     },
     SetConstructor {
+        kind: SetCollectionKind,
         realm: RealmId,
         new_target: FunctionId,
         iterable: StoredValue,

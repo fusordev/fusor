@@ -60,6 +60,7 @@ mod maps;
 mod promises;
 mod sets;
 mod symbols;
+mod weak_collections;
 pub(crate) use iterators::PreparedIteratorResultPlan;
 pub use limits::{RuntimeLimits, RuntimeUsage};
 
@@ -92,6 +93,8 @@ enum RealmIntrinsics {
         array: ArrayIntrinsics,
         map: MapIntrinsics,
         set: SetIntrinsics,
+        weak_map: WeakMapIntrinsics,
+        weak_set: WeakSetIntrinsics,
         promise: PromiseIntrinsics,
         symbol: SymbolIntrinsics,
         iterators: IteratorIntrinsics,
@@ -244,6 +247,18 @@ struct SetIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
     iterator_prototype: ObjectId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WeakMapIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WeakSetIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1220,6 +1235,10 @@ pub(crate) enum NativeFunctionKind {
     SetSpeciesGetter,
     SetPrototype(SetMethod),
     SetIteratorNext,
+    WeakMapConstructor,
+    WeakMapPrototype(WeakMapMethod),
+    WeakSetConstructor,
+    WeakSetPrototype(WeakSetMethod),
     StringPrototypeIterator,
     StringIteratorNext,
     GeneratorFunctionConstructor,
@@ -1379,6 +1398,51 @@ impl SetMethod {
     }
 }
 
+/// Methods installed on `%WeakMap.prototype%` in pinned `QuickJS` order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WeakMapMethod {
+    Set,
+    Get,
+    GetOrInsert,
+    GetOrInsertComputed,
+    Has,
+    Delete,
+}
+
+impl WeakMapMethod {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Set,
+        Self::Get,
+        Self::GetOrInsert,
+        Self::GetOrInsertComputed,
+        Self::Has,
+        Self::Delete,
+    ];
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Set | Self::GetOrInsert | Self::GetOrInsertComputed => 2,
+            Self::Get | Self::Has | Self::Delete => 1,
+        }
+    }
+}
+
+/// Methods installed on `%WeakSet.prototype%` in pinned `QuickJS` order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WeakSetMethod {
+    Add,
+    Has,
+    Delete,
+}
+
+impl WeakSetMethod {
+    pub(crate) const ALL: [Self; 3] = [Self::Add, Self::Has, Self::Delete];
+
+    pub(crate) const fn length() -> i32 {
+        1
+    }
+}
+
 /// The remaining methods installed on the `Promise` constructor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PromiseStatic {
@@ -1533,6 +1597,8 @@ impl NativeFunctionKind {
                 | Self::PromiseConstructor
                 | Self::MapConstructor
                 | Self::SetConstructor
+                | Self::WeakMapConstructor
+                | Self::WeakSetConstructor
         )
     }
 }

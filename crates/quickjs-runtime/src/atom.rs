@@ -97,6 +97,38 @@ struct AtomEntry {
     predefined: Option<PredefinedAtom>,
 }
 
+/// Non-owning identity used by weak collections.
+///
+/// Hashing and equality preserve Symbol identity without keeping the Atom
+/// entry alive. This is deliberately crate-private: JavaScript can only
+/// observe the identity again by presenting a live Symbol value.
+#[derive(Clone)]
+pub(crate) struct WeakAtom(Weak<AtomEntry>);
+
+impl WeakAtom {
+    pub(crate) fn from_atom(atom: &Atom) -> Self {
+        Self(Arc::downgrade(&atom.0))
+    }
+
+    pub(crate) fn strong_count(&self) -> usize {
+        self.0.strong_count()
+    }
+}
+
+impl PartialEq for WeakAtom {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+}
+
+impl Eq for WeakAtom {}
+
+impl Hash for WeakAtom {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.as_ptr().hash(state);
+    }
+}
+
 impl Atom {
     /// Returns the atom namespace.
     #[must_use]

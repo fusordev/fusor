@@ -47,7 +47,7 @@ use super::{
     RealmHandle, RealmId, RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime,
     RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, SetIntrinsics, SetMethod,
     StoredValue, StringHtmlMethod, StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction,
-    VecDeque, check_limit, predefined_string, usize_to_u64,
+    VecDeque, WeakMapIntrinsics, WeakSetIntrinsics, check_limit, predefined_string, usize_to_u64,
 };
 
 use allocation::IntrinsicRecords;
@@ -708,6 +708,14 @@ impl RealmBuildTransaction<'_> {
                 constructor: function(NativeFunctionKind::SetConstructor),
                 iterator_prototype: object(IntrinsicObjectId::SetIteratorPrototype),
             },
+            weak_map: WeakMapIntrinsics {
+                prototype: object(IntrinsicObjectId::WeakMapPrototype),
+                constructor: function(NativeFunctionKind::WeakMapConstructor),
+            },
+            weak_set: WeakSetIntrinsics {
+                prototype: object(IntrinsicObjectId::WeakSetPrototype),
+                constructor: function(NativeFunctionKind::WeakSetConstructor),
+            },
             promise: PromiseIntrinsics {
                 prototype: object(IntrinsicObjectId::PromisePrototype),
                 constructor: function(NativeFunctionKind::PromiseConstructor),
@@ -876,6 +884,11 @@ impl RealmBuildTransaction<'_> {
             &graph.dynamic_atoms,
             DeclarativeBatch::SetGlobals,
         )?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::WeakCollectionGlobals,
+        )?;
         Ok(())
     }
 
@@ -884,7 +897,11 @@ impl RealmBuildTransaction<'_> {
         graph: &RealmPublicationState,
         intrinsic_schema: &RealmIntrinsicSchema,
     ) -> Result<(), RealmPublicationError> {
-        for batch in [DeclarativeBatch::Maps, DeclarativeBatch::Sets] {
+        for batch in [
+            DeclarativeBatch::Maps,
+            DeclarativeBatch::Sets,
+            DeclarativeBatch::WeakCollections,
+        ] {
             self.publish_intrinsic_schema_batch(intrinsic_schema, &graph.dynamic_atoms, batch)?;
         }
         Ok(())

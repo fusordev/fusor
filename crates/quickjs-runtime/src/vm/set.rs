@@ -33,6 +33,50 @@ use super::*;
 use crate::object::{SetIteratorKind, SetState};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SetCollectionKind {
+    Set,
+    WeakSet,
+}
+
+impl SetCollectionKind {
+    const fn constructor_error(self) -> &'static str {
+        match self {
+            Self::Set => "Set constructor requires 'new'",
+            Self::WeakSet => "WeakSet constructor requires 'new'",
+        }
+    }
+}
+
+pub(super) struct SetConstructorRequest {
+    kind: SetCollectionKind,
+    realm: RealmId,
+    new_target: Option<FunctionId>,
+    iterable: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+}
+
+impl SetConstructorRequest {
+    pub(super) const fn new(
+        kind: SetCollectionKind,
+        realm: RealmId,
+        new_target: Option<FunctionId>,
+        iterable: StoredValue,
+        return_to: Option<CallReturn>,
+        origin: JsStackFrame,
+    ) -> Self {
+        Self {
+            kind,
+            realm,
+            new_target,
+            iterable,
+            return_to,
+            origin,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SetConstructorStage {
     Adder,
     IteratorMethod,
@@ -177,15 +221,19 @@ impl SetOperationContinuation {
 
 pub(super) fn begin_set_constructor(
     runtime: &mut Runtime,
-    realm: RealmId,
-    new_target: Option<FunctionId>,
-    iterable: StoredValue,
-    return_to: Option<CallReturn>,
-    origin: JsStackFrame,
+    request: SetConstructorRequest,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    let SetConstructorRequest {
+        kind,
+        realm,
+        new_target,
+        iterable,
+        return_to,
+        origin,
+    } = request;
     let Some(new_target) = new_target else {
-        return set_type_error(realm, origin, "Set constructor requires 'new'");
+        return set_type_error(realm, origin, kind.constructor_error());
     };
     let receiver = StoredValue::Function(new_target);
     charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
@@ -198,6 +246,7 @@ pub(super) fn begin_set_constructor(
     )? {
         PropertyReadOutcome::Value(value) => finish_set_constructor_after_prototype_get(
             runtime,
+            kind,
             realm,
             new_target,
             iterable,
@@ -210,6 +259,7 @@ pub(super) fn begin_set_constructor(
             function,
             receiver,
             IntrinsicGetContinuation::SetConstructor {
+                kind,
                 realm,
                 new_target,
                 iterable,
@@ -231,6 +281,7 @@ pub(super) fn begin_set_constructor(
 )]
 pub(super) fn finish_set_constructor_after_prototype_get(
     runtime: &mut Runtime,
+    kind: SetCollectionKind,
     realm: RealmId,
     new_target: FunctionId,
     iterable: StoredValue,
@@ -244,10 +295,16 @@ pub(super) fn finish_set_constructor_after_prototype_get(
         StoredValue::Object(object) => HeapReference::Object(*object),
         _ => {
             let target_realm = runtime.function_realm(new_target)?;
-            HeapReference::Object(runtime.realm_set_prototype(target_realm)?)
+            HeapReference::Object(match kind {
+                SetCollectionKind::Set => runtime.realm_set_prototype(target_realm)?,
+                SetCollectionKind::WeakSet => runtime.realm_weak_set_prototype(target_realm)?,
+            })
         }
     };
-    let target = runtime.allocate_set_object(prototype)?;
+    let target = match kind {
+        SetCollectionKind::Set => runtime.allocate_set_object(prototype)?,
+        SetCollectionKind::WeakSet => runtime.allocate_weak_set_object(prototype)?,
+    };
     if matches!(iterable, StoredValue::Undefined | StoredValue::Null) {
         return Ok(NativeDispatch::Immediate(StoredValue::Object(target)));
     }

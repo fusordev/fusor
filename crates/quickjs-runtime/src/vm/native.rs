@@ -418,12 +418,14 @@ pub(super) fn resume_native_continuations(
                 runtime, realm, new_target, executor, origin, return_to, &value,
             )?,
             NativeContinuation::IntrinsicGet(IntrinsicGetContinuation::MapConstructor {
+                kind,
                 realm,
                 new_target,
                 iterable,
                 origin,
             }) => finish_map_constructor_after_prototype_get(
                 runtime,
+                kind,
                 realm,
                 new_target,
                 iterable,
@@ -433,12 +435,14 @@ pub(super) fn resume_native_continuations(
                 execution_budget,
             )?,
             NativeContinuation::IntrinsicGet(IntrinsicGetContinuation::SetConstructor {
+                kind,
                 realm,
                 new_target,
                 iterable,
                 origin,
             }) => finish_set_constructor_after_prototype_get(
                 runtime,
+                kind,
                 realm,
                 new_target,
                 iterable,
@@ -2442,11 +2446,29 @@ pub(super) fn dispatch_native_call_with_frames(
             let iterable = inputs.arguments.take_first_or_undefined();
             begin_map_constructor(
                 runtime,
-                native.realm,
-                inputs.new_target,
-                iterable,
-                return_to,
-                origin.unwrap_or_else(native_function_host_origin),
+                MapConstructorRequest::new(
+                    MapCollectionKind::Map,
+                    native.realm,
+                    inputs.new_target,
+                    iterable,
+                    return_to,
+                    origin.unwrap_or_else(native_function_host_origin),
+                ),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::WeakMapConstructor => {
+            let iterable = inputs.arguments.take_first_or_undefined();
+            begin_map_constructor(
+                runtime,
+                MapConstructorRequest::new(
+                    MapCollectionKind::WeakMap,
+                    native.realm,
+                    inputs.new_target,
+                    iterable,
+                    return_to,
+                    origin.unwrap_or_else(native_function_host_origin),
+                ),
                 execution_budget,
             )
         }
@@ -2462,11 +2484,29 @@ pub(super) fn dispatch_native_call_with_frames(
             let iterable = inputs.arguments.take_first_or_undefined();
             begin_set_constructor(
                 runtime,
-                native.realm,
-                inputs.new_target,
-                iterable,
-                return_to,
-                origin.unwrap_or_else(native_function_host_origin),
+                SetConstructorRequest::new(
+                    SetCollectionKind::Set,
+                    native.realm,
+                    inputs.new_target,
+                    iterable,
+                    return_to,
+                    origin.unwrap_or_else(native_function_host_origin),
+                ),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::WeakSetConstructor => {
+            let iterable = inputs.arguments.take_first_or_undefined();
+            begin_set_constructor(
+                runtime,
+                SetConstructorRequest::new(
+                    SetCollectionKind::WeakSet,
+                    native.realm,
+                    inputs.new_target,
+                    iterable,
+                    return_to,
+                    origin.unwrap_or_else(native_function_host_origin),
+                ),
                 execution_budget,
             )
         }
@@ -2663,6 +2703,18 @@ pub(super) fn dispatch_native_call_with_frames(
             },
             execution_budget,
         ),
+        NativeFunctionKind::WeakMapPrototype(method) => dispatch_weak_map_method(
+            runtime,
+            method,
+            inputs.receiver,
+            inputs.arguments,
+            MapMethodContext {
+                realm: native.realm,
+                return_to,
+                origin: origin.unwrap_or_else(native_function_host_origin),
+            },
+            execution_budget,
+        ),
         NativeFunctionKind::MapIteratorNext => begin_map_iterator_next(
             runtime,
             &inputs.receiver,
@@ -2671,6 +2723,18 @@ pub(super) fn dispatch_native_call_with_frames(
             execution_budget,
         ),
         NativeFunctionKind::SetPrototype(method) => dispatch_set_method(
+            runtime,
+            method,
+            inputs.receiver,
+            inputs.arguments,
+            SetMethodContext {
+                realm: native.realm,
+                return_to,
+                origin: origin.unwrap_or_else(native_function_host_origin),
+            },
+            execution_budget,
+        ),
+        NativeFunctionKind::WeakSetPrototype(method) => dispatch_weak_set_method(
             runtime,
             method,
             inputs.receiver,

@@ -17,6 +17,7 @@ mod reflect;
 mod set;
 mod string;
 mod symbol;
+mod weak_collections;
 
 use super::schema::{
     ConstructorPrototypeSpec, FamilyCardinality, IntrinsicDescriptorSpec, IntrinsicFunctionId,
@@ -127,12 +128,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 35,
+                expected: 37,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 300,
+                expected: 311,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -172,6 +173,8 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::MapIteratorPrototype
             | IntrinsicObjectId::SetPrototype
             | IntrinsicObjectId::SetIteratorPrototype
+            | IntrinsicObjectId::WeakMapPrototype
+            | IntrinsicObjectId::WeakSetPrototype
             | IntrinsicObjectId::Reflect
             | IntrinsicObjectId::Json
             | IntrinsicObjectId::Math
@@ -274,6 +277,10 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::SetSpeciesGetter
             | NativeFunctionKind::SetPrototype(_)
             | NativeFunctionKind::SetIteratorNext
+            | NativeFunctionKind::WeakMapConstructor
+            | NativeFunctionKind::WeakMapPrototype(_)
+            | NativeFunctionKind::WeakSetConstructor
+            | NativeFunctionKind::WeakSetPrototype(_)
     )
 }
 
@@ -299,6 +306,8 @@ pub(super) enum DeclarativeBatch {
     MapGlobals,
     Sets,
     SetGlobals,
+    WeakCollections,
+    WeakCollectionGlobals,
     NamespaceObjects,
 }
 
@@ -377,6 +386,11 @@ pub(super) fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatc
     if is_set_identity(property.holder) || referenced_function.is_some_and(is_set_function) {
         return DeclarativeBatch::Sets;
     }
+    if is_weak_collection_identity(property.holder)
+        || referenced_function.is_some_and(is_weak_collection_function)
+    {
+        return DeclarativeBatch::WeakCollections;
+    }
     if is_kernel_identity(property.holder) || referenced_function.is_some_and(is_kernel_function) {
         return DeclarativeBatch::Kernel;
     }
@@ -434,6 +448,9 @@ fn special_reference_batch(
         NativeFunctionKind::PromiseConstructor => Some(DeclarativeBatch::PromiseGlobals),
         NativeFunctionKind::MapConstructor => Some(DeclarativeBatch::MapGlobals),
         NativeFunctionKind::SetConstructor => Some(DeclarativeBatch::SetGlobals),
+        NativeFunctionKind::WeakMapConstructor | NativeFunctionKind::WeakSetConstructor => {
+            Some(DeclarativeBatch::WeakCollectionGlobals)
+        }
         NativeFunctionKind::OrdinaryFunctionConstructor | NativeFunctionKind::ObjectConstructor => {
             Some(DeclarativeBatch::KernelGlobals)
         }
@@ -534,6 +551,26 @@ const fn is_set_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::SetSpeciesGetter
             | NativeFunctionKind::SetPrototype(_)
             | NativeFunctionKind::SetIteratorNext
+    )
+}
+
+const fn is_weak_collection_identity(id: IntrinsicIdentity) -> bool {
+    match id {
+        IntrinsicIdentity::Object(
+            IntrinsicObjectId::WeakMapPrototype | IntrinsicObjectId::WeakSetPrototype,
+        ) => true,
+        IntrinsicIdentity::Function(id) => is_weak_collection_function(id),
+        IntrinsicIdentity::Object(_) => false,
+    }
+}
+
+const fn is_weak_collection_function(id: IntrinsicFunctionId) -> bool {
+    matches!(
+        id.0,
+        NativeFunctionKind::WeakMapConstructor
+            | NativeFunctionKind::WeakMapPrototype(_)
+            | NativeFunctionKind::WeakSetConstructor
+            | NativeFunctionKind::WeakSetPrototype(_)
     )
 }
 
@@ -733,6 +770,8 @@ pub(super) const fn function_batch(id: IntrinsicFunctionId) -> DeclarativeBatch 
         DeclarativeBatch::Maps
     } else if is_set_function(id) {
         DeclarativeBatch::Sets
+    } else if is_weak_collection_function(id) {
+        DeclarativeBatch::WeakCollections
     } else if matches!(
         id.0,
         NativeFunctionKind::SymbolConstructor
@@ -773,6 +812,7 @@ fn visit_object_specs(visit: ObjectSink<'_>) {
     promise::visit_objects(visit);
     map::visit_objects(visit);
     set::visit_objects(visit);
+    weak_collections::visit_objects(visit);
     reflect::visit_objects(visit);
     json::visit_objects(visit);
     math::visit_objects(visit);
@@ -792,6 +832,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
     promise::visit_functions(visit);
     map::visit_functions(visit);
     set::visit_functions(visit);
+    weak_collections::visit_functions(visit);
     reflect::visit_functions(visit);
     json::visit_functions(visit);
     math::visit_functions(visit);
@@ -813,6 +854,7 @@ fn visit_property_specs(visit: PropertySink<'_>) {
     promise::visit_properties(visit);
     map::visit_properties(visit);
     set::visit_properties(visit);
+    weak_collections::visit_properties(visit);
     globals::visit_properties(visit);
     reflect::visit_properties(visit);
     json::visit_properties(visit);
@@ -923,8 +965,8 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 300);
-        assert_eq!(schema.constructor_prototypes.len(), 23);
+        assert_eq!(schema.specs().len(), 311);
+        assert_eq!(schema.constructor_prototypes.len(), 25);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]
