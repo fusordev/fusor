@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "surface-metadata-and-order",
+      "covers": ["replace-all-surface", "replace-all-own-key-order"],
+      "body": "let names=Object.getOwnPropertyNames(String.prototype);let index=names.indexOf('replaceAll');return [String.prototype.replaceAll.name,String.prototype.replaceAll.length,names[index-1]].join('|');",
+      "expect": {"kind": "string", "value": "replaceAll|2|replace"}
+    },
+    {
+      "id": "plain-nonoverlap-empty-and-substitution",
+      "covers": ["replace-all-non-overlap", "replace-all-empty-search", "replace-all-substitution"],
+      "body": "return ['aaaa'.replaceAll('aa','X'),'ab'.replaceAll('','_'),\"aba\".replaceAll(\"a\",\"[$&][$`][$'][$$][$1][$<x>]\")].join('|');",
+      "expect": {"kind": "string", "value": "XX|_a_b_|[a][][ba][$][$1][$<x>]b[a][ab][][$][$1][$<x>]"}
+    },
+    {
+      "id": "callback-utf16-and-result-coercion",
+      "covers": ["replace-all-callback", "replace-all-utf16", "replace-all-result-coercion"],
+      "body": "let log=[];let lone=String.fromCharCode(55296);let subject=lone+'x'+lone;let result=subject.replaceAll(lone,function(match,position,whole){log.push(match.charCodeAt(0)+','+position+','+whole.length);return {toString(){log.push('toString');return 'Y';}};});return result.charCodeAt(1)+'|'+log.join('|');",
+      "expect": {"kind": "string", "value": "120|55296,0,3|toString|55296,2,3|toString"}
+    },
+    {
+      "id": "match-flags-replace-protocol-order",
+      "covers": ["replace-all-match-order", "replace-all-global-flags", "replace-all-symbol-replace"],
+      "body": "let log=[];let search={get [Symbol.match](){log.push('match');return true;},get flags(){log.push('flags');return {toString(){log.push('flags-string');return 'g';}};},get [Symbol.replace](){log.push('replace');return function(receiver,replacement){log.push('call');return receiver===recv&&replacement===repl;};}};let recv={toString(){log.push('receiver');return 'aba';}};let repl={toString(){log.push('replacement');return 'X';}};let result=String.prototype.replaceAll.call(recv,search,repl);return result+'#'+log.join(',');",
+      "expect": {"kind": "string", "value": "true#match,flags,flags-string,replace,call"}
+    },
+    {
+      "id": "fallback-and-nullish-order",
+      "covers": ["replace-all-fallback-order", "replace-all-nullish-order"],
+      "body": "let log=[];let search={get [Symbol.match](){log.push('match');return false;},get flags(){log.push('bad-flags');return 'g';},get [Symbol.replace](){log.push('replace');return undefined;},toString(){log.push('search');return 'a';}};let receiver={toString(){log.push('receiver');return 'aba';}};let replacement={toString(){log.push('replacement');return 'X';}};let result=String.prototype.replaceAll.call(receiver,search,replacement);let touched=false;try{String.prototype.replaceAll.call(null,{get [Symbol.match](){touched=true;}},'X');}catch(error){}return result+'#'+log.join(',')+'#'+touched;",
+      "expect": {"kind": "string", "value": "XbX#match,replace,receiver,search,replacement#false"}
+    },
+    {
+      "id": "global-and-get-method-errors",
+      "covers": ["replace-all-errors"],
+      "body": "let errors=[];try{'abc'.replaceAll({[Symbol.match]:true,flags:'i'},'X');}catch(error){errors.push(error.name);}try{'abc'.replaceAll({[Symbol.match]:true,flags:null},'X');}catch(error){errors.push(error.name);}try{'abc'.replaceAll({[Symbol.match]:false,[Symbol.replace]:1},'X');}catch(error){errors.push(error.name);}return errors.join('|');",
+      "expect": {"kind": "string", "value": "TypeError|TypeError|TypeError"}
+    }
+  ]
+}

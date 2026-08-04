@@ -832,6 +832,9 @@ pub(crate) enum StringMethod {
     /// `String.prototype.replace`, whose `@@replace` protocol dispatch must run
     /// before the receiver and fallback arguments are string-coerced.
     Replace,
+    /// `String.prototype.replaceAll`, which additionally performs the
+    /// observable `IsRegExp` and global-flags checks before `@@replace`.
+    ReplaceAll,
     Slice,
     StartsWith,
     Substr,
@@ -875,6 +878,7 @@ impl StringMethod {
             | Self::ToUpperCase
             | Self::Concat
             | Self::Replace
+            | Self::ReplaceAll
             | Self::FromCharCode
             | Self::FromCodePoint => &[],
             Self::Html(method) => {

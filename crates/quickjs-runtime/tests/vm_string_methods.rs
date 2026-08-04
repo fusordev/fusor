@@ -62,6 +62,8 @@
 //! "abc".replace("", "X") => "Xabc"
 //! substitution template => "a[b][a][cabc][$][$1][$<x>]cabc"
 //! replace conversion order => "get,recv,search,repl"
+//! "ababa".replaceAll("a", "X") => "XbXbX"
+//! "ab".replaceAll("", callback) callback positions => "0,1,2"
 //! ```
 
 use std::{error::Error, fmt, sync::Arc};
@@ -367,6 +369,10 @@ fn replace_dispatches_the_symbol_protocol_before_fallback_coercion() {
             "(function(){const search={[Symbol.replace]:null,toString(){return 'b';}};return 'abc'.replace(search,'X');})()",
             "aXc",
         ),
+        (
+            "(function(){String.prototype[Symbol.replace]=function(receiver,replacement){return this+'|'+receiver+'|'+replacement;};return 'abc'.replace('b','X');})()",
+            "b|abc|X",
+        ),
     ]);
     assert_throws(
         "return 'abc'.replace({[Symbol.replace]: 1}, 'X');",
@@ -408,6 +414,72 @@ fn replace_rejects_a_nullish_receiver_before_protocol_lookup() {
         "return String.prototype.replace.call(undefined, {}, 'X');",
         ExceptionKind::TypeError,
         "null or undefined are forbidden",
+    );
+}
+
+/// `replaceAll` discovers every non-overlapping UTF-16 match before applying
+/// the same empty-capture substitution rules as `replace`.
+#[test]
+fn replace_all_applies_every_plain_string_match_and_empty_boundary() {
+    assert_all(&[
+        ("'ababa'.replaceAll('a', 'X')", "XbXbX"),
+        ("'aaaa'.replaceAll('aa', 'X')", "XX"),
+        ("'abc'.replaceAll('z', 'X')", "abc"),
+        (
+            r#""aba".replaceAll("a", "[$&][$`][$'][$$][$1][$<x>]")"#,
+            "[a][][ba][$][$1][$<x>]b[a][ab][][$][$1][$<x>]",
+        ),
+        (
+            "(function(){let positions=[];let result='ab'.replaceAll('',function(m,p,s){positions.push(p+':'+s.length);return '<'+p+'>';});return result+'|'+positions.join(',');})()",
+            "<0>a<1>b<2>|0:2,1:2,2:2",
+        ),
+        (
+            "(function(){let positions=[];let result='\\uD800x\\uD800'.replaceAll('\\uD800',function(m,p,s){positions.push(p+':'+s.length);return 'Y';});return result.charCodeAt(1)+'|'+positions.join(',');})()",
+            "120|0:3,2:3",
+        ),
+    ]);
+}
+
+/// `replaceAll` performs `IsRegExp`, the global-flag check, and `GetMethod`
+/// before any fallback conversion, with each getter able to re-enter the VM.
+#[test]
+fn replace_all_preserves_match_flags_replace_and_fallback_order() {
+    assert_all(&[
+        (
+            "(function(){let log=[];let search={get [Symbol.match](){log.push('match');return true;},get flags(){log.push('flags');return {toString(){log.push('flags-string');return 'g';}};},get [Symbol.replace](){log.push('replace');return function(r,v){log.push('call');return (r===recv)+'|'+(v===replacement);};}};let recv={toString(){log.push('recv');return 'aba';}};let replacement={toString(){log.push('replacement');return 'X';}};let result=String.prototype.replaceAll.call(recv,search,replacement);return result+'#'+log.join(',');})()",
+            "true|true#match,flags,flags-string,replace,call",
+        ),
+        (
+            "(function(){let log=[];let search={get [Symbol.match](){log.push('match');return false;},get flags(){log.push('bad-flags');return 'g';},get [Symbol.replace](){log.push('replace');return undefined;},toString(){log.push('search');return 'a';}};let recv={toString(){log.push('recv');return 'aba';}};let replacement={toString(){log.push('replacement');return 'X';}};let result=String.prototype.replaceAll.call(recv,search,replacement);return result+'#'+log.join(',');})()",
+            "XbX#match,replace,recv,search,replacement",
+        ),
+        (
+            "(function(){String.prototype[Symbol.replace]=function(receiver,replacement){return this+'|'+receiver+'|'+replacement;};return 'aba'.replaceAll('a','X');})()",
+            "a|aba|X",
+        ),
+        (
+            "(function(){let touched=false;let search={get [Symbol.match](){touched=true;return true;}};try{String.prototype.replaceAll.call(null,search,'X');}catch(error){}return touched;})()",
+            "false",
+        ),
+    ]);
+}
+
+#[test]
+fn replace_all_rejects_regexp_like_objects_without_a_global_flag() {
+    assert_throws(
+        "return 'abc'.replaceAll({[Symbol.match]:true,flags:'i',[Symbol.replace](){return 'bad';}},'X');",
+        ExceptionKind::TypeError,
+        "regexp must have the 'g' flag",
+    );
+    assert_throws(
+        "return 'abc'.replaceAll({[Symbol.match]:true,flags:null,[Symbol.replace](){return 'bad';}},'X');",
+        ExceptionKind::TypeError,
+        "cannot convert to object",
+    );
+    assert_throws(
+        "return 'abc'.replaceAll({[Symbol.match]:false,[Symbol.replace]:1},'X');",
+        ExceptionKind::TypeError,
+        "not a function",
     );
 }
 
@@ -647,6 +719,8 @@ fn the_installed_methods_have_the_pinned_shape() {
         ("String.prototype.substring.length", "2"),
         ("String.prototype.replace.length", "2"),
         ("String.prototype.replace.name", "replace"),
+        ("String.prototype.replaceAll.length", "2"),
+        ("String.prototype.replaceAll.name", "replaceAll"),
         ("String.prototype.trim.length", "0"),
         ("String.prototype.trim.name", "trim"),
         ("String.prototype.isWellFormed.length", "0"),
@@ -717,7 +791,7 @@ fn supported_string_prototype_names_preserve_the_pinned_quickjs_order() {
         rendered("Object.getOwnPropertyNames(String.prototype).join('|')"),
         "length|at|charCodeAt|charAt|concat|codePointAt|isWellFormed|toWellFormed|\
          indexOf|lastIndexOf|includes|endsWith|startsWith|substring|substr|slice|repeat|\
-         replace|padEnd|padStart|trim|trimEnd|trimRight|trimStart|trimLeft|toString|\
+         replace|replaceAll|padEnd|padStart|trim|trimEnd|trimRight|trimStart|trimLeft|toString|\
          valueOf|toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase|anchor|big|\
          blink|bold|fixed|fontcolor|fontsize|italics|link|small|strike|sub|sup|\
          constructor|normalize|localeCompare"

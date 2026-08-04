@@ -65,16 +65,16 @@ const BIGINT_INTERNED_STATICS: [&str; 2] = ["asIntN", "asUintN"];
 
 /// The `String.prototype` methods this profile installs.
 ///
-/// The set is deliberately narrower than the pinned oracle's: `replace`
-/// implements its `@@replace` protocol and exact plain-string path, while the
-/// remaining RegExp-coupled methods (`match`, `matchAll`, `replaceAll`,
+/// The set is deliberately narrower than the pinned oracle's: `replace` and
+/// `replaceAll` implement their `@@replace` protocols and exact plain-string
+/// paths, while the remaining RegExp-coupled methods (`match`, `matchAll`,
 /// `search`, and `split`) remain absent and therefore fail closed rather than
 /// behaving incorrectly. The order is the pinned `QuickJS` own-key order with
 /// unsupported methods omitted.
 ///
 /// Each `length` matches the pinned oracle, which reports `1` for most methods
 /// and `2` for `slice`, `substr`, and `substring`.
-const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 41] = [
+const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 42] = [
     StringPrototypeMethod::interned("at", StringMethod::At, 1),
     StringPrototypeMethod::interned("charCodeAt", StringMethod::CharCodeAt, 1),
     StringPrototypeMethod::interned("charAt", StringMethod::CharAt, 1),
@@ -92,6 +92,7 @@ const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 41] = [
     StringPrototypeMethod::interned("slice", StringMethod::Slice, 2),
     StringPrototypeMethod::interned("repeat", StringMethod::Repeat, 1),
     StringPrototypeMethod::interned("replace", StringMethod::Replace, 2),
+    StringPrototypeMethod::interned("replaceAll", StringMethod::ReplaceAll, 2),
     StringPrototypeMethod::interned("padEnd", StringMethod::PadEnd, 1),
     StringPrototypeMethod::interned("padStart", StringMethod::PadStart, 1),
     StringPrototypeMethod::interned("trim", StringMethod::Trim, 0),

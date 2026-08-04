@@ -2388,8 +2388,11 @@ pub(super) fn dispatch_native_call_with_frames(
         // because they all convert the receiver with `ToString` and then each
         // declared argument in order, and every one of those steps can re-enter
         // the interpreter.
-        NativeFunctionKind::StringPrototypeMethod(StringMethod::Replace) => begin_string_replace(
+        NativeFunctionKind::StringPrototypeMethod(
+            method @ (StringMethod::Replace | StringMethod::ReplaceAll),
+        ) => begin_string_replace(
             runtime,
+            matches!(method, StringMethod::ReplaceAll),
             native.realm,
             inputs.receiver,
             inputs.arguments,

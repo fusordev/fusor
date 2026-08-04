@@ -38,6 +38,7 @@ pub(crate) const DEFAULT_CALL_SPREAD_CORPUS: &str = "tests/call-spread/manifest.
 pub(crate) const DEFAULT_OBJECT_LEGACY_CORPUS: &str = "tests/object-legacy/manifest.json";
 pub(crate) const DEFAULT_PROMISE_CORE_CORPUS: &str = "tests/promise-core/manifest.json";
 pub(crate) const DEFAULT_STRING_HTML_CORPUS: &str = "tests/string-html/manifest.json";
+pub(crate) const DEFAULT_STRING_REPLACE_ALL_CORPUS: &str = "tests/string-replace-all/manifest.json";
 pub(crate) const DEFAULT_MAP_CORPUS: &str = "tests/map/manifest.json";
 pub(crate) const DEFAULT_SET_CORPUS: &str = "tests/set/manifest.json";
 pub(crate) const DEFAULT_WEAK_COLLECTIONS_CORPUS: &str = "tests/weak-collections/manifest.json";
@@ -392,6 +393,23 @@ const STRING_HTML_REQUIRED_COVERAGE: &[&str] = &[
     "trim-aliases",
 ];
 
+const STRING_REPLACE_ALL_REQUIRED_COVERAGE: &[&str] = &[
+    "replace-all-callback",
+    "replace-all-empty-search",
+    "replace-all-errors",
+    "replace-all-fallback-order",
+    "replace-all-global-flags",
+    "replace-all-match-order",
+    "replace-all-non-overlap",
+    "replace-all-nullish-order",
+    "replace-all-own-key-order",
+    "replace-all-result-coercion",
+    "replace-all-substitution",
+    "replace-all-surface",
+    "replace-all-symbol-replace",
+    "replace-all-utf16",
+];
+
 const MAP_REQUIRED_COVERAGE: &[&str] = &[
     "map-brand",
     "map-constructor-close",
@@ -640,6 +658,7 @@ enum RuntimeDifferentialSuite {
     ObjectLegacy,
     PromiseCore,
     StringHtml,
+    StringReplaceAll,
     Map,
     Set,
     WeakCollections,
@@ -661,6 +680,7 @@ impl RuntimeDifferentialSuite {
             Self::ObjectLegacy => "object-legacy",
             Self::PromiseCore => "promise-core",
             Self::StringHtml => "string-html",
+            Self::StringReplaceAll => "string-replace-all",
             Self::Map => "map",
             Self::Set => "set",
             Self::WeakCollections => "weak-collections",
@@ -682,6 +702,7 @@ impl RuntimeDifferentialSuite {
             Self::ObjectLegacy => OBJECT_LEGACY_REQUIRED_COVERAGE,
             Self::PromiseCore => PROMISE_CORE_REQUIRED_COVERAGE,
             Self::StringHtml => STRING_HTML_REQUIRED_COVERAGE,
+            Self::StringReplaceAll => STRING_REPLACE_ALL_REQUIRED_COVERAGE,
             Self::Map => MAP_REQUIRED_COVERAGE,
             Self::Set => SET_REQUIRED_COVERAGE,
             Self::WeakCollections => WEAK_COLLECTIONS_REQUIRED_COVERAGE,
@@ -773,6 +794,13 @@ pub(crate) struct PromiseCoreDifferentialOptions {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct StringHtmlDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct StringReplaceAllDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -962,6 +990,17 @@ pub(crate) fn run_string_html_differential(
         &options.corpus,
         options.timeout,
         RuntimeDifferentialSuite::StringHtml,
+    )
+}
+
+pub(crate) fn run_string_replace_all_differential(
+    options: &StringReplaceAllDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::StringReplaceAll,
     )
 }
 
@@ -2601,6 +2640,21 @@ mod tests {
         )
         .expect("checked-in string-html manifest");
         assert_eq!(corpus.cases.len(), 6);
+    }
+
+    #[test]
+    fn checked_in_string_replace_all_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/string-replace-all/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in String replaceAll manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::StringReplaceAll,
+        )
+        .expect("checked-in String replaceAll manifest");
+        assert_eq!(corpus.cases.len(), 6);
+        assert_eq!(super::STRING_REPLACE_ALL_REQUIRED_COVERAGE.len(), 14);
     }
 
     #[test]

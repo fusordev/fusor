@@ -550,9 +550,9 @@ fn finish_string_method(
             }
             StoredValue::String(repeat_string(subject, count, state)?)
         }
-        StringMethod::Replace => {
+        StringMethod::Replace | StringMethod::ReplaceAll => {
             return Err(EngineFault::RuntimeInvariant {
-                message: "String.prototype.replace entered the simple String method machine",
+                message: "String replacement entered the simple String method machine",
             }
             .into());
         }
