@@ -405,6 +405,9 @@ pub(super) fn dispatch_pending_exception(
                         | NativeContinuation::ArrayStatic(_)
                         | NativeContinuation::IteratorAppend(_)
                         | NativeContinuation::IteratorClose(_)
+                ) || matches!(
+                    continuation,
+                    NativeContinuation::Promise(state) if state.handles_abrupt()
                 )
             }) {
                 handler = Some(Handler::Native(index));
@@ -558,6 +561,10 @@ pub(super) fn dispatch_pending_exception(
                 native_returns,
                 pending,
                 return_to,
+                frames,
+                active_frames,
+                *active_frame_values,
+                compiler,
                 execution_budget,
             );
             let dispatch = match dispatch {
@@ -574,16 +581,22 @@ pub(super) fn dispatch_pending_exception(
             };
             match dispatch {
                 Ok(NativeDispatch::Immediate(value)) => {
-                    let parent = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
-                        message: "iterator native handler completed without a parent frame",
-                    })?;
-                    push_call_result(
-                        parent,
-                        value,
-                        return_to.ok_or(EngineFault::RuntimeInvariant {
-                            message: "iterator native handler has no caller continuation",
-                        })?,
-                    )?;
+                    if let Some(parent) = frames.last_mut() {
+                        push_call_result(
+                            parent,
+                            value,
+                            return_to.ok_or(EngineFault::RuntimeInvariant {
+                                message: "iterator native handler has no caller continuation",
+                            })?,
+                        )?;
+                    } else if return_to.is_none() {
+                        execution_budget.native_root_completion = Some(value);
+                    } else {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "root native handler retained a caller continuation",
+                        }
+                        .into());
+                    }
                 }
                 Ok(NativeDispatch::Pair(original, updated)) => {
                     let parent = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {

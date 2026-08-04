@@ -1,0 +1,120 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "executor-runs-synchronously-with-resolving-functions",
+      "covers": ["constructor-sync", "resolving-functions"],
+      "body": "let log = 'before|';\nnew Promise(function (resolve, reject) { log += typeof resolve + ':' + typeof reject + '|executor|'; });\nlog += 'after';\nreturn log;",
+      "expect": {"kind": "string", "value": "before|function:function|executor|after"}
+    },
+    {
+      "id": "constructor-requires-new-and-callable-executor",
+      "covers": ["constructor-new", "executor-callable"],
+      "body": "let call = false, executor = false;\ntry { Promise(function () {}); } catch (error) { call = error.name === 'TypeError'; }\ntry { new Promise(0); } catch (error) { executor = error.name === 'TypeError'; }\nreturn call && executor;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "resolving-function-metadata",
+      "covers": ["resolving-metadata"],
+      "body": "let metadata;\nnew Promise(function (resolve, reject) { metadata = resolve.length + ':' + resolve.name + ':' + reject.length + ':' + reject.name; });\nreturn metadata;",
+      "expect": {"kind": "string", "value": "1::1:"}
+    },
+    {
+      "id": "fulfilled-reactions-are-deferred",
+      "covers": ["reaction-deferred"],
+      "body": "let log = 'sync';\nPromise.resolve(1).then(function () { log = 'job'; });\nreturn log;",
+      "expect": {"kind": "string", "value": "sync"}
+    },
+    {
+      "id": "thenable-get-precedes-deferred-call",
+      "covers": ["thenable-get"],
+      "body": "let log = '';\nPromise.resolve({ get then() { log += 'get'; return function () { log += '|call'; }; } });\nreturn log;",
+      "expect": {"kind": "string", "value": "get"}
+    },
+    {
+      "id": "catch-observably-gets-and-calls-then",
+      "covers": ["catch-invoke"],
+      "body": "let log = '';\nfunction handler() {}\nlet receiver = { get then() { log += 'get|'; return function (onFulfilled, onRejected) { log += String(this === receiver) + ':' + String(onFulfilled === undefined) + ':' + String(onRejected === handler); return 9; }; } };\nlet result = Promise.prototype.catch.call(receiver, handler);\nreturn log + '|' + result;",
+      "expect": {"kind": "string", "value": "get|true:true:true|9"}
+    },
+    {
+      "id": "resolve-preserves-intrinsic-promise-identity",
+      "covers": ["resolve-identity"],
+      "body": "let promise = Promise.resolve(1);\nreturn Promise.resolve(promise) === promise;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "promise-object-brand",
+      "covers": ["promise-brand"],
+      "body": "return Object.prototype.toString.call(Promise.resolve());",
+      "expect": {"kind": "string", "value": "[object Promise]"}
+    },
+    {
+      "id": "then-requires-a-promise-receiver",
+      "covers": ["then-brand"],
+      "body": "try { Promise.prototype.then.call({}); } catch (error) { return error.name === 'TypeError'; }\nreturn false;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "new-target-selects-custom-or-intrinsic-prototype",
+      "covers": ["new-target-prototype", "prototype-fallback"],
+      "body": "function Custom() {}\nlet prototype = {};\nCustom.prototype = prototype;\nlet custom = Reflect.construct(Promise, [function (resolve) { resolve(1); }], Custom);\nfunction Fallback() {}\nFallback.prototype = 1;\nlet fallback = Reflect.construct(Promise, [function (resolve) { resolve(2); }], Fallback);\nreturn Object.getPrototypeOf(custom) === prototype && Object.getPrototypeOf(fallback) === Promise.prototype;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "new-target-prototype-get-precedes-and-can-suppress-executor",
+      "covers": ["prototype-order", "prototype-abrupt"],
+      "body": "let log = '';\nlet Ordered = (function () {}).bind(null);\nObject.defineProperty(Ordered, 'prototype', { get: function () { log += 'prototype|'; return {}; } });\nReflect.construct(Promise, [function () { log += 'executor|'; }], Ordered);\nlet Abrupt = (function () {}).bind(null);\nObject.defineProperty(Abrupt, 'prototype', { get: function () { log += 'abrupt'; throw 'stop'; } });\ntry { Reflect.construct(Promise, [function () { log += '|bad'; }], Abrupt); } catch (error) { log += ':' + error; }\nreturn log;",
+      "expect": {"kind": "string", "value": "prototype|executor|abrupt:stop"}
+    },
+    {
+      "id": "resolve-observes-branded-input-constructor-before-identity-reuse",
+      "covers": ["resolve-constructor-get", "resolve-constructor-abrupt"],
+      "body": "let log = '';\nlet same = Promise.resolve(1);\nObject.defineProperty(same, 'constructor', { get: function () { log += 'get|'; return Promise; } });\nlet identity = Promise.resolve(same) === same;\nlet wrapped = Promise.resolve(2);\nObject.defineProperty(wrapped, 'constructor', { value: function Other() {} });\nlet distinct = Promise.resolve(wrapped) !== wrapped;\nlet abrupt = Promise.resolve(3);\nObject.defineProperty(abrupt, 'constructor', { get: function () { throw 'stop'; } });\nlet threw = false;\ntry { Promise.resolve(abrupt); } catch (error) { threw = error === 'stop'; }\nreturn log + identity + ':' + distinct + ':' + threw;",
+      "expect": {"kind": "string", "value": "get|true:true:true"}
+    },
+    {
+      "id": "static-resolve-and-reject-use-generic-capabilities",
+      "covers": ["generic-resolve", "generic-reject"],
+      "body": "let log = '';\nfunction C(executor) {\n  let result = {};\n  executor(\n    function (value) { 'use strict'; log += 'resolve:' + value + ':' + (this === undefined) + '|'; result.value = value; },\n    function (reason) { 'use strict'; log += 'reject:' + reason + ':' + (this === undefined) + '|'; result.reason = reason; }\n  );\n  return result;\n}\nlet resolved = Promise.resolve.call(C, 7);\nlet rejected = Promise.reject.call(C, 'x');\nreturn log + resolved.value + ':' + rejected.reason;",
+      "expect": {"kind": "string", "value": "resolve:7:true|reject:x:true|7:x"}
+    },
+    {
+      "id": "capability-executor-is-one-shot-and-requires-callables",
+      "covers": ["capability-executor-once", "capability-callable"],
+      "body": "function Once(executor) {\n  let result = {};\n  function settle() {}\n  executor(settle, settle);\n  try { executor(settle, settle); } catch (error) { result.second = error.name; }\n  return result;\n}\nlet second = Promise.resolve.call(Once, 1).second;\nfunction Bad(executor) { executor(0, function () {}); return {}; }\nlet callable = '';\ntry { Promise.resolve.call(Bad, 1); } catch (error) { callable = error.name; }\nreturn second + ':' + callable;",
+      "expect": {"kind": "string", "value": "TypeError:TypeError"}
+    },
+    {
+      "id": "then-uses-selected-species-capability",
+      "covers": ["species-constructor-order", "then-capability"],
+      "body": "let log = '';\nfunction C(executor) { log += 'construct|'; let result = { marker: 1 }; executor(function () {}, function () {}); return result; }\nlet promise = Promise.resolve(1);\nObject.defineProperty(promise, 'constructor', { get: function () {\n  log += 'constructor|';\n  return { get [Symbol.species]() { log += 'species|'; return C; } };\n} });\nlet derived = promise.then();\nreturn log + (derived.marker === 1);",
+      "expect": {"kind": "string", "value": "constructor|species|construct|true"}
+    },
+    {
+      "id": "promise-species-surface-fallback-and-validation",
+      "covers": ["species-getter", "species-fallback", "species-validation"],
+      "body": "let descriptor = Object.getOwnPropertyDescriptor(Promise, Symbol.species);\nlet surface = descriptor.get.name + ':' + descriptor.get.length + ':' + descriptor.enumerable + ':' + descriptor.configurable + ':' + (descriptor.set === undefined) + ':' + (descriptor.get.call(7) === 7);\nlet fallback = Promise.resolve(1);\nfallback.constructor = { [Symbol.species]: null };\nlet usedFallback = fallback.then() instanceof Promise;\nlet nullConstructor = Promise.resolve(1);\nnullConstructor.constructor = null;\nlet nullError = '';\ntry { nullConstructor.then(); } catch (error) { nullError = error.name; }\nlet invalidSpecies = Promise.resolve(1);\ninvalidSpecies.constructor = { [Symbol.species]: {} };\nlet speciesError = '';\ntry { invalidSpecies.then(); } catch (error) { speciesError = error.name; }\nreturn surface + '|' + usedFallback + ':' + nullError + ':' + speciesError;",
+      "expect": {"kind": "string", "value": "get [Symbol.species]:0:false:true:true:true|true:TypeError:TypeError"}
+    },
+    {
+      "id": "finally-is-generic-and-observes-constructor-species-then-order",
+      "covers": ["finally-generic", "finally-handler-metadata", "finally-order"],
+      "body": "let log = '';\nfunction cleanup() {}\nlet receiver = {\n  get constructor() { log += 'constructor|'; return { get [Symbol.species]() { log += 'species|'; return Promise; } }; },\n  get then() { log += 'then-get|'; return function (onFulfilled, onRejected) { log += 'then-call:' + (this === receiver) + ':' + onFulfilled.name + ':' + onFulfilled.length + ':' + onRejected.name + ':' + onRejected.length; return 9; }; }\n};\nlet result = Promise.prototype.finally.call(receiver, cleanup);\nreturn log + '|' + result;",
+      "expect": {"kind": "string", "value": "constructor|species|then-get|then-call:true::1::1|9"}
+    },
+    {
+      "id": "finally-passes-a-noncallable-handler-through-unchanged",
+      "covers": ["finally-noncallable"],
+      "body": "let log = '';\nlet receiver = { constructor: undefined, then: function (onFulfilled, onRejected) { log = typeof onFulfilled + ':' + onFulfilled + ':' + (onFulfilled === onRejected); return 4; } };\nlet result = Promise.prototype.finally.call(receiver, 7);\nreturn log + '|' + result;",
+      "expect": {"kind": "string", "value": "number:7:true|4"}
+    },
+    {
+      "id": "finally-surface-metadata-and-receiver-validation",
+      "covers": ["finally-surface", "finally-validation"],
+      "body": "let names = Object.getOwnPropertyNames(Promise.prototype).join('|');\nlet metadata = Promise.prototype.finally.length + ':' + Promise.prototype.finally.name;\nlet rejectedPrimitive = false;\ntry { Promise.prototype.finally.call(1, function () {}); } catch (error) { rejectedPrimitive = error.name === 'TypeError'; }\nreturn names + '#' + metadata + '#' + rejectedPrimitive;",
+      "expect": {"kind": "string", "value": "then|catch|finally|constructor#1:finally#true"}
+    }
+  ]
+}

@@ -152,6 +152,9 @@ pub(super) fn take_iterator_abrupt_handler(
                 | NativeContinuation::ArrayStatic(_)
                 | NativeContinuation::IteratorAppend(_)
                 | NativeContinuation::IteratorClose(_)
+        ) || matches!(
+            continuation,
+            NativeContinuation::Promise(state) if state.handles_abrupt()
         )
     })?;
     let handler = continuations.remove(index);
@@ -159,11 +162,19 @@ pub(super) fn take_iterator_abrupt_handler(
     Some(handler)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "abrupt native recovery carries the same explicit frame roots, compiler authority, and execution budget as ordinary continuation resumption"
+)]
 pub(super) fn resume_iterator_abrupt_continuations(
     runtime: &mut Runtime,
     mut continuations: Vec<NativeContinuation>,
     mut pending: PendingException,
     return_to: Option<CallReturn>,
+    active_root_frames: &[Frame],
+    active_frames: usize,
+    active_frame_values: u64,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     loop {
@@ -183,6 +194,9 @@ pub(super) fn resume_iterator_abrupt_continuations(
             NativeContinuation::ArrayStatic(state) => {
                 resume_array_static_abrupt(runtime, *state, pending, return_to, execution_budget)
             }
+            NativeContinuation::Promise(state) => {
+                resume_promise_abrupt(runtime, state, pending, return_to, execution_budget)
+            }
             handler => {
                 resume_iterator_abrupt(runtime, handler, pending, return_to, execution_budget)
             }
@@ -195,6 +209,19 @@ pub(super) fn resume_iterator_abrupt_continuations(
                     }
                     NativeDispatch::Call(call) => {
                         prepend_native_continuations(call, continuations)?;
+                    }
+                    NativeDispatch::Immediate(value) if !continuations.is_empty() => {
+                        return resume_native_continuations(
+                            runtime,
+                            continuations,
+                            value.duplicate(),
+                            return_to,
+                            active_root_frames,
+                            active_frames,
+                            active_frame_values,
+                            compiler,
+                            execution_budget,
+                        );
                     }
                     NativeDispatch::Immediate(_)
                     | NativeDispatch::Pair(_, _)
@@ -302,6 +329,14 @@ pub(super) fn resume_native_continuations(
                 origin,
                 &value,
                 execution_budget,
+            )?,
+            NativeContinuation::IntrinsicGet(IntrinsicGetContinuation::PromiseConstructor {
+                realm,
+                new_target,
+                executor,
+                origin,
+            }) => finish_promise_constructor_after_prototype_get(
+                runtime, realm, new_target, executor, origin, return_to, &value,
             )?,
             NativeContinuation::IntrinsicGet(state) => {
                 finish_intrinsic_get(runtime, state, value, active_root_frames, &continuations)?
@@ -479,6 +514,13 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
+            NativeContinuation::Promise(state) => advance_promise_continuation(
+                runtime,
+                state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::ReflectSet => NativeDispatch::Immediate(StoredValue::Boolean(true)),
             NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
         };
@@ -594,6 +636,9 @@ fn resolve_native_dispatch_inner(
                 generation: call.function.generation(),
             })?;
         let native = node.native().copied();
+        let resolving = node.promise_resolving().cloned();
+        let capability_executor = node.promise_capability_executor().cloned();
+        let promise_finally = node.promise_finally().cloned();
         if native.is_none()
             && let Some(bound) = node.bound()
         {
@@ -633,6 +678,193 @@ fn resolve_native_dispatch_inner(
             dispatch = NativeDispatch::Call(call);
             continue;
         }
+        if let Some(resolving) = resolving {
+            apply_native_pre_call(runtime, call.pre_call.as_ref())?;
+            let outcome = dispatch_promise_resolving(
+                runtime,
+                &resolving,
+                call.arguments,
+                call.return_to,
+                call.origin,
+                execution_budget,
+            );
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(
+                    NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending),
+                ) => {
+                    dispatch = resume_iterator_abrupt_continuations(
+                        runtime,
+                        call.continuations,
+                        pending,
+                        call.return_to,
+                        active_root_frames,
+                        active_frames,
+                        active_frame_values,
+                        compiler,
+                        execution_budget,
+                    )?;
+                    continue;
+                }
+                Err(NativeFailure::Execution(error)) => {
+                    return Err(NativeFailure::Execution(error));
+                }
+            };
+            dispatch = match outcome {
+                NativeDispatch::Immediate(value) => resume_native_continuations(
+                    runtime,
+                    call.continuations,
+                    value,
+                    call.return_to,
+                    active_root_frames,
+                    active_frames,
+                    active_frame_values,
+                    compiler,
+                    execution_budget,
+                )?,
+                NativeDispatch::Call(mut inner) => {
+                    prepend_native_continuations(&mut inner, call.continuations)?;
+                    NativeDispatch::Call(inner)
+                }
+                NativeDispatch::Frame(mut frame) => {
+                    attach_native_continuations(&mut frame, call.continuations)?;
+                    NativeDispatch::Frame(frame)
+                }
+                NativeDispatch::Pair(_, _)
+                | NativeDispatch::ForOfRecord { .. }
+                | NativeDispatch::ForOfStep { .. }
+                | NativeDispatch::ForOfClosed
+                | NativeDispatch::CopyDataPropertiesDone => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Promise resolving function produced a structured result",
+                    }
+                    .into());
+                }
+            };
+            continue;
+        }
+        if let Some(executor) = capability_executor {
+            apply_native_pre_call(runtime, call.pre_call.as_ref())?;
+            let outcome =
+                dispatch_promise_capability_executor(&executor, call.arguments, call.origin);
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(
+                    NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending),
+                ) => {
+                    dispatch = resume_iterator_abrupt_continuations(
+                        runtime,
+                        call.continuations,
+                        pending,
+                        call.return_to,
+                        active_root_frames,
+                        active_frames,
+                        active_frame_values,
+                        compiler,
+                        execution_budget,
+                    )?;
+                    continue;
+                }
+                Err(NativeFailure::Execution(error)) => {
+                    return Err(NativeFailure::Execution(error));
+                }
+            };
+            dispatch = match outcome {
+                NativeDispatch::Immediate(value) => resume_native_continuations(
+                    runtime,
+                    call.continuations,
+                    value,
+                    call.return_to,
+                    active_root_frames,
+                    active_frames,
+                    active_frame_values,
+                    compiler,
+                    execution_budget,
+                )?,
+                NativeDispatch::Call(mut inner) => {
+                    prepend_native_continuations(&mut inner, call.continuations)?;
+                    NativeDispatch::Call(inner)
+                }
+                NativeDispatch::Frame(mut frame) => {
+                    attach_native_continuations(&mut frame, call.continuations)?;
+                    NativeDispatch::Frame(frame)
+                }
+                NativeDispatch::Pair(_, _)
+                | NativeDispatch::ForOfRecord { .. }
+                | NativeDispatch::ForOfStep { .. }
+                | NativeDispatch::ForOfClosed
+                | NativeDispatch::CopyDataPropertiesDone => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Promise capability executor produced a structured result",
+                    }
+                    .into());
+                }
+            };
+            continue;
+        }
+        if let Some(promise_finally) = promise_finally {
+            apply_native_pre_call(runtime, call.pre_call.as_ref())?;
+            let outcome = dispatch_promise_finally_function(
+                &promise_finally,
+                call.arguments,
+                call.return_to,
+                call.origin,
+            );
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(
+                    NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending),
+                ) => {
+                    dispatch = resume_iterator_abrupt_continuations(
+                        runtime,
+                        call.continuations,
+                        pending,
+                        call.return_to,
+                        active_root_frames,
+                        active_frames,
+                        active_frame_values,
+                        compiler,
+                        execution_budget,
+                    )?;
+                    continue;
+                }
+                Err(NativeFailure::Execution(error)) => {
+                    return Err(NativeFailure::Execution(error));
+                }
+            };
+            dispatch = match outcome {
+                NativeDispatch::Immediate(value) => resume_native_continuations(
+                    runtime,
+                    call.continuations,
+                    value,
+                    call.return_to,
+                    active_root_frames,
+                    active_frames,
+                    active_frame_values,
+                    compiler,
+                    execution_budget,
+                )?,
+                NativeDispatch::Call(mut inner) => {
+                    prepend_native_continuations(&mut inner, call.continuations)?;
+                    NativeDispatch::Call(inner)
+                }
+                NativeDispatch::Frame(mut frame) => {
+                    attach_native_continuations(&mut frame, call.continuations)?;
+                    NativeDispatch::Frame(frame)
+                }
+                NativeDispatch::Pair(_, _)
+                | NativeDispatch::ForOfRecord { .. }
+                | NativeDispatch::ForOfStep { .. }
+                | NativeDispatch::ForOfClosed
+                | NativeDispatch::CopyDataPropertiesDone => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Promise finally function produced a structured result",
+                    }
+                    .into());
+                }
+            };
+            continue;
+        }
         if let Some(native) = native {
             apply_native_pre_call(runtime, call.pre_call.as_ref())?;
             let outcome = dispatch_native_call_with_frames(
@@ -662,6 +894,10 @@ fn resolve_native_dispatch_inner(
                         call.continuations,
                         pending,
                         call.return_to,
+                        active_root_frames,
+                        active_frames,
+                        active_frame_values,
+                        compiler,
                         execution_budget,
                     )?;
                     continue;
@@ -763,16 +999,15 @@ impl fmt::Display for DynamicFunctionServiceUnavailable {
 
 impl Error for DynamicFunctionServiceUnavailable {}
 
-pub(super) fn execute_native_entry(
+pub(super) fn execute_native_entry_with_budget(
     runtime: &mut Runtime,
     function: FunctionId,
     native: NativeFunction,
     receiver: StoredValue,
     arguments: Vec<StoredValue>,
-    limits: ExecutionLimits,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<StoredValue, ExecutionError> {
-    let mut execution_budget = ExecutionBudget::new(limits);
     let mut prepared_frames = Vec::new();
     prepared_frames
         .try_reserve_exact(1)
@@ -796,7 +1031,7 @@ pub(super) fn execute_native_entry(
         0,
         0,
         compiler,
-        &mut execution_budget,
+        execution_budget,
     );
     let dispatch = match dispatch {
         Ok(dispatch) => resolve_native_dispatch(
@@ -806,10 +1041,26 @@ pub(super) fn execute_native_entry(
             0,
             0,
             compiler,
-            &mut execution_budget,
+            execution_budget,
         ),
         Err(error) => Err(error),
     };
+    execute_root_dispatch_with_budget(
+        runtime,
+        dispatch,
+        prepared_frames,
+        compiler,
+        execution_budget,
+    )
+}
+
+pub(super) fn execute_root_dispatch_with_budget(
+    runtime: &mut Runtime,
+    dispatch: Result<NativeDispatch, NativeFailure>,
+    mut prepared_frames: Vec<Frame>,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<StoredValue, ExecutionError> {
     match dispatch {
         Ok(NativeDispatch::Immediate(value)) => Ok(value),
         Ok(
@@ -829,7 +1080,7 @@ pub(super) fn execute_native_entry(
                 prepared_frames,
                 compiler,
                 None,
-                &mut execution_budget,
+                execution_budget,
             )
         }
         Ok(NativeDispatch::Call(_)) => Err(EngineFault::RuntimeInvariant {
@@ -1358,6 +1609,50 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::ObjectPrototypeProtoGetter => object_prototype_proto_getter(
+            runtime,
+            native.realm,
+            inputs.receiver,
+            &origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::ObjectPrototypeProtoSetter => {
+            let requested = inputs.arguments.take_first_or_undefined();
+            object_prototype_proto_setter(
+                runtime,
+                native.realm,
+                &inputs.receiver,
+                &requested,
+                &origin.unwrap_or_else(native_function_host_origin),
+            )
+        }
+        NativeFunctionKind::ObjectPrototypeDefineGetter
+        | NativeFunctionKind::ObjectPrototypeDefineSetter => begin_legacy_define_accessor(
+            runtime,
+            native.realm,
+            inputs,
+            if native.kind == NativeFunctionKind::ObjectPrototypeDefineGetter {
+                LegacyAccessorKind::Getter
+            } else {
+                LegacyAccessorKind::Setter
+            },
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::ObjectPrototypeLookupGetter
+        | NativeFunctionKind::ObjectPrototypeLookupSetter => begin_legacy_lookup_accessor(
+            runtime,
+            native.realm,
+            inputs,
+            if native.kind == NativeFunctionKind::ObjectPrototypeLookupGetter {
+                LegacyAccessorKind::Getter
+            } else {
+                LegacyAccessorKind::Setter
+            },
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::Reflect(method) => begin_reflect_method(
             runtime,
             native.realm,
@@ -1911,7 +2206,11 @@ pub(super) fn dispatch_native_call_with_frames(
                 )
             }
         }
-        NativeFunctionKind::ArraySpeciesGetter => Ok(NativeDispatch::Immediate(inputs.receiver)),
+        NativeFunctionKind::ArraySpeciesGetter
+        | NativeFunctionKind::PromiseSpeciesGetter
+        | NativeFunctionKind::IteratorPrototypeIterator => {
+            Ok(NativeDispatch::Immediate(inputs.receiver))
+        }
         NativeFunctionKind::SymbolConstructor => {
             let mut arguments = inputs.arguments;
             let Some(argument) = arguments.take_first() else {
@@ -1999,9 +2298,6 @@ pub(super) fn dispatch_native_call_with_frames(
                     StoredValue::Undefined
                 },
             ))
-        }
-        NativeFunctionKind::IteratorPrototypeIterator => {
-            Ok(NativeDispatch::Immediate(inputs.receiver))
         }
         NativeFunctionKind::ArrayPrototypeJoin => {
             let mut arguments = inputs.arguments;
@@ -2092,6 +2388,24 @@ pub(super) fn dispatch_native_call_with_frames(
             Ok(NativeDispatch::Immediate(StoredValue::String(
                 function_to_string(runtime, function, native.realm, origin.as_ref())?,
             )))
+        }
+        NativeFunctionKind::PromiseConstructor => {
+            begin_promise_constructor(runtime, native, inputs, return_to, origin, execution_budget)
+        }
+        NativeFunctionKind::PromiseResolve => {
+            begin_promise_resolve(runtime, native, inputs, return_to, origin, execution_budget)
+        }
+        NativeFunctionKind::PromiseReject => {
+            begin_promise_reject(runtime, native, inputs, return_to, origin)
+        }
+        NativeFunctionKind::PromisePrototypeThen => {
+            begin_promise_then(runtime, native, inputs, return_to, origin, execution_budget)
+        }
+        NativeFunctionKind::PromisePrototypeCatch => {
+            begin_promise_catch(runtime, native, inputs, return_to, origin, execution_budget)
+        }
+        NativeFunctionKind::PromisePrototypeFinally => {
+            begin_promise_finally(runtime, native, inputs, return_to, origin, execution_budget)
         }
     }
 }

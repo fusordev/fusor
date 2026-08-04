@@ -163,6 +163,8 @@ pub enum RuntimeResource {
     Collection,
     /// The deferred public-root release mailbox.
     ReleaseMailbox,
+    /// Jobs retained by the runtime-owned ECMAScript Promise FIFO.
+    PromiseJobs,
 }
 
 impl fmt::Display for RuntimeResource {
@@ -187,6 +189,7 @@ impl fmt::Display for RuntimeResource {
             Self::ExceptionFrames => "exception stack frames",
             Self::Collection => "runtime collection",
             Self::ReleaseMailbox => "release mailbox",
+            Self::PromiseJobs => "Promise jobs",
         })
     }
 }

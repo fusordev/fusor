@@ -180,6 +180,273 @@ pub(super) fn object_constructor(
     Ok(NativeDispatch::Immediate(object))
 }
 
+/// Applies `ToObject` for legacy `Object.prototype` entry points.
+fn legacy_to_object(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    value: StoredValue,
+    origin: &JsStackFrame,
+) -> Result<StoredValue, NativeFailure> {
+    if matches!(value, StoredValue::Undefined | StoredValue::Null) {
+        return Err(NativeFailure::Abrupt(type_error(
+            realm,
+            Some(origin),
+            "Object.prototype",
+            "cannot convert to object",
+        )?));
+    }
+    match object_constructor(runtime, realm, Some(value))? {
+        NativeDispatch::Immediate(object) => Ok(object),
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::Frame(_)
+        | NativeDispatch::Call(_) => Err(EngineFault::RuntimeInvariant {
+            message: "ToObject produced a non-immediate result",
+        }
+        .into()),
+    }
+}
+
+/// `get Object.prototype.__proto__`.
+pub(super) fn object_prototype_proto_getter(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    receiver: StoredValue,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let object = legacy_to_object(runtime, realm, receiver, origin)?;
+    let reference = object
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Object.prototype.__proto__ getter lost its boxed receiver",
+        })?;
+    Ok(NativeDispatch::Immediate(heap_reference_value(
+        runtime.object_record(reference)?.prototype(),
+    )))
+}
+
+/// `set Object.prototype.__proto__`.
+pub(super) fn object_prototype_proto_setter(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    receiver: &StoredValue,
+    requested: &StoredValue,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    // RequireObjectCoercible precedes validation of the requested prototype.
+    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
+        return Err(NativeFailure::Abrupt(type_error(
+            realm,
+            Some(origin),
+            "__proto__",
+            "not an object",
+        )?));
+    }
+    let prototype = match requested {
+        StoredValue::Null => None,
+        StoredValue::Function(function) => Some(HeapReference::Function(*function)),
+        StoredValue::Object(object) => Some(HeapReference::Object(*object)),
+        StoredValue::Undefined
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+        }
+    };
+    let Some(reference) = receiver.heap_reference() else {
+        return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+    };
+    match runtime.set_prototype_of(reference, prototype)? {
+        SetPrototypeOutcome::Complete => Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
+        SetPrototypeOutcome::NonExtensible => Err(NativeFailure::Abrupt(type_error(
+            realm,
+            Some(origin),
+            "__proto__",
+            "object is not extensible",
+        )?)),
+        SetPrototypeOutcome::CyclicPrototype => Err(NativeFailure::Abrupt(type_error(
+            realm,
+            Some(origin),
+            "__proto__",
+            "circular prototype chain",
+        )?)),
+    }
+}
+
+/// Starts `__defineGetter__` or `__defineSetter__` in specification order.
+pub(super) fn begin_legacy_define_accessor(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    inputs: CallInputs,
+    kind: LegacyAccessorKind,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let CallInputs {
+        receiver,
+        mut arguments,
+        ..
+    } = inputs;
+    let target = legacy_to_object(runtime, realm, receiver, &origin)?;
+    let key = arguments.take_first_or_undefined();
+    let accessor = arguments.take_first_or_undefined();
+    if !matches!(accessor, StoredValue::Function(_)) {
+        return Err(NativeFailure::Abrupt(type_error(
+            realm,
+            Some(&origin),
+            "legacy accessor definition",
+            "not a function",
+        )?));
+    }
+    begin_property_key_conversion(
+        runtime,
+        key,
+        PropertyKeyTarget::LegacyDefineAccessor {
+            target,
+            accessor,
+            kind,
+            realm,
+        },
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+/// Starts `__lookupGetter__` or `__lookupSetter__` in specification order.
+pub(super) fn begin_legacy_lookup_accessor(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    inputs: CallInputs,
+    kind: LegacyAccessorKind,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let CallInputs {
+        receiver,
+        mut arguments,
+        ..
+    } = inputs;
+    let target = legacy_to_object(runtime, realm, receiver, &origin)?;
+    let key = arguments.take_first_or_undefined();
+    begin_property_key_conversion(
+        runtime,
+        key,
+        PropertyKeyTarget::LegacyLookupAccessor { target, kind },
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) struct LegacyAccessorDefinition {
+    pub(super) target: StoredValue,
+    pub(super) accessor: StoredValue,
+    pub(super) kind: LegacyAccessorKind,
+    pub(super) realm: RealmId,
+    pub(super) key: PropertyKey,
+    pub(super) name: JsString,
+}
+
+/// Completes a legacy accessor definition after `ToPropertyKey`.
+pub(super) fn finish_legacy_define_accessor(
+    runtime: &mut Runtime,
+    definition: LegacyAccessorDefinition,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(accessor) = definition.accessor else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "legacy accessor definition lost its validated function",
+        }
+        .into());
+    };
+    let property_definition = match definition.kind {
+        LegacyAccessorKind::Getter => {
+            PropertyDefinition::accessor(Requested::Present(Some(accessor)), Requested::Absent)
+        }
+        LegacyAccessorKind::Setter => {
+            PropertyDefinition::accessor(Requested::Absent, Requested::Present(Some(accessor)))
+        }
+    }
+    .with_enumerable(Requested::Present(true))
+    .with_configurable(Requested::Present(true));
+    match define_own_property(
+        runtime,
+        &definition.target,
+        definition.key,
+        &property_definition,
+        execution_budget,
+    )? {
+        PropertyDefinitionOutcome::Complete => {
+            Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+        }
+        PropertyDefinitionOutcome::Failed(failure) => {
+            Err(NativeFailure::Abrupt(property_exception_at(
+                definition.realm,
+                origin.clone(),
+                Some(&definition.name),
+                failure,
+            )?))
+        }
+    }
+}
+
+/// Completes a legacy accessor lookup after `ToPropertyKey`.
+pub(super) fn finish_legacy_lookup_accessor(
+    runtime: &Runtime,
+    target: &StoredValue,
+    kind: LegacyAccessorKind,
+    key: &PropertyKey,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut current = target
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "legacy accessor lookup lost its boxed receiver",
+        })?;
+    let mut remaining = runtime
+        .functions
+        .len()
+        .saturating_add(runtime.objects.len())
+        .saturating_add(1);
+    loop {
+        if remaining == 0 {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ordinary prototype chain contains a cycle",
+            }
+            .into());
+        }
+        remaining -= 1;
+        execution_budget.charge_instructions(1)?;
+        if let Some(property) = heap_own_property(runtime, current, key)? {
+            let function = match property {
+                OwnProperty::Accessor { getter, setter, .. } => match kind {
+                    LegacyAccessorKind::Getter => getter,
+                    LegacyAccessorKind::Setter => setter,
+                },
+                OwnProperty::Data { .. } => None,
+            };
+            return Ok(NativeDispatch::Immediate(
+                function.map_or(StoredValue::Undefined, StoredValue::Function),
+            ));
+        }
+        let Some(prototype) = runtime.object_record(current)?.prototype() else {
+            return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+        };
+        current = prototype;
+    }
+}
+
 /// `Object.getPrototypeOf(target)`.
 pub(super) fn get_prototype_of(
     runtime: &mut Runtime,

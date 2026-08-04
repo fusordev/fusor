@@ -30,13 +30,14 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     ArrayIteratorPrototype,
     StringIteratorPrototype,
     SymbolPrototype,
+    PromisePrototype,
     Reflect,
     Json,
     Math,
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 23] = [
+    pub(in crate::runtime) const ALL: [Self; 24] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -57,6 +58,7 @@ impl IntrinsicObjectId {
         Self::ArrayIteratorPrototype,
         Self::StringIteratorPrototype,
         Self::SymbolPrototype,
+        Self::PromisePrototype,
         Self::Reflect,
         Self::Json,
         Self::Math,
@@ -92,6 +94,7 @@ pub(in crate::runtime) enum RealmNameId {
     ObjectStatic(NativeFunctionKind),
     BigIntStatic(NativeFunctionKind),
     StringMethod(StringMethod),
+    StringAlias(&'static str),
     NumberValue(&'static str),
     NumberPredicate(NumberPredicate),
     StringStatic(StringMethod),

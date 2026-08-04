@@ -41,6 +41,7 @@ const DEFAULT_MAX_REALM_GLOBAL_BINDINGS: u64 = 1_048_576;
 const DEFAULT_MAX_PUBLIC_ROOTS: u64 = 1_048_576;
 const DEFAULT_MAX_ACTIVE_FRAMES: u32 = 1_024;
 const DEFAULT_MAX_ACTIVE_FRAME_VALUES: u64 = 16_777_216;
+const DEFAULT_MAX_PENDING_PROMISE_JOBS: u64 = 1_048_576;
 
 /// Inclusive logical ceilings for one JavaScript runtime.
 ///
@@ -64,6 +65,7 @@ pub struct RuntimeLimits {
     pub(super) max_public_roots: u64,
     pub(crate) max_active_frames: u32,
     pub(crate) max_active_frame_values: u64,
+    pub(crate) max_pending_promise_jobs: u64,
 }
 
 impl RuntimeLimits {
@@ -171,6 +173,13 @@ impl RuntimeLimits {
         self.max_active_frame_values = maximum;
         self
     }
+
+    /// Replaces the maximum number of Promise jobs waiting in the runtime FIFO.
+    #[must_use]
+    pub const fn with_max_pending_promise_jobs(mut self, maximum: u64) -> Self {
+        self.max_pending_promise_jobs = maximum;
+        self
+    }
 }
 
 impl Default for RuntimeLimits {
@@ -191,6 +200,7 @@ impl Default for RuntimeLimits {
             max_public_roots: DEFAULT_MAX_PUBLIC_ROOTS,
             max_active_frames: DEFAULT_MAX_ACTIVE_FRAMES,
             max_active_frame_values: DEFAULT_MAX_ACTIVE_FRAME_VALUES,
+            max_pending_promise_jobs: DEFAULT_MAX_PENDING_PROMISE_JOBS,
         }
     }
 }
@@ -214,6 +224,7 @@ pub struct RuntimeUsage {
     pub(super) realm_global_bindings: u64,
     pub(super) public_roots: u64,
     pub(super) pending_releases: u64,
+    pub(super) pending_promise_jobs: u64,
 }
 
 impl RuntimeUsage {
@@ -294,5 +305,11 @@ impl RuntimeUsage {
     #[must_use]
     pub const fn pending_releases(self) -> u64 {
         self.pending_releases
+    }
+
+    /// Returns the number of Promise jobs retained by the runtime FIFO.
+    #[must_use]
+    pub const fn pending_promise_jobs(self) -> u64 {
+        self.pending_promise_jobs
     }
 }

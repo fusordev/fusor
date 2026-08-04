@@ -182,6 +182,10 @@ pub(super) fn finish_ordinary_function_constructor(
     Ok(NativeDispatch::Frame(frame))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one resumable Object.prototype.toString entry keeps every primitive wrapper and branded default-tag branch in specification order"
+)]
 pub(super) fn begin_object_prototype_to_string(
     runtime: &mut Runtime,
     realm: RealmId,
@@ -257,6 +261,17 @@ pub(super) fn begin_object_prototype_to_string(
                 .is_error()
             {
                 ObjectPrototypeTag::Error
+            } else if runtime
+                .objects
+                .get(*object)
+                .ok_or(EngineFault::StaleHeapEdge {
+                    edge: "object",
+                    index: object.index(),
+                    generation: object.generation(),
+                })?
+                .is_promise()
+            {
+                ObjectPrototypeTag::Promise
             } else {
                 ObjectPrototypeTag::Object
             },
@@ -869,6 +884,9 @@ pub(super) fn function_is_constructor(
                     .has_prototype());
             }
             FunctionImplementation::Native(native) => return Ok(native.kind.is_constructor()),
+            FunctionImplementation::PromiseResolving(_)
+            | FunctionImplementation::PromiseCapabilityExecutor(_)
+            | FunctionImplementation::PromiseFinally(_) => return Ok(false),
             FunctionImplementation::Bound(bound) => {
                 if remaining == 0 {
                     return Err(EngineFault::RuntimeInvariant {

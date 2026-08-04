@@ -32,6 +32,9 @@ pub(crate) const DEFAULT_FUNCTION_APPLY_CORPUS: &str = "tests/function-apply/man
 pub(crate) const DEFAULT_FUNCTION_BIND_CORPUS: &str = "tests/function-bind/manifest.json";
 pub(crate) const DEFAULT_ITERATOR_CORPUS: &str = "tests/iterator/manifest.json";
 pub(crate) const DEFAULT_CALL_SPREAD_CORPUS: &str = "tests/call-spread/manifest.json";
+pub(crate) const DEFAULT_OBJECT_LEGACY_CORPUS: &str = "tests/object-legacy/manifest.json";
+pub(crate) const DEFAULT_PROMISE_CORE_CORPUS: &str = "tests/promise-core/manifest.json";
+pub(crate) const DEFAULT_STRING_HTML_CORPUS: &str = "tests/string-html/manifest.json";
 pub(crate) const MAX_CONTROL_FLOW_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const CANDIDATE_WORKER_COMMAND: &str = "__control-flow-candidate-worker";
 
@@ -341,6 +344,80 @@ const ITERATOR_REQUIRED_COVERAGE: &[&str] = &[
     "iterator-result-nonobject",
 ];
 
+const OBJECT_LEGACY_REQUIRED_COVERAGE: &[&str] = &[
+    "define-getter",
+    "define-setter",
+    "define-validation-order",
+    "lookup-key-order",
+    "lookup-prototype",
+    "lookup-shadow",
+    "proto-cycle",
+    "proto-getter",
+    "proto-invalid-prototype",
+    "proto-nonextensible",
+    "proto-nullish-order",
+    "proto-primitive-receiver",
+    "proto-setter",
+    "surface-order",
+    "symbol-key",
+];
+
+const STRING_HTML_REQUIRED_COVERAGE: &[&str] = &[
+    "anchor",
+    "big",
+    "blink",
+    "bold",
+    "coercion-order",
+    "fixed",
+    "fontcolor",
+    "fontsize",
+    "italics",
+    "link",
+    "nullish-order",
+    "quote-escape",
+    "small",
+    "strike",
+    "sub",
+    "sup",
+    "surface-order",
+    "trim-aliases",
+];
+
+const PROMISE_CORE_REQUIRED_COVERAGE: &[&str] = &[
+    "capability-callable",
+    "capability-executor-once",
+    "catch-invoke",
+    "constructor-new",
+    "constructor-sync",
+    "executor-callable",
+    "finally-generic",
+    "finally-handler-metadata",
+    "finally-noncallable",
+    "finally-order",
+    "finally-surface",
+    "finally-validation",
+    "generic-reject",
+    "generic-resolve",
+    "new-target-prototype",
+    "promise-brand",
+    "prototype-abrupt",
+    "prototype-fallback",
+    "prototype-order",
+    "reaction-deferred",
+    "resolve-identity",
+    "resolve-constructor-abrupt",
+    "resolve-constructor-get",
+    "resolving-functions",
+    "resolving-metadata",
+    "species-constructor-order",
+    "species-fallback",
+    "species-getter",
+    "species-validation",
+    "then-capability",
+    "then-brand",
+    "thenable-get",
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeDifferentialSuite {
     ControlFlow,
@@ -349,6 +426,9 @@ enum RuntimeDifferentialSuite {
     FunctionBind,
     Iterator,
     CallSpread,
+    ObjectLegacy,
+    PromiseCore,
+    StringHtml,
 }
 
 impl RuntimeDifferentialSuite {
@@ -360,6 +440,9 @@ impl RuntimeDifferentialSuite {
             Self::FunctionBind => "function-bind",
             Self::Iterator => "iterator",
             Self::CallSpread => "call-spread",
+            Self::ObjectLegacy => "object-legacy",
+            Self::PromiseCore => "promise-core",
+            Self::StringHtml => "string-html",
         }
     }
 
@@ -371,6 +454,9 @@ impl RuntimeDifferentialSuite {
             Self::FunctionBind => FUNCTION_BIND_REQUIRED_COVERAGE,
             Self::Iterator => ITERATOR_REQUIRED_COVERAGE,
             Self::CallSpread => CALL_SPREAD_REQUIRED_COVERAGE,
+            Self::ObjectLegacy => OBJECT_LEGACY_REQUIRED_COVERAGE,
+            Self::PromiseCore => PROMISE_CORE_REQUIRED_COVERAGE,
+            Self::StringHtml => STRING_HTML_REQUIRED_COVERAGE,
         }
     }
 }
@@ -412,6 +498,27 @@ pub(crate) struct IteratorDifferentialOptions {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct CallSpreadDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct ObjectLegacyDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct PromiseCoreDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct StringHtmlDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -507,6 +614,39 @@ pub(crate) fn run_call_spread_differential(
         &options.corpus,
         options.timeout,
         RuntimeDifferentialSuite::CallSpread,
+    )
+}
+
+pub(crate) fn run_object_legacy_differential(
+    options: &ObjectLegacyDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::ObjectLegacy,
+    )
+}
+
+pub(crate) fn run_promise_core_differential(
+    options: &PromiseCoreDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::PromiseCore,
+    )
+}
+
+pub(crate) fn run_string_html_differential(
+    options: &StringHtmlDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::StringHtml,
     )
 }
 
@@ -1965,6 +2105,51 @@ mod tests {
         )
         .expect("checked-in function-bind manifest");
         assert_eq!(corpus.cases.len(), 21);
+    }
+
+    #[test]
+    fn checked_in_object_legacy_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/object-legacy/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in object-legacy manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::ObjectLegacy,
+        )
+        .expect("checked-in object-legacy manifest");
+        assert_eq!(corpus.cases.len(), 15);
+        assert_eq!(
+            super::OBJECT_LEGACY_REQUIRED_COVERAGE.len(),
+            corpus.cases.len()
+        );
+    }
+
+    #[test]
+    fn checked_in_promise_core_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/promise-core/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in Promise core manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::PromiseCore,
+        )
+        .expect("checked-in Promise core manifest");
+        assert_eq!(corpus.cases.len(), 19);
+    }
+
+    #[test]
+    fn checked_in_string_html_manifest_satisfies_the_strict_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/string-html/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in string-html manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::StringHtml,
+        )
+        .expect("checked-in string-html manifest");
+        assert_eq!(corpus.cases.len(), 6);
     }
 
     #[test]

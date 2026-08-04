@@ -28,12 +28,389 @@
 use super::{
     ArrayDefineOutcome, ArrayLengthWriteOutcome, CollectionRoot, ErrorIntrinsicKind, ForInAdvance,
     FunctionImplementation, HeapFunction, KeyPhases, NativeFunction, NativeFunctionKind,
-    RealmIntrinsics, RootEnvironment, Runtime, RuntimeLimits, RuntimeUsage,
-    array_length_from_number, dynamic_function_declaration_property_layout,
+    PromiseFinallyThunkKind, PromiseJob, RealmIntrinsics, RootEnvironment, Runtime, RuntimeLimits,
+    RuntimeUsage, array_length_from_number, dynamic_function_declaration_property_layout,
     global_function_replacement_layout, is_supported_opcode, usize_to_u64,
 };
 
-const REALM_PROPERTY_SLOTS: u64 = 757;
+const REALM_PROPERTY_SLOTS: u64 = 839;
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one test audits every Promise-owned GC edge and its rooted then unrooted lifecycle"
+)]
+fn promise_state_and_pending_jobs_trace_all_owned_heap_edges() {
+    use crate::object::{PromiseCapability, PromiseReaction, PromiseReactionKind, PromiseState};
+
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let baseline = runtime.usage().heap_objects();
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+
+    let result = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("Promise result");
+    let promise = runtime
+        .allocate_intrinsic_promise(realm_id)
+        .expect("Promise");
+    *runtime
+        .objects
+        .get_mut(promise)
+        .and_then(crate::object::HeapObject::promise_state_mut)
+        .expect("Promise state") = PromiseState::Fulfilled(StoredValue::Object(result));
+
+    runtime
+        .collect_cycles_with_roots(|mark| {
+            mark(CollectionRoot::Heap(HeapReference::Object(promise)));
+        })
+        .expect("rooted Promise collection");
+    assert_eq!(runtime.usage().heap_objects(), baseline + 2);
+    runtime
+        .collect_cycles()
+        .expect("unrooted Promise collection");
+    assert_eq!(runtime.usage().heap_objects(), baseline);
+
+    let thenable = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("thenable");
+    let queued_promise = runtime
+        .allocate_intrinsic_promise(realm_id)
+        .expect("queued Promise");
+    let then = runtime
+        .realm_promise_constructor(realm_id)
+        .expect("Promise constructor");
+    runtime.promise_jobs.push_back(PromiseJob::Thenable {
+        promise: queued_promise,
+        realm: realm_id,
+        thenable: StoredValue::Object(thenable),
+        then,
+    });
+    runtime.collect_cycles().expect("queued Promise collection");
+    assert_eq!(runtime.usage().heap_objects(), baseline + 2);
+    assert_eq!(runtime.usage().pending_promise_jobs(), 1);
+
+    runtime.promise_jobs.clear();
+    runtime
+        .collect_cycles()
+        .expect("drained Promise collection");
+    assert_eq!(runtime.usage().heap_objects(), baseline);
+    assert_eq!(runtime.usage().pending_promise_jobs(), 0);
+
+    let function_baseline = runtime.usage().heap_functions();
+    let captured_resolve = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("captured resolve");
+    let captured_reject = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("captured reject");
+    let (executor, capture) = runtime
+        .allocate_promise_capability_executor(realm_id)
+        .expect("capability executor");
+    {
+        let mut capture = capture.borrow_mut();
+        capture.resolve = Some(StoredValue::Object(captured_resolve));
+        capture.reject = Some(StoredValue::Object(captured_reject));
+    }
+    runtime
+        .collect_cycles_with_roots(|mark| {
+            mark(CollectionRoot::Heap(HeapReference::Function(executor)));
+        })
+        .expect("rooted capability executor collection");
+    assert_eq!(runtime.usage().heap_objects(), baseline + 2);
+    assert_eq!(runtime.usage().heap_functions(), function_baseline + 1);
+    runtime
+        .collect_cycles()
+        .expect("unrooted capability executor collection");
+    assert_eq!(runtime.usage().heap_objects(), baseline);
+    assert_eq!(runtime.usage().heap_functions(), function_baseline);
+
+    let captured_cleanup = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("captured finally cleanup object");
+    let (on_finally, capture) = runtime
+        .allocate_promise_capability_executor(realm_id)
+        .expect("finally cleanup function");
+    capture.borrow_mut().resolve = Some(StoredValue::Object(captured_cleanup));
+    let constructor = runtime
+        .realm_promise_constructor(realm_id)
+        .expect("Promise constructor");
+    let (then_finally, _) = runtime
+        .allocate_promise_finally_handlers(realm_id, on_finally, constructor)
+        .expect("finally handlers");
+    runtime
+        .collect_cycles_with_roots(|mark| {
+            mark(CollectionRoot::Heap(HeapReference::Function(then_finally)));
+        })
+        .expect("rooted finally handler collection");
+    assert_eq!(runtime.usage().heap_objects(), baseline + 1);
+    assert_eq!(runtime.usage().heap_functions(), function_baseline + 2);
+    runtime
+        .collect_cycles()
+        .expect("unrooted finally handler collection");
+    assert_eq!(runtime.usage().heap_objects(), baseline);
+    assert_eq!(runtime.usage().heap_functions(), function_baseline);
+
+    let captured_completion = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("captured finally completion");
+    let thunk = runtime
+        .allocate_promise_finally_thunk(
+            realm_id,
+            StoredValue::Object(captured_completion),
+            PromiseFinallyThunkKind::Return,
+        )
+        .expect("finally completion thunk");
+    runtime
+        .collect_cycles_with_roots(|mark| {
+            mark(CollectionRoot::Heap(HeapReference::Function(thunk)));
+        })
+        .expect("rooted finally thunk collection");
+    assert_eq!(runtime.usage().heap_objects(), baseline + 1);
+    assert_eq!(runtime.usage().heap_functions(), function_baseline + 1);
+    runtime
+        .collect_cycles()
+        .expect("unrooted finally thunk collection");
+    assert_eq!(runtime.usage().heap_objects(), baseline);
+    assert_eq!(runtime.usage().heap_functions(), function_baseline);
+
+    let source = runtime
+        .allocate_intrinsic_promise(realm_id)
+        .expect("reaction source");
+    let derived = runtime
+        .allocate_intrinsic_promise(realm_id)
+        .expect("reaction derived promise");
+    let (resolve, reject) = runtime
+        .allocate_promise_resolving_functions(derived, realm_id)
+        .expect("reaction capability functions");
+    let state = runtime
+        .objects
+        .get_mut(source)
+        .and_then(crate::object::HeapObject::promise_state_mut)
+        .expect("source Promise state");
+    let PromiseState::Pending {
+        fulfill_reactions, ..
+    } = state
+    else {
+        panic!("new Promise is pending");
+    };
+    fulfill_reactions.push(PromiseReaction {
+        kind: PromiseReactionKind::Fulfill,
+        handler: None,
+        capability: PromiseCapability {
+            promise: StoredValue::Object(derived),
+            resolve,
+            reject,
+        },
+    });
+    runtime
+        .collect_cycles_with_roots(|mark| {
+            mark(CollectionRoot::Heap(HeapReference::Object(source)));
+        })
+        .expect("rooted Promise reaction collection");
+    assert_eq!(runtime.usage().heap_objects(), baseline + 2);
+    assert_eq!(runtime.usage().heap_functions(), function_baseline + 2);
+    runtime
+        .collect_cycles()
+        .expect("unrooted Promise reaction collection");
+    assert_eq!(runtime.usage().heap_objects(), baseline);
+    assert_eq!(runtime.usage().heap_functions(), function_baseline);
+}
+
+#[test]
+fn promise_capability_executor_limits_are_atomic_and_inclusive() {
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_functions(245)).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let before = runtime.usage();
+    assert!(matches!(
+        runtime.allocate_promise_capability_executor(realm.0.id),
+        Err(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::HeapFunctions,
+            limit: 245,
+            observed: 246,
+        })
+    ));
+    assert_eq!(runtime.usage(), before);
+
+    let mut runtime = Runtime::try_new(
+        RuntimeLimits::default().with_max_object_properties(REALM_PROPERTY_SLOTS + 1),
+    )
+    .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let before = runtime.usage();
+    assert!(matches!(
+        runtime.allocate_promise_capability_executor(realm.0.id),
+        Err(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::ObjectProperties,
+            limit,
+            observed,
+        }) if limit == REALM_PROPERTY_SLOTS + 1 && observed == REALM_PROPERTY_SLOTS + 2
+    ));
+    assert_eq!(runtime.usage(), before);
+
+    let mut runtime = Runtime::try_new(
+        RuntimeLimits::default()
+            .with_max_heap_functions(246)
+            .with_max_object_properties(REALM_PROPERTY_SLOTS + 2),
+    )
+    .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let before = runtime.usage();
+    runtime
+        .allocate_promise_capability_executor(realm.0.id)
+        .expect("inclusive capability allocation");
+    assert_eq!(
+        runtime.usage().heap_functions(),
+        before.heap_functions() + 1
+    );
+    assert_eq!(
+        runtime.usage().object_properties(),
+        before.object_properties() + 2
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one limit test keeps the handler and thunk transactions together across both aggregate resources"
+)]
+fn promise_finally_function_limits_are_atomic_and_inclusive() {
+    let constructor_limit = 245;
+    let handler_function_limit = constructor_limit + 1;
+    let handler_property_limit = REALM_PROPERTY_SLOTS + 3;
+
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_functions(handler_function_limit))
+            .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let constructor = runtime
+        .realm_promise_constructor(realm.0.id)
+        .expect("Promise constructor");
+    let before = runtime.usage();
+    assert!(matches!(
+        runtime.allocate_promise_finally_handlers(realm.0.id, constructor, constructor),
+        Err(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::HeapFunctions,
+            limit,
+            observed,
+        }) if limit == handler_function_limit && observed == constructor_limit + 2
+    ));
+    assert_eq!(runtime.usage(), before);
+
+    let mut runtime = Runtime::try_new(
+        RuntimeLimits::default().with_max_object_properties(handler_property_limit),
+    )
+    .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let constructor = runtime
+        .realm_promise_constructor(realm.0.id)
+        .expect("Promise constructor");
+    let before = runtime.usage();
+    assert!(matches!(
+        runtime.allocate_promise_finally_handlers(realm.0.id, constructor, constructor),
+        Err(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::ObjectProperties,
+            limit,
+            observed,
+        }) if limit == handler_property_limit && observed == REALM_PROPERTY_SLOTS + 4
+    ));
+    assert_eq!(runtime.usage(), before);
+
+    let mut runtime = Runtime::try_new(
+        RuntimeLimits::default()
+            .with_max_heap_functions(constructor_limit + 2)
+            .with_max_object_properties(REALM_PROPERTY_SLOTS + 4),
+    )
+    .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let constructor = runtime
+        .realm_promise_constructor(realm.0.id)
+        .expect("Promise constructor");
+    let before = runtime.usage();
+    runtime
+        .allocate_promise_finally_handlers(realm.0.id, constructor, constructor)
+        .expect("inclusive finally handler allocation");
+    assert_eq!(
+        runtime.usage().heap_functions(),
+        before.heap_functions() + 2
+    );
+    assert_eq!(
+        runtime.usage().object_properties(),
+        before.object_properties() + 4
+    );
+
+    let mut runtime = Runtime::try_new(
+        RuntimeLimits::default()
+            .with_max_heap_functions(constructor_limit)
+            .with_max_object_properties(REALM_PROPERTY_SLOTS + 1),
+    )
+    .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let before = runtime.usage();
+    assert!(matches!(
+        runtime.allocate_promise_finally_thunk(
+            realm.0.id,
+            StoredValue::Undefined,
+            PromiseFinallyThunkKind::Throw,
+        ),
+        Err(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::HeapFunctions,
+            limit,
+            observed,
+        }) if limit == constructor_limit && observed == constructor_limit + 1
+    ));
+    assert_eq!(runtime.usage(), before);
+
+    let mut runtime = Runtime::try_new(
+        RuntimeLimits::default()
+            .with_max_heap_functions(constructor_limit + 1)
+            .with_max_object_properties(REALM_PROPERTY_SLOTS + 1),
+    )
+    .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let before = runtime.usage();
+    assert!(matches!(
+        runtime.allocate_promise_finally_thunk(
+            realm.0.id,
+            StoredValue::Undefined,
+            PromiseFinallyThunkKind::Throw,
+        ),
+        Err(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::ObjectProperties,
+            limit,
+            observed,
+        }) if limit == REALM_PROPERTY_SLOTS + 1 && observed == REALM_PROPERTY_SLOTS + 2
+    ));
+    assert_eq!(runtime.usage(), before);
+
+    let mut runtime = Runtime::try_new(
+        RuntimeLimits::default()
+            .with_max_heap_functions(constructor_limit + 1)
+            .with_max_object_properties(REALM_PROPERTY_SLOTS + 2),
+    )
+    .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let before = runtime.usage();
+    runtime
+        .allocate_promise_finally_thunk(
+            realm.0.id,
+            StoredValue::Undefined,
+            PromiseFinallyThunkKind::Throw,
+        )
+        .expect("inclusive finally thunk allocation");
+    assert_eq!(
+        runtime.usage().heap_functions(),
+        before.heap_functions() + 1
+    );
+    assert_eq!(
+        runtime.usage().object_properties(),
+        before.object_properties() + 2
+    );
+}
 
 fn live_property_slots(runtime: &Runtime) -> u64 {
     let object_slots = runtime
@@ -104,7 +481,7 @@ fn realm_installs_a_rooted_branded_array_prototype_with_exact_length() {
         }) if layout == PropertyLayout::data(true, false, false)
             && value.strict_equals(JsNumber::from_i32(0))
     ));
-    assert_eq!(runtime.usage().heap_objects(), 23);
+    assert_eq!(runtime.usage().heap_objects(), 24);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
     assert_eq!(
         runtime.usage().object_properties(),
@@ -187,8 +564,8 @@ fn realm_installs_a_realm_owned_array_constructor_with_exact_descriptors() {
         PropertyLayout::data(true, false, true),
         |value| matches!(value, StoredValue::Function(id) if id == array.constructor),
     );
-    assert_eq!(runtime.usage().heap_objects(), 23);
-    assert_eq!(runtime.usage().heap_functions(), 219);
+    assert_eq!(runtime.usage().heap_objects(), 24);
+    assert_eq!(runtime.usage().heap_functions(), 245);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
 }
 
@@ -606,22 +983,23 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         array: _,
         symbol: _,
         iterators: _,
+        promise: _,
     } = state.intrinsics
     else {
         panic!("realm intrinsics remained uninitialized");
     };
 
     assert_eq!(runtime.usage().realms(), 1);
-    assert_eq!(runtime.usage().heap_objects(), 23);
-    assert_eq!(runtime.usage().heap_functions(), 219);
+    assert_eq!(runtime.usage().heap_objects(), 24);
+    assert_eq!(runtime.usage().heap_functions(), 245);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
     assert_eq!(runtime.usage().installed_code(), 0);
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 159,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_232,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 159,
+            live_atoms: PREDEFINED_ATOM_COUNT + 178,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_381,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 178,
         }
     );
 
@@ -1275,9 +1653,9 @@ fn function_call_is_realm_owned_while_its_dynamic_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 159,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_232,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 159,
+            live_atoms: PREDEFINED_ATOM_COUNT + 178,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_381,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 178,
         }
     );
 }
@@ -1324,9 +1702,9 @@ fn function_apply_is_realm_owned_while_its_predefined_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 159,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_232,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 159,
+            live_atoms: PREDEFINED_ATOM_COUNT + 178,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_381,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 178,
         }
     );
 }
@@ -1361,8 +1739,8 @@ fn realm_installs_complete_realm_owned_error_intrinsic_graph() {
         .property_key_from_string(&JsString::from_utf8("isError").expect("name"))
         .expect("isError key");
 
-    assert_eq!(runtime.usage().heap_objects(), 23);
-    assert_eq!(runtime.usage().heap_functions(), 219);
+    assert_eq!(runtime.usage().heap_objects(), 24);
+    assert_eq!(runtime.usage().heap_functions(), 245);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
 
     assert_native_method_named(
@@ -1771,10 +2149,10 @@ fn engine_error_materialization_is_realm_owned_branded_and_exact() {
 fn engine_error_materialization_limit_failures_are_atomic() {
     for (limits, expected_resource, expected_limit, expected_observed, stack) in [
         (
-            RuntimeLimits::default().with_max_heap_objects(23),
+            RuntimeLimits::default().with_max_heap_objects(24),
             RuntimeResource::HeapObjects,
-            23,
             24,
+            25,
             None,
         ),
         (
@@ -1843,7 +2221,7 @@ fn unrooted_engine_error_is_collected_without_reclaiming_error_prototypes() {
     assert_eq!(report.objects(), 1);
     assert!(runtime.objects.get(error).is_none());
     assert!(runtime.objects.get(prototype).is_some());
-    assert_eq!(runtime.usage().heap_objects(), 23);
+    assert_eq!(runtime.usage().heap_objects(), 24);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
 }
 
@@ -1851,16 +2229,16 @@ fn unrooted_engine_error_is_collected_without_reclaiming_error_prototypes() {
 fn realm_intrinsic_creation_is_failure_atomic_at_each_limit() {
     for (limits, expected_resource, limit, observed) in [
         (
-            RuntimeLimits::default().with_max_heap_objects(22),
+            RuntimeLimits::default().with_max_heap_objects(23),
             RuntimeResource::HeapObjects,
-            22,
             23,
+            24,
         ),
         (
-            RuntimeLimits::default().with_max_heap_functions(218),
+            RuntimeLimits::default().with_max_heap_functions(224),
             RuntimeResource::HeapFunctions,
-            218,
-            219,
+            224,
+            245,
         ),
         (
             RuntimeLimits::default().with_max_object_properties(REALM_PROPERTY_SLOTS - 1),
@@ -1895,7 +2273,7 @@ fn failed_realm_creation_does_not_consume_a_math_random_stream() {
         .to_bits();
 
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_functions(218)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_functions(224)).expect("runtime");
     runtime
         .create_realm()
         .expect_err("the undersized realm must fail");
@@ -1984,7 +2362,7 @@ fn raw_json_allocation_publishes_one_frozen_null_prototype_data_object() {
 #[test]
 fn boxed_boolean_allocation_limit_failure_is_atomic() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(23)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(24)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = realm.0.id;
     let usage = runtime.usage();
@@ -1999,8 +2377,8 @@ fn boxed_boolean_allocation_limit_failure_is_atomic() {
             error,
             ExecutionError::LimitExceeded {
                 resource: RuntimeResource::HeapObjects,
-                limit: 23,
-                observed: 24,
+                limit: 24,
+                observed: 25,
             }
         ));
         assert_eq!(runtime.usage(), usage);
@@ -2011,7 +2389,7 @@ fn boxed_boolean_allocation_limit_failure_is_atomic() {
 #[test]
 fn boxed_boolean_allocation_at_exact_limit_preserves_brand_and_prototype() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(24)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(25)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = realm.0.id;
     let prototype = runtime
@@ -2022,7 +2400,7 @@ fn boxed_boolean_allocation_at_exact_limit_preserves_brand_and_prototype() {
         .allocate_boxed_boolean(realm_id, true)
         .expect("one boxed Boolean fits the exact limit");
 
-    assert_eq!(runtime.usage().heap_objects(), 24);
+    assert_eq!(runtime.usage().heap_objects(), 25);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
     assert_eq!(
         runtime.boxed_boolean(object).expect("live wrapper"),
@@ -2067,7 +2445,7 @@ fn boolean_brand_is_not_inferred_from_the_prototype_chain() {
 #[test]
 fn boxed_number_allocation_limit_failure_is_atomic() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(23)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(24)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = realm.0.id;
     let usage = runtime.usage();
@@ -2086,8 +2464,8 @@ fn boxed_number_allocation_limit_failure_is_atomic() {
             error,
             ExecutionError::LimitExceeded {
                 resource: RuntimeResource::HeapObjects,
-                limit: 23,
-                observed: 24,
+                limit: 24,
+                observed: 25,
             }
         ));
         assert_eq!(runtime.usage(), usage);
@@ -2098,7 +2476,7 @@ fn boxed_number_allocation_limit_failure_is_atomic() {
 #[test]
 fn boxed_number_allocation_at_exact_limit_preserves_payload_and_prototype() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(24)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(25)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = realm.0.id;
     let prototype = runtime
@@ -2110,7 +2488,7 @@ fn boxed_number_allocation_at_exact_limit_preserves_payload_and_prototype() {
         .allocate_boxed_number(realm_id, negative_zero)
         .expect("one boxed Number fits the exact limit");
 
-    assert_eq!(runtime.usage().heap_objects(), 24);
+    assert_eq!(runtime.usage().heap_objects(), 25);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
     assert!(
         runtime
@@ -2158,10 +2536,10 @@ fn number_brand_is_not_inferred_from_the_prototype_chain() {
 fn boxed_string_allocation_limits_fail_atomically() {
     for (limits, resource, limit, observed) in [
         (
-            RuntimeLimits::default().with_max_heap_objects(23),
+            RuntimeLimits::default().with_max_heap_objects(24),
             RuntimeResource::HeapObjects,
-            23,
             24,
+            25,
         ),
         (
             RuntimeLimits::default().with_max_object_properties(REALM_PROPERTY_SLOTS),
@@ -2198,7 +2576,7 @@ fn boxed_string_allocation_limits_fail_atomically() {
 #[test]
 fn boxed_string_allocation_preserves_payload_prototype_and_exact_length_property() {
     let limits = RuntimeLimits::default()
-        .with_max_heap_objects(24)
+        .with_max_heap_objects(25)
         .with_max_object_properties(REALM_PROPERTY_SLOTS + 1);
     let mut runtime = Runtime::try_new(limits).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -2212,7 +2590,7 @@ fn boxed_string_allocation_preserves_payload_prototype_and_exact_length_property
         .allocate_boxed_string(realm_id, text.clone())
         .expect("one boxed String fits the exact limits");
 
-    assert_eq!(runtime.usage().heap_objects(), 24);
+    assert_eq!(runtime.usage().heap_objects(), 25);
     assert_eq!(
         runtime.usage().object_properties(),
         REALM_PROPERTY_SLOTS + 1
@@ -2353,7 +2731,7 @@ fn realm_function_intrinsics_remain_roots_during_collection() {
     let report = runtime.collect_cycles().expect("collection");
 
     assert_eq!(report.functions(), 0);
-    assert_eq!(runtime.usage().heap_functions(), 219);
+    assert_eq!(runtime.usage().heap_functions(), 245);
     assert_eq!(runtime.usage().installed_code(), 0);
     assert_eq!(
         runtime
@@ -2423,7 +2801,7 @@ fn function_methods_are_collected_after_their_realm_prototype_edges_are_replaced
     assert_eq!(report.functions(), 2);
     assert!(runtime.functions.get(function_call).is_none());
     assert!(runtime.functions.get(function_apply).is_none());
-    assert_eq!(runtime.usage().heap_functions(), 217);
+    assert_eq!(runtime.usage().heap_functions(), 243);
     assert_eq!(
         runtime.usage().object_properties(),
         REALM_PROPERTY_SLOTS - 4
@@ -2890,7 +3268,7 @@ fn for_in_boxes_primitives_and_enumerates_utf16_string_indices() {
 fn for_in_limits_roll_back_primitive_wrappers_and_gc_traces_iterator_current() {
     let mut limited = Runtime::try_new(
         RuntimeLimits::default()
-            .with_max_heap_objects(25)
+            .with_max_heap_objects(26)
             .with_max_for_in_entries(0),
     )
     .expect("runtime");

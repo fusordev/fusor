@@ -12,12 +12,12 @@ use quickjs_runtime::{
     ValueKind,
 };
 
-const REALM_ERROR_GRAPH_OBJECTS: u64 = 23;
-const REALM_ERROR_GRAPH_FUNCTIONS: u64 = 219;
-const REALM_ERROR_GRAPH_PROPERTIES: u64 = 757;
-const REALM_DYNAMIC_ATOMS: u32 = 159;
-const REALM_DYNAMIC_ATOM_CODE_UNITS: u64 = 1_232;
-const REALM_DYNAMIC_INTERNER_SLOTS: u32 = 159;
+const REALM_ERROR_GRAPH_OBJECTS: u64 = 24;
+const REALM_ERROR_GRAPH_FUNCTIONS: u64 = 245;
+const REALM_ERROR_GRAPH_PROPERTIES: u64 = 839;
+const REALM_DYNAMIC_ATOMS: u32 = 178;
+const REALM_DYNAMIC_ATOM_CODE_UNITS: u64 = 1_381;
+const REALM_DYNAMIC_INTERNER_SLOTS: u32 = 178;
 
 fn compile_dynamic(body: &str) -> Arc<VerifiedBytecode> {
     let parameters = [];
@@ -105,22 +105,23 @@ fn complete_error_realm_graph_has_exact_public_resource_usage() {
 fn error_realm_graph_limit_failures_are_atomic_and_runtime_is_reusable() {
     for (limits, expected_resource, limit, observed) in [
         (
-            RuntimeLimits::default().with_max_heap_objects(45),
+            RuntimeLimits::default().with_max_heap_objects(REALM_ERROR_GRAPH_OBJECTS * 2 - 1),
             RuntimeResource::HeapObjects,
-            45,
-            46,
+            REALM_ERROR_GRAPH_OBJECTS * 2 - 1,
+            REALM_ERROR_GRAPH_OBJECTS * 2,
         ),
         (
-            RuntimeLimits::default().with_max_heap_functions(437),
+            RuntimeLimits::default().with_max_heap_functions(REALM_ERROR_GRAPH_FUNCTIONS * 2 - 1),
             RuntimeResource::HeapFunctions,
-            437,
-            438,
+            REALM_ERROR_GRAPH_FUNCTIONS * 2 - 1,
+            REALM_ERROR_GRAPH_FUNCTIONS * 2,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(1513),
+            RuntimeLimits::default()
+                .with_max_object_properties(REALM_ERROR_GRAPH_PROPERTIES * 2 - 1),
             RuntimeResource::ObjectProperties,
-            1513,
-            1514,
+            REALM_ERROR_GRAPH_PROPERTIES * 2 - 1,
+            REALM_ERROR_GRAPH_PROPERTIES * 2,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");

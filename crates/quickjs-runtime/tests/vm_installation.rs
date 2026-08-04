@@ -63,9 +63,9 @@ fn atom_failure_rolls_back_the_complete_installation() {
         "fail",
     );
     let atom_limits = AtomLimits::new(
-        PREDEFINED_ATOM_COUNT + 159,
-        PREDEFINED_DESCRIPTION_CODE_UNITS + 1_232,
-        PREDEFINED_INTERNER_SLOTS + 159,
+        PREDEFINED_ATOM_COUNT + 178,
+        PREDEFINED_DESCRIPTION_CODE_UNITS + 1_381,
+        PREDEFINED_INTERNER_SLOTS + 178,
     );
     let mut runtime =
         Runtime::try_new(RuntimeLimits::default().with_atom_limits(atom_limits)).expect("runtime");
@@ -208,16 +208,16 @@ fn public_root_metadata_preflight_is_failure_atomic() {
     let authority = compile("function subject(first,second){}", "subject");
     for (limits, resource, limit, observed) in [
         (
-            RuntimeLimits::default().with_max_heap_objects(23),
+            RuntimeLimits::default().with_max_heap_objects(24),
             RuntimeResource::HeapObjects,
-            23,
             24,
+            25,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(760),
+            RuntimeLimits::default().with_max_object_properties(839),
             RuntimeResource::ObjectProperties,
-            760,
-            761,
+            839,
+            843,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -231,16 +231,19 @@ fn public_root_metadata_preflight_is_failure_atomic() {
             .instantiate(Arc::clone(&authority))
             .expect_err("root metadata must exceed the exact limit");
 
-        assert!(matches!(
-            error,
-            InstallError::LimitExceeded {
-                resource: actual_resource,
-                limit: actual_limit,
-                observed: actual_observed,
-            } if actual_resource == resource
-                && actual_limit == limit
-                && actual_observed == observed
-        ));
+        assert!(
+            matches!(
+                error,
+                InstallError::LimitExceeded {
+                    resource: actual_resource,
+                    limit: actual_limit,
+                    observed: actual_observed,
+                } if actual_resource == resource
+                    && actual_limit == limit
+                    && actual_observed == observed
+            ),
+            "unexpected installation failure: {error:?}"
+        );
         assert_eq!(runtime.usage(), usage);
         assert_eq!(runtime.atom_usage(), atoms);
     }
@@ -354,7 +357,7 @@ fn long_lived_context_drains_dropped_roots_before_installation_limits() {
     let mut runtime = Runtime::try_new(
         RuntimeLimits::default()
             .with_max_public_roots(1)
-            .with_max_heap_functions(220),
+            .with_max_heap_functions(246),
     )
     .expect("runtime");
     let realm = runtime.create_realm().expect("realm");

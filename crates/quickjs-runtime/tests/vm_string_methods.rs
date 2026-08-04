@@ -673,3 +673,73 @@ fn the_installed_methods_have_the_pinned_shape() {
         ),
     ]);
 }
+
+#[test]
+fn annex_b_html_methods_cover_the_complete_create_html_surface() {
+    assert_eq!(
+        rendered(
+            "(function(){let s='x';return [s.anchor('a\\\"b'),s.big(),s.blink(),s.bold(),\
+             s.fixed(),s.fontcolor('r\\\"d'),s.fontsize(3),s.italics(),s.link('u\\\"v'),\
+             s.small(),s.strike(),s.sub(),s.sup()].join('|');})()"
+        ),
+        "<a name=\"a&quot;b\">x</a>|<big>x</big>|<blink>x</blink>|<b>x</b>|\
+         <tt>x</tt>|<font color=\"r&quot;d\">x</font>|<font size=\"3\">x</font>|\
+         <i>x</i>|<a href=\"u&quot;v\">x</a>|<small>x</small>|<strike>x</strike>|\
+         <sub>x</sub>|<sup>x</sup>"
+    );
+}
+
+#[test]
+fn annex_b_html_conversion_order_and_trim_aliases_follow_the_specification() {
+    assert_eq!(
+        rendered(
+            "(function(){\
+                let log='';\
+                let receiver={toString(){log+='receiver|';return 'x';}};\
+                let attribute={toString(){log+='attribute';return 'v\\\"q';}};\
+                let html=String.prototype.anchor.call(receiver,attribute);\
+                let nullish=false;\
+                try{String.prototype.link.call(null,{toString(){log+='bad';return 'u';}});}\
+                catch(error){nullish=error.name==='TypeError';}\
+                return html+'#'+log+'#'+nullish+'#'+\
+                    (String.prototype.trimEnd===String.prototype.trimRight)+'#'+\
+                    (String.prototype.trimStart===String.prototype.trimLeft)+'#'+\
+                    String.prototype.trimRight.name+'#'+String.prototype.trimLeft.name;\
+            })()"
+        ),
+        "<a name=\"v&quot;q\">x</a>#receiver|attribute#true#true#true#trimEnd#trimStart"
+    );
+}
+
+#[test]
+fn supported_string_prototype_names_preserve_the_pinned_quickjs_order() {
+    assert_eq!(
+        rendered("Object.getOwnPropertyNames(String.prototype).join('|')"),
+        "length|at|charCodeAt|charAt|concat|codePointAt|isWellFormed|toWellFormed|\
+         indexOf|lastIndexOf|includes|endsWith|startsWith|substring|substr|slice|repeat|\
+         replace|padEnd|padStart|trim|trimEnd|trimRight|trimStart|trimLeft|toString|\
+         valueOf|toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase|anchor|big|\
+         blink|bold|fixed|fontcolor|fontsize|italics|link|small|strike|sub|sup|\
+         constructor|normalize|localeCompare"
+    );
+    assert_all(&[
+        ("String.prototype.anchor.length", "1"),
+        ("String.prototype.anchor.name", "anchor"),
+        ("String.prototype.big.length", "0"),
+        ("String.prototype.fontcolor.length", "1"),
+        ("String.prototype.fontsize.length", "1"),
+        ("String.prototype.link.length", "1"),
+        (
+            "Object.getOwnPropertyDescriptor(String.prototype,'anchor').enumerable",
+            "false",
+        ),
+        (
+            "Object.getOwnPropertyDescriptor(String.prototype,'anchor').writable",
+            "true",
+        ),
+        (
+            "Object.getOwnPropertyDescriptor(String.prototype,'anchor').configurable",
+            "true",
+        ),
+    ]);
+}

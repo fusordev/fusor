@@ -1046,10 +1046,65 @@ pub(crate) enum HeapObjectKind {
     RawJson,
     Array(ArrayState),
     Error,
+    /// An ECMAScript Promise object with its specification-level internal slots.
+    Promise(PromiseState),
     BoxedPrimitive(BoxedPrimitive),
     ForInIterator(ForInIterator),
     ArrayIterator(ArrayIterator),
     StringIterator(StringIterator),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseReactionKind {
+    Fulfill,
+    Reject,
+}
+
+pub(crate) struct PromiseCapability {
+    pub(crate) promise: StoredValue,
+    pub(crate) resolve: FunctionId,
+    pub(crate) reject: FunctionId,
+}
+
+impl Clone for PromiseCapability {
+    fn clone(&self) -> Self {
+        Self {
+            promise: self.promise.duplicate(),
+            resolve: self.resolve,
+            reject: self.reject,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct PromiseReaction {
+    pub(crate) kind: PromiseReactionKind,
+    pub(crate) handler: Option<FunctionId>,
+    pub(crate) capability: PromiseCapability,
+}
+
+pub(crate) enum PromiseState {
+    Pending {
+        fulfill_reactions: Vec<PromiseReaction>,
+        reject_reactions: Vec<PromiseReaction>,
+        is_handled: bool,
+    },
+    Fulfilled(StoredValue),
+    Rejected {
+        reason: StoredValue,
+        is_handled: bool,
+    },
+}
+
+impl PromiseState {
+    #[must_use]
+    pub(crate) const fn pending() -> Self {
+        Self::Pending {
+            fulfill_reactions: Vec::new(),
+            reject_reactions: Vec::new(),
+            is_handled: false,
+        }
+    }
 }
 
 impl HeapObjectKind {
@@ -1061,6 +1116,7 @@ impl HeapObjectKind {
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
+            | Self::Promise(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
             | Self::StringIterator(_) => None,
@@ -1075,6 +1131,7 @@ impl HeapObjectKind {
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Error
+            | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
@@ -1089,6 +1146,7 @@ impl HeapObjectKind {
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Error
+            | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
@@ -1104,6 +1162,7 @@ impl HeapObjectKind {
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
+            | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
             | Self::StringIterator(_) => None,
@@ -1118,6 +1177,7 @@ impl HeapObjectKind {
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
+            | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
             | Self::StringIterator(_) => None,
@@ -1132,6 +1192,7 @@ impl HeapObjectKind {
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
+            | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::StringIterator(_) => None,
@@ -1146,6 +1207,7 @@ impl HeapObjectKind {
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
+            | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::StringIterator(_) => None,
@@ -1160,6 +1222,7 @@ impl HeapObjectKind {
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
+            | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_) => None,
@@ -1174,6 +1237,7 @@ impl HeapObjectKind {
             | Self::RawJson
             | Self::Array(_)
             | Self::Error
+            | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_) => None,
@@ -1246,6 +1310,15 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn promise(record: ObjectRecord) -> Self {
+        Self {
+            kind: HeapObjectKind::Promise(PromiseState::pending()),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn with_boxed_primitive(record: ObjectRecord, value: BoxedPrimitive) -> Self {
         Self {
             kind: HeapObjectKind::BoxedPrimitive(value),
@@ -1296,6 +1369,25 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn is_promise(&self) -> bool {
+        matches!(self.kind, HeapObjectKind::Promise(_))
+    }
+
+    pub(crate) const fn promise_state(&self) -> Option<&PromiseState> {
+        match &self.kind {
+            HeapObjectKind::Promise(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn promise_state_mut(&mut self) -> Option<&mut PromiseState> {
+        match &mut self.kind {
+            HeapObjectKind::Promise(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn is_arguments(&self) -> bool {
         matches!(self.kind, HeapObjectKind::Arguments(_))
     }
@@ -1307,6 +1399,7 @@ impl HeapObject {
             | HeapObjectKind::RawJson
             | HeapObjectKind::Array(_)
             | HeapObjectKind::Error
+            | HeapObjectKind::Promise(_)
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
@@ -1321,6 +1414,7 @@ impl HeapObject {
             | HeapObjectKind::RawJson
             | HeapObjectKind::Array(_)
             | HeapObjectKind::Error
+            | HeapObjectKind::Promise(_)
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
@@ -1337,6 +1431,7 @@ impl HeapObject {
             | HeapObjectKind::RawJson
             | HeapObjectKind::Array(_)
             | HeapObjectKind::Error
+            | HeapObjectKind::Promise(_)
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
@@ -1351,6 +1446,7 @@ impl HeapObject {
             | HeapObjectKind::RawJson
             | HeapObjectKind::Array(_)
             | HeapObjectKind::Error
+            | HeapObjectKind::Promise(_)
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)

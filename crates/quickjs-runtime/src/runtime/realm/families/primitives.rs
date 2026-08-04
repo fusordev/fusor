@@ -287,8 +287,7 @@ fn visit_bigint_properties(visit: PropertySink<'_>) {
 }
 
 fn visit_locale_properties(visit: PropertySink<'_>) {
-    for (method_id, holder) in LOCALE_STRING_METHODS.into_iter().zip([
-        IntrinsicObjectId::ObjectPrototype,
+    for (method_id, holder) in LOCALE_STRING_METHODS.into_iter().skip(1).zip([
         IntrinsicObjectId::NumberPrototype,
         IntrinsicObjectId::BigIntPrototype,
         IntrinsicObjectId::ArrayPrototype,

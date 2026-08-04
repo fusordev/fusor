@@ -42,10 +42,11 @@ use super::{
     HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
     IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, MathMethod, NativeFunction,
     NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord,
-    PredefinedAtom, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics,
-    RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity,
-    RuntimeLimits, RuntimeResource, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics,
-    UriFunction, check_limit, predefined_string, usize_to_u64,
+    PredefinedAtom, PromiseIntrinsics, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId,
+    RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError,
+    RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringHtmlMethod,
+    StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction, VecDeque, check_limit,
+    predefined_string, usize_to_u64,
 };
 
 use allocation::IntrinsicRecords;
@@ -64,38 +65,60 @@ const BIGINT_INTERNED_STATICS: [&str; 2] = ["asIntN", "asUintN"];
 /// The set is deliberately narrower than the pinned oracle's: `replace`
 /// implements its `@@replace` protocol and exact plain-string path, while the
 /// remaining RegExp-coupled methods (`match`, `matchAll`, `replaceAll`,
-/// `search`, and `split`) and the Annex B HTML wrappers remain absent and
-/// therefore fail closed rather than behaving incorrectly.
+/// `search`, and `split`) remain absent and therefore fail closed rather than
+/// behaving incorrectly. The order is the pinned `QuickJS` own-key order with
+/// unsupported methods omitted.
 ///
 /// Each `length` matches the pinned oracle, which reports `1` for most methods
 /// and `2` for `slice`, `substr`, and `substring`.
-const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 28] = [
+const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 41] = [
     StringPrototypeMethod::interned("at", StringMethod::At, 1),
-    StringPrototypeMethod::interned("charAt", StringMethod::CharAt, 1),
     StringPrototypeMethod::interned("charCodeAt", StringMethod::CharCodeAt, 1),
-    StringPrototypeMethod::interned("codePointAt", StringMethod::CodePointAt, 1),
+    StringPrototypeMethod::interned("charAt", StringMethod::CharAt, 1),
     StringPrototypeMethod::predefined(PredefinedAtom::Concat, StringMethod::Concat, 1),
-    StringPrototypeMethod::interned("endsWith", StringMethod::EndsWith, 1),
-    StringPrototypeMethod::interned("includes", StringMethod::Includes, 1),
+    StringPrototypeMethod::interned("codePointAt", StringMethod::CodePointAt, 1),
+    StringPrototypeMethod::interned("isWellFormed", StringMethod::IsWellFormed, 0),
+    StringPrototypeMethod::interned("toWellFormed", StringMethod::ToWellFormed, 0),
     StringPrototypeMethod::interned("indexOf", StringMethod::IndexOf, 1),
     StringPrototypeMethod::interned("lastIndexOf", StringMethod::LastIndexOf, 1),
-    StringPrototypeMethod::interned("padEnd", StringMethod::PadEnd, 1),
-    StringPrototypeMethod::interned("padStart", StringMethod::PadStart, 1),
+    StringPrototypeMethod::interned("includes", StringMethod::Includes, 1),
+    StringPrototypeMethod::interned("endsWith", StringMethod::EndsWith, 1),
+    StringPrototypeMethod::interned("startsWith", StringMethod::StartsWith, 1),
+    StringPrototypeMethod::interned("substring", StringMethod::Substring, 2),
+    StringPrototypeMethod::interned("substr", StringMethod::Substr, 2),
+    StringPrototypeMethod::interned("slice", StringMethod::Slice, 2),
     StringPrototypeMethod::interned("repeat", StringMethod::Repeat, 1),
     StringPrototypeMethod::interned("replace", StringMethod::Replace, 2),
-    StringPrototypeMethod::interned("slice", StringMethod::Slice, 2),
-    StringPrototypeMethod::interned("startsWith", StringMethod::StartsWith, 1),
-    StringPrototypeMethod::interned("substr", StringMethod::Substr, 2),
-    StringPrototypeMethod::interned("substring", StringMethod::Substring, 2),
+    StringPrototypeMethod::interned("padEnd", StringMethod::PadEnd, 1),
+    StringPrototypeMethod::interned("padStart", StringMethod::PadStart, 1),
     StringPrototypeMethod::interned("trim", StringMethod::Trim, 0),
     StringPrototypeMethod::interned("trimEnd", StringMethod::TrimEnd, 0),
     StringPrototypeMethod::interned("trimStart", StringMethod::TrimStart, 0),
-    StringPrototypeMethod::interned("isWellFormed", StringMethod::IsWellFormed, 0),
-    StringPrototypeMethod::interned("toWellFormed", StringMethod::ToWellFormed, 0),
     StringPrototypeMethod::interned("toLowerCase", StringMethod::ToLowerCase, 0),
     StringPrototypeMethod::interned("toUpperCase", StringMethod::ToUpperCase, 0),
     StringPrototypeMethod::interned("toLocaleLowerCase", StringMethod::ToLocaleLowerCase, 0),
     StringPrototypeMethod::interned("toLocaleUpperCase", StringMethod::ToLocaleUpperCase, 0),
+    StringPrototypeMethod::interned("anchor", StringMethod::Html(StringHtmlMethod::Anchor), 1),
+    StringPrototypeMethod::interned("big", StringMethod::Html(StringHtmlMethod::Big), 0),
+    StringPrototypeMethod::interned("blink", StringMethod::Html(StringHtmlMethod::Blink), 0),
+    StringPrototypeMethod::interned("bold", StringMethod::Html(StringHtmlMethod::Bold), 0),
+    StringPrototypeMethod::interned("fixed", StringMethod::Html(StringHtmlMethod::Fixed), 0),
+    StringPrototypeMethod::interned(
+        "fontcolor",
+        StringMethod::Html(StringHtmlMethod::FontColor),
+        1,
+    ),
+    StringPrototypeMethod::interned(
+        "fontsize",
+        StringMethod::Html(StringHtmlMethod::FontSize),
+        1,
+    ),
+    StringPrototypeMethod::interned("italics", StringMethod::Html(StringHtmlMethod::Italics), 0),
+    StringPrototypeMethod::interned("link", StringMethod::Html(StringHtmlMethod::Link), 1),
+    StringPrototypeMethod::interned("small", StringMethod::Html(StringHtmlMethod::Small), 0),
+    StringPrototypeMethod::interned("strike", StringMethod::Html(StringHtmlMethod::Strike), 0),
+    StringPrototypeMethod::interned("sub", StringMethod::Html(StringHtmlMethod::Sub), 0),
+    StringPrototypeMethod::interned("sup", StringMethod::Html(StringHtmlMethod::Sup), 0),
     StringPrototypeMethod::interned("normalize", StringMethod::Normalize, 0),
     StringPrototypeMethod::interned("localeCompare", StringMethod::LocaleCompare, 1),
 ];
@@ -307,6 +330,35 @@ const OBJECT_PROTOTYPE_REFLECTION: [(&str, NativeFunctionKind, i32); 3] = [
     ),
 ];
 
+/// The legacy `Object.prototype` accessor-definition and lookup methods.
+///
+/// These names are not predefined atoms in the pinned release, so Realm
+/// construction interns them in the same typed namespace as the ordinary
+/// reflection methods. Their order and arities follow the pinned property
+/// table and ECMA-262 legacy built-in definitions.
+const OBJECT_PROTOTYPE_LEGACY_ACCESSORS: [(&str, NativeFunctionKind, i32); 4] = [
+    (
+        "__defineGetter__",
+        NativeFunctionKind::ObjectPrototypeDefineGetter,
+        2,
+    ),
+    (
+        "__defineSetter__",
+        NativeFunctionKind::ObjectPrototypeDefineSetter,
+        2,
+    ),
+    (
+        "__lookupGetter__",
+        NativeFunctionKind::ObjectPrototypeLookupGetter,
+        1,
+    ),
+    (
+        "__lookupSetter__",
+        NativeFunctionKind::ObjectPrototypeLookupSetter,
+        1,
+    ),
+];
+
 /// The `Array.prototype` searches this profile installs.
 ///
 /// Each reports arity 1, which the pinned oracle confirms.
@@ -499,6 +551,7 @@ impl Runtime {
             public_roots: 0,
             collection_pending: false,
             interrupts: InterruptState::default(),
+            promise_jobs: VecDeque::new(),
             next_math_random_seed: 1,
         })
     }
@@ -638,6 +691,10 @@ impl RealmBuildTransaction<'_> {
                 prototype: object(IntrinsicObjectId::ArrayPrototype),
                 constructor: function(NativeFunctionKind::ArrayConstructor),
             },
+            promise: PromiseIntrinsics {
+                prototype: object(IntrinsicObjectId::PromisePrototype),
+                constructor: function(NativeFunctionKind::PromiseConstructor),
+            },
             symbol: SymbolIntrinsics {
                 prototype: object(IntrinsicObjectId::SymbolPrototype),
                 constructor: function(NativeFunctionKind::SymbolConstructor),
@@ -736,6 +793,11 @@ impl RealmBuildTransaction<'_> {
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,
             &graph.dynamic_atoms,
+            DeclarativeBatch::Promises,
+        )?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
             DeclarativeBatch::NamespaceObjects,
         )?;
         self.publish_intrinsic_schema_batch(
@@ -757,6 +819,11 @@ impl RealmBuildTransaction<'_> {
             intrinsic_schema,
             &graph.dynamic_atoms,
             DeclarativeBatch::SymbolGlobals,
+        )?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::PromiseGlobals,
         )?;
         Ok(())
     }

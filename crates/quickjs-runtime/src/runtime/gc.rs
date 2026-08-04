@@ -27,9 +27,10 @@
 
 use super::{
     AtomUsage, BindingCellId, EnvironmentBinding, FunctionId, FunctionImplementation, HashSet,
-    HeapReference, ObjectId, ObjectRecord, RealmIntrinsics, Runtime, RuntimeError, RuntimeResource,
-    RuntimeUsage, SlotValue, StoredValue, usize_to_u64,
+    HeapReference, ObjectId, ObjectRecord, PromiseJob, RealmIntrinsics, Runtime, RuntimeError,
+    RuntimeResource, RuntimeUsage, SlotValue, StoredValue, usize_to_u64,
 };
+use crate::object::{PromiseCapability, PromiseState};
 
 #[derive(Clone, Copy)]
 pub(crate) enum CollectionRoot {
@@ -90,6 +91,23 @@ fn mark_stored_value(
 ) {
     if let Some(reference) = value.heap_reference() {
         mark_heap_reference(reference, marked_functions, marked_objects, work);
+    }
+}
+
+fn mark_promise_capability(
+    capability: &PromiseCapability,
+    marked_functions: &mut HashSet<FunctionId>,
+    marked_objects: &mut HashSet<ObjectId>,
+    work: &mut Vec<GraphNode>,
+) {
+    mark_stored_value(&capability.promise, marked_functions, marked_objects, work);
+    for function in [capability.resolve, capability.reject] {
+        mark_heap_reference(
+            HeapReference::Function(function),
+            marked_functions,
+            marked_objects,
+            work,
+        );
     }
 }
 
@@ -161,6 +179,7 @@ impl Runtime {
             realm_global_bindings: usize_to_u64(self.global_bindings.len()),
             public_roots: self.public_roots,
             pending_releases: usize_to_u64(self.mailbox.pending_len()),
+            pending_promise_jobs: usize_to_u64(self.promise_jobs.len()),
         }
     }
 
@@ -277,6 +296,7 @@ impl Runtime {
                 bigint,
                 string,
                 array,
+                promise,
                 symbol,
                 iterators,
             } = realm.intrinsics
@@ -382,6 +402,18 @@ impl Runtime {
                     &mut work,
                 );
                 mark_heap_reference(
+                    HeapReference::Object(promise.prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(promise.constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
                     HeapReference::Object(symbol.prototype),
                     &mut marked_functions,
                     &mut marked_objects,
@@ -400,6 +432,57 @@ impl Runtime {
                 ] {
                     mark_heap_reference(
                         HeapReference::Object(prototype),
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
+            }
+        }
+        for job in &self.promise_jobs {
+            match job {
+                PromiseJob::Reaction { reaction, argument } => {
+                    if let Some(handler) = reaction.handler {
+                        mark_heap_reference(
+                            HeapReference::Function(handler),
+                            &mut marked_functions,
+                            &mut marked_objects,
+                            &mut work,
+                        );
+                    }
+                    mark_promise_capability(
+                        &reaction.capability,
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                    mark_stored_value(
+                        argument,
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
+                PromiseJob::Thenable {
+                    promise,
+                    realm: _,
+                    thenable,
+                    then,
+                } => {
+                    mark_heap_reference(
+                        HeapReference::Object(*promise),
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                    mark_stored_value(
+                        thenable,
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                    mark_heap_reference(
+                        HeapReference::Function(*then),
                         &mut marked_functions,
                         &mut marked_objects,
                         &mut work,
@@ -466,6 +549,60 @@ impl Runtime {
                                 );
                             }
                         }
+                        if let FunctionImplementation::PromiseResolving(resolving) =
+                            &function.implementation
+                        {
+                            mark_heap_reference(
+                                HeapReference::Object(resolving.promise),
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
+                        if let FunctionImplementation::PromiseCapabilityExecutor(executor) =
+                            &function.implementation
+                        {
+                            let capture = executor.capture.borrow();
+                            for value in [capture.resolve.as_ref(), capture.reject.as_ref()]
+                                .into_iter()
+                                .flatten()
+                            {
+                                mark_stored_value(
+                                    value,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                        }
+                        if let FunctionImplementation::PromiseFinally(finally) =
+                            &function.implementation
+                        {
+                            match finally {
+                                super::PromiseFinallyFunction::Handler {
+                                    on_finally,
+                                    constructor,
+                                    ..
+                                } => {
+                                    for function in [on_finally, constructor] {
+                                        mark_heap_reference(
+                                            HeapReference::Function(*function),
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
+                                    }
+                                }
+                                super::PromiseFinallyFunction::Thunk { completion, .. } => {
+                                    mark_stored_value(
+                                        completion,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
+                            }
+                        }
                         mark_object_record(
                             &function.object,
                             &mut marked_functions,
@@ -496,6 +633,43 @@ impl Runtime {
                                 &mut marked_objects,
                                 &mut work,
                             );
+                        }
+                        if let Some(state) = object.promise_state() {
+                            match state {
+                                PromiseState::Pending {
+                                    fulfill_reactions,
+                                    reject_reactions,
+                                    ..
+                                } => {
+                                    for reaction in
+                                        fulfill_reactions.iter().chain(reject_reactions.iter())
+                                    {
+                                        if let Some(handler) = reaction.handler {
+                                            mark_heap_reference(
+                                                HeapReference::Function(handler),
+                                                &mut marked_functions,
+                                                &mut marked_objects,
+                                                &mut work,
+                                            );
+                                        }
+                                        mark_promise_capability(
+                                            &reaction.capability,
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
+                                    }
+                                }
+                                PromiseState::Fulfilled(value)
+                                | PromiseState::Rejected { reason: value, .. } => {
+                                    mark_stored_value(
+                                        value,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
+                            }
                         }
                         mark_object_record(
                             &object.record,

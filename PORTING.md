@@ -101,14 +101,15 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Ordinary functions/constructors, lexical capture and TDZ, ordinary dynamic
   `Function`, `call`/`apply`/`bind`, `instanceof`, rest/default/destructured
   parameters, separate parameter/body environments, strict and mapped
-  `arguments` objects, and admitted `NamedEvaluation` forms.
+  `arguments` objects, `Function.prototype` legacy poison accessors backed by a
+  shared `%ThrowTypeError%`, and admitted `NamedEvaluation` forms.
 - [x] Synchronous iterator protocols, Array/String iterators, array and call
   spread, destructuring, `for-of`, `IteratorClose`, and original-abrupt-
   completion precedence use typed, same-site verifier state.
 - [x] Realm bootstrap is declared by validated intrinsic schemas. Atom and
   resource plans, typed shell allocation, ordered publication, and allocation-
   free reverse rollback are derived from that schema. A normalized snapshot
-  pins all 242 Realm-local identities and 757 ordered properties across Realms.
+  pins all 269 Realm-local identities and 839 ordered properties across Realms.
 - [ ] Add Proxy and remaining exotics, shape/transition interning, dense indexed
   storage, deterministic finalization, and complete reflection/diagnostics.
 
@@ -118,7 +119,8 @@ does not imply complete ECMAScript or QuickJS compatibility.
   `parseFloat`, `parseInt`, and the four URI encode/decode functions.
 - [x] `Object`: the admitted constructor statics, including descriptor,
   integrity, enumeration, copy, iterable, and `groupBy` operations; the common
-  prototype methods and deterministic no-`Intl` `toLocaleString` are present.
+  prototype methods, deterministic no-`Intl` `toLocaleString`, and legacy
+  `__proto__`/accessor methods are present with specification evaluation order.
 - [x] `Reflect`: all 13 ordinary-object methods, including resumable
   `apply`/`construct`, receiver-preserving `get`/`set`, and exact own-key order.
 - [x] `Error`, native Error subclasses, and `AggregateError`, including causes,
@@ -130,7 +132,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] `String` constructor/statics and a broad non-RegExp prototype subset,
   including UTF-16 search/slicing/padding, well-formedness, full Unicode casing,
   normalization, deterministic no-`Intl` `localeCompare`, and the plain-string
-  plus `@@replace` protocol path of `replace`. ICU4X data is pinned.
+  plus `@@replace` protocol path of `replace`. All 13 Annex B `CreateHTML`
+  wrappers and the identity-sharing `trimLeft`/`trimRight` aliases preserve
+  specification coercion order and pinned own-key order. ICU4X data is pinned.
 - [x] `Array` construction, `isArray`, synchronous `from`/`of`, species,
   iterators, mutators, searches, callbacks, reductions, sorting, flattening,
   change-by-copy methods, locale rendering, and generic array-like behavior,
@@ -141,18 +145,26 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] `%Math%`: all methods and constants installed by the pinned profile,
   including realm-local `random`, exact-width conversions, and the iterator-
   based exact `sumPrecise` accumulator.
-- [ ] Complete legacy Function metadata, Annex B Object prototype accessors,
-  remaining String methods, and `Array.fromAsync`; implement RegExp and its
-  String protocols, Date, Proxy, collections, binary data/typed arrays, Atomics,
-  weak references, and finalization registries.
+- [x] Intrinsic Promise core: branded Promise objects, constructor executors,
+  one-shot generic capabilities, thenable assimilation, generic
+  `resolve`/`reject`, species-derived `then`/`catch`/`finally`, cleanup-result
+  assimilation, and bounded FIFO jobs. Abrupt completion and observable
+  `Get`/construct/call order follow the specification; the pinned corpus is
+  19/19 with 32/32 feature tags.
+- [ ] Complete RegExp-coupled String methods and `Array.fromAsync`; implement
+  RegExp, Date, Proxy, collections, binary data/typed arrays, Atomics, weak
+  references, and finalization registries.
 
 ### Jobs, asynchronous semantics, and modules
 
-- [ ] Implement the runtime-owned FIFO Promise/job queue and drain it to a fixed
-  point at each turn. Tokio may carry owned host I/O, timer, cancellation, and
-  wakeup events, but Tokio scheduling must never define JavaScript job order.
-- [ ] Implement Promise semantics, async functions/generators, generators, and
-  their dynamic constructors on verified continuations.
+- [x] A runtime-owned, resource-bounded FIFO Promise-job queue drains nested
+  work to a fixed point after normal or JavaScript-abrupt host completion.
+  Jobs, pending reactions, results, and resolving functions are explicit GC
+  edges; the turn shares one fuel/interrupt budget. Tokio never defines
+  JavaScript job order.
+- [ ] Complete Promise combinators and rejection tracking; then add
+  generators, async functions/generators, and their dynamic constructors on
+  verified continuations.
 - [ ] Implement module linking/evaluation, cycles, resolver semantics, dynamic
   import, and top-level `await`. Module parsing alone is not an execution claim.
 - [ ] Finish the Rust embedding API, ESM REPL, `qjs`, Rust-native `qjsc`,
@@ -217,6 +229,9 @@ QuickJS `qjs` or `qjsc`. Current corpus results are:
 | `Function.prototype.bind` | 21/21 |
 | Call spread | 15/15 |
 | Error | 35/35, 59/59 feature tags |
+| Legacy `Object.prototype` | 15/15, 15/15 feature tags |
+| Annex B String HTML | 6/6, 18/18 feature tags |
+| Promise core | 19/19, 32/32 feature tags |
 
 The parser gate also fails for an uncovered pinned production, uncovered
 reachable diagnostic, falsely unreachable diagnostic, or changed oracle

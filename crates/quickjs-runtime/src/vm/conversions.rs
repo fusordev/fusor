@@ -449,6 +449,10 @@ pub(super) fn finish_intrinsic_get(
             message: "Array prototype getter resumed without an execution budget",
         }
         .into()),
+        IntrinsicGetContinuation::PromiseConstructor { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Promise prototype getter resumed without its caller completion",
+        }
+        .into()),
         IntrinsicGetContinuation::ObjectPrototypeToString {
             default_tag,
             temporary_receiver,
@@ -2726,6 +2730,27 @@ fn finish_property_key_target(
                 layout.is_enumerable()
             });
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(enumerable)))
+        }
+        PropertyKeyTarget::LegacyDefineAccessor {
+            target,
+            accessor,
+            kind,
+            realm,
+        } => finish_legacy_define_accessor(
+            runtime,
+            LegacyAccessorDefinition {
+                target,
+                accessor,
+                kind,
+                realm,
+                key: property.key,
+                name: property.name,
+            },
+            origin,
+            execution_budget,
+        ),
+        PropertyKeyTarget::LegacyLookupAccessor { target, kind } => {
+            finish_legacy_lookup_accessor(runtime, &target, kind, &property.key, execution_budget)
         }
         PropertyKeyTarget::ReflectHas { target, realm } => Ok(NativeDispatch::Immediate(
             StoredValue::Boolean(has_property(runtime, realm, &target, &property.key)?),

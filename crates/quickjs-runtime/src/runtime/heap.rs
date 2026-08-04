@@ -629,6 +629,15 @@ impl Runtime {
                     );
                 }
                 FunctionImplementation::Native(native) => return Ok(native.realm),
+                FunctionImplementation::PromiseResolving(resolving) => {
+                    return Ok(resolving.realm);
+                }
+                FunctionImplementation::PromiseCapabilityExecutor(executor) => {
+                    return Ok(executor.realm);
+                }
+                FunctionImplementation::PromiseFinally(function) => {
+                    return Ok(function.realm());
+                }
                 FunctionImplementation::Bound(bound) => {
                     if remaining == 0 {
                         return Err(crate::EngineFault::RuntimeInvariant {

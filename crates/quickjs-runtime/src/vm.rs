@@ -25,7 +25,7 @@
 
 //! Iterative execution of runtime-installed verified bytecode.
 
-use std::{error::Error, fmt, sync::Arc};
+use std::{cell::RefCell, error::Error, fmt, rc::Rc, sync::Arc};
 
 use quickjs_bytecode::{
     BytecodePc, CompilerBindingKind, CompilerClosureBinding, CompilerClosureSource,
@@ -33,6 +33,7 @@ use quickjs_bytecode::{
     SourceByteSpan, VerifiedBytecodeFunction, VerifiedSuccessorKind,
 };
 
+use crate::runtime::StringHtmlMethod;
 use crate::{
     ArrayIndex, BigIntError, Context, DynamicFunctionCompileFailure, EngineFault, ExceptionKind,
     ExecutionError, Function, HandleError, HandleKind, JsBigInt, JsException, JsNumber,
@@ -59,7 +60,9 @@ use crate::{
         FrameBindingAddress, FunctionImplementation, GlobalNumericFunction, HeapFunction,
         InstalledCode, InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod,
         MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
-        PreparedIteratorResultPlan, RealmGlobalBindingState, ReflectMethod, SetPrototypeOutcome,
+        PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
+        PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
+        PromiseResolvingKind, RealmGlobalBindingState, ReflectMethod, SetPrototypeOutcome,
         StringArgument, StringMethod, UriFunction, array_length_from_number, check_execution_limit,
         global_declaration_error, usize_to_u64,
     },
@@ -95,6 +98,7 @@ mod math;
 mod math_sum_precise;
 mod native;
 mod object_intrinsics;
+mod promise;
 mod properties;
 mod reflect;
 mod stack;
@@ -113,8 +117,8 @@ use {
     bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*,
     errors::*, exceptions::*, execution::*, from_entries::*, group_by::*, iterators::*,
     json_parse::*, json_stringify::*, locale_string::*, math::*, math_sum_precise::*, native::*,
-    object_intrinsics::*, properties::*, reflect::*, stack::*, string_methods::*, string_raw::*,
-    string_replace::*, uri::*,
+    object_intrinsics::*, promise::*, properties::*, reflect::*, stack::*, string_methods::*,
+    string_raw::*, string_replace::*, uri::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -173,6 +177,7 @@ struct ExecutionBudget {
     source_code_unit_limit: u64,
     compilations: u64,
     source_code_units: u64,
+    native_root_completion: Option<StoredValue>,
 }
 
 impl ExecutionBudget {
@@ -185,6 +190,7 @@ impl ExecutionBudget {
             source_code_unit_limit: limits.dynamic_source_code_units,
             compilations: 0,
             source_code_units: 0,
+            native_root_completion: None,
         }
     }
 
@@ -333,6 +339,7 @@ enum NativeContinuation {
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
     InstanceOf(InstanceOfContinuation),
+    Promise(PromiseContinuation),
     /// Ignore an accessor setter's return value and complete `Reflect.set`
     /// with the internal-method success Boolean.
     ReflectSet,
@@ -382,8 +389,183 @@ impl NativeContinuation {
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
+            Self::Promise(state) => state.retained_values(),
             Self::ReflectSet | Self::FunctionCall => 0,
         }
+    }
+}
+
+enum PromiseCapabilityPurpose {
+    Resolve {
+        resolution: StoredValue,
+    },
+    Reject {
+        reason: StoredValue,
+    },
+    Then {
+        promise: ObjectId,
+        on_fulfilled: Option<FunctionId>,
+        on_rejected: Option<FunctionId>,
+    },
+}
+
+impl PromiseCapabilityPurpose {
+    fn retained_values(&self) -> u64 {
+        match self {
+            Self::Resolve { .. } | Self::Reject { .. } => 1,
+            Self::Then {
+                on_fulfilled,
+                on_rejected,
+                ..
+            } => 1_u64
+                .saturating_add(u64::from(on_fulfilled.is_some()))
+                .saturating_add(u64::from(on_rejected.is_some())),
+        }
+    }
+}
+
+struct PromiseThenState {
+    promise: ObjectId,
+    realm: RealmId,
+    on_fulfilled: Option<FunctionId>,
+    on_rejected: Option<FunctionId>,
+    origin: JsStackFrame,
+}
+
+struct PromiseFinallyState {
+    receiver: StoredValue,
+    realm: RealmId,
+    on_finally: StoredValue,
+    origin: JsStackFrame,
+}
+
+struct PromiseFinallyThenState {
+    receiver: StoredValue,
+    then_finally: StoredValue,
+    catch_finally: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl PromiseThenState {
+    fn retained_values(&self) -> u64 {
+        1_u64
+            .saturating_add(u64::from(self.on_fulfilled.is_some()))
+            .saturating_add(u64::from(self.on_rejected.is_some()))
+    }
+}
+
+enum PromiseContinuation {
+    ConstructorExecutor {
+        promise: ObjectId,
+        reject: FunctionId,
+    },
+    ResolveThenGet {
+        promise: ObjectId,
+        realm: RealmId,
+        resolution: StoredValue,
+        completion: StoredValue,
+    },
+    ResolveConstructorGet {
+        realm: RealmId,
+        constructor: FunctionId,
+        promise: ObjectId,
+        origin: JsStackFrame,
+    },
+    NewCapabilityConstruct {
+        capture: Rc<RefCell<PromiseCapabilityCapture>>,
+        realm: RealmId,
+        origin: JsStackFrame,
+        purpose: PromiseCapabilityPurpose,
+    },
+    CapabilitySettlement {
+        promise: StoredValue,
+    },
+    ThenConstructorGet(PromiseThenState),
+    ThenSpeciesGet(PromiseThenState),
+    FinallyConstructorGet(PromiseFinallyState),
+    FinallySpeciesGet(PromiseFinallyState),
+    FinallyThenGet(PromiseFinallyThenState),
+    FinallyCallback {
+        realm: RealmId,
+        constructor: FunctionId,
+        completion: StoredValue,
+        kind: PromiseFinallyThunkKind,
+        origin: JsStackFrame,
+    },
+    FinallyResolved {
+        realm: RealmId,
+        completion: StoredValue,
+        kind: PromiseFinallyThunkKind,
+        origin: JsStackFrame,
+    },
+    FinallyResolvedThenGet {
+        realm: RealmId,
+        promise: StoredValue,
+        thunk: FunctionId,
+        origin: JsStackFrame,
+    },
+    CatchThenGet {
+        realm: RealmId,
+        receiver: StoredValue,
+        on_rejected: StoredValue,
+        origin: JsStackFrame,
+    },
+    ReactionHandler {
+        capability: crate::object::PromiseCapability,
+    },
+    ThenableCall {
+        promise: ObjectId,
+        reject: FunctionId,
+    },
+}
+
+impl PromiseContinuation {
+    fn retained_values(&self) -> u64 {
+        match self {
+            Self::ConstructorExecutor { .. }
+            | Self::ThenableCall { .. }
+            | Self::ResolveConstructorGet { .. }
+            | Self::CatchThenGet { .. }
+            | Self::FinallyConstructorGet(_)
+            | Self::FinallySpeciesGet(_)
+            | Self::FinallyCallback { .. }
+            | Self::FinallyResolvedThenGet { .. } => 2,
+            Self::ResolveThenGet { .. }
+            | Self::ReactionHandler { .. }
+            | Self::FinallyThenGet(_) => 3,
+            Self::NewCapabilityConstruct {
+                capture, purpose, ..
+            } => {
+                let capture = capture.borrow();
+                purpose
+                    .retained_values()
+                    .saturating_add(u64::from(capture.resolve.is_some()))
+                    .saturating_add(u64::from(capture.reject.is_some()))
+            }
+            Self::CapabilitySettlement { .. } | Self::FinallyResolved { .. } => 1,
+            Self::ThenConstructorGet(state) | Self::ThenSpeciesGet(state) => {
+                state.retained_values()
+            }
+        }
+    }
+
+    const fn handles_abrupt(&self) -> bool {
+        !matches!(
+            self,
+            Self::CatchThenGet { .. }
+                | Self::ResolveConstructorGet { .. }
+                | Self::NewCapabilityConstruct { .. }
+                | Self::CapabilitySettlement { .. }
+                | Self::ThenConstructorGet(_)
+                | Self::ThenSpeciesGet(_)
+                | Self::FinallyConstructorGet(_)
+                | Self::FinallySpeciesGet(_)
+                | Self::FinallyThenGet(_)
+                | Self::FinallyCallback { .. }
+                | Self::FinallyResolved { .. }
+                | Self::FinallyResolvedThenGet { .. }
+        )
     }
 }
 
@@ -406,6 +588,12 @@ enum IntrinsicGetContinuation {
         arguments: Vec<StoredValue>,
         origin: JsStackFrame,
     },
+    PromiseConstructor {
+        realm: RealmId,
+        new_target: FunctionId,
+        executor: FunctionId,
+        origin: JsStackFrame,
+    },
     ObjectPrototypeToString {
         default_tag: ObjectPrototypeTag,
         temporary_receiver: Option<ObjectId>,
@@ -421,6 +609,7 @@ impl IntrinsicGetContinuation {
             Self::ArrayConstructor { arguments, .. } => {
                 1_u64.saturating_add(usize_to_u64(arguments.len()))
             }
+            Self::PromiseConstructor { .. } => 2,
             Self::ObjectPrototypeToString {
                 temporary_receiver, ..
             } => u64::from(temporary_receiver.is_some()),
@@ -438,6 +627,7 @@ enum ObjectPrototypeTag {
     Function,
     Number,
     Object,
+    Promise,
     String,
     Symbol,
 }
@@ -453,6 +643,7 @@ impl ObjectPrototypeTag {
             Self::Function => "Function",
             Self::Number => "Number",
             Self::Object => "Object",
+            Self::Promise => "Promise",
             Self::String => "String",
             Self::Symbol => "Symbol",
         }
@@ -692,6 +883,12 @@ impl PropertyKeyContinuation {
     }
 }
 
+#[derive(Clone, Copy)]
+enum LegacyAccessorKind {
+    Getter,
+    Setter,
+}
+
 enum PropertyKeyTarget {
     ToKey,
     Read {
@@ -733,6 +930,20 @@ enum PropertyKeyTarget {
         target: StoredValue,
         realm: RealmId,
     },
+    /// `__defineGetter__` or `__defineSetter__`, after target coercion and
+    /// accessor callability validation but before the observable key coercion.
+    LegacyDefineAccessor {
+        target: StoredValue,
+        accessor: StoredValue,
+        kind: LegacyAccessorKind,
+        realm: RealmId,
+    },
+    /// `__lookupGetter__` or `__lookupSetter__`, after target coercion and
+    /// before the observable key coercion.
+    LegacyLookupAccessor {
+        target: StoredValue,
+        kind: LegacyAccessorKind,
+    },
     /// The `delete` operator's key, awaiting `ToPropertyKey`.
     Delete {
         base: StoredValue,
@@ -773,11 +984,13 @@ impl PropertyKeyTarget {
             | Self::OwnPropertyDescriptor { .. }
             | Self::HasOwnProperty { .. }
             | Self::PropertyIsEnumerable { .. }
+            | Self::LegacyLookupAccessor { .. }
             | Self::ReflectOwnPropertyDescriptor { .. }
             | Self::ReflectHas { .. } => 1,
             Self::Write { .. }
             | Self::DefineMethod { .. }
             | Self::DefineProperty { .. }
+            | Self::LegacyDefineAccessor { .. }
             | Self::ReflectGet { .. }
             | Self::ReflectDefineProperty { .. } => 2,
             Self::ReflectSet { .. } => 3,
@@ -1210,6 +1423,7 @@ fn trace_property_key_target_roots(
         | PropertyKeyTarget::OwnPropertyDescriptor { target: base, .. }
         | PropertyKeyTarget::HasOwnProperty { target: base, .. }
         | PropertyKeyTarget::PropertyIsEnumerable { target: base, .. }
+        | PropertyKeyTarget::LegacyLookupAccessor { target: base, .. }
         | PropertyKeyTarget::ReflectOwnPropertyDescriptor { target: base, .. }
         | PropertyKeyTarget::ReflectHas { target: base, .. } => {
             trace_stored_value_root(base, mark);
@@ -1219,6 +1433,11 @@ fn trace_property_key_target_roots(
         }
         | PropertyKeyTarget::ReflectDefineProperty {
             target, descriptor, ..
+        }
+        | PropertyKeyTarget::LegacyDefineAccessor {
+            target,
+            accessor: descriptor,
+            ..
         } => {
             trace_stored_value_root(target, mark);
             trace_stored_value_root(descriptor, mark);
@@ -1431,6 +1650,14 @@ fn trace_native_continuation_roots(
                     trace_stored_value_root(argument, mark);
                 }
             }
+            IntrinsicGetContinuation::PromiseConstructor {
+                new_target,
+                executor,
+                ..
+            } => {
+                mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
+                mark(CollectionRoot::Heap(HeapReference::Function(*executor)));
+            }
             IntrinsicGetContinuation::ObjectPrototypeToString {
                 temporary_receiver, ..
             } => {
@@ -1499,6 +1726,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::InstanceOf(state) => {
             trace_instance_of_roots(state, mark);
         }
+        NativeContinuation::Promise(state) => state.trace_roots(mark),
         NativeContinuation::ReflectSet | NativeContinuation::FunctionCall => {}
     }
 }
@@ -1961,6 +2189,7 @@ impl Context<'_> {
             }
         }
 
+        let mut execution_budget = ExecutionBudget::new(limits);
         let mut function_id = function_id;
         let mut receiver = StoredValue::Undefined;
         let mut owned_arguments: Option<Vec<StoredValue>> = None;
@@ -1990,16 +2219,173 @@ impl Context<'_> {
                     }
                     stored
                 };
-                let value = execute_native_entry(
+                let completion = execute_native_entry_with_budget(
                     self.runtime,
                     function_id,
                     native,
                     receiver,
                     materialized,
-                    limits,
                     compiler,
-                )?;
-                return self.runtime.public_value(value);
+                    &mut execution_budget,
+                )
+                .and_then(|value| self.runtime.public_value(value));
+                return complete_host_turn(
+                    self.runtime,
+                    compiler,
+                    &mut execution_budget,
+                    completion,
+                );
+            }
+            if let Some(resolving) = node.promise_resolving().cloned() {
+                let materialized = if let Some(arguments) = owned_arguments {
+                    arguments
+                } else {
+                    let mut stored: Vec<StoredValue> = Vec::new();
+                    stored.try_reserve_exact(arguments.len()).map_err(|_| {
+                        ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::FrameValues,
+                            additional: arguments.len(),
+                        }
+                    })?;
+                    for argument in arguments {
+                        stored.push(argument.stored()?.duplicate());
+                    }
+                    stored
+                };
+                let prepared_frames = Vec::new();
+                let dispatch = dispatch_promise_resolving(
+                    self.runtime,
+                    &resolving,
+                    CallArguments::from_values(materialized),
+                    None,
+                    native_function_host_origin(),
+                    &mut execution_budget,
+                );
+                let dispatch = match dispatch {
+                    Ok(dispatch) => resolve_native_dispatch(
+                        self.runtime,
+                        dispatch,
+                        &prepared_frames,
+                        0,
+                        0,
+                        compiler,
+                        &mut execution_budget,
+                    ),
+                    Err(error) => Err(error),
+                };
+                let completion = execute_root_dispatch_with_budget(
+                    self.runtime,
+                    dispatch,
+                    prepared_frames,
+                    compiler,
+                    &mut execution_budget,
+                )
+                .and_then(|value| self.runtime.public_value(value));
+                return complete_host_turn(
+                    self.runtime,
+                    compiler,
+                    &mut execution_budget,
+                    completion,
+                );
+            }
+            if let Some(executor) = node.promise_capability_executor().cloned() {
+                let materialized = if let Some(arguments) = owned_arguments {
+                    arguments
+                } else {
+                    let mut stored: Vec<StoredValue> = Vec::new();
+                    stored.try_reserve_exact(arguments.len()).map_err(|_| {
+                        ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::FrameValues,
+                            additional: arguments.len(),
+                        }
+                    })?;
+                    for argument in arguments {
+                        stored.push(argument.stored()?.duplicate());
+                    }
+                    stored
+                };
+                let prepared_frames = Vec::new();
+                let dispatch = dispatch_promise_capability_executor(
+                    &executor,
+                    CallArguments::from_values(materialized),
+                    native_function_host_origin(),
+                );
+                let dispatch = match dispatch {
+                    Ok(dispatch) => resolve_native_dispatch(
+                        self.runtime,
+                        dispatch,
+                        &prepared_frames,
+                        0,
+                        0,
+                        compiler,
+                        &mut execution_budget,
+                    ),
+                    Err(error) => Err(error),
+                };
+                let completion = execute_root_dispatch_with_budget(
+                    self.runtime,
+                    dispatch,
+                    prepared_frames,
+                    compiler,
+                    &mut execution_budget,
+                )
+                .and_then(|value| self.runtime.public_value(value));
+                return complete_host_turn(
+                    self.runtime,
+                    compiler,
+                    &mut execution_budget,
+                    completion,
+                );
+            }
+            if let Some(promise_finally) = node.promise_finally().cloned() {
+                let materialized = if let Some(arguments) = owned_arguments {
+                    arguments
+                } else {
+                    let mut stored: Vec<StoredValue> = Vec::new();
+                    stored.try_reserve_exact(arguments.len()).map_err(|_| {
+                        ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::FrameValues,
+                            additional: arguments.len(),
+                        }
+                    })?;
+                    for argument in arguments {
+                        stored.push(argument.stored()?.duplicate());
+                    }
+                    stored
+                };
+                let prepared_frames = Vec::new();
+                let dispatch = dispatch_promise_finally_function(
+                    &promise_finally,
+                    CallArguments::from_values(materialized),
+                    None,
+                    native_function_host_origin(),
+                );
+                let dispatch = match dispatch {
+                    Ok(dispatch) => resolve_native_dispatch(
+                        self.runtime,
+                        dispatch,
+                        &prepared_frames,
+                        0,
+                        0,
+                        compiler,
+                        &mut execution_budget,
+                    ),
+                    Err(error) => Err(error),
+                };
+                let completion = execute_root_dispatch_with_budget(
+                    self.runtime,
+                    dispatch,
+                    prepared_frames,
+                    compiler,
+                    &mut execution_budget,
+                )
+                .and_then(|value| self.runtime.public_value(value));
+                return complete_host_turn(
+                    self.runtime,
+                    compiler,
+                    &mut execution_budget,
+                    completion,
+                );
             }
             let Some(bound) = node.bound() else {
                 break;
@@ -2041,8 +2427,10 @@ impl Context<'_> {
             None,
             None,
         )?;
-        let value = execute_frames(self.runtime, frame, limits, compiler, None)?;
-        self.runtime.public_value(value)
+        let completion =
+            execute_frames_with_budget(self.runtime, frame, compiler, None, &mut execution_budget)
+                .and_then(|value| self.runtime.public_value(value));
+        complete_host_turn(self.runtime, compiler, &mut execution_budget, completion)
     }
 
     pub(crate) fn execute_internal_root(
@@ -2198,6 +2586,10 @@ fn execute_frame_loop(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<StoredValue, ExecutionError> {
     'frames: loop {
+        if let Some(completion) = execution_budget.native_root_completion.take() {
+            debug_assert!(frames.is_empty());
+            return Ok(completion);
+        }
         execution_budget.charge_instructions(1)?;
         // The interrupt poll is separate from the fuel charge: fuel is a
         // pre-committed budget, while an interrupt is a decision the host makes
@@ -2225,6 +2617,9 @@ fn execute_frame_loop(
                 let mut inputs = inputs;
                 let construction = inputs.is_construction();
                 let mut native = None;
+                let mut resolving = None;
+                let mut capability_executor = None;
+                let mut promise_finally = None;
                 loop {
                     let node =
                         runtime
@@ -2237,6 +2632,18 @@ fn execute_frame_loop(
                             })?;
                     if let Some(value) = node.native().copied() {
                         native = Some(value);
+                        break;
+                    }
+                    if let Some(value) = node.promise_resolving().cloned() {
+                        resolving = Some(value);
+                        break;
+                    }
+                    if let Some(value) = node.promise_capability_executor().cloned() {
+                        capability_executor = Some(value);
+                        break;
+                    }
+                    if let Some(value) = node.promise_finally().cloned() {
+                        promise_finally = Some(value);
                         break;
                     }
                     let Some(bound) = node.bound() else {
@@ -2425,6 +2832,310 @@ fn execute_frame_loop(
                                 message: "transient native throw has no executing frame",
                             })?;
                             frame.transient_cleanup_pending = true;
+                            dispatch_pending_exception(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                pending,
+                                compiler,
+                                execution_budget,
+                            )?;
+                        }
+                        Err(NativeFailure::Execution(error)) => return Err(error),
+                    }
+                    continue;
+                }
+                if let Some(resolving) = resolving {
+                    if construction {
+                        let pending = PendingException {
+                            realm: operation_realm,
+                            payload: PendingExceptionPayload::EngineError {
+                                kind: ExceptionKind::TypeError,
+                                message: function_not_constructor_message(runtime, function)?,
+                            },
+                            origin,
+                        };
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
+                        continue;
+                    }
+                    let active_frames = active_execution_frames(frames);
+                    frames
+                        .try_reserve(1)
+                        .map_err(|_| ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::Frames,
+                            additional: 1,
+                        })?;
+                    let inputs = take_call_inputs(
+                        frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?,
+                        function,
+                        inputs,
+                    )?;
+                    let dispatch = dispatch_promise_resolving(
+                        runtime,
+                        &resolving,
+                        inputs.arguments,
+                        Some(return_to),
+                        origin,
+                        execution_budget,
+                    );
+                    let dispatch = match dispatch {
+                        Ok(dispatch) => resolve_native_dispatch(
+                            runtime,
+                            dispatch,
+                            frames,
+                            active_frames,
+                            *active_frame_values,
+                            compiler,
+                            execution_budget,
+                        ),
+                        Err(error) => Err(error),
+                    };
+                    match dispatch {
+                        Ok(NativeDispatch::Immediate(value)) => {
+                            let parent =
+                                frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                                    function: FunctionTemplateId::new(0),
+                                    instruction: 0,
+                                })?;
+                            push_call_result(parent, value, return_to)?;
+                        }
+                        Ok(NativeDispatch::Frame(child)) => {
+                            *active_frame_values =
+                                active_frame_values.saturating_add(child.reserved_values);
+                            frames.push(child);
+                        }
+                        Ok(NativeDispatch::Call(_)) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "Promise resolving dispatch remained unresolved",
+                            }
+                            .into());
+                        }
+                        Ok(
+                            NativeDispatch::Pair(_, _)
+                            | NativeDispatch::ForOfRecord { .. }
+                            | NativeDispatch::ForOfStep { .. }
+                            | NativeDispatch::ForOfClosed
+                            | NativeDispatch::CopyDataPropertiesDone,
+                        ) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "Promise resolving function produced a structured result",
+                            }
+                            .into());
+                        }
+                        Err(
+                            NativeFailure::Abrupt(pending)
+                            | NativeFailure::AbruptAfterTransient(pending),
+                        ) => {
+                            dispatch_pending_exception(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                pending,
+                                compiler,
+                                execution_budget,
+                            )?;
+                        }
+                        Err(NativeFailure::Execution(error)) => return Err(error),
+                    }
+                    continue;
+                }
+                if let Some(executor) = capability_executor {
+                    if construction {
+                        let pending = PendingException {
+                            realm: operation_realm,
+                            payload: PendingExceptionPayload::EngineError {
+                                kind: ExceptionKind::TypeError,
+                                message: function_not_constructor_message(runtime, function)?,
+                            },
+                            origin,
+                        };
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
+                        continue;
+                    }
+                    let active_frames = active_execution_frames(frames);
+                    frames
+                        .try_reserve(1)
+                        .map_err(|_| ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::Frames,
+                            additional: 1,
+                        })?;
+                    let inputs = take_call_inputs(
+                        frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?,
+                        function,
+                        inputs,
+                    )?;
+                    let dispatch =
+                        dispatch_promise_capability_executor(&executor, inputs.arguments, origin);
+                    let dispatch = match dispatch {
+                        Ok(dispatch) => resolve_native_dispatch(
+                            runtime,
+                            dispatch,
+                            frames,
+                            active_frames,
+                            *active_frame_values,
+                            compiler,
+                            execution_budget,
+                        ),
+                        Err(error) => Err(error),
+                    };
+                    match dispatch {
+                        Ok(NativeDispatch::Immediate(value)) => {
+                            let parent =
+                                frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                                    function: FunctionTemplateId::new(0),
+                                    instruction: 0,
+                                })?;
+                            push_call_result(parent, value, return_to)?;
+                        }
+                        Ok(NativeDispatch::Frame(child)) => {
+                            *active_frame_values =
+                                active_frame_values.saturating_add(child.reserved_values);
+                            frames.push(child);
+                        }
+                        Ok(NativeDispatch::Call(_)) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "Promise capability executor dispatch remained unresolved",
+                            }
+                            .into());
+                        }
+                        Ok(
+                            NativeDispatch::Pair(_, _)
+                            | NativeDispatch::ForOfRecord { .. }
+                            | NativeDispatch::ForOfStep { .. }
+                            | NativeDispatch::ForOfClosed
+                            | NativeDispatch::CopyDataPropertiesDone,
+                        ) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "Promise capability executor produced a structured result",
+                            }
+                            .into());
+                        }
+                        Err(
+                            NativeFailure::Abrupt(pending)
+                            | NativeFailure::AbruptAfterTransient(pending),
+                        ) => {
+                            dispatch_pending_exception(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                pending,
+                                compiler,
+                                execution_budget,
+                            )?;
+                        }
+                        Err(NativeFailure::Execution(error)) => return Err(error),
+                    }
+                    continue;
+                }
+                if let Some(promise_finally) = promise_finally {
+                    if construction {
+                        let pending = PendingException {
+                            realm: operation_realm,
+                            payload: PendingExceptionPayload::EngineError {
+                                kind: ExceptionKind::TypeError,
+                                message: function_not_constructor_message(runtime, function)?,
+                            },
+                            origin,
+                        };
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
+                        continue;
+                    }
+                    let active_frames = active_execution_frames(frames);
+                    frames
+                        .try_reserve(1)
+                        .map_err(|_| ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::Frames,
+                            additional: 1,
+                        })?;
+                    let inputs = take_call_inputs(
+                        frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?,
+                        function,
+                        inputs,
+                    )?;
+                    let dispatch = dispatch_promise_finally_function(
+                        &promise_finally,
+                        inputs.arguments,
+                        Some(return_to),
+                        origin,
+                    );
+                    let dispatch = match dispatch {
+                        Ok(dispatch) => resolve_native_dispatch(
+                            runtime,
+                            dispatch,
+                            frames,
+                            active_frames,
+                            *active_frame_values,
+                            compiler,
+                            execution_budget,
+                        ),
+                        Err(error) => Err(error),
+                    };
+                    match dispatch {
+                        Ok(NativeDispatch::Immediate(value)) => {
+                            let parent =
+                                frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                                    function: FunctionTemplateId::new(0),
+                                    instruction: 0,
+                                })?;
+                            push_call_result(parent, value, return_to)?;
+                        }
+                        Ok(NativeDispatch::Frame(child)) => {
+                            *active_frame_values =
+                                active_frame_values.saturating_add(child.reserved_values);
+                            frames.push(child);
+                        }
+                        Ok(NativeDispatch::Call(_)) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "Promise finally dispatch remained unresolved",
+                            }
+                            .into());
+                        }
+                        Ok(
+                            NativeDispatch::Pair(_, _)
+                            | NativeDispatch::ForOfRecord { .. }
+                            | NativeDispatch::ForOfStep { .. }
+                            | NativeDispatch::ForOfClosed
+                            | NativeDispatch::CopyDataPropertiesDone,
+                        ) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "Promise finally function produced a structured result",
+                            }
+                            .into());
+                        }
+                        Err(
+                            NativeFailure::Abrupt(pending)
+                            | NativeFailure::AbruptAfterTransient(pending),
+                        ) => {
                             dispatch_pending_exception(
                                 runtime,
                                 frames,

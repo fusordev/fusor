@@ -8,6 +8,7 @@ mod json;
 mod kernel;
 mod math;
 mod primitives;
+mod promise;
 mod reflect;
 mod string;
 mod symbol;
@@ -121,12 +122,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 23,
+                expected: 24,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 219,
+                expected: 245,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -154,6 +155,7 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::ArrayIteratorPrototype
             | IntrinsicObjectId::StringIteratorPrototype
             | IntrinsicObjectId::SymbolPrototype
+            | IntrinsicObjectId::PromisePrototype
             | IntrinsicObjectId::Reflect
             | IntrinsicObjectId::Json
             | IntrinsicObjectId::Math
@@ -184,7 +186,11 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::StringPrototypeValueOf
             | NativeFunctionKind::StringPrototypeMethod(_)
             | NativeFunctionKind::StringRaw
-            | NativeFunctionKind::LocaleString(_)
+            | NativeFunctionKind::LocaleString(
+                super::LocaleStringMethod::Number
+                    | super::LocaleStringMethod::BigInt
+                    | super::LocaleStringMethod::Array
+            )
             | NativeFunctionKind::ArrayConstructor
             | NativeFunctionKind::ArraySpeciesGetter
             | NativeFunctionKind::ArrayPrototypeJoin
@@ -221,6 +227,13 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::JsonRawJson
             | NativeFunctionKind::JsonStringify
             | NativeFunctionKind::Math(_)
+            | NativeFunctionKind::PromiseConstructor
+            | NativeFunctionKind::PromiseResolve
+            | NativeFunctionKind::PromiseReject
+            | NativeFunctionKind::PromiseSpeciesGetter
+            | NativeFunctionKind::PromisePrototypeThen
+            | NativeFunctionKind::PromisePrototypeCatch
+            | NativeFunctionKind::PromisePrototypeFinally
     )
 }
 
@@ -240,6 +253,8 @@ pub(super) enum DeclarativeBatch {
     Iterators,
     Symbols,
     SymbolGlobals,
+    Promises,
+    PromiseGlobals,
     NamespaceObjects,
 }
 
@@ -308,6 +323,10 @@ pub(super) fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatc
     {
         return DeclarativeBatch::Symbols;
     }
+    if is_promise_identity(property.holder) || referenced_function.is_some_and(is_promise_function)
+    {
+        return DeclarativeBatch::Promises;
+    }
     if is_kernel_identity(property.holder) || referenced_function.is_some_and(is_kernel_function) {
         return DeclarativeBatch::Kernel;
     }
@@ -362,6 +381,7 @@ fn special_reference_batch(
         | NativeFunctionKind::StringConstructor => Some(DeclarativeBatch::PrimitiveGlobals),
         NativeFunctionKind::ArrayConstructor => Some(DeclarativeBatch::ArrayGlobals),
         NativeFunctionKind::SymbolConstructor => Some(DeclarativeBatch::SymbolGlobals),
+        NativeFunctionKind::PromiseConstructor => Some(DeclarativeBatch::PromiseGlobals),
         NativeFunctionKind::OrdinaryFunctionConstructor | NativeFunctionKind::ObjectConstructor => {
             Some(DeclarativeBatch::KernelGlobals)
         }
@@ -415,6 +435,27 @@ const fn is_array_identity(id: IntrinsicIdentity) -> bool {
     }
 }
 
+const fn is_promise_identity(id: IntrinsicIdentity) -> bool {
+    match id {
+        IntrinsicIdentity::Object(IntrinsicObjectId::PromisePrototype) => true,
+        IntrinsicIdentity::Function(id) => is_promise_function(id),
+        IntrinsicIdentity::Object(_) => false,
+    }
+}
+
+const fn is_promise_function(id: IntrinsicFunctionId) -> bool {
+    matches!(
+        id.0,
+        NativeFunctionKind::PromiseConstructor
+            | NativeFunctionKind::PromiseResolve
+            | NativeFunctionKind::PromiseReject
+            | NativeFunctionKind::PromiseSpeciesGetter
+            | NativeFunctionKind::PromisePrototypeThen
+            | NativeFunctionKind::PromisePrototypeCatch
+            | NativeFunctionKind::PromisePrototypeFinally
+    )
+}
+
 const fn is_iterator_identity(id: IntrinsicIdentity) -> bool {
     match id {
         IntrinsicIdentity::Object(
@@ -461,7 +502,11 @@ const fn is_primitive_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::StringPrototypeValueOf
             | NativeFunctionKind::StringPrototypeMethod(_)
             | NativeFunctionKind::StringRaw
-            | NativeFunctionKind::LocaleString(_)
+            | NativeFunctionKind::LocaleString(
+                super::LocaleStringMethod::Number
+                    | super::LocaleStringMethod::BigInt
+                    | super::LocaleStringMethod::Array
+            )
     )
 }
 
@@ -477,6 +522,13 @@ pub(super) const fn is_kernel_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::ObjectPrototypeHasOwnProperty
             | NativeFunctionKind::ObjectPrototypeIsPrototypeOf
             | NativeFunctionKind::ObjectPrototypePropertyIsEnumerable
+            | NativeFunctionKind::ObjectPrototypeProtoGetter
+            | NativeFunctionKind::ObjectPrototypeProtoSetter
+            | NativeFunctionKind::ObjectPrototypeDefineGetter
+            | NativeFunctionKind::ObjectPrototypeDefineSetter
+            | NativeFunctionKind::ObjectPrototypeLookupGetter
+            | NativeFunctionKind::ObjectPrototypeLookupSetter
+            | NativeFunctionKind::LocaleString(super::LocaleStringMethod::Object)
             | NativeFunctionKind::FunctionPrototypeToString
             | NativeFunctionKind::FunctionPrototypeCall
             | NativeFunctionKind::FunctionPrototypeApply
@@ -562,6 +614,8 @@ pub(super) const fn function_batch(id: IntrinsicFunctionId) -> DeclarativeBatch 
         DeclarativeBatch::Arrays
     } else if is_iterator_function(id) {
         DeclarativeBatch::Iterators
+    } else if is_promise_function(id) {
+        DeclarativeBatch::Promises
     } else if matches!(
         id.0,
         NativeFunctionKind::SymbolConstructor
@@ -596,6 +650,7 @@ fn visit_object_specs(visit: ObjectSink<'_>) {
     array::visit_objects(visit);
     iterator::visit_objects(visit);
     symbol::visit_objects(visit);
+    promise::visit_objects(visit);
     reflect::visit_objects(visit);
     json::visit_objects(visit);
     math::visit_objects(visit);
@@ -609,6 +664,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
     array::visit_kernel_functions(visit);
     iterator::visit_functions(visit);
     symbol::visit_functions(visit);
+    promise::visit_functions(visit);
     reflect::visit_functions(visit);
     json::visit_functions(visit);
     math::visit_functions(visit);
@@ -624,6 +680,7 @@ fn visit_property_specs(visit: PropertySink<'_>) {
     array::visit_properties(visit);
     iterator::visit_properties(visit);
     symbol::visit_properties(visit);
+    promise::visit_properties(visit);
     globals::visit_properties(visit);
     reflect::visit_properties(visit);
     json::visit_properties(visit);
@@ -734,8 +791,8 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 219);
-        assert_eq!(schema.constructor_prototypes.len(), 17);
+        assert_eq!(schema.specs().len(), 245);
+        assert_eq!(schema.constructor_prototypes.len(), 18);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]

@@ -1,6 +1,7 @@
 //! String method and factory declarations.
 
 use super::{FunctionSink, PropertySink, data, method, ordinary};
+use crate::runtime::StringMethod;
 use crate::runtime::realm::{
     CONSTRUCTOR_PROTOTYPE_PROPERTY, IDENTITY_PROPERTY, NativeFunctionKind, PredefinedAtom,
     STRING_FROM_STATICS, STRING_PROTOTYPE_METHODS,
@@ -44,27 +45,32 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IDENTITY_PROPERTY,
         IntrinsicValueSpec::NumberBits(0_f64.to_bits()),
     ));
-    for (key, function) in [
-        (
-            PredefinedAtom::Constructor,
-            NativeFunctionKind::StringConstructor,
-        ),
-        (
-            PredefinedAtom::ToString,
-            NativeFunctionKind::StringPrototypeToString,
-        ),
-        (
-            PredefinedAtom::ValueOf,
-            NativeFunctionKind::StringPrototypeValueOf,
-        ),
-    ] {
-        visit(method(
-            prototype,
-            IntrinsicKeySpec::PredefinedString(key),
-            function,
-        ));
-    }
     for method_spec in STRING_PROTOTYPE_METHODS {
+        if method_spec.method == StringMethod::ToLowerCase {
+            for (key, function) in [
+                (
+                    PredefinedAtom::ToString,
+                    NativeFunctionKind::StringPrototypeToString,
+                ),
+                (
+                    PredefinedAtom::ValueOf,
+                    NativeFunctionKind::StringPrototypeValueOf,
+                ),
+            ] {
+                visit(method(
+                    prototype,
+                    IntrinsicKeySpec::PredefinedString(key),
+                    function,
+                ));
+            }
+        }
+        if method_spec.method == StringMethod::Normalize {
+            visit(method(
+                prototype,
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+                NativeFunctionKind::StringConstructor,
+            ));
+        }
         let key = method_spec.predefined_name.map_or(
             IntrinsicKeySpec::InternedString(RealmNameId::StringMethod(method_spec.method)),
             IntrinsicKeySpec::PredefinedString,
@@ -74,6 +80,18 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             key,
             NativeFunctionKind::StringPrototypeMethod(method_spec.method),
         ));
+        let alias = match method_spec.method {
+            StringMethod::TrimEnd => Some("trimRight"),
+            StringMethod::TrimStart => Some("trimLeft"),
+            _ => None,
+        };
+        if let Some(alias) = alias {
+            visit(method(
+                prototype,
+                IntrinsicKeySpec::InternedString(RealmNameId::StringAlias(alias)),
+                NativeFunctionKind::StringPrototypeMethod(method_spec.method),
+            ));
+        }
     }
     visit(method(
         prototype,

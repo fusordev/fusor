@@ -1,0 +1,2 @@
+/crates/quickjs-bytecode/tests/support/snapshots/*.txt text eol=lf
+/crates/quickjs-compiler/tests/support/snapshots/*.txt text eol=lf

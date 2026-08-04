@@ -630,7 +630,7 @@ fn array_iterator_creation_boxes_a_primitive_receiver_once() {
 #[test]
 fn array_iterator_primitive_boxing_preflights_the_complete_transaction() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(23)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(24)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = runtime.context(&realm).expect("context").realm;
     let usage = runtime.usage();
@@ -647,8 +647,8 @@ fn array_iterator_primitive_boxing_preflights_the_complete_transaction() {
         result,
         Err(NativeFailure::Execution(ExecutionError::LimitExceeded {
             resource: RuntimeResource::HeapObjects,
-            limit: 23,
-            observed: 25,
+            limit: 24,
+            observed: 26,
         }))
     ));
     assert_eq!(runtime.usage(), usage);
@@ -2340,7 +2340,7 @@ fn array_constructor_prototype_get_precedes_dense_work_fuel_charge() {
     // smaller than the 64-element dense charge, so exhaustion after the Get
     // proves the ordering. The lower bound tracks `Object.prototype`'s property
     // count, because the lookup charges its full shape scan.
-    let mut budget = ExecutionBudget::new(ExecutionLimits::default().with_instruction_fuel(25));
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default().with_instruction_fuel(30));
     let Ok(dispatch) = dispatch_native_call(
         &mut runtime,
         array_constructor,
@@ -4828,7 +4828,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(763))
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(845))
         .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
@@ -4850,8 +4850,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 763,
-            observed: 764,
+            limit: 845,
+            observed: 846,
         }
     ));
     let failed = runtime.usage();

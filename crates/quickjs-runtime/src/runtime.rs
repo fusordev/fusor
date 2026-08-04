@@ -24,7 +24,9 @@
  */
 
 use std::{
-    collections::{HashMap, HashSet},
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet, VecDeque},
+    rc::Rc,
     sync::{Arc, Weak},
 };
 
@@ -44,14 +46,15 @@ use crate::{
     interrupt::InterruptState,
     object::{
         ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, ForInIterator, ForInSnapshot,
-        HeapObject, IntegrityLevel, KeyPhases, ObjectRecord, OwnProperty, PropertyDeletion,
-        StringIterator,
+        HeapObject, IntegrityLevel, KeyPhases, ObjectRecord, OwnProperty, PromiseReaction,
+        PropertyDeletion, StringIterator,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
 
 mod iterators;
 mod limits;
+mod promises;
 mod symbols;
 pub(crate) use iterators::PreparedIteratorResultPlan;
 pub use limits::{RuntimeLimits, RuntimeUsage};
@@ -83,6 +86,7 @@ enum RealmIntrinsics {
         bigint: BigIntIntrinsics,
         string: StringIntrinsics,
         array: ArrayIntrinsics,
+        promise: PromiseIntrinsics,
         symbol: SymbolIntrinsics,
         iterators: IteratorIntrinsics,
     },
@@ -215,6 +219,12 @@ struct StringIntrinsics {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ArrayIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PromiseIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
 }
@@ -673,6 +683,63 @@ pub(crate) enum StringArgument {
 
 /// One `String.prototype` method's identity and argument shape.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StringHtmlMethod {
+    Anchor,
+    Big,
+    Blink,
+    Bold,
+    Fixed,
+    FontColor,
+    FontSize,
+    Italics,
+    Link,
+    Small,
+    Strike,
+    Sub,
+    Sup,
+}
+
+impl StringHtmlMethod {
+    /// Returns the HTML element name passed to the specification's
+    /// `CreateHTML` abstract operation.
+    pub(crate) const fn tag_name(self) -> &'static str {
+        match self {
+            Self::Anchor | Self::Link => "a",
+            Self::Big => "big",
+            Self::Blink => "blink",
+            Self::Bold => "b",
+            Self::Fixed => "tt",
+            Self::FontColor | Self::FontSize => "font",
+            Self::Italics => "i",
+            Self::Small => "small",
+            Self::Strike => "strike",
+            Self::Sub => "sub",
+            Self::Sup => "sup",
+        }
+    }
+
+    /// Returns the optional attribute name passed to `CreateHTML`.
+    pub(crate) const fn attribute_name(self) -> Option<&'static str> {
+        match self {
+            Self::Anchor => Some("name"),
+            Self::FontColor => Some("color"),
+            Self::FontSize => Some("size"),
+            Self::Link => Some("href"),
+            Self::Big
+            | Self::Blink
+            | Self::Bold
+            | Self::Fixed
+            | Self::Italics
+            | Self::Small
+            | Self::Strike
+            | Self::Sub
+            | Self::Sup => None,
+        }
+    }
+}
+
+/// One `String.prototype` method's identity and argument shape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StringMethod {
     At,
     CharAt,
@@ -704,6 +771,8 @@ pub(crate) enum StringMethod {
     ToLocaleUpperCase,
     ToLowerCase,
     ToUpperCase,
+    /// One Annex B HTML wrapper implemented through `CreateHTML`.
+    Html(StringHtmlMethod),
     /// `String.fromCharCode`, which is a static rather than a prototype method.
     FromCharCode,
     /// `String.fromCodePoint`, likewise a static.
@@ -732,6 +801,13 @@ impl StringMethod {
             | Self::Replace
             | Self::FromCharCode
             | Self::FromCodePoint => &[],
+            Self::Html(method) => {
+                if method.attribute_name().is_some() {
+                    &[StringArgument::String]
+                } else {
+                    &[]
+                }
+            }
             Self::At | Self::CharAt | Self::CharCodeAt | Self::CodePointAt => {
                 &[StringArgument::Integer]
             }
@@ -995,6 +1071,12 @@ pub(crate) enum NativeFunctionKind {
     ObjectPrototypeHasOwnProperty,
     ObjectPrototypeIsPrototypeOf,
     ObjectPrototypePropertyIsEnumerable,
+    ObjectPrototypeProtoGetter,
+    ObjectPrototypeProtoSetter,
+    ObjectPrototypeDefineGetter,
+    ObjectPrototypeDefineSetter,
+    ObjectPrototypeLookupGetter,
+    ObjectPrototypeLookupSetter,
     /// One method on the ordinary `%Reflect%` object.
     Reflect(ReflectMethod),
     /// `JSON.parse`.
@@ -1078,6 +1160,13 @@ pub(crate) enum NativeFunctionKind {
     ArrayIteratorNext,
     StringPrototypeIterator,
     StringIteratorNext,
+    PromiseConstructor,
+    PromiseResolve,
+    PromiseReject,
+    PromiseSpeciesGetter,
+    PromisePrototypeThen,
+    PromisePrototypeCatch,
+    PromisePrototypeFinally,
 }
 
 /// The synchronous generic factories installed on the `Array` constructor.
@@ -1185,6 +1274,7 @@ impl NativeFunctionKind {
                 | Self::NumberConstructor
                 | Self::StringConstructor
                 | Self::ArrayConstructor
+                | Self::PromiseConstructor
         )
     }
 }
@@ -1199,6 +1289,127 @@ pub(crate) enum FunctionImplementation {
     Bytecode(BytecodeFunction),
     Native(NativeFunction),
     Bound(BoundFunction),
+    PromiseResolving(PromiseResolvingFunction),
+    PromiseCapabilityExecutor(PromiseCapabilityExecutor),
+    PromiseFinally(PromiseFinallyFunction),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseResolvingKind {
+    Resolve,
+    Reject,
+}
+
+pub(crate) struct PromiseResolvingFunction {
+    pub(crate) promise: ObjectId,
+    pub(crate) realm: RealmId,
+    pub(crate) kind: PromiseResolvingKind,
+    pub(crate) already_resolved: Rc<Cell<bool>>,
+}
+
+impl Clone for PromiseResolvingFunction {
+    fn clone(&self) -> Self {
+        Self {
+            promise: self.promise,
+            realm: self.realm,
+            kind: self.kind,
+            already_resolved: Rc::clone(&self.already_resolved),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct PromiseCapabilityCapture {
+    pub(crate) resolve: Option<StoredValue>,
+    pub(crate) reject: Option<StoredValue>,
+}
+
+pub(crate) struct PromiseCapabilityExecutor {
+    pub(crate) realm: RealmId,
+    pub(crate) capture: Rc<RefCell<PromiseCapabilityCapture>>,
+}
+
+impl Clone for PromiseCapabilityExecutor {
+    fn clone(&self) -> Self {
+        Self {
+            realm: self.realm,
+            capture: Rc::clone(&self.capture),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseFinallyHandlerKind {
+    Then,
+    Catch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseFinallyThunkKind {
+    Return,
+    Throw,
+}
+
+pub(crate) enum PromiseFinallyFunction {
+    Handler {
+        realm: RealmId,
+        on_finally: FunctionId,
+        constructor: FunctionId,
+        kind: PromiseFinallyHandlerKind,
+    },
+    Thunk {
+        realm: RealmId,
+        completion: StoredValue,
+        kind: PromiseFinallyThunkKind,
+    },
+}
+
+impl PromiseFinallyFunction {
+    pub(crate) const fn realm(&self) -> RealmId {
+        match self {
+            Self::Handler { realm, .. } | Self::Thunk { realm, .. } => *realm,
+        }
+    }
+}
+
+impl Clone for PromiseFinallyFunction {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Handler {
+                realm,
+                on_finally,
+                constructor,
+                kind,
+            } => Self::Handler {
+                realm: *realm,
+                on_finally: *on_finally,
+                constructor: *constructor,
+                kind: *kind,
+            },
+            Self::Thunk {
+                realm,
+                completion,
+                kind,
+            } => Self::Thunk {
+                realm: *realm,
+                completion: completion.duplicate(),
+                kind: *kind,
+            },
+        }
+    }
+}
+
+pub(crate) enum PromiseJob {
+    Reaction {
+        reaction: PromiseReaction,
+        argument: StoredValue,
+    },
+    Thenable {
+        promise: ObjectId,
+        realm: RealmId,
+        thenable: StoredValue,
+        then: FunctionId,
+    },
 }
 
 /// One `Function.prototype.bind` result: a callable/constructable function
@@ -1225,20 +1436,76 @@ impl HeapFunction {
             FunctionImplementation::Bound(_) => Err(crate::EngineFault::RuntimeInvariant {
                 message: "bound function reached the bytecode execution path",
             }),
+            FunctionImplementation::PromiseResolving(_) => {
+                Err(crate::EngineFault::RuntimeInvariant {
+                    message: "Promise resolving function reached the bytecode execution path",
+                })
+            }
+            FunctionImplementation::PromiseCapabilityExecutor(_) => {
+                Err(crate::EngineFault::RuntimeInvariant {
+                    message: "Promise capability executor reached the bytecode execution path",
+                })
+            }
+            FunctionImplementation::PromiseFinally(_) => {
+                Err(crate::EngineFault::RuntimeInvariant {
+                    message: "Promise finally function reached the bytecode execution path",
+                })
+            }
         }
     }
 
     pub(crate) const fn native(&self) -> Option<&NativeFunction> {
         match &self.implementation {
-            FunctionImplementation::Bytecode(_) | FunctionImplementation::Bound(_) => None,
+            FunctionImplementation::Bytecode(_)
+            | FunctionImplementation::Bound(_)
+            | FunctionImplementation::PromiseResolving(_)
+            | FunctionImplementation::PromiseCapabilityExecutor(_)
+            | FunctionImplementation::PromiseFinally(_) => None,
             FunctionImplementation::Native(function) => Some(function),
         }
     }
 
     pub(crate) fn bound(&self) -> Option<&BoundFunction> {
         match &self.implementation {
-            FunctionImplementation::Bytecode(_) | FunctionImplementation::Native(_) => None,
+            FunctionImplementation::Bytecode(_)
+            | FunctionImplementation::Native(_)
+            | FunctionImplementation::PromiseResolving(_)
+            | FunctionImplementation::PromiseCapabilityExecutor(_)
+            | FunctionImplementation::PromiseFinally(_) => None,
             FunctionImplementation::Bound(bound) => Some(bound),
+        }
+    }
+
+    pub(crate) fn promise_resolving(&self) -> Option<&PromiseResolvingFunction> {
+        match &self.implementation {
+            FunctionImplementation::PromiseResolving(resolving) => Some(resolving),
+            FunctionImplementation::Bytecode(_)
+            | FunctionImplementation::Native(_)
+            | FunctionImplementation::Bound(_)
+            | FunctionImplementation::PromiseCapabilityExecutor(_)
+            | FunctionImplementation::PromiseFinally(_) => None,
+        }
+    }
+
+    pub(crate) fn promise_capability_executor(&self) -> Option<&PromiseCapabilityExecutor> {
+        match &self.implementation {
+            FunctionImplementation::PromiseCapabilityExecutor(executor) => Some(executor),
+            FunctionImplementation::Bytecode(_)
+            | FunctionImplementation::Native(_)
+            | FunctionImplementation::Bound(_)
+            | FunctionImplementation::PromiseResolving(_)
+            | FunctionImplementation::PromiseFinally(_) => None,
+        }
+    }
+
+    pub(crate) fn promise_finally(&self) -> Option<&PromiseFinallyFunction> {
+        match &self.implementation {
+            FunctionImplementation::PromiseFinally(function) => Some(function),
+            FunctionImplementation::Bytecode(_)
+            | FunctionImplementation::Native(_)
+            | FunctionImplementation::Bound(_)
+            | FunctionImplementation::PromiseResolving(_)
+            | FunctionImplementation::PromiseCapabilityExecutor(_) => None,
         }
     }
 }
@@ -1464,6 +1731,7 @@ pub struct Runtime {
     public_roots: u64,
     pub(crate) collection_pending: bool,
     pub(crate) interrupts: InterruptState,
+    pub(crate) promise_jobs: VecDeque<PromiseJob>,
     /// Next non-zero seed assigned after a realm transaction commits.
     next_math_random_seed: u64,
 }

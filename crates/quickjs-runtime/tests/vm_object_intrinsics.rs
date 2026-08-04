@@ -279,6 +279,91 @@ fn set_prototype_of_permits_a_same_value_write_on_a_non_extensible_object() {
     );
 }
 
+#[test]
+fn legacy_object_prototype_accessors_have_the_pinned_graph() {
+    assert_eq!(
+        text(
+            "let proto=Object.prototype;\
+             let descriptor=Object.getOwnPropertyDescriptor(proto,'__proto__');\
+             let methods=['__defineGetter__','__defineSetter__','__lookupGetter__','__lookupSetter__'];\
+             let methodShape=methods.map(function(name){\
+                 let value=proto[name];let own=Object.getOwnPropertyDescriptor(proto,name);\
+                 return value.name+':'+value.length+':'+own.enumerable+':'+own.configurable+':'+own.writable;\
+             }).join(',');\
+             return Object.getOwnPropertyNames(proto).join('|')+'#'+\
+                 descriptor.get.name+':'+descriptor.get.length+':'+\
+                 descriptor.set.name+':'+descriptor.set.length+':'+\
+                 descriptor.enumerable+':'+descriptor.configurable+'#'+methodShape;"
+        ),
+        "toString|toLocaleString|valueOf|hasOwnProperty|isPrototypeOf|propertyIsEnumerable|\
+         __proto__|__defineGetter__|__defineSetter__|__lookupGetter__|__lookupSetter__|\
+         constructor#get __proto__:0:set __proto__:1:false:true#\
+         __defineGetter__:2:false:true:true,__defineSetter__:2:false:true:true,\
+         __lookupGetter__:1:false:true:true,__lookupSetter__:1:false:true:true"
+    );
+}
+
+#[test]
+fn proto_accessor_follows_the_specification_receiver_and_prototype_order() {
+    assert!(boolean(
+        "let descriptor=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__');\
+         let get=descriptor.get,set=descriptor.set;\
+         let first={first:true},second={second:true},target={};\
+         let direct={};direct.__proto__=first;\
+         let setResult=set.call(target,first);\
+         let invalidResult=set.call(target,1);\
+         let primitiveResult=set.call(1,second);\
+         let same=Object.preventExtensions({});\
+         let sameResult=set.call(same,Object.prototype);\
+         let locked=Object.preventExtensions({});let lockedThrows=false;\
+         try{set.call(locked,second);}catch(error){lockedThrows=error.name==='TypeError';}\
+         let cycle={};let cycleThrows=false;\
+         try{set.call(cycle,cycle);}catch(error){cycleThrows=error.name==='TypeError';}\
+         let nullGetThrows=false,nullSetThrows=false;\
+         try{get.call(null);}catch(error){nullGetThrows=error.name==='TypeError';}\
+         try{set.call(null,1);}catch(error){nullSetThrows=error.name==='TypeError';}\
+         return get.call(Object.create(null))===null&&get.call(1)===Number.prototype&&\
+             get.call(direct)===first&&setResult===undefined&&get.call(target)===first&&\
+             invalidResult===undefined&&get.call(target)===first&&primitiveResult===undefined&&\
+             sameResult===undefined&&get.call(same)===Object.prototype&&lockedThrows&&\
+             cycleThrows&&nullGetThrows&&nullSetThrows;"
+    ));
+}
+
+#[test]
+fn legacy_accessor_definition_and_lookup_preserve_observable_order() {
+    assert!(boolean(
+        "let getter=function(){return 1;},setter=function(value){this.seen=value;};\
+         let target={},symbol=Symbol('legacy');\
+         let first=target.__defineGetter__('value',getter);\
+         let second=target.__defineSetter__('value',setter);\
+         target.__defineGetter__(symbol,getter);\
+         let descriptor=Object.getOwnPropertyDescriptor(target,'value');\
+         let child=Object.create(target);child.value=7;\
+         let shadow=Object.create(target);Object.defineProperty(shadow,'value',{value:2});\
+         let log='';let key={toString(){log+='key|';return 'ordered';}};\
+         let callableBeforeKey=false;\
+         try{Object.prototype.__defineGetter__.call({},key,0);}\
+         catch(error){callableBeforeKey=error.name==='TypeError'&&log==='';}\
+         Object.prototype.__defineGetter__.call({},key,getter);\
+         let lookupKey={toString(){log+='lookup';return 'value';}};\
+         let looked=Object.prototype.__lookupGetter__.call(child,lookupKey);\
+         let nullBeforeKey=false;let untouched={toString(){log+='bad';return 'x';}};\
+         try{Object.prototype.__lookupGetter__.call(null,untouched);}\
+         catch(error){nullBeforeKey=error.name==='TypeError'&&!log.includes('bad');}\
+         let nonExtensible=false;\
+         try{Object.preventExtensions({}).__defineGetter__('x',getter);}\
+         catch(error){nonExtensible=error.name==='TypeError';}\
+         return first===undefined&&second===undefined&&descriptor.get===getter&&\
+             descriptor.set===setter&&descriptor.enumerable&&descriptor.configurable&&\
+             child.value===1&&child.seen===7&&target.__lookupGetter__('value')===getter&&\
+             target.__lookupSetter__('value')===setter&&target.__lookupGetter__(symbol)===getter&&\
+             shadow.__lookupGetter__('value')===undefined&&callableBeforeKey&&\
+             log==='key|lookup'&&looked===getter&&nullBeforeKey&&nonExtensible&&\
+             Object.prototype.__defineGetter__.call(1,'x',getter)===undefined;"
+    ));
+}
+
 /// Oracle: `preventExtensions returns => [true]`,
 /// `isExtensible fresh => [true]`, `isExtensible prevented => [false]`,
 /// `isExtensible primitive => [false]`,

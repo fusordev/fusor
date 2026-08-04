@@ -5,8 +5,9 @@ use super::{
     object_prototype, ordinary,
 };
 use crate::runtime::realm::{
-    CONSTRUCTOR_PROTOTYPE_PROPERTY, FROZEN_PROPERTY, METHOD_PROPERTY, NativeFunctionKind,
-    OBJECT_PROTOTYPE_REFLECTION, OBJECT_STATIC_METHODS, PredefinedAtom, PropertyLayout,
+    CONSTRUCTOR_PROTOTYPE_PROPERTY, FROZEN_PROPERTY, LocaleStringMethod, METHOD_PROPERTY,
+    NativeFunctionKind, OBJECT_PROTOTYPE_LEGACY_ACCESSORS, OBJECT_PROTOTYPE_REFLECTION,
+    OBJECT_STATIC_METHODS, PredefinedAtom, PropertyLayout,
     schema::{
         IntrinsicFunctionId, IntrinsicIdentity, IntrinsicIdentityPublication, IntrinsicKeySpec,
         IntrinsicNameSpec, IntrinsicObjectId, IntrinsicObjectKind, IntrinsicStringSpec,
@@ -61,6 +62,39 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         }
         visit(spec);
     }
+    visit_object_functions(visit);
+    for (kind, name, length) in [
+        (
+            NativeFunctionKind::FunctionPrototypeToString,
+            IntrinsicNameSpec::Predefined(PredefinedAtom::ToString),
+            0,
+        ),
+        (
+            NativeFunctionKind::FunctionPrototypeCall,
+            IntrinsicNameSpec::RealmName(RealmNameId::Call),
+            1,
+        ),
+        (
+            NativeFunctionKind::FunctionPrototypeApply,
+            IntrinsicNameSpec::Predefined(PredefinedAtom::Apply),
+            2,
+        ),
+        (
+            NativeFunctionKind::FunctionPrototypeBind,
+            IntrinsicNameSpec::RealmName(RealmNameId::Bind),
+            1,
+        ),
+        (
+            NativeFunctionKind::FunctionPrototypeHasInstance,
+            IntrinsicNameSpec::Literal("[Symbol.hasInstance]"),
+            1,
+        ),
+    ] {
+        visit(ordinary(kind, name, length));
+    }
+}
+
+fn visit_object_functions(visit: FunctionSink<'_>) {
     for method in OBJECT_STATIC_METHODS {
         let name = method.predefined_name.map_or_else(
             || {
@@ -97,32 +131,24 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     }
     for (kind, name, length) in [
         (
-            NativeFunctionKind::FunctionPrototypeToString,
-            IntrinsicNameSpec::Predefined(PredefinedAtom::ToString),
+            NativeFunctionKind::ObjectPrototypeProtoGetter,
+            IntrinsicNameSpec::Literal("get __proto__"),
             0,
         ),
         (
-            NativeFunctionKind::FunctionPrototypeCall,
-            IntrinsicNameSpec::RealmName(RealmNameId::Call),
-            1,
-        ),
-        (
-            NativeFunctionKind::FunctionPrototypeApply,
-            IntrinsicNameSpec::Predefined(PredefinedAtom::Apply),
-            2,
-        ),
-        (
-            NativeFunctionKind::FunctionPrototypeBind,
-            IntrinsicNameSpec::RealmName(RealmNameId::Bind),
-            1,
-        ),
-        (
-            NativeFunctionKind::FunctionPrototypeHasInstance,
-            IntrinsicNameSpec::Literal("[Symbol.hasInstance]"),
+            NativeFunctionKind::ObjectPrototypeProtoSetter,
+            IntrinsicNameSpec::Literal("set __proto__"),
             1,
         ),
     ] {
         visit(ordinary(kind, name, length));
+    }
+    for (_, kind, length) in OBJECT_PROTOTYPE_LEGACY_ACCESSORS {
+        visit(ordinary(
+            kind,
+            IntrinsicNameSpec::RealmName(RealmNameId::ObjectPrototypeMethod(kind)),
+            length,
+        ));
     }
 }
 
@@ -135,23 +161,40 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
 
 fn visit_object_prototype_properties(visit: PropertySink<'_>) {
     let prototype = IntrinsicIdentity::Object(IntrinsicObjectId::ObjectPrototype);
-    for (key, function) in [
-        (
-            PredefinedAtom::ToString,
-            NativeFunctionKind::ObjectPrototypeToString,
-        ),
-        (
-            PredefinedAtom::ValueOf,
-            NativeFunctionKind::ObjectPrototypeValueOf,
-        ),
-    ] {
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToString),
+        NativeFunctionKind::ObjectPrototypeToString,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToLocaleString),
+        NativeFunctionKind::LocaleString(LocaleStringMethod::Object),
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::ValueOf),
+        NativeFunctionKind::ObjectPrototypeValueOf,
+    ));
+    for (_, function, _) in OBJECT_PROTOTYPE_REFLECTION {
         visit(method(
             prototype,
-            IntrinsicKeySpec::PredefinedString(key),
+            IntrinsicKeySpec::InternedString(RealmNameId::ObjectPrototypeMethod(function)),
             function,
         ));
     }
-    for (_, function, _) in OBJECT_PROTOTYPE_REFLECTION {
+    visit(accessor(
+        prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Proto),
+        PropertyLayout::accessor(false, true),
+        Some(IntrinsicFunctionId(
+            NativeFunctionKind::ObjectPrototypeProtoGetter,
+        )),
+        Some(IntrinsicFunctionId(
+            NativeFunctionKind::ObjectPrototypeProtoSetter,
+        )),
+    ));
+    for (_, function, _) in OBJECT_PROTOTYPE_LEGACY_ACCESSORS {
         visit(method(
             prototype,
             IntrinsicKeySpec::InternedString(RealmNameId::ObjectPrototypeMethod(function)),
