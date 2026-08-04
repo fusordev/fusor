@@ -443,6 +443,12 @@ const GENERATOR_REQUIRED_COVERAGE: &[&str] = &[
     "delegate-return",
     "delegate-throw",
     "done-before-value",
+    "dynamic-generator-call",
+    "dynamic-generator-fallback-prototype",
+    "dynamic-generator-function",
+    "dynamic-generator-metadata",
+    "dynamic-generator-new-target",
+    "dynamic-generator-source-order",
     "for-of-consumption",
     "function-prototype-chain",
     "generator-method",
@@ -1692,7 +1698,7 @@ fn observe_candidate_body(body: &str) -> Result<Observation, String> {
     let limits = DynamicFunctionLimits::default()
         .with_frontend(
             FrontendLimits::new(CANDIDATE_SOURCE_BYTES)
-                .with_max_dynamic_function_fragments(1)
+                .with_max_dynamic_function_fragments(16)
                 .with_max_dynamic_function_origin_bytes(128),
         )
         .with_execution(execution);
@@ -2193,8 +2199,8 @@ mod tests {
             RuntimeDifferentialSuite::Generator,
         )
         .expect("checked-in generator manifest");
-        assert_eq!(corpus.cases.len(), 16);
-        assert_eq!(super::GENERATOR_REQUIRED_COVERAGE.len(), 37);
+        assert_eq!(corpus.cases.len(), 18);
+        assert_eq!(super::GENERATOR_REQUIRED_COVERAGE.len(), 43);
     }
 
     #[test]

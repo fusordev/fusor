@@ -1,7 +1,7 @@
 use super::super::{
-    BindingId, CompilationContext, CompilationGoal, DeclarationKind, DynamicFunctionKind,
-    FrameSlot, InitializationPolicy, LeafCompilationError, Span, UnsupportedLeafFeature,
-    VariableDeclarationKind, WritePolicy, unsupported,
+    BindingId, CompilationContext, DeclarationKind, FrameSlot, InitializationPolicy,
+    LeafCompilationError, Span, UnsupportedLeafFeature, VariableDeclarationKind, WritePolicy,
+    unsupported,
 };
 
 impl CompilationContext<'_, '_, '_> {
@@ -21,7 +21,7 @@ impl CompilationContext<'_, '_, '_> {
                 InitializationPolicy::FunctionAtInstantiation
             )
         );
-        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
+        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal())
             || declaration_kind != VariableDeclarationKind::Var
             || !merged_global_policy
             || storage.policy().writes() != WritePolicy::Mutable

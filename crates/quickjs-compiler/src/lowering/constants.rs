@@ -14,12 +14,12 @@ use super::atoms::{
 };
 use super::{
     ArrayExpression, ArrayExpressionElement, AssignmentTargetProperty, AstKind, BindingPattern,
-    CompilationContext, CompilationGoal, CompiledConstant, CompiledFunctionConstant,
-    DynamicFunctionKind, Executable, ExpressionPlanner, FunctionTreeLayoutSeed, GetSpan,
-    LeafCompilationError, NodeId, OxcPropertyKey, ParsedUnit, PlannedInstruction, StoragePlacement,
-    UnaryOperator, checked_function_entry_count, compiled_static_property_key,
-    compiler_identifier_string, decode_compiler_string, exact_i32, exact_negated_i32,
-    record_property_candidate, record_property_candidate_for, record_string_candidate,
+    CompilationContext, CompiledConstant, CompiledFunctionConstant, Executable, ExpressionPlanner,
+    FunctionTreeLayoutSeed, GetSpan, LeafCompilationError, NodeId, OxcPropertyKey, ParsedUnit,
+    PlannedInstruction, StoragePlacement, UnaryOperator, checked_function_entry_count,
+    compiled_static_property_key, compiler_identifier_string, decode_compiler_string, exact_i32,
+    exact_negated_i32, record_property_candidate, record_property_candidate_for,
+    record_string_candidate,
 };
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
@@ -107,8 +107,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 });
             }
             if executable.id().index() == 0
-                && self.unit.goal()
-                    == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
+                && crate::is_synchronous_dynamic_function_goal(self.unit.goal())
             {
                 owner.push(CompiledMetadataAtomCandidate {
                     key: CompiledMetadataAtomKey::ScriptCompletion,

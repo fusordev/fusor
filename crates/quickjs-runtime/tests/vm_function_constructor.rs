@@ -9,9 +9,9 @@ use quickjs_frontend::{
     with_dynamic_function_source,
 };
 use quickjs_runtime::{
-    Context, DynamicFunctionCompileFailure, ExceptionKind, ExecutionError, ExecutionLimits,
-    Function, JsNumber, JsString, OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
-    Runtime, RuntimeLimits, RuntimeResource, ValueKind,
+    Context, DynamicFunctionCompileFailure, DynamicFunctionFamily, ExceptionKind, ExecutionError,
+    ExecutionLimits, Function, JsNumber, JsString, OrdinaryDynamicFunctionCompiler,
+    OrdinaryDynamicFunctionSource, Runtime, RuntimeLimits, RuntimeResource, ValueKind,
 };
 
 #[derive(Debug)]
@@ -43,18 +43,24 @@ impl OrdinaryDynamicFunctionCompiler for TestCompiler {
             .iter()
             .map(|parameter| SourceFragment::new(parameter.as_str()))
             .collect::<Vec<_>>();
-        let dynamic_source = DynamicFunctionSource::new(
-            DynamicFunctionKind::Function,
-            &parameters,
-            SourceFragment::new(&body_text),
-        );
+        let (kind, source_name): (DynamicFunctionKind, Arc<str>) = match source.family() {
+            DynamicFunctionFamily::Function => (
+                DynamicFunctionKind::Function,
+                Arc::from("<runtime Function>"),
+            ),
+            DynamicFunctionFamily::GeneratorFunction => (
+                DynamicFunctionKind::GeneratorFunction,
+                Arc::from("<runtime GeneratorFunction>"),
+            ),
+        };
+        let dynamic_source =
+            DynamicFunctionSource::new(kind, &parameters, SourceFragment::new(&body_text));
         with_dynamic_function_source(
             dynamic_source,
             FrontendLimits::default(),
             |unit, _prepared| {
-                let context =
-                    CompilationContext::new_with_source_name(unit, Arc::from("<runtime Function>"))
-                        .map_err(engine_failure)?;
+                let context = CompilationContext::new_with_source_name(unit, source_name)
+                    .map_err(engine_failure)?;
                 context
                     .compile_dynamic_function_script(VerificationLimits::default())
                     .map(|tree| Arc::new(tree.verified_bytecode().clone()))
@@ -575,6 +581,36 @@ fn generated_source_units_are_bounded_before_compilation() {
             resource: RuntimeResource::DynamicSourceCodeUnits,
             limit: 27,
             observed: 28,
+        }
+    ));
+}
+
+#[test]
+fn generator_source_units_include_the_generator_wrapper_token() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let GeneratorFunction=(function*(){}).constructor; return GeneratorFunction();",
+    );
+
+    let error = context
+        .call_with_dynamic_function_compiler(
+            &run,
+            &[],
+            ExecutionLimits::default().with_dynamic_source_code_units(28),
+            &compiler(),
+        )
+        .expect_err("empty generator wrapper contains 29 UTF-16 code units");
+
+    assert!(matches!(
+        error,
+        ExecutionError::LimitExceeded {
+            resource: RuntimeResource::DynamicSourceCodeUnits,
+            limit: 28,
+            observed: 29,
         }
     ));
 }

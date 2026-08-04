@@ -46,7 +46,10 @@ pub use error::{
     ExecutionError, HandleError, HandleKind, InstallError, JsException, JsStackFrame, RuntimeError,
     RuntimeResource, ValueKind,
 };
-pub use host::{OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource};
+pub use host::{
+    DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,
+    OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
+};
 pub use interrupt::{INTERRUPT_POLL_INTERVAL, InterruptHandler};
 pub use number::JsNumber;
 pub use predefined_atoms::PredefinedAtom;

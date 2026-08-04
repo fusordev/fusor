@@ -39,9 +39,30 @@ fn ordinary_dynamic_function_is_a_synchronous_script_with_a_named_child() {
 }
 
 #[test]
-fn nonordinary_dynamic_function_families_remain_typed_fail_closed() {
+fn synchronous_dynamic_generator_is_a_script_with_a_generator_child() {
+    let plan = storage_result(DynamicFunctionKind::GeneratorFunction, "yield 1;")
+        .expect("dynamic GeneratorFunction storage");
+
+    assert_eq!(plan.kind(), CompilationUnitKind::Script);
+    assert_eq!(
+        plan.executables()[0].kind(),
+        ExecutableKind::Script {
+            asynchronous: false
+        }
+    );
+    assert_eq!(
+        plan.executables()[1].kind(),
+        ExecutableKind::Function {
+            asynchronous: false,
+            generator: true
+        }
+    );
+    assert_eq!(plan.executables()[1].name(), Some("anonymous"));
+}
+
+#[test]
+fn asynchronous_dynamic_function_families_remain_typed_fail_closed() {
     for kind in [
-        DynamicFunctionKind::GeneratorFunction,
         DynamicFunctionKind::AsyncFunction,
         DynamicFunctionKind::AsyncGeneratorFunction,
     ] {

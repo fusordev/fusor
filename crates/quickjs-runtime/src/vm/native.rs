@@ -1076,7 +1076,7 @@ struct DynamicFunctionServiceUnavailable;
 
 impl fmt::Display for DynamicFunctionServiceUnavailable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("no ordinary dynamic-Function compiler was supplied for this execution")
+        formatter.write_str("no dynamic-function compiler was supplied for this execution")
     }
 }
 
@@ -1341,7 +1341,8 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
-        NativeFunctionKind::OrdinaryFunctionConstructor => {
+        NativeFunctionKind::OrdinaryFunctionConstructor
+        | NativeFunctionKind::GeneratorFunctionConstructor => {
             let Some(compiler) = compiler else {
                 return Err(NativeFailure::Execution(
                     DynamicFunctionCompileFailure::Engine {
@@ -1350,7 +1351,7 @@ pub(super) fn dispatch_native_call_with_frames(
                     .into(),
                 ));
             };
-            let origin = origin.unwrap_or_else(native_function_host_origin);
+            let origin = origin.unwrap_or_else(|| dynamic_function_host_origin(native.kind));
             begin_function_source_conversion(
                 runtime,
                 native,
@@ -2468,18 +2469,6 @@ pub(super) fn dispatch_native_call_with_frames(
                 origin.unwrap_or_else(native_function_host_origin),
                 active_frame_values,
             )
-        }
-        NativeFunctionKind::GeneratorFunctionConstructor => {
-            Err(NativeFailure::Abrupt(PendingException {
-                realm: native.realm,
-                payload: PendingExceptionPayload::EngineError {
-                    kind: ExceptionKind::TypeError,
-                    message: JsString::from_utf8(
-                        "dynamic GeneratorFunction compilation is not implemented",
-                    )?,
-                },
-                origin: origin.unwrap_or_else(native_function_host_origin),
-            }))
         }
         NativeFunctionKind::FunctionPrototypeToString => {
             let StoredValue::Function(function) = inputs.receiver else {

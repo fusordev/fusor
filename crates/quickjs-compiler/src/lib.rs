@@ -10,6 +10,18 @@
 mod lowering;
 mod storage;
 
+pub(crate) const fn is_synchronous_dynamic_function_goal(
+    goal: quickjs_frontend::CompilationGoal<'_>,
+) -> bool {
+    matches!(
+        goal,
+        quickjs_frontend::CompilationGoal::DynamicFunction(
+            quickjs_frontend::DynamicFunctionKind::Function
+                | quickjs_frontend::DynamicFunctionKind::GeneratorFunction
+        )
+    )
+}
+
 pub use lowering::{
     CompilationContext, CompilationExecutable, CompiledClosureSource, CompiledClosureVariable,
     CompiledConstant, CompiledFunction, CompiledFunctionConstant, CompiledFunctionTree,

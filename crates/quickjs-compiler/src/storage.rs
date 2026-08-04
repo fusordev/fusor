@@ -82,7 +82,7 @@ impl ResolvedReferenceId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompilationUnitKind {
     /// A Script root, including host-loaded global Script and the internal
-    /// ordinary dynamic-Function wrapper Script.
+    /// synchronous dynamic-function wrapper Script.
     Script,
     /// An ECMAScript Module.
     Module,
@@ -699,7 +699,7 @@ impl StoragePlan {
 pub enum UnsupportedFeature {
     /// Any eval compilation goal.
     EvalCompilationGoal,
-    /// A nonordinary dynamic-function constructor family.
+    /// An unsupported dynamic-function constructor family.
     DynamicFunctionKind(DynamicFunctionKind),
     /// A syntactic bare `eval(...)` call.
     DirectEval,
@@ -919,7 +919,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     span: root_span,
                 });
             }
-            CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) => (
+            CompilationGoal::DynamicFunction(
+                DynamicFunctionKind::Function | DynamicFunctionKind::GeneratorFunction,
+            ) => (
                 CompilationUnitKind::Script,
                 ExecutableKind::Script {
                     asynchronous: false,
@@ -1662,8 +1664,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         match self.kind {
             CompilationUnitKind::Script => match kind {
                 DeclarationKind::Let | DeclarationKind::Const
-                    if self.unit.goal()
-                        == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) =>
+                    if crate::is_synchronous_dynamic_function_goal(self.unit.goal()) =>
                 {
                     Ok(StoragePlacement::Local)
                 }

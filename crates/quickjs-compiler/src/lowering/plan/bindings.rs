@@ -1,13 +1,12 @@
 use super::super::{
     ArgumentSlot, AssignmentExpression, AssignmentOperator, AssignmentTarget, BindingId,
-    BindingIdentifier, BindingPattern, BranchKind, CompilationContext, CompilationGoal,
-    CompiledConstantPool, DestructuringBindingInitialization, DynamicFunctionKind, ExecutableId,
-    Expression, FinalOpcode, ForStatementLeft, FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan,
-    IdentifierReference, LeafCompilationError, LocalSlot, NativeReferenceId, Operands,
-    PlannedControlFlow, PlannedInstruction, RealmGlobalId, ReferenceAccess, ReferenceId, Span,
-    StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature, VariableDeclaration,
-    VariableDeclarationKind, VariableDeclarator, WritePolicy, anonymous_named_evaluation_span,
-    binary_opcode, unsupported,
+    BindingIdentifier, BindingPattern, BranchKind, CompilationContext, CompiledConstantPool,
+    DestructuringBindingInitialization, ExecutableId, Expression, FinalOpcode, ForStatementLeft,
+    FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError,
+    LocalSlot, NativeReferenceId, Operands, PlannedControlFlow, PlannedInstruction, RealmGlobalId,
+    ReferenceAccess, ReferenceId, Span, StoragePlacement, SymbolId, UnresolvedGlobalId,
+    UnsupportedLeafFeature, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
+    WritePolicy, anonymous_named_evaluation_span, binary_opcode, unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -1217,7 +1216,7 @@ impl CompilationContext<'_, '_, '_> {
                 span: Some(span),
             });
         }
-        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) {
+        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal()) {
             return unsupported(UnsupportedLeafFeature::UnresolvedReference, span);
         }
         let global = tree_layout.realm_globals.for_unresolved(unresolved).ok_or(
@@ -1246,7 +1245,7 @@ impl CompilationContext<'_, '_, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
     ) -> Result<LoweredReference, LeafCompilationError> {
-        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) {
+        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal()) {
             return unsupported(UnsupportedLeafFeature::GlobalEnvironment, span);
         }
         let global = tree_layout.realm_globals.for_binding(binding).ok_or(

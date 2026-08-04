@@ -3,7 +3,7 @@ use std::sync::Arc;
 use quickjs_bytecode::{
     BytecodeGraphVerificationLimits, FunctionGraphVerificationLimits, VerificationLimits,
 };
-use quickjs_frontend::{CompilationGoal, DynamicFunctionKind, ParsedUnit};
+use quickjs_frontend::ParsedUnit;
 
 use crate::storage::{
     CompilerError, Executable, ExecutableId, PlannedStorage, StoragePlan, build_planned_storage,
@@ -229,8 +229,8 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         self.compile_subtree_with_all_limits(root, limits, graph_limits, bytecode_limits)
     }
 
-    /// Lowers the complete exact wrapper Script for an ordinary dynamic
-    /// `Function` constructor invocation.
+    /// Lowers the complete exact wrapper Script for a supported synchronous
+    /// dynamic-function constructor invocation.
     ///
     /// The Program root and every nested function template are compiled and
     /// final-verified as one indivisible authority. No API on this context can
@@ -238,7 +238,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
     ///
     /// # Errors
     ///
-    /// Rejects every non-dynamic source unit, nonordinary dynamic-function
+    /// Rejects every non-dynamic source unit, asynchronous dynamic-function
     /// family, unsupported declaration or syntax, resource limit, and staged
     /// or final verification failure. Program `var` and function declarations
     /// plus unresolved identifier references are typed as constructor-realm
@@ -256,7 +256,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         )
     }
 
-    /// Lowers a complete ordinary dynamic-Function Script with every staged
+    /// Lowers a complete synchronous dynamic-function Script with every staged
     /// and final graph limit explicit.
     ///
     /// # Errors
@@ -268,7 +268,7 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         graph_limits: FunctionGraphVerificationLimits,
         bytecode_limits: BytecodeGraphVerificationLimits,
     ) -> Result<CompiledFunctionTree, LeafCompilationError> {
-        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) {
+        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal()) {
             return unsupported(
                 UnsupportedLeafFeature::DynamicFunctionRequiresScriptRoot,
                 self.unit.program().span,

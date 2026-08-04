@@ -1,5 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
+use crate::storage::{
+    BindingId, CaptureSource, DeclarationKind, DeclarationPolicy, Executable, ExecutableId,
+    InitializationPolicy, StoragePlacement, WritePolicy,
+};
 use oxc_semantic::ScopeId;
 use quickjs_bytecode::{
     ClosureVariableDefinition as VerifiedClosureVariableDefinition,
@@ -10,12 +14,6 @@ use quickjs_bytecode::{
     CompilerWritePolicy as VerifiedWritePolicy, FunctionGraphVerificationLimits,
     FunctionTemplateId, ScopeLink, UnverifiedCompilerFunction, UnverifiedCompilerFunctionGraph,
     VariableDefinition, VerifiedCompilerFunctionGraph, verify_compiler_function_graph,
-};
-use quickjs_frontend::{CompilationGoal, DynamicFunctionKind};
-
-use crate::storage::{
-    BindingId, CaptureSource, DeclarationKind, DeclarationPolicy, Executable, ExecutableId,
-    InitializationPolicy, StoragePlacement, WritePolicy,
 };
 
 use super::{
@@ -703,8 +701,7 @@ impl CompilationContext<'_, '_, '_> {
                     id,
                 )?)
             } else {
-                if self.unit.goal()
-                    != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
+                if !crate::is_synchronous_dynamic_function_goal(self.unit.goal())
                     || executable.index() != 0
                 {
                     return Err(LeafCompilationError::SemanticInvariant {

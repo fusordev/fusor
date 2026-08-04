@@ -33,6 +33,7 @@ use super::*;
 
 pub(super) fn completed_dynamic_function_source(
     arguments: Vec<StoredValue>,
+    family: DynamicFunctionFamily,
 ) -> Result<OrdinaryDynamicFunctionSource, NativeFailure> {
     let mut converted = Vec::new();
     converted
@@ -51,7 +52,8 @@ pub(super) fn completed_dynamic_function_source(
         converted.push(argument);
     }
     if converted.is_empty() {
-        return Ok(OrdinaryDynamicFunctionSource::new(
+        return Ok(OrdinaryDynamicFunctionSource::for_family(
+            family,
             Arc::from([]),
             JsString::empty(),
         ));
@@ -59,7 +61,8 @@ pub(super) fn completed_dynamic_function_source(
     let body = converted.pop().ok_or(EngineFault::RuntimeInvariant {
         message: "nonempty dynamic Function arguments lost their body",
     })?;
-    Ok(OrdinaryDynamicFunctionSource::new(
+    Ok(OrdinaryDynamicFunctionSource::for_family(
+        family,
         Arc::from(converted),
         body,
     ))
@@ -70,7 +73,7 @@ pub(super) fn completed_dynamic_function_source(
     clippy::too_many_lines,
     reason = "verified compilation, installation, rollback, and frame admission form one failure-atomic boundary"
 )]
-pub(super) fn finish_ordinary_function_constructor(
+pub(super) fn finish_dynamic_function_constructor(
     runtime: &mut Runtime,
     native: NativeFunction,
     construction: Option<FunctionId>,
@@ -83,6 +86,7 @@ pub(super) fn finish_ordinary_function_constructor(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     execution_budget.charge_dynamic_compilation(&source)?;
+    let family = source.family();
     let authority = match compiler.compile(source) {
         Ok(authority) => authority,
         Err(DynamicFunctionCompileFailure::Syntax { message }) => {
@@ -176,6 +180,7 @@ pub(super) fn finish_ordinary_function_constructor(
     frame.dynamic_return = Some(DynamicFunctionReturn {
         root: installed,
         realm: native.realm,
+        family,
         construction,
         origin: Some(origin),
     });
@@ -688,12 +693,23 @@ fn native_function_name_to_string(
 }
 
 pub(super) fn native_function_host_origin() -> JsStackFrame {
+    dynamic_function_host_origin(NativeFunctionKind::OrdinaryFunctionConstructor)
+}
+
+pub(super) fn dynamic_function_host_origin(kind: NativeFunctionKind) -> JsStackFrame {
+    let (source_name, function_name, end) = match kind {
+        NativeFunctionKind::OrdinaryFunctionConstructor => ("<native Function>", "Function", 8),
+        NativeFunctionKind::GeneratorFunctionConstructor => {
+            ("<native GeneratorFunction>", "GeneratorFunction", 17)
+        }
+        _ => ("<native dynamic function>", "dynamic function", 16),
+    };
     JsStackFrame::new(
         FunctionTemplateId::new(0),
         BytecodePc::ZERO,
-        Arc::from("<native Function>"),
-        Arc::from("Function"),
-        SourceByteSpan::new(0, 8),
+        Arc::from(source_name),
+        Arc::from(function_name),
+        SourceByteSpan::new(0, end),
     )
 }
 
@@ -707,12 +723,17 @@ fn retire_failed_dynamic_root(
 }
 
 pub(super) fn dynamic_function_source_code_units(source: &OrdinaryDynamicFunctionSource) -> u64 {
-    const FIXED_WRAPPER_CODE_UNITS: u64 = 28;
+    const FUNCTION_WRAPPER_CODE_UNITS: u64 = 28;
+    const GENERATOR_WRAPPER_CODE_UNITS: u64 = 29;
+    let wrapper_units = match source.family() {
+        DynamicFunctionFamily::Function => FUNCTION_WRAPPER_CODE_UNITS,
+        DynamicFunctionFamily::GeneratorFunction => GENERATOR_WRAPPER_CODE_UNITS,
+    };
     let parameter_units = source.parameters().iter().fold(0_u64, |total, parameter| {
         total.saturating_add(u64::from(parameter.len()))
     });
     let separator_units = usize_to_u64(source.parameters().len().saturating_sub(1));
-    FIXED_WRAPPER_CODE_UNITS
+    wrapper_units
         .saturating_add(parameter_units)
         .saturating_add(separator_units)
         .saturating_add(u64::from(source.body().len()))
@@ -752,7 +773,7 @@ pub(super) fn finish_dynamic_function_return(
     value: StoredValue,
 ) -> Result<DynamicFunctionCompletion, ExecutionError> {
     let completion = if let Some(new_target) = dynamic.construction {
-        apply_dynamic_constructor_prototype(runtime, new_target, value)
+        apply_dynamic_constructor_prototype(runtime, new_target, dynamic.family, value)
     } else {
         Ok(value)
     };
@@ -811,6 +832,7 @@ impl From<JsStringError> for ConstructorCompletionError {
 fn apply_dynamic_constructor_prototype(
     runtime: &mut Runtime,
     new_target: FunctionId,
+    family: DynamicFunctionFamily,
     completion: StoredValue,
 ) -> Result<StoredValue, ConstructorCompletionError> {
     let target = match &completion {
@@ -843,7 +865,14 @@ fn apply_dynamic_constructor_prototype(
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             let realm = runtime.function_realm(new_target)?;
-            HeapReference::Function(runtime.realm_function_prototype(realm)?)
+            match family {
+                DynamicFunctionFamily::Function => {
+                    HeapReference::Function(runtime.realm_function_prototype(realm)?)
+                }
+                DynamicFunctionFamily::GeneratorFunction => {
+                    HeapReference::Object(runtime.realm_generator_function_prototype(realm)?)
+                }
+            }
         }
     };
     if !runtime.replace_prototype_checked(target, Some(prototype))? {

@@ -35,9 +35,9 @@ use quickjs_bytecode::{
 
 use crate::runtime::StringHtmlMethod;
 use crate::{
-    ArrayIndex, BigIntError, Context, DynamicFunctionCompileFailure, EngineFault, ExceptionKind,
-    ExecutionError, Function, HandleError, HandleKind, JsBigInt, JsException, JsNumber,
-    JsStackFrame, JsString, JsStringError, JsValue, MAX_STRING_CODE_UNITS,
+    ArrayIndex, BigIntError, Context, DynamicFunctionCompileFailure, DynamicFunctionFamily,
+    EngineFault, ExceptionKind, ExecutionError, Function, HandleError, HandleKind, JsBigInt,
+    JsException, JsNumber, JsStackFrame, JsString, JsStringError, JsValue, MAX_STRING_CODE_UNITS,
     OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey,
     PropertyLayout, Runtime, RuntimeError, RuntimeResource,
     conversion::{
@@ -144,8 +144,8 @@ impl ExecutionLimits {
         self
     }
 
-    /// Replaces the maximum ordinary dynamic-Function compilations in one
-    /// interpreter session.
+    /// Replaces the maximum dynamic-function compilations in one interpreter
+    /// session.
     #[must_use]
     pub const fn with_dynamic_compilations(mut self, maximum: u64) -> Self {
         self.dynamic_compilations = maximum;
@@ -315,6 +315,7 @@ impl SyntheticNativeFrame {
 struct DynamicFunctionReturn {
     root: InstalledRoot,
     realm: RealmId,
+    family: DynamicFunctionFamily,
     construction: Option<FunctionId>,
     origin: Option<JsStackFrame>,
 }
@@ -2217,8 +2218,8 @@ impl Context<'_> {
         self.call_with_optional_dynamic_function_compiler(function, arguments, limits, None)
     }
 
-    /// Invokes a runtime function with an immutable ordinary dynamic-Function
-    /// compiler available to nested `%Function%` calls.
+    /// Invokes a runtime function with an immutable dynamic-function compiler
+    /// available to nested `%Function%` and `%GeneratorFunction%` calls.
     ///
     /// The compiler receives only owned source strings and returns only a
     /// complete [`quickjs_bytecode::VerifiedBytecode`] authority. It never

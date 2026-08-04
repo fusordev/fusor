@@ -78,10 +78,11 @@ does not imply complete ECMAScript or QuickJS compatibility.
   bindings/captures, closures, expressions, statements, labels, `switch`,
   classic `for`, `for-in`, synchronous `for-of`, calls/spread, destructuring,
   exceptions, and `try`/`catch`/`finally`.
-- [x] Synchronous generator functions and methods lower plain `yield` and
-  delegated `yield*` to verified suspension programs. Typed iterator records
-  preserve resume-mode forwarding, exact iterator-result identity, method
-  absence, object validation, `finally`, and abrupt-close order.
+- [x] Synchronous generator functions, methods, and dynamic
+  `GeneratorFunction` wrappers lower plain `yield` and delegated `yield*` to
+  verified suspension programs. Typed iterator records preserve resume-mode
+  forwarding, exact iterator-result identity, method absence, object
+  validation, `finally`, and abrupt-close order.
 - [x] Runtime execution uses explicit frame and continuation stacks for
   bytecode/native calls, constructors, abrupt completion, iterator closing,
   coercion re-entry, and verified stack traces. Bound receiver/argument
@@ -102,11 +103,12 @@ does not imply complete ECMAScript or QuickJS compatibility.
   own-key phase order, prototype mutation, extensibility/integrity levels,
   object literal `__proto__`, Array exotic `length`, holes, and primitive String
   indexed properties.
-- [x] Ordinary functions/constructors, lexical capture and TDZ, ordinary dynamic
-  `Function`, `call`/`apply`/`bind`, `instanceof`, rest/default/destructured
-  parameters, separate parameter/body environments, strict and mapped
-  `arguments` objects, `Function.prototype` legacy poison accessors backed by a
-  shared `%ThrowTypeError%`, and admitted `NamedEvaluation` forms.
+- [x] Ordinary functions/constructors, lexical capture and TDZ, dynamic
+  `Function` and synchronous `GeneratorFunction`, `call`/`apply`/`bind`,
+  `instanceof`, rest/default/destructured parameters, separate parameter/body
+  environments, strict and mapped `arguments` objects, `Function.prototype`
+  legacy poison accessors backed by a shared `%ThrowTypeError%`, and admitted
+  `NamedEvaluation` forms.
 - [x] Synchronous iterator protocols, Array/String iterators, array and call
   spread, destructuring, `for-of`, `IteratorClose`, and original-abrupt-
   completion precedence use typed, same-site verifier state.
@@ -175,9 +177,11 @@ does not imply complete ECMAScript or QuickJS compatibility.
   chains, reentrancy rejection, all suspension states, yielding `finally`,
   nested iterator close, and `yield*` delegation across `next`/`return`/`throw`.
   Suspended frames and cached delegate methods are GC-traced; iterator-result
-  admission remains failure-atomic.
-- [ ] Add dynamic `GeneratorFunction` compilation, async functions, async
-  generators, and their dynamic constructors on verified continuations.
+  admission remains failure-atomic. Dynamic `GeneratorFunction` preserves
+  source coercion order, syntax rejection, metadata, and `newTarget` prototype
+  selection through the same bounded compiler service.
+- [ ] Add async functions, async generators, and their dynamic constructors on
+  verified continuations.
 - [ ] Implement module linking/evaluation, cycles, resolver semantics, dynamic
   import, and top-level `await`. Module parsing alone is not an execution claim.
 - [ ] Finish the Rust embedding API, ESM REPL, `qjs`, Rust-native `qjsc`,
@@ -248,7 +252,7 @@ QuickJS `qjs` or `qjsc`. Current corpus results are:
 | Legacy `Object.prototype` | 15/15, 15/15 feature tags |
 | Annex B String HTML | 6/6, 18/18 feature tags |
 | Promise core | 29/29, 46/46 feature tags |
-| Synchronous generators | 16/16, 37/37 feature tags |
+| Synchronous generators | 18/18, 43/43 feature tags |
 
 The parser gate also fails for an uncovered pinned production, uncovered
 reachable diagnostic, falsely unreachable diagnostic, or changed oracle

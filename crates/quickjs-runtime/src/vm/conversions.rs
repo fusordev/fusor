@@ -708,8 +708,20 @@ pub(super) fn advance_function_source_conversion(
 
     loop {
         if state.index == state.arguments.len() {
-            let source = completed_dynamic_function_source(state.arguments)?;
-            return finish_ordinary_function_constructor(
+            let family = match state.native.kind {
+                NativeFunctionKind::OrdinaryFunctionConstructor => DynamicFunctionFamily::Function,
+                NativeFunctionKind::GeneratorFunctionConstructor => {
+                    DynamicFunctionFamily::GeneratorFunction
+                }
+                _ => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "dynamic source conversion has a nondynamic constructor",
+                    }
+                    .into());
+                }
+            };
+            let source = completed_dynamic_function_source(state.arguments, family)?;
+            return finish_dynamic_function_constructor(
                 runtime,
                 state.native,
                 state.construction,

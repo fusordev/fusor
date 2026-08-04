@@ -1,10 +1,9 @@
 use quickjs_frontend::Span;
 
 use super::super::{
-    AstKind, CompilationContext, CompilationGoal, CompilationUnitKind, DynamicFunctionKind,
-    Executable, ExecutableId, ExecutableKind, Expression, Function, FunctionType,
-    LeafCompilationError, NodeId, ParsedUnit, Program, PropertyKind, UnsupportedLeafFeature,
-    unsupported,
+    AstKind, CompilationContext, CompilationUnitKind, Executable, ExecutableId, ExecutableKind,
+    Expression, Function, FunctionType, LeafCompilationError, NodeId, ParsedUnit, Program,
+    PropertyKind, UnsupportedLeafFeature, unsupported,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,7 +86,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 function.span,
             );
         }
-        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
+        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal())
             && let Some(reference) = self
                 .planned
                 .plan
@@ -106,7 +105,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         &self,
         executable_id: ExecutableId,
     ) -> Result<(&Executable, &Program<'arena>), LeafCompilationError> {
-        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function) {
+        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal()) {
             return unsupported(
                 UnsupportedLeafFeature::DynamicFunctionRequiresScriptRoot,
                 self.unit.program().span,
@@ -160,7 +159,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             || self.planned.plan.kind() != CompilationUnitKind::Script
         {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "ordinary dynamic Function has one synchronous sloppy Script root",
+                invariant: "dynamic function has one synchronous sloppy Script root",
                 span: Some(program.span),
             });
         }

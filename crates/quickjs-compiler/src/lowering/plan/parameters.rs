@@ -1,14 +1,13 @@
 use oxc_semantic::ScopeId;
 
 use super::super::{
-    ArgumentSlot, AstKind, BindingPattern, BranchKind, CompilationContext, CompilationGoal,
-    CompiledConstantPool, DeclarationKind, DestructuringBindingInitialization, DynamicFunctionKind,
-    Executable, ExecutableId, ExecutableKind, Expression, ExpressionPlanner, FinalOpcode,
-    FrameLayout, FrameSlot, Function, FunctionPlanningContext, FunctionTreeLayout, FunctionType,
-    InitializationPolicy, LeafCompilationError, NodeId, Operands, PlannedControlFlow,
-    PlannedInstruction, ScopeEntryInitialization, Span, StoragePlacement, UnsupportedLeafFeature,
-    VerifiedBindingKind, WritePolicy, checked_function_index, compact_get_argument, plan_put_slot,
-    unsupported,
+    ArgumentSlot, AstKind, BindingPattern, BranchKind, CompilationContext, CompiledConstantPool,
+    DeclarationKind, DestructuringBindingInitialization, Executable, ExecutableId, ExecutableKind,
+    Expression, ExpressionPlanner, FinalOpcode, FrameLayout, FrameSlot, Function,
+    FunctionPlanningContext, FunctionTreeLayout, FunctionType, InitializationPolicy,
+    LeafCompilationError, NodeId, Operands, PlannedControlFlow, PlannedInstruction,
+    ScopeEntryInitialization, Span, StoragePlacement, UnsupportedLeafFeature, VerifiedBindingKind,
+    WritePolicy, checked_function_index, compact_get_argument, plan_put_slot, unsupported,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -623,8 +622,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        if self.unit.goal() != CompilationGoal::DynamicFunction(DynamicFunctionKind::Function)
-            || executable.index() != 0
+        if !crate::is_synchronous_dynamic_function_goal(self.unit.goal()) || executable.index() != 0
         {
             return Ok(());
         }

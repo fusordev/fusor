@@ -33,7 +33,7 @@ use quickjs_bytecode::{
     Binary64Constant, CompilerCaptureLayout, CompilerCapturedBinding, FunctionIndexDomains,
     UnverifiedFunctionHeader,
 };
-use quickjs_frontend::{CompilationGoal, DynamicFunctionKind, ParsedUnit, Span};
+use quickjs_frontend::{CompilationGoal, ParsedUnit, Span};
 
 use crate::storage::{
     BindingId, CompilationUnitKind, DeclarationKind, Executable, ExecutableId, ExecutableKind,
@@ -183,8 +183,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     fn function_tree_layout(&self) -> Result<FunctionTreeLayout, LeafCompilationError> {
         let seed = FunctionTreeLayoutSeed::new(FunctionTreeLayoutSeedInput {
             plan: &self.planned.plan,
-            allow_realm_globals: self.unit.goal()
-                == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function),
+            allow_realm_globals: crate::is_synchronous_dynamic_function_goal(self.unit.goal()),
         })?;
         let mut function_declarations =
             vec![None; self.planned.plan.bindings().len()].into_boxed_slice();

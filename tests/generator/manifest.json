@@ -97,6 +97,18 @@
       "covers": ["throw-done-completion"],
       "body": "let delegated = (function* () {})();\ndelegated.next = function() { return {value: 1, done: false}; };\ndelegated.throw = function(value) { return {value: value + 1, done: true}; };\nfunction* outer() { return (yield* delegated) + 1; }\nlet iterator = outer();\niterator.next();\nlet result = iterator.throw(4);\nreturn result.value + ':' + result.done;",
       "expect": {"kind": "string", "value": "6:true"}
+    },
+    {
+      "id": "dynamic-generator-function-converts-source-and-executes",
+      "covers": ["dynamic-generator-function", "dynamic-generator-call", "dynamic-generator-source-order", "dynamic-generator-metadata"],
+      "body": "let log = '';\nlet parameter = {toString() { log = log + 'parameter|'; return 'value'; }};\nlet body = {toString() { log = log + 'body|'; return 'yield value; return 9;'; }};\nlet GeneratorFunction = (function* () {}).constructor;\nlet generated = GeneratorFunction(parameter, body);\nlet iterator = generated(4);\nlet first = iterator.next();\nlet second = iterator.next();\nreturn log + first.value + ':' + first.done + '|' + second.value + ':' + second.done + '|' + generated.name + ':' + generated.length + '|' + (Object.getPrototypeOf(generated) === GeneratorFunction.prototype);",
+      "expect": {"kind": "string", "value": "parameter|body|4:false|9:true|anonymous:1|true"}
+    },
+    {
+      "id": "dynamic-generator-function-honors-new-target-prototype-fallback",
+      "covers": ["dynamic-generator-new-target", "dynamic-generator-fallback-prototype"],
+      "body": "let GeneratorFunction = (function* () {}).constructor;\nlet custom = function Custom() {};\nlet expected = {marker: 1};\ncustom.prototype = expected;\nlet first = Reflect.construct(GeneratorFunction, ['yield 1;'], custom);\ncustom.prototype = 0;\nlet second = Reflect.construct(GeneratorFunction, ['yield 2;'], custom);\nreturn (Object.getPrototypeOf(first) === expected) + '|' + (Object.getPrototypeOf(second) === GeneratorFunction.prototype);",
+      "expect": {"kind": "string", "value": "true|true"}
     }
   ]
 }

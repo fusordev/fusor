@@ -1,14 +1,14 @@
 use super::super::{
     ArrayExpression, ArrayExpressionElement, AssignmentExpression, AssignmentOperator,
     AssignmentTarget, AtomPoolIndex, BinaryOperator, BranchKind, CompilationContext,
-    CompilationGoal, CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel,
-    ConditionalExpression, DynamicFunctionKind, ExecutableId, Expression, FinalOpcode, FrameLayout,
-    Function, FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError,
-    LogicalExpression, LogicalOperator, LoweredReference, ObjectExpression, ObjectProperty,
-    ObjectPropertyKind, Operands, PlannedControlFlow, PlannedInstruction, PropertyKind,
-    SequenceExpression, SimpleAssignmentTarget, Span, UnaryExpression, UnaryOperator,
-    UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
-    object_method_or_accessor_span, unsupported,
+    CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel, ConditionalExpression,
+    ExecutableId, Expression, FinalOpcode, FrameLayout, Function, FunctionTreeLayout, GetSpan,
+    IdentifierReference, LeafCompilationError, LogicalExpression, LogicalOperator,
+    LoweredReference, ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands,
+    PlannedControlFlow, PlannedInstruction, PropertyKind, SequenceExpression,
+    SimpleAssignmentTarget, Span, UnaryExpression, UnaryOperator, UnsupportedLeafFeature,
+    UpdateExpression, UpdateOperator, compiled_static_property_key, object_method_or_accessor_span,
+    unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 
@@ -638,7 +638,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             },
         )?;
         let is_dynamic_function_authority =
-            self.unit.goal() == CompilationGoal::DynamicFunction(DynamicFunctionKind::Function);
+            crate::is_synchronous_dynamic_function_goal(self.unit.goal());
         let is_object_method = self
             .planned
             .identities

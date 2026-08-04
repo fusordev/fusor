@@ -19,12 +19,12 @@ use quickjs_frontend::{
     with_dynamic_function_source_and_prepared,
 };
 use quickjs_runtime::{
-    Context, DynamicFunctionCompileFailure, DynamicFunctionScriptError, ExecutionError,
-    ExecutionLimits, Function, JsString, JsValue, OrdinaryDynamicFunctionCompiler,
-    OrdinaryDynamicFunctionSource,
+    Context, DynamicFunctionCompileFailure, DynamicFunctionCompileRequest, DynamicFunctionCompiler,
+    DynamicFunctionFamily, DynamicFunctionScriptError, ExecutionError, ExecutionLimits, Function,
+    JsString, JsValue,
 };
 
-/// Resource limits applied across every ordinary dynamic-Function stage.
+/// Resource limits applied across every supported dynamic-function stage.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DynamicFunctionLimits {
     frontend: FrontendLimits,
@@ -101,7 +101,7 @@ impl DynamicFunctionLimits {
     }
 }
 
-/// Oxc-backed compiler service for runtime-created ordinary `Function` values.
+/// Oxc-backed compiler service for runtime-created synchronous functions.
 ///
 /// The service is immutable and carries only explicit resource limits. Each
 /// request is parsed in the isolated frontend, compiled as the exact dynamic
@@ -112,7 +112,7 @@ pub struct OxcDynamicFunctionCompiler {
 }
 
 impl OxcDynamicFunctionCompiler {
-    /// Creates an ordinary dynamic-Function compiler with explicit limits.
+    /// Creates a dynamic-function compiler with explicit limits.
     #[must_use]
     pub const fn new(limits: DynamicFunctionLimits) -> Self {
         Self { limits }
@@ -180,11 +180,15 @@ impl fmt::Display for RuntimeSourceFragment {
     }
 }
 
-impl OrdinaryDynamicFunctionCompiler for OxcDynamicFunctionCompiler {
+impl DynamicFunctionCompiler for OxcDynamicFunctionCompiler {
     fn compile(
         &self,
-        source: OrdinaryDynamicFunctionSource,
+        source: DynamicFunctionCompileRequest,
     ) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
+        let kind = match source.family() {
+            DynamicFunctionFamily::Function => DynamicFunctionKind::Function,
+            DynamicFunctionFamily::GeneratorFunction => DynamicFunctionKind::GeneratorFunction,
+        };
         let mut parameter_texts = Vec::new();
         parameter_texts
             .try_reserve_exact(source.parameters().len())
@@ -224,11 +228,7 @@ impl OrdinaryDynamicFunctionCompiler for OxcDynamicFunctionCompiler {
                 .iter()
                 .map(|text| SourceFragment::new(text.as_str())),
         );
-        let source = DynamicFunctionSource::new(
-            DynamicFunctionKind::Function,
-            &parameters,
-            SourceFragment::new(&body_text),
-        );
+        let source = DynamicFunctionSource::new(kind, &parameters, SourceFragment::new(&body_text));
         compile_dynamic_function_source(source, self.limits)
             .map(|compiled| compiled.authority)
             .map_err(map_service_compilation_error)
@@ -262,10 +262,10 @@ impl Error for DynamicFunctionCompilerError {
     }
 }
 
-/// Failure of the ordinary dynamic-Function host pipeline.
+/// Failure of the dynamic-function host pipeline.
 #[derive(Debug)]
 pub enum DynamicFunctionConstructionError {
-    /// A generator or async constructor family remains deliberately disabled.
+    /// An asynchronous constructor family remains deliberately disabled.
     UnsupportedKind {
         /// Rejected dynamic-function family.
         kind: DynamicFunctionKind,
@@ -366,14 +366,14 @@ struct CompiledDynamicFunctionSource {
     prepared: PreparedDynamicFunctionSource,
 }
 
-/// Constructs and executes one ordinary dynamic `Function` wrapper.
+/// Constructs and executes one supported dynamic-function wrapper.
 ///
 /// Inputs are already coerced UTF-8 source fragments. The complete exact
 /// wrapper is parsed in an isolated Oxc arena, lowered as a Script root,
 /// final-verified as one whole [`quickjs_bytecode::VerifiedBytecode`] graph,
 /// and installed in `context`'s realm. It never receives or captures a caller
-/// lexical frame and never uses eval bytecode. Generator and async families
-/// remain fail closed.
+/// lexical frame and never uses eval bytecode. Asynchronous families remain
+/// fail closed.
 ///
 /// The return type is the Script completion rather than `Function`: compatible
 /// source can escape the synthetic wrapper and produce another object.
@@ -396,7 +396,7 @@ pub fn construct_dynamic_function(
         authority,
         prepared,
     } = compiled;
-    let dynamic_service: Arc<dyn OrdinaryDynamicFunctionCompiler> =
+    let dynamic_service: Arc<dyn DynamicFunctionCompiler> =
         Arc::new(OxcDynamicFunctionCompiler::new(limits));
     let value = match context.execute_dynamic_function_script_with_dynamic_function_compiler(
         authority,
@@ -412,8 +412,8 @@ pub fn construct_dynamic_function(
     Ok(DynamicFunctionCompletion { value, prepared })
 }
 
-/// Calls a runtime function with the published Oxc dynamic-Function compiler
-/// available to every nested `%Function%` invocation.
+/// Calls a runtime function with the published Oxc dynamic-function compiler
+/// available to every nested `%Function%` and `%GeneratorFunction%` invocation.
 ///
 /// One immutable [`Arc`] service is shared for the complete iterative
 /// interpreter session. Generated functions compile in the native
@@ -429,7 +429,7 @@ pub fn call_with_dynamic_function_support(
     arguments: &[JsValue],
     limits: DynamicFunctionLimits,
 ) -> Result<JsValue, ExecutionError> {
-    let dynamic_service: Arc<dyn OrdinaryDynamicFunctionCompiler> =
+    let dynamic_service: Arc<dyn DynamicFunctionCompiler> =
         Arc::new(OxcDynamicFunctionCompiler::new(limits));
     context.call_with_dynamic_function_compiler(
         function,
@@ -447,7 +447,10 @@ fn compile_dynamic_function_source(
     source: DynamicFunctionSource<'_>,
     limits: DynamicFunctionLimits,
 ) -> Result<CompiledDynamicFunctionSource, DynamicFunctionConstructionError> {
-    if source.kind() != DynamicFunctionKind::Function {
+    if !matches!(
+        source.kind(),
+        DynamicFunctionKind::Function | DynamicFunctionKind::GeneratorFunction
+    ) {
         return Err(DynamicFunctionConstructionError::UnsupportedKind {
             kind: source.kind(),
         });
@@ -457,9 +460,23 @@ fn compile_dynamic_function_source(
         source,
         limits.frontend,
         move |unit, _prepared| {
-            let compiler =
-                CompilationContext::new_with_source_name(unit, Arc::from("<dynamic Function>"))
-                    .map_err(DynamicFunctionCompilerError::Planning)?;
+            let source_name: Arc<str> = match source.kind() {
+                DynamicFunctionKind::Function => Arc::from("<dynamic Function>"),
+                DynamicFunctionKind::GeneratorFunction => Arc::from("<dynamic GeneratorFunction>"),
+                DynamicFunctionKind::AsyncFunction
+                | DynamicFunctionKind::AsyncGeneratorFunction => {
+                    return Err(DynamicFunctionCompilerError::Planning(
+                        CompilerError::Unsupported {
+                            feature: quickjs_compiler::UnsupportedFeature::DynamicFunctionKind(
+                                source.kind(),
+                            ),
+                            span: unit.program().span,
+                        },
+                    ));
+                }
+            };
+            let compiler = CompilationContext::new_with_source_name(unit, source_name)
+                .map_err(DynamicFunctionCompilerError::Planning)?;
             compiler
                 .compile_dynamic_function_script_with_all_limits(
                     limits.bytecode,

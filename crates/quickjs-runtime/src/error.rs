@@ -761,7 +761,7 @@ impl fmt::Display for EngineFault {
 
 impl Error for EngineFault {}
 
-/// Failure of the host-provided ordinary dynamic-Function compiler.
+/// Failure of the host-provided dynamic-function compiler.
 #[derive(Clone, Debug)]
 pub enum DynamicFunctionCompileFailure {
     /// Exact JavaScript syntax rejection suitable for a `SyntaxError`.
