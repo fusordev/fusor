@@ -462,13 +462,15 @@ impl AtomTable {
     /// interner slot when no other owner retained the identity.
     pub(crate) fn rollback_interned_string(&mut self, atom: Atom) {
         debug_assert_eq!(atom.kind(), AtomKind::String);
-        debug_assert_eq!(atom.predefined_atom(), None);
         debug_assert!(
             atom.0
                 .owner
                 .upgrade()
                 .is_some_and(|owner| { Arc::ptr_eq(&owner, &self.state) })
         );
+        if atom.predefined_atom().is_some() {
+            return;
+        }
         let description = atom
             .description()
             .expect("string atom has a description")
@@ -1346,6 +1348,20 @@ mod tests {
         );
         assert_eq!(table.collect_dead(), 1);
         assert_eq!(table.usage(), startup);
+    }
+
+    #[test]
+    fn rollback_preserves_a_reused_predefined_string_atom() {
+        let mut table = table();
+        let startup = table.usage();
+        let predefined = table.predefined(PredefinedAtom::SetProperty);
+        let transaction = table.intern_string(&string("set")).unwrap();
+
+        assert_eq!(transaction, predefined);
+        table.rollback_interned_string(transaction);
+
+        assert_eq!(table.usage(), startup);
+        assert_eq!(table.intern_string(&string("set")).unwrap(), predefined);
     }
 
     #[test]

@@ -36,6 +36,7 @@ const DEFAULT_MAX_HEAP_FUNCTIONS: u64 = 1_048_576;
 const DEFAULT_MAX_HEAP_OBJECTS: u64 = 1_048_576;
 const DEFAULT_MAX_OBJECT_PROPERTIES: u64 = 16_777_216;
 const DEFAULT_MAX_FOR_IN_ENTRIES: u64 = 16_777_216;
+const DEFAULT_MAX_COLLECTION_ENTRIES: u64 = 16_777_216;
 const DEFAULT_MAX_BINDING_CELLS: u64 = 1_048_576;
 const DEFAULT_MAX_REALM_GLOBAL_BINDINGS: u64 = 1_048_576;
 const DEFAULT_MAX_PUBLIC_ROOTS: u64 = 1_048_576;
@@ -60,6 +61,7 @@ pub struct RuntimeLimits {
     pub(crate) max_heap_objects: u64,
     pub(crate) max_object_properties: u64,
     pub(crate) max_for_in_entries: u64,
+    pub(crate) max_collection_entries: u64,
     pub(crate) max_binding_cells: u64,
     pub(crate) max_realm_global_bindings: u64,
     pub(super) max_public_roots: u64,
@@ -139,6 +141,13 @@ impl RuntimeLimits {
         self
     }
 
+    /// Replaces the maximum aggregate entries retained by keyed collections.
+    #[must_use]
+    pub const fn with_max_collection_entries(mut self, maximum: u64) -> Self {
+        self.max_collection_entries = maximum;
+        self
+    }
+
     /// Replaces the maximum live binding-cell count.
     #[must_use]
     pub const fn with_max_binding_cells(mut self, maximum: u64) -> Self {
@@ -195,6 +204,7 @@ impl Default for RuntimeLimits {
             max_heap_objects: DEFAULT_MAX_HEAP_OBJECTS,
             max_object_properties: DEFAULT_MAX_OBJECT_PROPERTIES,
             max_for_in_entries: DEFAULT_MAX_FOR_IN_ENTRIES,
+            max_collection_entries: DEFAULT_MAX_COLLECTION_ENTRIES,
             max_binding_cells: DEFAULT_MAX_BINDING_CELLS,
             max_realm_global_bindings: DEFAULT_MAX_REALM_GLOBAL_BINDINGS,
             max_public_roots: DEFAULT_MAX_PUBLIC_ROOTS,
@@ -220,6 +230,7 @@ pub struct RuntimeUsage {
     pub(super) heap_objects: u64,
     pub(super) object_properties: u64,
     pub(super) for_in_entries: u64,
+    pub(super) collection_entries: u64,
     pub(super) binding_cells: u64,
     pub(super) realm_global_bindings: u64,
     pub(super) public_roots: u64,
@@ -280,6 +291,12 @@ impl RuntimeUsage {
     #[must_use]
     pub const fn for_in_entries(self) -> u64 {
         self.for_in_entries
+    }
+
+    /// Returns entries retained by live keyed collections, including tombstones.
+    #[must_use]
+    pub const fn collection_entries(self) -> u64 {
+        self.collection_entries
     }
 
     /// Returns the number of live captured-binding cells.

@@ -175,6 +175,7 @@ impl Runtime {
             heap_objects: usize_to_u64(self.objects.len()),
             object_properties: self.object_properties,
             for_in_entries: self.for_in_entries,
+            collection_entries: self.collection_entries,
             binding_cells: usize_to_u64(self.cells.len()),
             realm_global_bindings: usize_to_u64(self.global_bindings.len()),
             public_roots: self.public_roots,
@@ -296,6 +297,7 @@ impl Runtime {
                 bigint,
                 string,
                 array,
+                map,
                 promise,
                 symbol,
                 iterators,
@@ -404,6 +406,18 @@ impl Runtime {
                     &mut marked_objects,
                     &mut work,
                 );
+                for reference in [
+                    HeapReference::Object(map.prototype),
+                    HeapReference::Object(map.iterator_prototype),
+                    HeapReference::Function(map.constructor),
+                ] {
+                    mark_heap_reference(
+                        reference,
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
                 mark_heap_reference(
                     HeapReference::Object(promise.prototype),
                     &mut marked_functions,
@@ -790,6 +804,22 @@ impl Runtime {
                                 &mut work,
                             );
                         }
+                        if let Some(current) = object.map_iterator_current() {
+                            mark_heap_reference(
+                                HeapReference::Object(current),
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
+                        for value in object.map_retained_values() {
+                            mark_stored_value(
+                                value,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut work,
+                            );
+                        }
                         if let Some(state) = object.promise_state() {
                             match state {
                                 PromiseState::Pending {
@@ -963,6 +993,9 @@ impl Runtime {
                 self.for_in_entries = self
                     .for_in_entries
                     .saturating_sub(usize_to_u64(object.for_in_entry_count()));
+                self.collection_entries = self
+                    .collection_entries
+                    .saturating_sub(usize_to_u64(object.map_entry_count()));
             }
         }
         for id in dead_cells {

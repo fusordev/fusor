@@ -41,11 +41,11 @@ use super::{
     ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FunctionId, FunctionImplementation,
     GeneratorIntrinsics, GlobalNumericFunction, HandleError, HandleKind, HashMap, HeapFunction,
     HeapObject, HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString,
-    LocaleStringMethod, MathMethod, NativeFunction, NativeFunctionKind, NumberFormat,
-    NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PromiseIntrinsics,
-    PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId,
-    RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError,
-    RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringHtmlMethod,
+    LocaleStringMethod, MapIntrinsics, MapMethod, MathMethod, NativeFunction, NativeFunctionKind,
+    NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom,
+    PromiseIntrinsics, PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Realm,
+    RealmHandle, RealmId, RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime,
+    RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringHtmlMethod,
     StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction, VecDeque, check_limit,
     predefined_string, usize_to_u64,
 };
@@ -549,6 +549,7 @@ impl Runtime {
             installed_constants: 0,
             object_properties: 0,
             for_in_entries: 0,
+            collection_entries: 0,
             public_roots: 0,
             collection_pending: false,
             interrupts: InterruptState::default(),
@@ -697,6 +698,11 @@ impl RealmBuildTransaction<'_> {
                 prototype: object(IntrinsicObjectId::ArrayPrototype),
                 constructor: function(NativeFunctionKind::ArrayConstructor),
             },
+            map: MapIntrinsics {
+                prototype: object(IntrinsicObjectId::MapPrototype),
+                constructor: function(NativeFunctionKind::MapConstructor),
+                iterator_prototype: object(IntrinsicObjectId::MapIteratorPrototype),
+            },
             promise: PromiseIntrinsics {
                 prototype: object(IntrinsicObjectId::PromisePrototype),
                 constructor: function(NativeFunctionKind::PromiseConstructor),
@@ -827,6 +833,11 @@ impl RealmBuildTransaction<'_> {
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,
             &graph.dynamic_atoms,
+            DeclarativeBatch::Maps,
+        )?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
             DeclarativeBatch::NamespaceObjects,
         )?;
         self.publish_intrinsic_schema_batch(
@@ -853,6 +864,11 @@ impl RealmBuildTransaction<'_> {
             intrinsic_schema,
             &graph.dynamic_atoms,
             DeclarativeBatch::PromiseGlobals,
+        )?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::MapGlobals,
         )?;
         Ok(())
     }

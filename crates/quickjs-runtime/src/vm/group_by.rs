@@ -23,7 +23,7 @@
  * THE SOFTWARE.
  */
 
-//! Resumable ECMA-262 `GroupBy` for `Object.groupBy`.
+//! Resumable ECMA-262 `GroupBy` for `Object.groupBy` and `Map.groupBy`.
 
 #[allow(
     clippy::wildcard_imports,
@@ -49,8 +49,19 @@ pub(super) enum GroupByStage {
     AwaitPropertyKey,
 }
 
-struct PropertyGroup {
-    key: PropertyKey,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GroupByKind {
+    Property,
+    Collection,
+}
+
+enum GroupKey {
+    Property(PropertyKey),
+    Collection(StoredValue),
+}
+
+struct ValueGroup {
+    key: GroupKey,
     elements: Vec<StoredValue>,
 }
 
@@ -62,7 +73,8 @@ pub(super) struct GroupByContinuation {
     next: Option<StoredValue>,
     result: Option<StoredValue>,
     value: Option<StoredValue>,
-    groups: Vec<PropertyGroup>,
+    groups: Vec<ValueGroup>,
+    kind: GroupByKind,
     index: u64,
     realm: RealmId,
     stage: GroupByStage,
@@ -72,7 +84,9 @@ pub(super) struct GroupByContinuation {
 impl GroupByContinuation {
     pub(super) fn retained_values(&self) -> u64 {
         let grouped = self.groups.iter().fold(0_u64, |count, group| {
-            count.saturating_add(usize_to_u64(group.elements.len()))
+            count
+                .saturating_add(usize_to_u64(group.elements.len()))
+                .saturating_add(u64::from(matches!(group.key, GroupKey::Collection(_))))
         });
         2_u64
             .saturating_add(u64::from(self.iterator.is_some()))
@@ -97,6 +111,9 @@ impl GroupByContinuation {
             trace_stored_value_root(value, mark);
         }
         for group in &self.groups {
+            if let GroupKey::Collection(key) = &group.key {
+                trace_stored_value_root(key, mark);
+            }
             for value in &group.elements {
                 trace_stored_value_root(value, mark);
             }
@@ -121,6 +138,54 @@ pub(super) fn begin_group_by(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    begin_group_by_kind(
+        runtime,
+        items,
+        callback,
+        GroupByKind::Property,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn begin_map_group_by(
+    runtime: &mut Runtime,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let items = arguments.take_first_or_undefined();
+    let callback = arguments.take_first_or_undefined();
+    begin_group_by_kind(
+        runtime,
+        items,
+        &callback,
+        GroupByKind::Collection,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared GroupBy entry retains its key-coercion kind and ordinary native-call authority"
+)]
+fn begin_group_by_kind(
+    runtime: &mut Runtime,
+    items: StoredValue,
+    callback: &StoredValue,
+    kind: GroupByKind,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
     if matches!(items, StoredValue::Undefined | StoredValue::Null) {
         return abrupt_group_by_type_error(realm, origin, "cannot convert to object");
     }
@@ -135,6 +200,7 @@ pub(super) fn begin_group_by(
         result: None,
         value: None,
         groups: Vec::new(),
+        kind,
         index: 0,
         realm,
         stage: GroupByStage::AwaitIteratorMethod,
@@ -228,6 +294,16 @@ pub(super) fn advance_group_by(
             call_group_by_callback(state, return_to)
         }
         GroupByStage::AwaitCallback => {
+            if state.kind == GroupByKind::Collection {
+                let key = canonicalize_collection_key(completion);
+                let value = state.value.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Map.groupBy callback completed without an iterator value",
+                })?;
+                add_value_to_group(&mut state.groups, GroupKey::Collection(key), value)?;
+                state.result = None;
+                state.index = state.index.saturating_add(1);
+                return call_group_by_next(runtime, state, return_to, execution_budget);
+            }
             state.stage = GroupByStage::AwaitPropertyKey;
             let conversion = begin_property_key_conversion(
                 runtime,
@@ -253,7 +329,7 @@ pub(super) fn advance_group_by(
             let value = state.value.take().ok_or(EngineFault::RuntimeInvariant {
                 message: "groupBy completed ToPropertyKey without an iterator value",
             })?;
-            add_value_to_property_group(&mut state.groups, property.key, value)?;
+            add_value_to_group(&mut state.groups, GroupKey::Property(property.key), value)?;
             state.result = None;
             state.index = state.index.saturating_add(1);
             call_group_by_next(runtime, state, return_to, execution_budget)
@@ -466,12 +542,15 @@ fn group_by_continuation(
     Ok(continuations)
 }
 
-fn add_value_to_property_group(
-    groups: &mut Vec<PropertyGroup>,
-    key: PropertyKey,
+fn add_value_to_group(
+    groups: &mut Vec<ValueGroup>,
+    key: GroupKey,
     value: StoredValue,
 ) -> Result<(), NativeFailure> {
-    if let Some(group) = groups.iter_mut().find(|group| group.key == key) {
+    if let Some(group) = groups
+        .iter_mut()
+        .find(|group| group_keys_equal(&group.key, &key))
+    {
         group
             .elements
             .try_reserve(1)
@@ -496,8 +575,26 @@ fn add_value_to_property_group(
             resource: RuntimeResource::FrameValues,
             additional: 1,
         })?;
-    groups.push(PropertyGroup { key, elements });
+    groups.push(ValueGroup { key, elements });
     Ok(())
+}
+
+fn group_keys_equal(left: &GroupKey, right: &GroupKey) -> bool {
+    match (left, right) {
+        (GroupKey::Property(left), GroupKey::Property(right)) => left == right,
+        (GroupKey::Collection(left), GroupKey::Collection(right)) => left.same_value_zero(right),
+        (GroupKey::Property(_), GroupKey::Collection(_))
+        | (GroupKey::Collection(_), GroupKey::Property(_)) => false,
+    }
+}
+
+fn canonicalize_collection_key(key: StoredValue) -> StoredValue {
+    match key {
+        StoredValue::Number(value) if value.as_f64() == 0.0 => {
+            StoredValue::Number(JsNumber::from_f64(0.0))
+        }
+        key => key,
+    }
 }
 
 fn finish_group_by(
@@ -505,26 +602,51 @@ fn finish_group_by(
     state: GroupByContinuation,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let target = runtime.allocate_ordinary_object_with_optional_prototype(None)?;
-    for group in state.groups {
-        let elements = runtime.allocate_array(state.realm, group.elements)?;
-        match define_static_property(
-            runtime,
-            &StoredValue::Object(target),
-            group.key,
-            StoredValue::Object(elements),
-            execution_budget,
-        )? {
-            PropertyWriteOutcome::Complete => {}
-            PropertyWriteOutcome::Setter { .. } | PropertyWriteOutcome::Failed(_) => {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "groupBy fresh result refused a data property",
+    match state.kind {
+        GroupByKind::Property => {
+            let target = runtime.allocate_ordinary_object_with_optional_prototype(None)?;
+            for group in state.groups {
+                let GroupKey::Property(key) = group.key else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Object.groupBy retained a collection key",
+                    }
+                    .into());
+                };
+                let elements = runtime.allocate_array(state.realm, group.elements)?;
+                match define_static_property(
+                    runtime,
+                    &StoredValue::Object(target),
+                    key,
+                    StoredValue::Object(elements),
+                    execution_budget,
+                )? {
+                    PropertyWriteOutcome::Complete => {}
+                    PropertyWriteOutcome::Setter { .. } | PropertyWriteOutcome::Failed(_) => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "groupBy fresh result refused a data property",
+                        }
+                        .into());
+                    }
                 }
-                .into());
             }
+            Ok(NativeDispatch::Immediate(StoredValue::Object(target)))
+        }
+        GroupByKind::Collection => {
+            let prototype = runtime.realm_map_prototype(state.realm)?;
+            let target = runtime.allocate_map_object(HeapReference::Object(prototype))?;
+            for group in state.groups {
+                let GroupKey::Collection(key) = group.key else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Map.groupBy retained a property key",
+                    }
+                    .into());
+                };
+                let elements = runtime.allocate_array(state.realm, group.elements)?;
+                runtime.map_set(target, key, StoredValue::Object(elements))?;
+            }
+            Ok(NativeDispatch::Immediate(StoredValue::Object(target)))
         }
     }
-    Ok(NativeDispatch::Immediate(StoredValue::Object(target)))
 }
 
 fn abrupt_group_by_type_error(

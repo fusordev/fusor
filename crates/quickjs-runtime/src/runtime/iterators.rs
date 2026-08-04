@@ -182,14 +182,15 @@ impl Runtime {
     pub(crate) fn prepare_iterator_result_allocation(
         &mut self,
         realm: RealmId,
-        entry_index: Option<u32>,
+        entry_key: Option<StoredValue>,
     ) -> Result<PreparedIteratorResultPlan, crate::ExecutionError> {
         let result_prototype = self.realm_object_prototype(realm)?;
-        let entry_prototype = entry_index
+        let entry_prototype = entry_key
+            .as_ref()
             .map(|_| self.realm_array_prototype(realm))
             .transpose()?;
-        let additional_objects = if entry_index.is_some() { 2 } else { 1 };
-        let additional_properties = if entry_index.is_some() { 5 } else { 2 };
+        let additional_objects = if entry_key.is_some() { 2 } else { 1 };
+        let additional_properties = if entry_key.is_some() { 5 } else { 2 };
         self.preflight_iterator_result_allocation(additional_objects, additional_properties)?;
 
         let layout = PropertyLayout::data(true, true, true);
@@ -221,9 +222,9 @@ impl Runtime {
                 additional: 2,
             })?;
 
-        let entry_pair = entry_index
+        let entry_pair = entry_key
             .zip(entry_prototype)
-            .map(|(entry_index, prototype)| {
+            .map(|(entry_key, prototype)| {
                 let mut pair = ObjectRecord::empty(Some(HeapReference::Object(prototype)));
                 pair.try_reserve_data(3)
                     .map_err(|_| crate::ExecutionError::AllocationFailed {
@@ -239,13 +240,7 @@ impl Runtime {
                     resource: RuntimeResource::ObjectProperties,
                     additional: 3,
                 })?;
-                for (index, value) in [
-                    StoredValue::Number(JsNumber::from_u32(entry_index)),
-                    StoredValue::Undefined,
-                ]
-                .into_iter()
-                .enumerate()
-                {
+                for (index, value) in [entry_key, StoredValue::Undefined].into_iter().enumerate() {
                     pair.append_data(
                         PropertyKey::from_index(
                             ArrayIndex::new(

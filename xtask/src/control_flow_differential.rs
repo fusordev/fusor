@@ -38,6 +38,7 @@ pub(crate) const DEFAULT_CALL_SPREAD_CORPUS: &str = "tests/call-spread/manifest.
 pub(crate) const DEFAULT_OBJECT_LEGACY_CORPUS: &str = "tests/object-legacy/manifest.json";
 pub(crate) const DEFAULT_PROMISE_CORE_CORPUS: &str = "tests/promise-core/manifest.json";
 pub(crate) const DEFAULT_STRING_HTML_CORPUS: &str = "tests/string-html/manifest.json";
+pub(crate) const DEFAULT_MAP_CORPUS: &str = "tests/map/manifest.json";
 pub(crate) const MAX_CONTROL_FLOW_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const CANDIDATE_WORKER_COMMAND: &str = "__control-flow-candidate-worker";
 pub(crate) const ASYNC_FUNCTION_CANDIDATE_WORKER_COMMAND: &str =
@@ -388,6 +389,22 @@ const STRING_HTML_REQUIRED_COVERAGE: &[&str] = &[
     "trim-aliases",
 ];
 
+const MAP_REQUIRED_COVERAGE: &[&str] = &[
+    "map-brand",
+    "map-constructor-close",
+    "map-constructor-no-close-on-step",
+    "map-constructor-order",
+    "map-delete-clear",
+    "map-for-each-reentry",
+    "map-group-by",
+    "map-group-order",
+    "map-insertion-order",
+    "map-live-iterator",
+    "map-new-target",
+    "map-same-value-zero",
+    "map-surface",
+];
+
 const PROMISE_CORE_REQUIRED_COVERAGE: &[&str] = &[
     "all-input-order",
     "all-settled-records",
@@ -562,6 +579,7 @@ enum RuntimeDifferentialSuite {
     ObjectLegacy,
     PromiseCore,
     StringHtml,
+    Map,
 }
 
 impl RuntimeDifferentialSuite {
@@ -579,6 +597,7 @@ impl RuntimeDifferentialSuite {
             Self::ObjectLegacy => "object-legacy",
             Self::PromiseCore => "promise-core",
             Self::StringHtml => "string-html",
+            Self::Map => "map",
         }
     }
 
@@ -596,6 +615,7 @@ impl RuntimeDifferentialSuite {
             Self::ObjectLegacy => OBJECT_LEGACY_REQUIRED_COVERAGE,
             Self::PromiseCore => PROMISE_CORE_REQUIRED_COVERAGE,
             Self::StringHtml => STRING_HTML_REQUIRED_COVERAGE,
+            Self::Map => MAP_REQUIRED_COVERAGE,
         }
     }
 
@@ -683,6 +703,13 @@ pub(crate) struct PromiseCoreDifferentialOptions {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct StringHtmlDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct MapDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -844,6 +871,15 @@ pub(crate) fn run_string_html_differential(
         &options.corpus,
         options.timeout,
         RuntimeDifferentialSuite::StringHtml,
+    )
+}
+
+pub(crate) fn run_map_differential(options: &MapDifferentialOptions) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::Map,
     )
 }
 
@@ -2443,6 +2479,20 @@ mod tests {
         )
         .expect("checked-in string-html manifest");
         assert_eq!(corpus.cases.len(), 6);
+    }
+
+    #[test]
+    fn checked_in_map_manifest_satisfies_the_strict_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/map/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in Map manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::Map,
+        )
+        .expect("checked-in Map manifest");
+        assert_eq!(corpus.cases.len(), 6);
+        assert_eq!(super::MAP_REQUIRED_COVERAGE.len(), 13);
     }
 
     #[test]

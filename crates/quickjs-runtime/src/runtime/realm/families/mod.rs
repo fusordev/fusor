@@ -9,6 +9,7 @@ mod globals;
 mod iterator;
 mod json;
 mod kernel;
+mod map;
 mod math;
 mod primitives;
 mod promise;
@@ -125,12 +126,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 31,
+                expected: 33,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 265,
+                expected: 281,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -166,6 +167,8 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::AsyncFunctionPrototype
             | IntrinsicObjectId::SymbolPrototype
             | IntrinsicObjectId::PromisePrototype
+            | IntrinsicObjectId::MapPrototype
+            | IntrinsicObjectId::MapIteratorPrototype
             | IntrinsicObjectId::Reflect
             | IntrinsicObjectId::Json
             | IntrinsicObjectId::Math
@@ -258,6 +261,11 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::PromisePrototypeThen
             | NativeFunctionKind::PromisePrototypeCatch
             | NativeFunctionKind::PromisePrototypeFinally
+            | NativeFunctionKind::MapConstructor
+            | NativeFunctionKind::MapGroupBy
+            | NativeFunctionKind::MapSpeciesGetter
+            | NativeFunctionKind::MapPrototype(_)
+            | NativeFunctionKind::MapIteratorNext
     )
 }
 
@@ -279,6 +287,8 @@ pub(super) enum DeclarativeBatch {
     SymbolGlobals,
     Promises,
     PromiseGlobals,
+    Maps,
+    MapGlobals,
     NamespaceObjects,
 }
 
@@ -351,6 +361,9 @@ pub(super) fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatc
     {
         return DeclarativeBatch::Promises;
     }
+    if is_map_identity(property.holder) || referenced_function.is_some_and(is_map_function) {
+        return DeclarativeBatch::Maps;
+    }
     if is_kernel_identity(property.holder) || referenced_function.is_some_and(is_kernel_function) {
         return DeclarativeBatch::Kernel;
     }
@@ -406,6 +419,7 @@ fn special_reference_batch(
         NativeFunctionKind::ArrayConstructor => Some(DeclarativeBatch::ArrayGlobals),
         NativeFunctionKind::SymbolConstructor => Some(DeclarativeBatch::SymbolGlobals),
         NativeFunctionKind::PromiseConstructor => Some(DeclarativeBatch::PromiseGlobals),
+        NativeFunctionKind::MapConstructor => Some(DeclarativeBatch::MapGlobals),
         NativeFunctionKind::OrdinaryFunctionConstructor | NativeFunctionKind::ObjectConstructor => {
             Some(DeclarativeBatch::KernelGlobals)
         }
@@ -465,6 +479,27 @@ const fn is_promise_identity(id: IntrinsicIdentity) -> bool {
         IntrinsicIdentity::Function(id) => is_promise_function(id),
         IntrinsicIdentity::Object(_) => false,
     }
+}
+
+const fn is_map_identity(id: IntrinsicIdentity) -> bool {
+    match id {
+        IntrinsicIdentity::Object(
+            IntrinsicObjectId::MapPrototype | IntrinsicObjectId::MapIteratorPrototype,
+        ) => true,
+        IntrinsicIdentity::Function(id) => is_map_function(id),
+        IntrinsicIdentity::Object(_) => false,
+    }
+}
+
+const fn is_map_function(id: IntrinsicFunctionId) -> bool {
+    matches!(
+        id.0,
+        NativeFunctionKind::MapConstructor
+            | NativeFunctionKind::MapGroupBy
+            | NativeFunctionKind::MapSpeciesGetter
+            | NativeFunctionKind::MapPrototype(_)
+            | NativeFunctionKind::MapIteratorNext
+    )
 }
 
 const fn is_promise_function(id: IntrinsicFunctionId) -> bool {
@@ -659,6 +694,8 @@ pub(super) const fn function_batch(id: IntrinsicFunctionId) -> DeclarativeBatch 
         DeclarativeBatch::Iterators
     } else if is_promise_function(id) {
         DeclarativeBatch::Promises
+    } else if is_map_function(id) {
+        DeclarativeBatch::Maps
     } else if matches!(
         id.0,
         NativeFunctionKind::SymbolConstructor
@@ -697,6 +734,7 @@ fn visit_object_specs(visit: ObjectSink<'_>) {
     async_generator::visit_objects(visit);
     symbol::visit_objects(visit);
     promise::visit_objects(visit);
+    map::visit_objects(visit);
     reflect::visit_objects(visit);
     json::visit_objects(visit);
     math::visit_objects(visit);
@@ -714,6 +752,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
     async_generator::visit_functions(visit);
     symbol::visit_functions(visit);
     promise::visit_functions(visit);
+    map::visit_functions(visit);
     reflect::visit_functions(visit);
     json::visit_functions(visit);
     math::visit_functions(visit);
@@ -733,6 +772,7 @@ fn visit_property_specs(visit: PropertySink<'_>) {
     async_generator::visit_properties(visit);
     symbol::visit_properties(visit);
     promise::visit_properties(visit);
+    map::visit_properties(visit);
     globals::visit_properties(visit);
     reflect::visit_properties(visit);
     json::visit_properties(visit);
@@ -843,8 +883,8 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 265);
-        assert_eq!(schema.constructor_prototypes.len(), 21);
+        assert_eq!(schema.specs().len(), 281);
+        assert_eq!(schema.constructor_prototypes.len(), 22);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]

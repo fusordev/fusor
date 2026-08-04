@@ -7,8 +7,8 @@
 
 use super::{
     ArrayCallback, ArrayCopier, ArrayFlatten, ArrayMutator, ArrayReduction, ArraySearch, ArraySort,
-    ArrayStatic, ErrorIntrinsicKind, GlobalNumericFunction, LocaleStringMethod, MathMethod,
-    NativeFunctionKind, NumberFormat, NumberPredicate, PredefinedAtom, PromiseStatic,
+    ArrayStatic, ErrorIntrinsicKind, GlobalNumericFunction, LocaleStringMethod, MapMethod,
+    MathMethod, NativeFunctionKind, NumberFormat, NumberPredicate, PredefinedAtom, PromiseStatic,
     PropertyLayout, ReflectMethod, StringMethod, UriFunction,
 };
 
@@ -38,13 +38,15 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     AsyncFunctionPrototype,
     SymbolPrototype,
     PromisePrototype,
+    MapPrototype,
+    MapIteratorPrototype,
     Reflect,
     Json,
     Math,
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 31] = [
+    pub(in crate::runtime) const ALL: [Self; 33] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -73,6 +75,8 @@ impl IntrinsicObjectId {
         Self::AsyncFunctionPrototype,
         Self::SymbolPrototype,
         Self::PromisePrototype,
+        Self::MapPrototype,
+        Self::MapIteratorPrototype,
         Self::Reflect,
         Self::Json,
         Self::Math,
@@ -123,6 +127,7 @@ pub(in crate::runtime) enum RealmNameId {
     ArrayIsArray,
     ArrayFromAsync,
     PromiseStatic(PromiseStatic),
+    MapMethod(MapMethod),
     ArraySort(ArraySort),
     ArrayFlatten(ArrayFlatten),
     MathMethod(MathMethod),

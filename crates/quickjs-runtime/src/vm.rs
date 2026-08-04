@@ -59,7 +59,7 @@ use crate::{
         BoundFunction, BytecodeFunction, CollectionRoot, EnvironmentBinding, ForInAdvance,
         FrameBindingAddress, FunctionImplementation, GlobalNumericFunction, HeapFunction,
         InstalledCode, InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod,
-        MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
+        MapMethod, MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
         PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
         PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
         PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
@@ -100,6 +100,7 @@ mod iterators;
 mod json_parse;
 mod json_stringify;
 mod locale_string;
+mod map;
 mod math;
 mod math_sum_precise;
 mod native;
@@ -127,9 +128,9 @@ use {
     array_statics::*, async_from_sync::*, async_generator::*, bigint_intrinsics::*, bindings::*,
     conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*,
     exceptions::*, execution::*, from_entries::*, generator::*, group_by::*, iterators::*,
-    json_parse::*, json_stringify::*, locale_string::*, math::*, math_sum_precise::*, native::*,
-    object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*, stack::*,
-    string_methods::*, string_raw::*, string_replace::*, uri::*,
+    json_parse::*, json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*,
+    native::*, object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*,
+    stack::*, string_methods::*, string_raw::*, string_replace::*, uri::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -383,6 +384,9 @@ enum NativeContinuation {
     AggregateError(AggregateErrorContinuation),
     FromEntries(Box<FromEntriesContinuation>),
     GroupBy(Box<GroupByContinuation>),
+    MapConstructor(Box<MapConstructorContinuation>),
+    MapForEach(Box<MapForEachContinuation>),
+    MapComputed(Box<MapComputedContinuation>),
     MathSumPrecise(Box<MathSumPreciseContinuation>),
     JsonParse(Box<JsonParseContinuation>),
     JsonStringify(Box<JsonStringifyContinuation>),
@@ -447,6 +451,9 @@ impl NativeContinuation {
             Self::AggregateError(state) => state.retained_values(),
             Self::FromEntries(state) => state.retained_values(),
             Self::GroupBy(state) => state.retained_values(),
+            Self::MapConstructor(state) => state.retained_values(),
+            Self::MapForEach(_) => MapForEachContinuation::retained_values(),
+            Self::MapComputed(_) => MapComputedContinuation::retained_values(),
             Self::MathSumPrecise(state) => state.retained_values(),
             Self::JsonParse(state) => state.retained_values(),
             Self::JsonStringify(state) => state.retained_values(),
@@ -494,6 +501,7 @@ impl NativeContinuation {
             Self::AggregateError(_)
                 | Self::FromEntries(_)
                 | Self::GroupBy(_)
+                | Self::MapConstructor(_)
                 | Self::ArrayStatic(_)
                 | Self::ArrayFromAsync(_)
                 | Self::PromiseCombinator(_)
@@ -735,6 +743,12 @@ enum IntrinsicGetContinuation {
         arguments: Vec<StoredValue>,
         origin: JsStackFrame,
     },
+    MapConstructor {
+        realm: RealmId,
+        new_target: FunctionId,
+        iterable: StoredValue,
+        origin: JsStackFrame,
+    },
     PromiseConstructor {
         realm: RealmId,
         new_target: FunctionId,
@@ -756,7 +770,7 @@ impl IntrinsicGetContinuation {
             Self::ArrayConstructor { arguments, .. } => {
                 1_u64.saturating_add(usize_to_u64(arguments.len()))
             }
-            Self::PromiseConstructor { .. } => 2,
+            Self::MapConstructor { .. } | Self::PromiseConstructor { .. } => 2,
             Self::ObjectPrototypeToString {
                 temporary_receiver, ..
             } => u64::from(temporary_receiver.is_some()),
@@ -1905,6 +1919,14 @@ fn trace_native_continuation_roots(
                     trace_stored_value_root(argument, mark);
                 }
             }
+            IntrinsicGetContinuation::MapConstructor {
+                new_target,
+                iterable,
+                ..
+            } => {
+                mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
+                trace_stored_value_root(iterable, mark);
+            }
             IntrinsicGetContinuation::PromiseConstructor {
                 new_target,
                 executor,
@@ -1924,6 +1946,9 @@ fn trace_native_continuation_roots(
         NativeContinuation::AggregateError(state) => state.trace_roots(mark),
         NativeContinuation::FromEntries(state) => state.trace_roots(mark),
         NativeContinuation::GroupBy(state) => state.trace_roots(mark),
+        NativeContinuation::MapConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::MapForEach(state) => state.trace_roots(mark),
+        NativeContinuation::MapComputed(state) => state.trace_roots(mark),
         NativeContinuation::MathSumPrecise(state) => state.trace_roots(mark),
         NativeContinuation::JsonParse(state) => state.trace_roots(mark),
         NativeContinuation::JsonStringify(state) => state.trace_roots(mark),

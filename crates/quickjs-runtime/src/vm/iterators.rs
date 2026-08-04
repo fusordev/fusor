@@ -86,7 +86,7 @@ fn iterator_method_call(
     iterator_getter_call(function, receiver, continuation, return_to, origin, None)
 }
 
-fn iterator_result(
+pub(super) fn iterator_result(
     runtime: &mut Runtime,
     realm: RealmId,
     value: StoredValue,
@@ -356,10 +356,13 @@ pub(super) fn finish_array_iterator_length(
     }
 
     let index = state.index;
-    state.prepared_result = Some(runtime.prepare_iterator_result_allocation(
-        state.realm,
-        matches!(state.kind, crate::object::ArrayIteratorKind::KeyAndValue).then_some(index),
-    )?);
+    state.prepared_result = Some(
+        runtime.prepare_iterator_result_allocation(
+            state.realm,
+            matches!(state.kind, crate::object::ArrayIteratorKind::KeyAndValue)
+                .then_some(StoredValue::Number(JsNumber::from_u32(index))),
+        )?,
+    );
     if matches!(state.kind, crate::object::ArrayIteratorKind::Key) {
         let prepared = state
             .prepared_result

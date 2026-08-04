@@ -186,6 +186,9 @@ pub(super) fn resume_iterator_abrupt_continuations(
             NativeContinuation::GroupBy(state) => {
                 resume_group_by_abrupt(runtime, *state, pending, return_to, execution_budget)
             }
+            NativeContinuation::MapConstructor(state) => {
+                resume_map_constructor_abrupt(runtime, *state, pending, return_to, execution_budget)
+            }
             NativeContinuation::ArrayStatic(state) => {
                 resume_array_static_abrupt(runtime, *state, pending, return_to, execution_budget)
             }
@@ -411,6 +414,21 @@ pub(super) fn resume_native_continuations(
             }) => finish_promise_constructor_after_prototype_get(
                 runtime, realm, new_target, executor, origin, return_to, &value,
             )?,
+            NativeContinuation::IntrinsicGet(IntrinsicGetContinuation::MapConstructor {
+                realm,
+                new_target,
+                iterable,
+                origin,
+            }) => finish_map_constructor_after_prototype_get(
+                runtime,
+                realm,
+                new_target,
+                iterable,
+                origin,
+                return_to,
+                &value,
+                execution_budget,
+            )?,
             NativeContinuation::IntrinsicGet(state) => {
                 finish_intrinsic_get(runtime, state, value, active_root_frames, &continuations)?
             }
@@ -427,6 +445,13 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::GroupBy(state) => {
                 advance_group_by(runtime, *state, value, return_to, execution_budget)?
             }
+            NativeContinuation::MapConstructor(state) => {
+                advance_map_constructor(runtime, *state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::MapForEach(state) => {
+                advance_map_for_each(runtime, *state, return_to, execution_budget)?
+            }
+            NativeContinuation::MapComputed(state) => resume_map_computed(runtime, *state, value)?,
             NativeContinuation::MathSumPrecise(state) => {
                 advance_math_sum_precise(runtime, *state, value, return_to, execution_budget)?
             }
@@ -2386,8 +2411,29 @@ pub(super) fn dispatch_native_call_with_frames(
                 )
             }
         }
+        NativeFunctionKind::MapConstructor => {
+            let iterable = inputs.arguments.take_first_or_undefined();
+            begin_map_constructor(
+                runtime,
+                native.realm,
+                inputs.new_target,
+                iterable,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::MapGroupBy => begin_map_group_by(
+            runtime,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::ArraySpeciesGetter
         | NativeFunctionKind::PromiseSpeciesGetter
+        | NativeFunctionKind::MapSpeciesGetter
         | NativeFunctionKind::IteratorPrototypeIterator
         | NativeFunctionKind::AsyncIteratorPrototypeAsyncIterator => {
             Ok(NativeDispatch::Immediate(inputs.receiver))
@@ -2562,6 +2608,25 @@ pub(super) fn dispatch_native_call_with_frames(
             inputs.receiver,
             native.realm,
             return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::MapPrototype(method) => dispatch_map_method(
+            runtime,
+            method,
+            inputs.receiver,
+            inputs.arguments,
+            MapMethodContext {
+                realm: native.realm,
+                return_to,
+                origin: origin.unwrap_or_else(native_function_host_origin),
+            },
+            execution_budget,
+        ),
+        NativeFunctionKind::MapIteratorNext => begin_map_iterator_next(
+            runtime,
+            &inputs.receiver,
+            native.realm,
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),

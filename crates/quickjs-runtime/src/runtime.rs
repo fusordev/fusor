@@ -56,6 +56,7 @@ use crate::{
 mod async_functions;
 mod iterators;
 mod limits;
+mod maps;
 mod promises;
 mod symbols;
 pub(crate) use iterators::PreparedIteratorResultPlan;
@@ -88,6 +89,7 @@ enum RealmIntrinsics {
         bigint: BigIntIntrinsics,
         string: StringIntrinsics,
         array: ArrayIntrinsics,
+        map: MapIntrinsics,
         promise: PromiseIntrinsics,
         symbol: SymbolIntrinsics,
         iterators: IteratorIntrinsics,
@@ -226,6 +228,13 @@ struct StringIntrinsics {
 struct ArrayIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MapIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+    iterator_prototype: ObjectId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1192,6 +1201,11 @@ pub(crate) enum NativeFunctionKind {
     ArrayPrototypeKeys,
     ArrayPrototypeEntries,
     ArrayIteratorNext,
+    MapConstructor,
+    MapGroupBy,
+    MapSpeciesGetter,
+    MapPrototype(MapMethod),
+    MapIteratorNext,
     StringPrototypeIterator,
     StringIteratorNext,
     GeneratorFunctionConstructor,
@@ -1211,6 +1225,65 @@ pub(crate) enum NativeFunctionKind {
     PromisePrototypeThen,
     PromisePrototypeCatch,
     PromisePrototypeFinally,
+}
+
+/// Methods installed on `%Map.prototype%` in pinned `QuickJS` property order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MapMethod {
+    Set,
+    Get,
+    GetOrInsert,
+    GetOrInsertComputed,
+    Has,
+    Delete,
+    Clear,
+    Size,
+    ForEach,
+    Values,
+    Keys,
+    Entries,
+}
+
+impl MapMethod {
+    pub(crate) const ALL: [Self; 12] = [
+        Self::Set,
+        Self::Get,
+        Self::GetOrInsert,
+        Self::GetOrInsertComputed,
+        Self::Has,
+        Self::Delete,
+        Self::Clear,
+        Self::Size,
+        Self::ForEach,
+        Self::Values,
+        Self::Keys,
+        Self::Entries,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Set => "set",
+            Self::Get => "get",
+            Self::GetOrInsert => "getOrInsert",
+            Self::GetOrInsertComputed => "getOrInsertComputed",
+            Self::Has => "has",
+            Self::Delete => "delete",
+            Self::Clear => "clear",
+            Self::Size => "size",
+            Self::ForEach => "forEach",
+            Self::Values => "values",
+            Self::Keys => "keys",
+            Self::Entries => "entries",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Set | Self::GetOrInsert | Self::GetOrInsertComputed => 2,
+            Self::Get | Self::Has | Self::Delete | Self::ForEach => 1,
+            Self::Clear | Self::Size | Self::Values | Self::Keys | Self::Entries => 0,
+        }
+    }
 }
 
 /// The remaining methods installed on the `Promise` constructor.
@@ -1365,6 +1438,7 @@ impl NativeFunctionKind {
                 | Self::AsyncFunctionConstructor
                 | Self::AsyncGeneratorFunctionConstructor
                 | Self::PromiseConstructor
+                | Self::MapConstructor
         )
     }
 }
@@ -1884,6 +1958,7 @@ pub struct Runtime {
     installed_constants: u64,
     pub(crate) object_properties: u64,
     pub(crate) for_in_entries: u64,
+    pub(crate) collection_entries: u64,
     public_roots: u64,
     pub(crate) collection_pending: bool,
     pub(crate) interrupts: InterruptState,

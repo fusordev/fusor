@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "surface-metadata-and-brand",
+      "covers": ["map-surface", "map-brand"],
+      "body": "return Map.name+':'+Map.length+':'+Map.groupBy.name+':'+Map.groupBy.length+':'+Object.prototype.toString.call(new Map())+':'+(Map.prototype[Symbol.iterator]===Map.prototype.entries);",
+      "expect": {"kind": "string", "value": "Map:0:groupBy:2:[object Map]:true"}
+    },
+    {
+      "id": "same-value-zero-and-insertion-order",
+      "covers": ["map-same-value-zero", "map-insertion-order"],
+      "body": "var map=new Map();map.set(-0,'zero').set(NaN,'nan').set(1,'one');var same=map.set(1,'updated')===map;return [map.size,map.get(+0),map.has(NaN),same,map.delete(NaN),map.size,Array.from(map.keys()).join(':')].join('|');",
+      "expect": {"kind": "string", "value": "3|zero|true|true|true|2|0:1"}
+    },
+    {
+      "id": "constructor-order-close-and-original-abrupt",
+      "covers": ["map-constructor-order", "map-constructor-close"],
+      "body": "var log=[];var original={};var secondary={};var iterable={[Symbol.iterator]:function(){log.push('iterator');return {next:function(){log.push('next');return {done:false,value:{get 0(){log.push('key');throw original}}}},return:function(){log.push('return');throw secondary}}}};var saved=Map.prototype.set;Object.defineProperty(Map.prototype,'set',{configurable:true,get:function(){log.push('adder');return saved}});var caught=false;try{new Map(iterable)}catch(error){caught=error===original}Object.defineProperty(Map.prototype,'set',{configurable:true,writable:true,value:saved});return log.join(',')+'|'+caught;",
+      "expect": {"kind": "string", "value": "adder,iterator,next,key,return|true"}
+    },
+    {
+      "id": "constructor-step-abrupt-does-not-close",
+      "covers": ["map-constructor-no-close-on-step"],
+      "body": "var original={};var log=[];function iterable(next){return {[Symbol.iterator]:function(){return {next:next,return:function(){log.push('close');return {}}}}};}var caught=[];try{new Map(iterable(function(){throw original}))}catch(error){caught.push(error===original)}try{new Map(iterable(function(){return {get done(){throw original}}}))}catch(error){caught.push(error===original)}try{new Map(iterable(function(){return {done:false,get value(){throw original}}}))}catch(error){caught.push(error===original)}return log.join(',')+'|'+caught.join(',');",
+      "expect": {"kind": "string", "value": "|true,true,true"}
+    },
+    {
+      "id": "new-target-and-live-reentrant-iteration",
+      "covers": ["map-new-target", "map-live-iterator", "map-delete-clear", "map-for-each-reentry"],
+      "body": "function Derived(){}var prototype=Object.create(Map.prototype);Derived.prototype=prototype;var derived=Reflect.construct(Map,[],Derived);var map=new Map([[1,'a'],[2,'b']]);var iterator=map.entries();var first=iterator.next().value.join(':');map.delete(2);map.set(3,'c');var second=iterator.next().value.join(':');map.clear();map.set(4,'d');var third=iterator.next().value.join(':');var seen=[];map.forEach(function(value,key,receiver){seen.push(key+value+(receiver===map));if(key===4)map.set(5,'e')});var fourth=iterator.next().value.join(':');return [(Object.getPrototypeOf(derived)===prototype),first,second,third,fourth,iterator.next().done,seen.join(',')].join('|');",
+      "expect": {"kind": "string", "value": "true|1:a|3:c|4:d|5:e|true|4dtrue,5etrue"}
+    },
+    {
+      "id": "group-by-first-key-order",
+      "covers": ["map-group-by", "map-group-order"],
+      "body": "var grouped=Map.groupBy([1,2,3,4],function(value,index){return (value+index)%3});var out=[];grouped.forEach(function(values,key){out.push(key+':'+values.join(','))});return out.join('|');",
+      "expect": {"kind": "string", "value": "1:1,4|0:2|2:3"}
+    }
+  ]
+}

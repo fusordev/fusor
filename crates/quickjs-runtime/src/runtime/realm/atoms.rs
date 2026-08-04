@@ -5,7 +5,7 @@ use crate::Atom;
 use super::{
     ARRAY_CALLBACK_METHODS, ARRAY_COPIER_METHODS, ARRAY_FLATTEN_METHODS, ARRAY_MUTATOR_METHODS,
     ARRAY_REDUCTION_METHODS, ARRAY_SEARCH_METHODS, ARRAY_SORT_METHODS, AtomError, AtomTable,
-    BIGINT_INTERNED_STATICS, DYNAMIC_SYMBOL_STATIC_PROPERTIES, JsString, MATH_CONSTANTS,
+    BIGINT_INTERNED_STATICS, DYNAMIC_SYMBOL_STATIC_PROPERTIES, JsString, MATH_CONSTANTS, MapMethod,
     MathMethod, NUMBER_FORMAT_METHODS, NUMBER_PREDICATE_STATICS, NUMBER_VALUE_STATICS,
     NativeFunctionKind, OBJECT_PROTOTYPE_LEGACY_ACCESSORS, OBJECT_PROTOTYPE_REFLECTION,
     OBJECT_STATIC_METHODS, PromiseStatic, Runtime, RuntimeError, RuntimeResource,
@@ -283,6 +283,7 @@ fn visit_realm_name_order(
     for method in PromiseStatic::ALL {
         visit(RealmNameId::PromiseStatic(method))?;
     }
+    visit_map_name_order(&mut visit)?;
     for method in ARRAY_SORT_METHODS {
         visit(RealmNameId::ArraySort(method))?;
     }
@@ -294,6 +295,24 @@ fn visit_realm_name_order(
     }
     for (name, _) in MATH_CONSTANTS {
         visit(RealmNameId::MathConstant(name))?;
+    }
+    Ok(())
+}
+
+fn visit_map_name_order(
+    visit: &mut impl FnMut(RealmNameId) -> Result<(), RuntimeError>,
+) -> Result<(), RuntimeError> {
+    for method in MapMethod::ALL {
+        if matches!(
+            method,
+            MapMethod::Set
+                | MapMethod::GetOrInsert
+                | MapMethod::GetOrInsertComputed
+                | MapMethod::Clear
+                | MapMethod::ForEach
+        ) {
+            visit(RealmNameId::MapMethod(method))?;
+        }
     }
     Ok(())
 }
@@ -372,6 +391,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArrayIsArray => "isArray",
         RealmNameId::ArrayFromAsync => "fromAsync",
         RealmNameId::PromiseStatic(method) => method.name(),
+        RealmNameId::MapMethod(method) => method.name(),
         RealmNameId::ArraySort(method) => method.name(),
         RealmNameId::ArrayFlatten(method) => method.name(),
         RealmNameId::MathMethod(method) => method.name(),
@@ -388,8 +408,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 184);
-        assert_eq!(plan.description_code_units(), 1_423);
+        assert_eq!(plan.len(), 188);
+        assert_eq!(plan.description_code_units(), 1_461);
     }
 
     #[test]

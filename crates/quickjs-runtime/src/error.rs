@@ -143,6 +143,8 @@ pub enum RuntimeResource {
     ObjectProperties,
     /// Property-key snapshots and visited-key entries retained by `for-in` iterators.
     ForInEntries,
+    /// Ordered entries and tombstones retained by keyed collections.
+    CollectionEntries,
     /// Captured binding cells.
     BindingCells,
     /// Constructor-realm global binding records.
@@ -179,6 +181,7 @@ impl fmt::Display for RuntimeResource {
             Self::HeapObjects => "heap objects",
             Self::ObjectProperties => "object properties",
             Self::ForInEntries => "for-in iterator entries",
+            Self::CollectionEntries => "keyed collection entries",
             Self::BindingCells => "binding cells",
             Self::RealmGlobalBindings => "realm global bindings",
             Self::PublicRoots => "public roots",

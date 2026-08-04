@@ -372,7 +372,7 @@ pub(super) fn begin_intrinsic_get(
     }
 }
 
-fn intrinsic_getter_call(
+pub(super) fn intrinsic_getter_call(
     function: FunctionId,
     receiver: StoredValue,
     continuation: IntrinsicGetContinuation,
@@ -447,6 +447,10 @@ pub(super) fn finish_intrinsic_get(
         } => finish_string_constructor_wrapper(runtime, new_target, string_value, &value),
         IntrinsicGetContinuation::ArrayConstructor { .. } => Err(EngineFault::RuntimeInvariant {
             message: "Array prototype getter resumed without an execution budget",
+        }
+        .into()),
+        IntrinsicGetContinuation::MapConstructor { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Map prototype getter resumed without an execution budget",
         }
         .into()),
         IntrinsicGetContinuation::PromiseConstructor { .. } => Err(EngineFault::RuntimeInvariant {

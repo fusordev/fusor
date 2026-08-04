@@ -24,7 +24,8 @@
  */
 
 use std::{
-    collections::{HashSet, TryReserveError},
+    collections::{HashMap, HashSet, TryReserveError},
+    hash::{Hash, Hasher},
     sync::Arc,
 };
 
@@ -208,6 +209,235 @@ impl ArrayIterator {
 pub(crate) struct StringIterator {
     iterated: Option<JsString>,
     next: u32,
+}
+
+/// Hashable `SameValueZero` projection used by `Map`'s lookup index.
+///
+/// The ordered entry vector remains the semantic source of truth. This key is
+/// deliberately private to the index so hash-table layout cannot affect
+/// observable iteration order.
+#[derive(Clone, Eq, PartialEq)]
+enum MapKey {
+    Undefined,
+    Null,
+    Boolean(bool),
+    Number(u64),
+    BigInt(Arc<JsBigInt>),
+    String(JsString),
+    Symbol(Atom),
+    Function(FunctionId),
+    Object(ObjectId),
+}
+
+impl MapKey {
+    fn from_value(value: &StoredValue) -> Self {
+        match value {
+            StoredValue::Undefined => Self::Undefined,
+            StoredValue::Null => Self::Null,
+            StoredValue::Boolean(value) => Self::Boolean(*value),
+            StoredValue::Number(value) => {
+                let value = value.as_f64();
+                let bits = if value == 0.0 {
+                    0_f64.to_bits()
+                } else if value.is_nan() {
+                    f64::NAN.to_bits()
+                } else {
+                    value.to_bits()
+                };
+                Self::Number(bits)
+            }
+            StoredValue::BigInt(value) => Self::BigInt(Arc::clone(value)),
+            StoredValue::String(value) => Self::String(value.clone()),
+            StoredValue::Symbol(value) => Self::Symbol(value.clone()),
+            StoredValue::Function(value) => Self::Function(*value),
+            StoredValue::Object(value) => Self::Object(*value),
+        }
+    }
+}
+
+impl Hash for MapKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        match self {
+            Self::Undefined | Self::Null => {}
+            Self::Boolean(value) => value.hash(state),
+            Self::Number(value) => value.hash(state),
+            Self::BigInt(value) => value.hash(state),
+            Self::String(value) => value.hash(state),
+            Self::Symbol(value) => value.hash(state),
+            Self::Function(value) => value.hash(state),
+            Self::Object(value) => value.hash(state),
+        }
+    }
+}
+
+pub(crate) struct MapEntry {
+    key: StoredValue,
+    value: StoredValue,
+    live: bool,
+}
+
+impl MapEntry {
+    pub(crate) const fn key(&self) -> &StoredValue {
+        &self.key
+    }
+
+    pub(crate) const fn value(&self) -> &StoredValue {
+        &self.value
+    }
+
+    pub(crate) const fn is_live(&self) -> bool {
+        self.live
+    }
+}
+
+/// Ordered `[[MapData]]` plus an average-sublinear `SameValueZero` index.
+///
+/// Deletion leaves a tombstone in `entries`; this is what lets active Map
+/// iterators observe later appends without snapshots or iterator registries.
+pub(crate) struct MapState {
+    entries: Vec<MapEntry>,
+    index: HashMap<MapKey, usize>,
+    live: usize,
+}
+
+pub(crate) enum MapSetOutcome {
+    Inserted,
+    Updated,
+}
+
+impl MapState {
+    pub(crate) fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+            index: HashMap::new(),
+            live: 0,
+        }
+    }
+
+    pub(crate) const fn len(&self) -> usize {
+        self.live
+    }
+
+    pub(crate) const fn retained_len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn entry(&self, index: usize) -> Option<&MapEntry> {
+        self.entries.get(index)
+    }
+
+    pub(crate) fn retained_values(&self) -> impl Iterator<Item = &StoredValue> {
+        self.entries
+            .iter()
+            .flat_map(|entry| [&entry.key, &entry.value])
+    }
+
+    pub(crate) fn get(&self, key: &StoredValue) -> Option<&StoredValue> {
+        self.index
+            .get(&MapKey::from_value(key))
+            .and_then(|index| self.entries.get(*index))
+            .filter(|entry| entry.live)
+            .map(MapEntry::value)
+    }
+
+    pub(crate) fn contains_key(&self, key: &StoredValue) -> bool {
+        self.index.contains_key(&MapKey::from_value(key))
+    }
+
+    pub(crate) fn try_set(
+        &mut self,
+        key: StoredValue,
+        value: StoredValue,
+    ) -> Result<MapSetOutcome, TryReserveError> {
+        let index_key = MapKey::from_value(&key);
+        if let Some(index) = self.index.get(&index_key).copied() {
+            if let Some(entry) = self.entries.get_mut(index) {
+                entry.value = value;
+                return Ok(MapSetOutcome::Updated);
+            }
+            debug_assert!(false, "Map lookup index must name an entry");
+        }
+        self.entries.try_reserve(1)?;
+        self.index.try_reserve(1)?;
+        let index = self.entries.len();
+        self.entries.push(MapEntry {
+            key,
+            value,
+            live: true,
+        });
+        self.index.insert(index_key, index);
+        self.live = self.live.saturating_add(1);
+        Ok(MapSetOutcome::Inserted)
+    }
+
+    pub(crate) fn delete(&mut self, key: &StoredValue) -> bool {
+        let Some(index) = self.index.remove(&MapKey::from_value(key)) else {
+            return false;
+        };
+        let Some(entry) = self.entries.get_mut(index) else {
+            debug_assert!(false, "Map lookup index must name an entry");
+            return false;
+        };
+        entry.key = StoredValue::Undefined;
+        entry.value = StoredValue::Undefined;
+        entry.live = false;
+        self.live = self.live.saturating_sub(1);
+        true
+    }
+
+    pub(crate) fn clear(&mut self) {
+        for entry in &mut self.entries {
+            entry.key = StoredValue::Undefined;
+            entry.value = StoredValue::Undefined;
+            entry.live = false;
+        }
+        self.index.clear();
+        self.live = 0;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MapIteratorKind {
+    Key,
+    Value,
+    KeyAndValue,
+}
+
+pub(crate) struct MapIterator {
+    iterated: Option<ObjectId>,
+    kind: MapIteratorKind,
+    next: usize,
+}
+
+impl MapIterator {
+    pub(crate) const fn new(iterated: ObjectId, kind: MapIteratorKind) -> Self {
+        Self {
+            iterated: Some(iterated),
+            kind,
+            next: 0,
+        }
+    }
+
+    pub(crate) const fn iterated(&self) -> Option<ObjectId> {
+        self.iterated
+    }
+
+    pub(crate) const fn kind(&self) -> MapIteratorKind {
+        self.kind
+    }
+
+    pub(crate) const fn next(&self) -> usize {
+        self.next
+    }
+
+    pub(crate) fn advance(&mut self) {
+        self.next = self.next.saturating_add(1);
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.iterated = None;
+    }
 }
 
 impl StringIterator {
@@ -1053,6 +1283,9 @@ pub(crate) enum HeapObjectKind {
     ForInIterator(ForInIterator),
     ArrayIterator(ArrayIterator),
     StringIterator(StringIterator),
+    /// An ECMAScript Map object with ordered `[[MapData]]`.
+    Map(MapState),
+    MapIterator(MapIterator),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1136,7 +1369,9 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
-            | Self::StringIterator(_) => None,
+            | Self::StringIterator(_)
+            | Self::Map(_)
+            | Self::MapIterator(_) => None,
             Self::BoxedPrimitive(value) => Some(value),
         }
     }
@@ -1152,7 +1387,9 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
-            | Self::StringIterator(_) => None,
+            | Self::StringIterator(_)
+            | Self::Map(_)
+            | Self::MapIterator(_) => None,
         }
     }
 
@@ -1167,7 +1404,9 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
-            | Self::StringIterator(_) => None,
+            | Self::StringIterator(_)
+            | Self::Map(_)
+            | Self::MapIterator(_) => None,
         }
     }
 
@@ -1182,7 +1421,9 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
-            | Self::StringIterator(_) => None,
+            | Self::StringIterator(_)
+            | Self::Map(_)
+            | Self::MapIterator(_) => None,
         }
     }
 
@@ -1197,7 +1438,9 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
-            | Self::StringIterator(_) => None,
+            | Self::StringIterator(_)
+            | Self::Map(_)
+            | Self::MapIterator(_) => None,
         }
     }
 
@@ -1212,7 +1455,9 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
-            | Self::StringIterator(_) => None,
+            | Self::StringIterator(_)
+            | Self::Map(_)
+            | Self::MapIterator(_) => None,
         }
     }
 
@@ -1227,7 +1472,9 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
-            | Self::StringIterator(_) => None,
+            | Self::StringIterator(_)
+            | Self::Map(_)
+            | Self::MapIterator(_) => None,
         }
     }
 
@@ -1242,7 +1489,9 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
-            | Self::ArrayIterator(_) => None,
+            | Self::ArrayIterator(_)
+            | Self::Map(_)
+            | Self::MapIterator(_) => None,
         }
     }
 
@@ -1257,7 +1506,37 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
-            | Self::ArrayIterator(_) => None,
+            | Self::ArrayIterator(_)
+            | Self::Map(_)
+            | Self::MapIterator(_) => None,
+        }
+    }
+
+    pub(crate) const fn map(&self) -> Option<&MapState> {
+        match self {
+            Self::Map(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn map_mut(&mut self) -> Option<&mut MapState> {
+        match self {
+            Self::Map(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn map_iterator(&self) -> Option<&MapIterator> {
+        match self {
+            Self::MapIterator(iterator) => Some(iterator),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn map_iterator_mut(&mut self) -> Option<&mut MapIterator> {
+        match self {
+            Self::MapIterator(iterator) => Some(iterator),
+            _ => None,
         }
     }
 }
@@ -1372,6 +1651,24 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn map(record: ObjectRecord, state: MapState) -> Self {
+        Self {
+            kind: HeapObjectKind::Map(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn map_iterator(record: ObjectRecord, iterator: MapIterator) -> Self {
+        Self {
+            kind: HeapObjectKind::MapIterator(iterator),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     #[allow(
         dead_code,
         reason = "kind inspection supports class-sensitive object behavior beyond the first Boolean consumer"
@@ -1420,7 +1717,9 @@ impl HeapObject {
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
-            | HeapObjectKind::StringIterator(_) => None,
+            | HeapObjectKind::StringIterator(_)
+            | HeapObjectKind::Map(_)
+            | HeapObjectKind::MapIterator(_) => None,
         }
     }
 
@@ -1435,7 +1734,9 @@ impl HeapObject {
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
-            | HeapObjectKind::StringIterator(_) => None,
+            | HeapObjectKind::StringIterator(_)
+            | HeapObjectKind::Map(_)
+            | HeapObjectKind::MapIterator(_) => None,
         }
         .into_iter()
         .flatten()
@@ -1452,7 +1753,9 @@ impl HeapObject {
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
-            | HeapObjectKind::StringIterator(_) => None,
+            | HeapObjectKind::StringIterator(_)
+            | HeapObjectKind::Map(_)
+            | HeapObjectKind::MapIterator(_) => None,
         }
     }
 
@@ -1467,7 +1770,9 @@ impl HeapObject {
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
-            | HeapObjectKind::StringIterator(_) => 0,
+            | HeapObjectKind::StringIterator(_)
+            | HeapObjectKind::Map(_)
+            | HeapObjectKind::MapIterator(_) => 0,
         }
     }
 
@@ -1489,6 +1794,26 @@ impl HeapObject {
     #[must_use]
     pub(crate) const fn array_state_mut(&mut self) -> Option<&mut ArrayState> {
         self.kind.array_mut()
+    }
+
+    #[must_use]
+    pub(crate) const fn map_state(&self) -> Option<&MapState> {
+        self.kind.map()
+    }
+
+    #[must_use]
+    pub(crate) const fn map_state_mut(&mut self) -> Option<&mut MapState> {
+        self.kind.map_mut()
+    }
+
+    #[must_use]
+    pub(crate) const fn map_iterator_state(&self) -> Option<&MapIterator> {
+        self.kind.map_iterator()
+    }
+
+    #[must_use]
+    pub(crate) const fn map_iterator_state_mut(&mut self) -> Option<&mut MapIterator> {
+        self.kind.map_iterator_mut()
     }
 
     #[must_use]
@@ -1524,6 +1849,25 @@ impl HeapObject {
     #[must_use]
     pub(crate) fn for_in_entry_count(&self) -> usize {
         self.for_in_state().map_or(0, ForInIterator::entry_count)
+    }
+
+    #[must_use]
+    pub(crate) fn map_entry_count(&self) -> usize {
+        self.map_state().map_or(0, MapState::retained_len)
+    }
+
+    pub(crate) fn map_retained_values(&self) -> impl Iterator<Item = &StoredValue> {
+        self.map_state()
+            .into_iter()
+            .flat_map(MapState::retained_values)
+    }
+
+    #[must_use]
+    pub(crate) const fn map_iterator_current(&self) -> Option<ObjectId> {
+        match self.kind.map_iterator() {
+            Some(iterator) => iterator.iterated(),
+            None => None,
+        }
     }
 
     #[must_use]

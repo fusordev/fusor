@@ -630,7 +630,7 @@ fn array_iterator_creation_boxes_a_primitive_receiver_once() {
 #[test]
 fn array_iterator_primitive_boxing_preflights_the_complete_transaction() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(31)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(33)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = runtime.context(&realm).expect("context").realm;
     let usage = runtime.usage();
@@ -647,8 +647,8 @@ fn array_iterator_primitive_boxing_preflights_the_complete_transaction() {
         result,
         Err(NativeFailure::Execution(ExecutionError::LimitExceeded {
             resource: RuntimeResource::HeapObjects,
-            limit: 31,
-            observed: 33,
+            limit: 33,
+            observed: 35,
         }))
     ));
     assert_eq!(runtime.usage(), usage);
@@ -762,6 +762,111 @@ fn array_iterator_result_preflight_preserves_cursor_and_allows_retry() {
                     .array_iterator_snapshot(iterator)
                     .expect("Array iterator after retry")
                     .next,
+                1
+            );
+        }
+    }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one matrix regression proves heap and property atomicity for every Map iterator result shape"
+)]
+fn map_iterator_result_preflight_preserves_cursor_and_allows_retry() {
+    for (kind, result_objects, result_properties) in [
+        (crate::object::MapIteratorKind::Key, 1_u64, 2_u64),
+        (crate::object::MapIteratorKind::Value, 1, 2),
+        (crate::object::MapIteratorKind::KeyAndValue, 2, 5),
+    ] {
+        for constrained in [
+            RuntimeResource::HeapObjects,
+            RuntimeResource::ObjectProperties,
+        ] {
+            let (mut runtime, realm, _) = ordinary_test_frame();
+            let prototype = runtime.realm_map_prototype(realm).expect("Map.prototype");
+            let map = runtime
+                .allocate_map_object(HeapReference::Object(prototype))
+                .expect("Map");
+            runtime
+                .map_set(
+                    map,
+                    StoredValue::String(JsString::from_utf8("key").expect("key")),
+                    StoredValue::Number(JsNumber::from_i32(11)),
+                )
+                .expect("Map entry");
+            let iterator = runtime
+                .allocate_map_iterator(realm, map, kind)
+                .expect("Map iterator");
+            let baseline = runtime.usage();
+            let collection_pending = runtime.collection_pending;
+            let original_limits = runtime.limits;
+            let (limit, observed) = match constrained {
+                RuntimeResource::HeapObjects => {
+                    let observed = baseline.heap_objects() + result_objects;
+                    runtime.limits.max_heap_objects = observed - 1;
+                    (runtime.limits.max_heap_objects, observed)
+                }
+                RuntimeResource::ObjectProperties => {
+                    let observed = baseline.object_properties() + result_properties;
+                    runtime.limits.max_object_properties = observed - 1;
+                    (runtime.limits.max_object_properties, observed)
+                }
+                _ => unreachable!("the matrix only constrains iterator-result resources"),
+            };
+            let receiver = StoredValue::Object(iterator);
+            let mut execution_budget = ExecutionBudget::new(ExecutionLimits::default());
+            let failure = begin_map_iterator_next(
+                &mut runtime,
+                &receiver,
+                realm,
+                native_function_host_origin(),
+                &mut execution_budget,
+            );
+
+            assert!(matches!(
+                failure,
+                Err(NativeFailure::Execution(ExecutionError::LimitExceeded {
+                    resource,
+                    limit: actual_limit,
+                    observed: actual_observed,
+                })) if resource == constrained
+                    && actual_limit == limit
+                    && actual_observed == observed
+            ));
+            assert_eq!(runtime.usage(), baseline);
+            assert_eq!(runtime.collection_pending, collection_pending);
+            assert_eq!(
+                runtime
+                    .objects
+                    .get(iterator)
+                    .and_then(crate::object::HeapObject::map_iterator_state)
+                    .expect("Map iterator after failed preflight")
+                    .next(),
+                0
+            );
+
+            runtime.limits = original_limits;
+            let Ok(retry) = begin_map_iterator_next(
+                &mut runtime,
+                &receiver,
+                realm,
+                native_function_host_origin(),
+                &mut execution_budget,
+            ) else {
+                panic!("retry after restoring resource capacity failed");
+            };
+            assert!(matches!(
+                retry,
+                NativeDispatch::Immediate(StoredValue::Object(_))
+            ));
+            assert_eq!(
+                runtime
+                    .objects
+                    .get(iterator)
+                    .and_then(crate::object::HeapObject::map_iterator_state)
+                    .expect("Map iterator after retry")
+                    .next(),
                 1
             );
         }
@@ -4828,7 +4933,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(917))
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(970))
         .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
@@ -4850,8 +4955,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         error,
         ExecutionError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 917,
-            observed: 918,
+            limit: 970,
+            observed: 971,
         }
     ));
     let failed = runtime.usage();

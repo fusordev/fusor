@@ -35,9 +35,153 @@ use super::{
     usize_to_u64,
 };
 
-const REALM_OBJECT_SLOTS: u64 = 31;
-const REALM_PROPERTY_SLOTS: u64 = 911;
-const REALM_FUNCTION_SLOTS: u64 = 265;
+const REALM_OBJECT_SLOTS: u64 = 33;
+const REALM_PROPERTY_SLOTS: u64 = 964;
+const REALM_FUNCTION_SLOTS: u64 = 281;
+
+#[test]
+fn map_entry_limit_is_inclusive_atomic_and_counts_retained_tombstones() {
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_collection_entries(1)).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let prototype = runtime
+        .realm_map_prototype(realm.0.id)
+        .expect("Map.prototype");
+    let map = runtime
+        .allocate_map_object(HeapReference::Object(prototype))
+        .expect("Map");
+    let baseline = runtime.usage();
+    let key = StoredValue::Number(JsNumber::from_i32(1));
+
+    runtime
+        .map_set(map, key.duplicate(), StoredValue::Boolean(true))
+        .expect("first entry reaches the inclusive limit");
+    assert_eq!(runtime.usage().collection_entries(), 1);
+    runtime
+        .map_set(map, key.duplicate(), StoredValue::Boolean(false))
+        .expect("updating an entry consumes no new slot");
+    assert_eq!(runtime.usage().collection_entries(), 1);
+
+    assert!(
+        runtime
+            .objects
+            .get_mut(map)
+            .and_then(crate::object::HeapObject::map_state_mut)
+            .expect("Map state")
+            .delete(&key)
+    );
+    assert_eq!(runtime.usage().collection_entries(), 1);
+    let before_failure = runtime.usage();
+    assert!(matches!(
+        runtime.map_set(
+            map,
+            StoredValue::Number(JsNumber::from_i32(2)),
+            StoredValue::Undefined,
+        ),
+        Err(ExecutionError::LimitExceeded {
+            resource: RuntimeResource::CollectionEntries,
+            limit: 1,
+            observed: 2,
+        })
+    ));
+    assert_eq!(runtime.usage(), before_failure);
+    let state = runtime
+        .objects
+        .get(map)
+        .and_then(crate::object::HeapObject::map_state)
+        .expect("Map state");
+    assert_eq!(state.len(), 0);
+    assert_eq!(state.retained_len(), 1);
+    assert_eq!(baseline.collection_entries(), 0);
+}
+
+#[test]
+fn map_and_map_iterator_trace_keys_values_and_release_entry_charges() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+    let map_prototype = runtime
+        .realm_map_prototype(realm_id)
+        .expect("Map.prototype");
+    let baseline = runtime.usage();
+    let key = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("key");
+    let value = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("value");
+    let map = runtime
+        .allocate_map_object(HeapReference::Object(map_prototype))
+        .expect("Map");
+    runtime
+        .map_set(map, StoredValue::Object(key), StoredValue::Object(value))
+        .expect("Map entry");
+    let iterator = runtime
+        .allocate_map_iterator(realm_id, map, crate::object::MapIteratorKind::KeyAndValue)
+        .expect("Map iterator");
+
+    runtime
+        .collect_cycles_with_roots(|mark| {
+            mark(CollectionRoot::Heap(HeapReference::Object(iterator)));
+        })
+        .expect("rooted Map iterator collection");
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 4);
+    assert_eq!(runtime.usage().collection_entries(), 1);
+
+    let report = runtime.collect_cycles().expect("unrooted Map collection");
+    assert_eq!(report.objects(), 4);
+    assert_eq!(runtime.usage(), baseline);
+}
+
+#[test]
+fn deleted_map_entries_release_key_and_value_edges_but_retain_slot_charge() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+    let map_prototype = runtime
+        .realm_map_prototype(realm_id)
+        .expect("Map.prototype");
+    let baseline = runtime.usage();
+    let key = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("key");
+    let value = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("value");
+    let map = runtime
+        .allocate_map_object(HeapReference::Object(map_prototype))
+        .expect("Map");
+    runtime
+        .map_set(map, StoredValue::Object(key), StoredValue::Object(value))
+        .expect("Map entry");
+    assert!(
+        runtime
+            .objects
+            .get_mut(map)
+            .and_then(crate::object::HeapObject::map_state_mut)
+            .expect("Map state")
+            .delete(&StoredValue::Object(key))
+    );
+
+    let report = runtime
+        .collect_cycles_with_roots(|mark| {
+            mark(CollectionRoot::Heap(HeapReference::Object(map)));
+        })
+        .expect("rooted deleted-entry Map collection");
+    assert_eq!(report.objects(), 2);
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 1);
+    assert_eq!(runtime.usage().collection_entries(), 1);
+
+    let report = runtime.collect_cycles().expect("unrooted Map collection");
+    assert_eq!(report.objects(), 1);
+    assert_eq!(runtime.usage(), baseline);
+}
 
 #[test]
 #[allow(
@@ -1261,6 +1405,7 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         async_functions: _,
         async_generators: _,
         promise: _,
+        map: _,
     } = state.intrinsics
     else {
         panic!("realm intrinsics remained uninitialized");
@@ -1274,9 +1419,9 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 184,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_423,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 184,
+            live_atoms: PREDEFINED_ATOM_COUNT + 187,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_458,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 187,
         }
     );
 
@@ -1930,9 +2075,9 @@ fn function_call_is_realm_owned_while_its_dynamic_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 184,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_423,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 184,
+            live_atoms: PREDEFINED_ATOM_COUNT + 187,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_458,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 187,
         }
     );
 }
@@ -1979,9 +2124,9 @@ fn function_apply_is_realm_owned_while_its_predefined_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 184,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_423,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 184,
+            live_atoms: PREDEFINED_ATOM_COUNT + 187,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_458,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 187,
         }
     );
 }

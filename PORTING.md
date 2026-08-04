@@ -51,155 +51,73 @@ does not imply complete ECMAScript or QuickJS compatibility.
 
 ### Frontend and diagnostics
 
-- [x] Reproducible Rust workspace with safe core crates, CI gates, bounded
-  resource APIs, and optional oracle runners.
-- [x] Published Oxc `0.142.0` parser/semantic crates are pinned directly; no
-  vendoring or local patches.
-- [x] Lossless parse goals cover Script, Module, strict and asynchronous global
-  scripts, and all dynamic Function-constructor families. Unsupported adapters
-  reject before parsing.
-- [x] Owned semantic/module records preserve byte spans, binding roles,
-  source-order static requests, import attributes, and arena-independent data.
-- [x] The parser compatibility ledger is closed over parse goals, frontend
-  claims, pinned QuickJS grammar productions, and reachable parser diagnostics.
-  Each intentional Oxc difference has a stable ID and fixture.
+- [x] The safe, reproducible workspace pins published Oxc `0.142.0` directly.
+  Lossless Script, Module, strict/async-global, and dynamic-Function parse goals
+  produce owned span, binding, and module records; unsupported adapters reject.
+- [x] A closed compatibility ledger covers admitted grammar and reachable
+  diagnostics. Every intentional Oxc difference has an ID and fixture.
 - [ ] Complete source-map chaining and the remaining public diagnostic/API
   audit.
 
 ### Compiler, bytecode, and execution
 
-- [x] Complete opcode metadata, typed operands, deterministic checked codec and
-  disassembly, bounded construction, and total decoding.
-- [x] Only a whole-function, whole-child-graph `VerifiedBytecode` authority may
-  be installed or executed. Admission predecodes every instruction and checks
-  headers, operands, indices, targets, stack joins, capabilities, child graphs,
-  and resource limits before runtime mutation.
-- [x] Iterative lowering covers the admitted ordinary-function profile:
-  bindings/captures, closures, expressions, statements, labels, `switch`,
-  classic `for`, `for-in`, synchronous `for-of`, calls/spread, destructuring,
-  exceptions, and `try`/`catch`/`finally`.
-- [x] Synchronous generator functions, methods, and dynamic
-  `GeneratorFunction` wrappers lower plain `yield` and delegated `yield*` to
-  verified suspension programs. Typed iterator records preserve resume-mode
-  forwarding, exact iterator-result identity, method absence, object
-  validation, `finally`, and abrupt-close order.
-- [x] Async functions, methods, and dynamic `AsyncFunction` wrappers lower
-  `await` and async return to verified suspension programs. Calls allocate the
-  intrinsic Promise capability, run synchronously to the first suspension, and
-  resume through typed FIFO reactions; return/throw settle instead of escaping.
-- [x] Async generator functions, methods, and dynamic
-  `AsyncGeneratorFunction` wrappers lower `await`, `yield`, return, and async
-  `yield*` to verified suspension programs. Admission distinguishes raw
-  delegated values from ordinary awaited yields and requires typed async-
-  iterator records throughout every resume path.
-- [x] Runtime execution uses explicit frame and continuation stacks for
-  bytecode/native calls, constructors, abrupt completion, iterator closing,
-  coercion re-entry, and verified stack traces. Bound receiver/argument
-  accumulation and destructuring iterator order are regression-tested.
-- [x] Deterministic fuel and host interrupts are separate. The interrupt hook is
-  polled on the pinned 10,000-instruction counter and reports an uncatchable
-  `ExecutionError::Interrupted`.
+- [x] Typed opcode metadata, checked codec/disassembly, bounded construction,
+  total decoding, and whole-child-graph verification are complete. Only
+  `VerifiedBytecode` may execute; admission validates structure and resources
+  before runtime mutation.
+- [x] Iterative lowering covers the admitted ordinary profile, closures,
+  control flow, calls/spread, destructuring, exceptions, sync generators,
+  async functions, async generators, and delegated `yield*`. Typed suspension
+  and iterator records preserve resume, close, and `finally` order.
+- [x] Explicit VM frame/continuation stacks handle bytecode and native re-entry,
+  coercion, construction, abrupt completion, and traces. Deterministic fuel is
+  separate from the pinned 10,000-instruction uncatchable host interrupt.
 - [ ] Complete remaining opcode families, debug/source tables, and
   direct/indirect `eval`. Raw or serialized unverified bytecode and `eval`
   remain fail closed.
 
 ### Values, objects, and functions
 
-- [x] Exact UTF-16 strings, binary64 Numbers, project-owned BigInts, Symbols,
-  canonical property keys, primitive wrappers, conversion algorithms, ordinary
-  operators, and signed-zero/NaN behavior.
-- [x] Ordinary data/accessor properties, descriptor validation, deletion,
-  own-key phase order, prototype mutation, extensibility/integrity levels,
-  object literal `__proto__`, Array exotic `length`, holes, and primitive String
-  indexed properties.
-- [x] Ordinary functions/constructors, lexical capture and TDZ, all four
-  dynamic Function-constructor families, `call`/`apply`/`bind`, `instanceof`,
-  rest/default/destructured parameters, separate parameter/body environments,
-  strict and mapped `arguments` objects, `Function.prototype` legacy poison
-  accessors backed by a shared `%ThrowTypeError%`, and admitted
-  `NamedEvaluation` forms.
-- [x] Synchronous iterator protocols, Array/String iterators, array and call
-  spread, destructuring, `for-of`, `IteratorClose`, and original-abrupt-
-  completion precedence use typed, same-site verifier state.
-- [x] Realm bootstrap is declared by validated intrinsic schemas. Atom and
-  resource plans, typed shell allocation, ordered publication, and allocation-
-  free reverse rollback are derived from that schema. A normalized snapshot
-  pins all 296 Realm-local identities and 911 ordered properties across Realms.
+- [x] Exact UTF-16 strings, binary64 Numbers, owned BigInts, Symbols, canonical
+  keys, wrappers, conversions, operators, and signed-zero/NaN behavior.
+- [x] Ordinary descriptors and integrity, prototype/extensibility semantics,
+  key order, Array `length`/holes, String indices, functions/constructors,
+  lexical capture/TDZ, dynamic Function families, `call`/`apply`/`bind`,
+  `instanceof`, parameters, `arguments`, and admitted `NamedEvaluation`.
+- [x] Typed same-site iterator state covers Array/String iteration, spread,
+  destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
+- [x] Validated schemas derive Realm allocation and rollback. The normalized
+  snapshot pins 314 Realm-local identities and 964 ordered properties.
 - [ ] Add Proxy and remaining exotics, shape/transition interning, dense indexed
   storage, deterministic finalization, and complete reflection/diagnostics.
 
 ### Built-ins
 
-- [x] Globals: `undefined`, `NaN`, `Infinity`, `globalThis`, `isFinite`, `isNaN`,
-  `parseFloat`, `parseInt`, and the four URI encode/decode functions.
-- [x] `Object`: the admitted constructor statics, including descriptor,
-  integrity, enumeration, copy, iterable, and `groupBy` operations; the common
-  prototype methods, deterministic no-`Intl` `toLocaleString`, and legacy
-  `__proto__`/accessor methods are present with specification evaluation order.
-- [x] `Reflect`: all 13 ordinary-object methods, including resumable
-  `apply`/`construct`, receiver-preserving `get`/`set`, and exact own-key order.
-- [x] `Error`, native Error subclasses, and `AggregateError`, including causes,
-  `Error.isError`, exceptional iterator close, and frozen engine-error stacks.
-  The compatibility corpus is 35/35 with 59/59 required feature tags.
-- [x] `Boolean`, `Number`, `BigInt`, and `Symbol` constructors/prototypes and
-  their admitted statics; Number formatting/conversions and BigInt arithmetic
-  cover their full implemented numeric domains.
-- [x] `String` constructor/statics and a broad non-RegExp prototype subset,
-  including UTF-16 search/slicing/padding, well-formedness, full Unicode casing,
-  normalization, deterministic no-`Intl` `localeCompare`, and the plain-string
-  plus `@@replace` protocol path of `replace`. All 13 Annex B `CreateHTML`
-  wrappers and the identity-sharing `trimLeft`/`trimRight` aliases preserve
-  specification coercion order and pinned own-key order. ICU4X data is pinned.
-- [x] `Array` construction, `isArray`, `from`/`fromAsync`/`of`, species,
-  iterators, mutators, searches, callbacks, reductions, sorting, flattening,
-  change-by-copy methods, locale rendering, and generic array-like behavior.
-  `fromAsync` follows the specification's iterator-record-before-construction
-  order, awaits iterator/array-like values and mapper results, performs only
-  the required exceptional async closes, and traces every suspension root.
-- [x] `%JSON%`: iterative `parse`/reviver and `stringify`, plus `rawJSON` and
-  `isRawJSON`; lone surrogates, source records, getters/callbacks, cycles,
-  replacers, indentation, and raw embedding are covered.
-- [x] `%Math%`: all methods and constants installed by the pinned profile,
-  including realm-local `random`, exact-width conversions, and the iterator-
-  based exact `sumPrecise` accumulator.
-- [x] Intrinsic Promise core includes branded objects, one-shot generic
-  capabilities, thenable assimilation, species-derived
-  `then`/`catch`/`finally`, bounded FIFO jobs, and `all`, `allSettled`, `any`,
-  `try`, `race`, and `withResolvers`. Typed continuations preserve input order,
-  shared remaining-element records, and abrupt iterator close. The pinned
-  corpus is 29/29 with 46/46 feature tags.
+- [x] Globals; admitted `Object`; all 13 `Reflect` methods; `Error`, native
+  subclasses, and `AggregateError`; `Boolean`, `Number`, `BigInt`, and `Symbol`.
+- [x] Broad non-RegExp `String`, Unicode/normalization behavior, plain-string and
+  `@@replace` replacement, Annex B HTML wrappers, and pinned ICU4X data.
+- [x] Full admitted `Array`, including generic array-like behavior and
+  spec-ordered, resource-traced `fromAsync` iterator/array-like suspension.
+- [x] `Map`: ordered SameValueZero storage, `AddEntriesFromIterable` close
+  boundaries, live iterators, reentrant `forEach`, `groupBy`, `getOrInsert*`,
+  and exact GC/resource accounting. Corpus: 6/6, 13/13 feature tags.
+- [x] Iterative `%JSON%` plus `rawJSON`; complete pinned `%Math%`, including
+  exact `sumPrecise`; and intrinsic Promise core/combinators with bounded FIFO
+  jobs and typed close/order continuations (29/29, 46/46 feature tags).
 - [ ] Complete RegExp-coupled String methods; implement RegExp, Date, Temporal,
-  Proxy, collections, binary data/typed arrays, Atomics, weak references, and
-  finalization registries.
+  Proxy, Set/WeakMap/WeakSet, binary data/typed arrays, Atomics, weak references,
+  and finalization registries.
 
 ### Jobs, asynchronous semantics, and modules
 
-- [x] A runtime-owned, resource-bounded FIFO Promise-job queue drains nested
-  work to a fixed point after normal or JavaScript-abrupt host completion.
-  Jobs, pending reactions, results, and resolving functions are explicit GC
-  edges; the turn shares one fuel/interrupt budget. Tokio never defines
-  JavaScript job order.
-- [x] Host Promise rejection tracking reports `reject` at unhandled settlement
-  and `handle` at the first later reaction. Borrowed callback values add no GC
-  roots; hosts explicitly retain owned handles when needed.
-- [x] Synchronous generators preserve parameter timing, intrinsic chains,
-  reentrancy rejection, yielding `finally`, iterator close, and `yield*`
-  forwarding. Suspended frames and cached delegate methods are traced. Dynamic
-  `GeneratorFunction` uses the same bounded compiler service.
-- [x] Async functions start synchronously, always resume `await` through the
-  intrinsic Promise queue, preserve rejection as an abrupt completion at the
-  await site, and settle their returned Promise through thenable assimilation.
-  `%AsyncFunction%`, `%AsyncFunction.prototype%`, methods, dynamic construction,
-  suspended-frame GC edges, and non-constructability are pinned by QuickJS and
-  Node differentials.
-- [x] Async generators use realm-local intrinsic chains and a typed FIFO request
-  queue. `next`/`return`/`throw` await yielded and returned values, preserve
-  synchronous parameter and `catch`/`finally` order, drain completed requests,
-  and trace suspended frames, capabilities, awaits, and reactions.
-- [x] Async-generator `yield*` prefers `@@asyncIterator`, wraps sync iterators,
-  caches `next`, awaits before object validation, reads `done` before `value`,
-  forwards every resume mode, and closes sync-fallback rejection with original-
-  error precedence. Suspended wrappers and handlers are traced.
+- [x] A bounded runtime-owned FIFO job queue, with complete GC edges and one
+  turn budget, drains nested Promise work to a fixed point; Tokio never defines
+  JavaScript order. Host rejection tracking reports first reject/late handle.
+- [x] Sync generators, async functions, async generators, and async `yield*`
+  preserve parameter timing, intrinsic chains, reentrancy, resume modes,
+  thenable assimilation, iterator validation/close order, `catch`/`finally`,
+  request order, and suspended-state GC edges.
 - [ ] Implement module linking/evaluation, cycles, resolver semantics, dynamic
   import, and top-level `await`. Module parsing alone is not an execution claim.
 - [ ] Finish the Rust embedding API, ESM REPL, `qjs`, Rust-native `qjsc`,
@@ -207,17 +125,14 @@ does not imply complete ECMAScript or QuickJS compatibility.
 
 ### Conformance, performance, and optional layers
 
-- [ ] Run and maintain the pinned Test262 baseline
-  `5c8206929d81b2d3d727ca6aac56c18358c8d790` with the release patch,
-  configuration, and expected-error list; expand differential and fuzz coverage
-  at parser, bytecode, serializer, and runtime boundaries.
+- [ ] Maintain pinned Test262 `5c8206929d81b2d3d727ca6aac56c18358c8d790`
+  with its patch/configuration/expected errors; expand differential and fuzzing.
 - [ ] Establish startup, memory, interpreter, and compile benchmarks; require no
   unexplained supported-platform crashes or undefined behavior.
-- [ ] Complete public API, source-map, platform/resource-limit, cancellation,
-  dependency, and reproducible-release audits.
+- [ ] Complete API, source-map, platform/resource, cancellation, dependency, and
+  reproducible-release audits.
 - [ ] Optional: Wasmtime WebAssembly, an audited safe N-API boundary, erasable
-  TypeScript preprocessing with mandatory source maps, and a bounded
-  policy-driven Serde bridge.
+  TypeScript with source maps, and a bounded policy-driven Serde bridge.
 
 ## Compatibility differences
 
@@ -242,6 +157,10 @@ does not imply complete ECMAScript or QuickJS compatibility.
   `.return()` with `{ done: true, value: thenable }`, pinned QuickJS assimilates
   `value`. ECMA-262 and Node preserve that property value unchanged; this port
   follows the specification.
+- `QJS-MAP-001`: if a `getOrInsertComputed` callback inserts the requested key,
+  pinned QuickJS deletes that entry and appends the computed result. ECMA-262
+  rescans and updates the callback-created entry in place; this port follows the
+  specification and preserves its insertion position.
 
 ## Completion gates
 
@@ -275,6 +194,7 @@ QuickJS `qjs` or `qjsc`. Current corpus results are:
 | Annex B String HTML | 6/6, 18/18 feature tags |
 | Promise core | 29/29, 46/46 feature tags |
 | `Array.fromAsync` | 5/5 (Node; absent in pinned QuickJS) |
+| Map | 6/6, 13/13 feature tags (QuickJS and Node) |
 | Synchronous generators | 18/18, 43/43 feature tags |
 | Async functions | 9/9, 18/18 feature tags |
 | Async generators | 18/18, 41/41 feature tags (QuickJS and Node) |
