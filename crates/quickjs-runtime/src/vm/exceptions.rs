@@ -432,6 +432,9 @@ pub(super) fn dispatch_pending_exception(
                 let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
                     message: "exception unwinder lost a frame above its for-of handler",
                 })?;
+                if let Some(generator) = frame.generator_resume {
+                    complete_generator_resume(runtime, generator)?;
+                }
                 *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
                 if let Some(dynamic) = frame.dynamic_return.take() {
                     runtime.retire_dynamic_root(dynamic.root)?;
@@ -542,6 +545,9 @@ pub(super) fn dispatch_pending_exception(
                 let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
                     message: "exception unwinder lost a frame above its native handler",
                 })?;
+                if let Some(generator) = frame.generator_resume {
+                    complete_generator_resume(runtime, generator)?;
+                }
                 *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
                 if let Some(dynamic) = frame.dynamic_return.take() {
                     runtime.retire_dynamic_root(dynamic.root)?;
@@ -550,6 +556,9 @@ pub(super) fn dispatch_pending_exception(
             let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
                 message: "exception unwinder lost its native handler frame",
             })?;
+            if let Some(generator) = frame.generator_resume {
+                complete_generator_resume(runtime, generator)?;
+            }
             *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
             if let Some(dynamic) = frame.dynamic_return.take() {
                 runtime.retire_dynamic_root(dynamic.root)?;
@@ -685,6 +694,9 @@ pub(super) fn dispatch_pending_exception(
             let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
                 message: "exception unwinder lost a frame above its catch handler",
             })?;
+            if let Some(generator) = frame.generator_resume {
+                complete_generator_resume(runtime, generator)?;
+            }
             *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
             if let Some(dynamic) = frame.dynamic_return.take() {
                 runtime.retire_dynamic_root(dynamic.root)?;

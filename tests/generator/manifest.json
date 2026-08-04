@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "yield-resume-and-completed-resume-rules",
+      "covers": ["yield", "next-first-argument", "next-resume-value", "completed-next", "completed-return", "completed-throw"],
+      "body": "function* values(first) { let resumed = yield first; return resumed + 1; }\nlet iterator = values(2);\nlet first = iterator.next(99);\nlet second = iterator.next(4);\nlet completed = iterator.next();\nlet returned = iterator.return(8);\nlet thrown;\ntry { iterator.throw(7); } catch (error) { thrown = error; }\nreturn first.value + ':' + first.done + '|' + second.value + ':' + second.done + '|' + String(completed.value) + ':' + completed.done + '|' + returned.value + ':' + returned.done + '|' + thrown;",
+      "expect": {"kind": "string", "value": "2:false|5:true|undefined:true|8:true|7"}
+    },
+    {
+      "id": "generator-call-runs-parameter-initialization",
+      "covers": ["parameter-initialization", "prestart-return", "prestart-throw"],
+      "body": "let hits = 0;\nfunction* values(value = (hits = hits + 1)) { yield value; }\nlet returned = values().return(4);\nlet thrown;\ntry { values().throw(6); } catch (error) { thrown = error; }\nreturn hits + '|' + returned.value + ':' + returned.done + '|' + thrown;",
+      "expect": {"kind": "string", "value": "2|4:true|6"}
+    },
+    {
+      "id": "throw-enters-catch-and-uncaught-throw-completes",
+      "covers": ["throw-catch", "uncaught-completes"],
+      "body": "function* caught() { try { yield 1; } catch (error) { return error + 1; } }\nlet first = caught();\nfirst.next();\nlet handled = first.throw(4);\nfunction* abrupt() { yield 2; throw 8; }\nlet second = abrupt();\nsecond.next();\nlet escaped;\ntry { second.next(); } catch (error) { escaped = error; }\nlet completed = second.next();\nreturn handled.value + ':' + handled.done + '|' + escaped + '|' + String(completed.value) + ':' + completed.done;",
+      "expect": {"kind": "string", "value": "5:true|8|undefined:true"}
+    },
+    {
+      "id": "executing-generator-rejects-reentrant-next",
+      "covers": ["reentrancy"],
+      "body": "let iterator;\nfunction* values() { try { iterator.next(); } catch (error) { return error.name; } }\niterator = values();\nlet result = iterator.next();\nreturn result.value + ':' + result.done;",
+      "expect": {"kind": "string", "value": "TypeError:true"}
+    },
+    {
+      "id": "generator-function-and-instance-prototype-chains",
+      "covers": ["function-prototype-chain", "instance-prototype-chain", "nonconstructable"],
+      "body": "let generator = function* named() {};\nlet iterator = generator();\nlet functionPrototype = Object.getPrototypeOf(generator);\nlet generatorPrototype = Object.getPrototypeOf(generator.prototype);\nlet constructError = '';\ntry { new generator(); } catch (error) { constructError = error.name; }\nreturn Object.prototype.toString.call(functionPrototype) + '|' + Object.prototype.toString.call(generatorPrototype) + '|' + (Object.getPrototypeOf(iterator) === generator.prototype) + '|' + (generatorPrototype.constructor === functionPrototype) + '|' + constructError;",
+      "expect": {"kind": "string", "value": "[object GeneratorFunction]|[object Generator]|true|true|TypeError"}
+    },
+    {
+      "id": "generator-method-call-and-apply",
+      "covers": ["generator-method", "call-apply"],
+      "body": "let object = { *values() { yield 2; } };\nlet direct = object.values.call(object).next().value;\nlet applied = object.values.apply(object, []).next().value;\nreturn direct + ':' + applied;",
+      "expect": {"kind": "string", "value": "2:2"}
+    },
+    {
+      "id": "for-of-consumes-generator-in-order",
+      "covers": ["for-of-consumption"],
+      "body": "function* values() { yield 2; yield 3; }\nlet result = '';\nfor (const value of values()) result = result + value;\nreturn result;",
+      "expect": {"kind": "string", "value": "23"}
+    },
+    {
+      "id": "return-completion-survives-yielding-finally",
+      "covers": ["return-finally"],
+      "body": "function* values() { try { yield 1; } finally { yield 2; } }\nlet iterator = values();\nlet first = iterator.next();\nlet second = iterator.return(9);\nlet third = iterator.next();\nreturn first.value + ':' + first.done + '|' + second.value + ':' + second.done + '|' + third.value + ':' + third.done;",
+      "expect": {"kind": "string", "value": "1:false|2:false|9:true"}
+    },
+    {
+      "id": "return-closes-active-nested-generator-iterator",
+      "covers": ["return-nested-close"],
+      "body": "let log = '';\nfunction* inner() { try { while (true) yield 3; } finally { log = log + 'close'; } }\nfunction* outer() { for (const value of inner()) yield value; }\nlet iterator = outer();\nlet first = iterator.next();\nlet second = iterator.return(7);\nreturn first.value + ':' + first.done + '|' + log + '|' + second.value + ':' + second.done;",
+      "expect": {"kind": "string", "value": "3:false|close|7:true"}
+    }
+  ]
+}

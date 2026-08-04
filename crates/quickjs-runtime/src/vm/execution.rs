@@ -451,6 +451,9 @@ pub(super) fn create_frame(
         transient_cleanup_pending: false,
         ordinary_constructor: false,
         native_caller: None,
+        generator_resume: None,
+        generator_result: None,
+        resume_abrupt: None,
         reserved_values: plan.reserved_values,
         arguments_snapshot_use: plan.arguments_snapshot_use,
         arguments_snapshot,
@@ -2175,7 +2178,19 @@ pub(super) fn execute_one(
                 origin,
             }));
         }
-        FinalOpcode::Return => return Ok(Step::Return(pop(frame)?)),
+        FinalOpcode::InitialYield => {
+            return Ok(Step::InitialYield);
+        }
+        FinalOpcode::Yield => {
+            frame.instruction = verified_instruction.successors().fallthrough().ok_or(
+                EngineFault::InvalidSuccessor {
+                    function: frame.template,
+                    pc: source_pc,
+                },
+            )?;
+            return Ok(Step::Yield(pop(frame)?));
+        }
+        FinalOpcode::Return | FinalOpcode::ReturnAsync => return Ok(Step::Return(pop(frame)?)),
         FinalOpcode::ReturnUndef => return Ok(Step::Return(StoredValue::Undefined)),
         FinalOpcode::Nop => {}
         _ => return unsupported_dispatch(opcode),

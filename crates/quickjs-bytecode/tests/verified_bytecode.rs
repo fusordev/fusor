@@ -5071,6 +5071,9 @@ fn define_method_input_with_root_arguments(
             CompilerExecutableKind::DynamicFunctionScript => {
                 panic!("a define_method child cannot be a Script")
             }
+            CompilerExecutableKind::GeneratorFunction | CompilerExecutableKind::GeneratorMethod => {
+                panic!("this ordinary-method fixture cannot create a generator child")
+            }
         },
     );
     let child_atoms = (0..child_arguments)

@@ -78,6 +78,10 @@ does not imply complete ECMAScript or QuickJS compatibility.
   bindings/captures, closures, expressions, statements, labels, `switch`,
   classic `for`, `for-in`, synchronous `for-of`, calls/spread, destructuring,
   exceptions, and `try`/`catch`/`finally`.
+- [x] Plain-`yield` synchronous generator functions and methods lower to
+  verified suspension programs. Generator-only opcodes are admitted only for
+  generator authorities; abrupt cleanup preserves `finally` and closes active
+  iterators before suspension or completion.
 - [x] Runtime execution uses explicit frame and continuation stacks for
   bytecode/native calls, constructors, abrupt completion, iterator closing,
   coercion re-entry, and verified stack traces. Bound receiver/argument
@@ -85,9 +89,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Deterministic fuel and host interrupts are separate. The interrupt hook is
   polled on the pinned 10,000-instruction counter and reports an uncatchable
   `ExecutionError::Interrupted`.
-- [ ] Complete remaining opcode families, debug/source tables, generators, and
-  direct/indirect `eval`. Raw or serialized unverified bytecode and `eval`
-  remain fail closed.
+- [ ] Complete remaining opcode families, debug/source tables, `yield*`, async
+  functions/generators, and direct/indirect `eval`. Raw or serialized
+  unverified bytecode and `eval` remain fail closed.
 
 ### Values, objects, and functions
 
@@ -109,7 +113,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Realm bootstrap is declared by validated intrinsic schemas. Atom and
   resource plans, typed shell allocation, ordered publication, and allocation-
   free reverse rollback are derived from that schema. A normalized snapshot
-  pins all 275 Realm-local identities and 857 ordered properties across Realms.
+  pins all 281 Realm-local identities and 874 ordered properties across Realms.
 - [ ] Add Proxy and remaining exotics, shape/transition interning, dense indexed
   storage, deterministic finalization, and complete reflection/diagnostics.
 
@@ -167,8 +171,14 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Host Promise rejection tracking reports `reject` at unhandled settlement
   and `handle` at the first later reaction. Borrowed callback values add no GC
   roots; hosts explicitly retain owned handles when needed.
-- [ ] Add generators, async functions/generators, and their dynamic
-  constructors on verified continuations.
+- [x] Synchronous generator calls perform parameter instantiation before
+  returning an iterator, then preserve `SuspendedStart`, `SuspendedYield`,
+  `Executing`, and `Completed` transitions across `next`/`return`/`throw`.
+  Realm-local `%GeneratorFunction.prototype%` and `%Generator.prototype%`,
+  reentrancy rejection, yielding `finally`, nested `IteratorClose`, GC tracing,
+  and failure-atomic result admission are covered.
+- [ ] Add `yield*`, dynamic `GeneratorFunction` compilation, async functions,
+  async generators, and their dynamic constructors on verified continuations.
 - [ ] Implement module linking/evaluation, cycles, resolver semantics, dynamic
   import, and top-level `await`. Module parsing alone is not an execution claim.
 - [ ] Finish the Rust embedding API, ESM REPL, `qjs`, Rust-native `qjsc`,
@@ -239,6 +249,7 @@ QuickJS `qjs` or `qjsc`. Current corpus results are:
 | Legacy `Object.prototype` | 15/15, 15/15 feature tags |
 | Annex B String HTML | 6/6, 18/18 feature tags |
 | Promise core | 29/29, 46/46 feature tags |
+| Synchronous generators | 9/9, 20/20 feature tags |
 
 The parser gate also fails for an uncovered pinned production, uncovered
 reachable diagnostic, falsely unreachable diagnostic, or changed oracle

@@ -75,7 +75,11 @@ impl PlannedControlFlow {
         self.instruction_spans.push(instruction.span);
         self.last_instruction_can_fall_through = Some(!matches!(
             instruction.opcode,
-            FinalOpcode::Ret | FinalOpcode::Return | FinalOpcode::ReturnUndef | FinalOpcode::Throw
+            FinalOpcode::Ret
+                | FinalOpcode::Return
+                | FinalOpcode::ReturnUndef
+                | FinalOpcode::ReturnAsync
+                | FinalOpcode::Throw
         ));
         self.label_bound_after_last_instruction = false;
         Ok(())
@@ -236,6 +240,27 @@ impl PlannedControlFlow {
         {
             self.emit(PlannedInstruction::new(
                 FinalOpcode::ReturnUndef,
+                Operands::None,
+                span,
+            ))?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::lowering) fn ensure_generator_terminal(
+        &mut self,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        if self.label_bound_after_last_instruction
+            || self.last_instruction_can_fall_through.unwrap_or(true)
+        {
+            self.emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                span,
+            ))?;
+            self.emit(PlannedInstruction::new(
+                FinalOpcode::ReturnAsync,
                 Operands::None,
                 span,
             ))?;

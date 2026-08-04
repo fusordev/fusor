@@ -27,9 +27,9 @@
 
 use super::{
     Arc, AtomError, BytecodeFunction, CompilerExecutableKind, Context, DynamicFunctionScriptError,
-    ExceptionKind, ExecutionLimits, Function, FunctionId, FunctionImplementation, HeapFunction,
-    HeapObject, HeapReference, InstallError, InstalledCode, InstalledRoot, InstalledTemplate,
-    JsNumber, JsString, JsValue, ObjectId, ObjectRecord, OrdinaryDynamicFunctionCompiler,
+    ExceptionKind, ExecutionLimits, Function, FunctionImplementation, HeapFunction, HeapObject,
+    HeapReference, InstallError, InstalledCode, InstalledRoot, InstalledTemplate, JsNumber,
+    JsString, JsValue, ObjectId, ObjectRecord, OrdinaryDynamicFunctionCompiler,
     PendingRootEnvironment, PredefinedAtom, PrimitiveValue, PropertyKey, PropertyLayout,
     RootPublication, Runtime, RuntimeResource, RuntimeUsage, StoredValue, VerifiedBytecode,
     check_install_limit, global_declaration_error, preflight_opcodes, require_root_kind,
@@ -61,10 +61,10 @@ fn build_root_function_records(
     authority: &VerifiedBytecode,
     templates: &[InstalledTemplate],
     publication: RootPublication,
-    function_prototype: FunctionId,
+    function_prototype: HeapReference,
     object_prototype: Option<ObjectId>,
 ) -> Result<RootFunctionRecords, InstallError> {
-    let mut function = ObjectRecord::empty(Some(HeapReference::Function(function_prototype)));
+    let mut function = ObjectRecord::empty(Some(function_prototype));
     if !publication.is_public() {
         return Ok(RootFunctionRecords {
             function,
@@ -76,6 +76,8 @@ fn build_root_function_records(
     let root = authority.root();
     let header = root.function().control_flow().function_header();
     let has_prototype = header.flags().has_prototype();
+    let creates_prototype =
+        has_prototype || header.kind() == quickjs_bytecode::FunctionKind::Generator;
     let installed_index = usize::try_from(authority.root_id().get()).map_err(|_| {
         InstallError::AuthorityInvariant {
             message: "root template index is not representable",
@@ -99,7 +101,7 @@ fn build_root_function_records(
                 })
         },
     )?;
-    let function_property_count = 2_usize + usize::from(has_prototype);
+    let function_property_count = 2_usize + usize::from(creates_prototype);
     function
         .try_reserve_data(function_property_count)
         .map_err(|_| InstallError::AllocationFailed {
@@ -121,7 +123,7 @@ fn build_root_function_records(
         StoredValue::String(name),
     )?;
 
-    let prototype = if has_prototype {
+    let prototype = if creates_prototype {
         let object_prototype = object_prototype.ok_or(InstallError::AuthorityInvariant {
             message: "constructable root has no Object.prototype intrinsic",
         })?;
@@ -134,17 +136,19 @@ fn build_root_function_records(
         )?;
         let mut prototype = ObjectRecord::empty(Some(HeapReference::Object(object_prototype)));
         prototype
-            .try_reserve_data(1)
+            .try_reserve_data(usize::from(has_prototype))
             .map_err(|_| InstallError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
-                additional: 1,
+                additional: usize::from(has_prototype),
             })?;
-        append_root_data(
-            &mut prototype,
-            runtime.predefined_property_key(PredefinedAtom::Constructor),
-            PropertyLayout::data(true, false, true),
-            StoredValue::Undefined,
-        )?;
+        if has_prototype {
+            append_root_data(
+                &mut prototype,
+                runtime.predefined_property_key(PredefinedAtom::Constructor),
+                PropertyLayout::data(true, false, true),
+                StoredValue::Undefined,
+            )?;
+        }
         Some(prototype)
     } else {
         None
@@ -368,13 +372,6 @@ impl Context<'_> {
         if prepare_safe_point {
             self.runtime.prepare_installation_safe_point()?;
         }
-        let function_prototype =
-            self.runtime
-                .realm_function_prototype(self.realm)
-                .map_err(|_| InstallError::AuthorityInvariant {
-                    message: "constructor realm has no Function.prototype intrinsic",
-                })?;
-
         let graph_usage = authority.compiler_graph().usage();
         let functions = graph_usage.functions();
         let atoms = graph_usage.atoms();
@@ -405,22 +402,49 @@ impl Context<'_> {
             usize_to_u64(self.runtime.functions.len()).saturating_add(1),
         )?;
         let root_header = authority.root().function().control_flow().function_header();
+        let root_is_generator = root_header.kind() == quickjs_bytecode::FunctionKind::Generator;
         let root_has_prototype = publication.is_public() && root_header.flags().has_prototype();
-        let object_prototype = root_has_prototype
-            .then(|| self.runtime.realm_object_prototype(self.realm))
-            .transpose()
-            .map_err(|_| InstallError::AuthorityInvariant {
-                message: "constructor realm has no Object.prototype intrinsic",
-            })?;
+        let root_creates_prototype =
+            publication.is_public() && (root_has_prototype || root_is_generator);
+        let function_prototype = if root_is_generator {
+            HeapReference::Object(
+                self.runtime
+                    .realm_generator_function_prototype(self.realm)
+                    .map_err(|_| InstallError::AuthorityInvariant {
+                        message: "constructor realm has no GeneratorFunction.prototype intrinsic",
+                    })?,
+            )
+        } else {
+            HeapReference::Function(self.runtime.realm_function_prototype(self.realm).map_err(
+                |_| InstallError::AuthorityInvariant {
+                    message: "constructor realm has no Function.prototype intrinsic",
+                },
+            )?)
+        };
+        let object_prototype = if root_is_generator {
+            root_creates_prototype
+                .then(|| self.runtime.realm_generator_prototype(self.realm))
+                .transpose()
+        } else {
+            root_has_prototype
+                .then(|| self.runtime.realm_object_prototype(self.realm))
+                .transpose()
+        }
+        .map_err(|_| InstallError::AuthorityInvariant {
+            message: "constructor realm has no function instance prototype intrinsic",
+        })?;
         let root_property_count = if publication.is_public() {
-            2_u64.saturating_add(2 * u64::from(root_has_prototype))
+            2_u64
+                .saturating_add(u64::from(root_creates_prototype))
+                .saturating_add(u64::from(root_has_prototype))
         } else {
             0
         };
         check_install_limit(
             RuntimeResource::HeapObjects,
             self.runtime.limits.max_heap_objects,
-            usize_to_u64(self.runtime.objects.len()).saturating_add(u64::from(root_has_prototype)),
+            usize_to_u64(self.runtime.objects.len())
+                .saturating_add(u64::from(root_creates_prototype)),
         )?;
         check_install_limit(
             RuntimeResource::ObjectProperties,
@@ -465,10 +489,10 @@ impl Context<'_> {
             })?;
         self.runtime
             .objects
-            .try_reserve(usize::from(root_has_prototype))
+            .try_reserve(usize::from(root_creates_prototype))
             .map_err(|_| InstallError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
-                additional: usize::from(root_has_prototype),
+                additional: usize::from(root_creates_prototype),
             })?;
         if publication.is_public() {
             self.runtime.mailbox.try_reserve_root().map_err(|_| {
@@ -610,7 +634,7 @@ impl Context<'_> {
                 additional: 1,
             });
         };
-        if let Some(object) = prototype_object {
+        if root_has_prototype && let Some(object) = prototype_object {
             let constructor_key = self
                 .runtime
                 .predefined_property_key(PredefinedAtom::Constructor);

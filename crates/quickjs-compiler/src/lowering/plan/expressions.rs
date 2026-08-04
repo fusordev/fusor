@@ -10,6 +10,7 @@ use super::super::{
     UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
     object_method_or_accessor_span, unsupported,
 };
+use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 
 pub(in crate::lowering) fn anonymous_named_evaluation_span(
     mut expression: &Expression<'_>,
@@ -256,6 +257,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        abrupt_markers: &[AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let mut work = vec![ExpressionWork::Visit(expression)];
@@ -351,6 +353,45 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                                 constants,
                             )?)?;
                         }
+                        Expression::YieldExpression(yield_expression) => {
+                            if yield_expression.delegate {
+                                return unsupported(
+                                    UnsupportedLeafFeature::UnsupportedExpression,
+                                    yield_expression.span,
+                                );
+                            }
+                            let resumed = flow.new_label(yield_expression.span)?;
+                            work.push(ExpressionWork::Bind(resumed.clone()));
+                            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                                FinalOpcode::ReturnAsync,
+                                Operands::None,
+                                yield_expression.span,
+                            )));
+                            Self::schedule_yield_return_cleanup(
+                                abrupt_markers,
+                                yield_expression.span,
+                                &mut work,
+                            );
+                            work.push(ExpressionWork::Branch {
+                                kind: BranchKind::IfFalse,
+                                target: resumed,
+                                span: yield_expression.span,
+                            });
+                            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                                FinalOpcode::Yield,
+                                Operands::None,
+                                yield_expression.span,
+                            )));
+                            if let Some(argument) = &yield_expression.argument {
+                                work.push(ExpressionWork::Visit(argument));
+                            } else {
+                                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                                    FinalOpcode::Undefined,
+                                    Operands::None,
+                                    yield_expression.span,
+                                )));
+                            }
+                        }
                         Expression::ThisExpression(this) => {
                             flow.emit(self.plan_this_expression(this.span, layout)?)?;
                         }
@@ -365,6 +406,69 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             }
         }
         Ok(())
+    }
+
+    fn schedule_yield_return_cleanup<'expression>(
+        abrupt_markers: &[AbruptMarker],
+        span: Span,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) {
+        for marker in abrupt_markers {
+            match &marker.kind {
+                AbruptMarkerKind::Catch { finalizer } => {
+                    if let Some(finalizer) = finalizer {
+                        work.push(ExpressionWork::Branch {
+                            kind: BranchKind::Gosub,
+                            target: finalizer.clone(),
+                            span,
+                        });
+                    }
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::NipCatch,
+                        Operands::None,
+                        span,
+                    )));
+                }
+                AbruptMarkerKind::ForIn => {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Nip,
+                        Operands::None,
+                        span,
+                    )));
+                }
+                AbruptMarkerKind::ForOf => {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::IteratorClose,
+                        Operands::None,
+                        span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Undefined,
+                        Operands::None,
+                        span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Rot3r,
+                        Operands::None,
+                        span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::NipCatch,
+                        Operands::None,
+                        span,
+                    )));
+                }
+                AbruptMarkerKind::FinallySubroutine => {
+                    for _ in 0..2 {
+                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::Nip,
+                            Operands::None,
+                            span,
+                        )));
+                    }
+                }
+            }
+        }
     }
 
     fn plan_this_expression(

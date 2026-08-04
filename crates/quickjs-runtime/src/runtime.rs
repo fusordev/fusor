@@ -90,6 +90,7 @@ enum RealmIntrinsics {
         promise: PromiseIntrinsics,
         symbol: SymbolIntrinsics,
         iterators: IteratorIntrinsics,
+        generators: GeneratorIntrinsics,
     },
 }
 
@@ -246,6 +247,13 @@ struct IteratorIntrinsics {
     array_iterator_prototype: ObjectId,
     string_iterator_prototype: ObjectId,
     array_values: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GeneratorIntrinsics {
+    function_constructor: FunctionId,
+    function_prototype: ObjectId,
+    generator_prototype: ObjectId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1161,6 +1169,10 @@ pub(crate) enum NativeFunctionKind {
     ArrayIteratorNext,
     StringPrototypeIterator,
     StringIteratorNext,
+    GeneratorFunctionConstructor,
+    GeneratorPrototypeNext,
+    GeneratorPrototypeReturn,
+    GeneratorPrototypeThrow,
     PromiseConstructor,
     PromiseResolve,
     PromiseReject,
@@ -1317,6 +1329,7 @@ impl NativeFunctionKind {
                 | Self::NumberConstructor
                 | Self::StringConstructor
                 | Self::ArrayConstructor
+                | Self::GeneratorFunctionConstructor
                 | Self::PromiseConstructor
         )
     }
@@ -1842,6 +1855,7 @@ pub struct Runtime {
     pub(crate) interrupts: InterruptState,
     pub(crate) promise_rejections: PromiseRejectionState,
     pub(crate) promise_jobs: VecDeque<PromiseJob>,
+    pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,
     /// Next non-zero seed assigned after a realm transaction commits.
     next_math_random_seed: u64,
 }
@@ -1876,6 +1890,7 @@ mod arrays;
 mod context;
 mod for_in;
 mod gc;
+mod generators;
 pub use gc::CollectionReport;
 pub(crate) use gc::CollectionRoot;
 mod heap;
@@ -1964,34 +1979,23 @@ fn require_root_kind(
     expected: CompilerExecutableKind,
 ) -> Result<(), InstallError> {
     let actual = authority.root().metadata().executable_kind();
-    if actual == expected {
+    if actual == expected
+        || (expected == CompilerExecutableKind::OrdinaryFunction
+            && actual == CompilerExecutableKind::GeneratorFunction)
+    {
         return Ok(());
     }
-    let message = match (expected, actual) {
-        (
-            CompilerExecutableKind::OrdinaryFunction,
-            CompilerExecutableKind::DynamicFunctionScript,
-        ) => "dynamic-function Script cannot be instantiated as an ordinary function",
-        (CompilerExecutableKind::OrdinaryFunction, CompilerExecutableKind::OrdinaryMethod) => {
-            "ordinary method cannot be instantiated as an ordinary function"
+    let message = match expected {
+        CompilerExecutableKind::OrdinaryFunction => {
+            "non-instantiable executable cannot be instantiated as a source function"
         }
-        (CompilerExecutableKind::OrdinaryMethod, CompilerExecutableKind::OrdinaryFunction) => {
-            "ordinary function cannot be instantiated as an ordinary method"
+        CompilerExecutableKind::DynamicFunctionScript => {
+            "source function cannot execute as a dynamic-function Script"
         }
-        (CompilerExecutableKind::OrdinaryMethod, CompilerExecutableKind::DynamicFunctionScript) => {
-            "dynamic-function Script cannot be instantiated as an ordinary method"
-        }
-        (
-            CompilerExecutableKind::DynamicFunctionScript,
-            CompilerExecutableKind::OrdinaryFunction,
-        ) => "ordinary function cannot execute as a dynamic-function Script",
-        (CompilerExecutableKind::DynamicFunctionScript, CompilerExecutableKind::OrdinaryMethod) => {
-            "ordinary method cannot execute as a dynamic-function Script"
-        }
-        _ => {
-            return Err(InstallError::AuthorityInvariant {
-                message: "matching executable kinds reached rejection",
-            });
+        CompilerExecutableKind::OrdinaryMethod
+        | CompilerExecutableKind::GeneratorFunction
+        | CompilerExecutableKind::GeneratorMethod => {
+            "unsupported executable-kind admission request"
         }
     };
     Err(InstallError::AuthorityInvariant { message })
@@ -2072,6 +2076,9 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Throw
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
+            | FinalOpcode::ReturnAsync
+            | FinalOpcode::InitialYield
+            | FinalOpcode::Yield
             | FinalOpcode::GetLoc
             | FinalOpcode::PutLoc
             | FinalOpcode::SetLoc

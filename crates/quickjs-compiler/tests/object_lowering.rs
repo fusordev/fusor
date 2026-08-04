@@ -1000,11 +1000,6 @@ fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
             "return 1",
         ),
         (
-            "function make(){return {*1(){yield 1;}};}",
-            UnsupportedLeafFeature::NonOrdinaryFunction,
-            "yield 1",
-        ),
-        (
             "function make(){return this;}",
             UnsupportedLeafFeature::UnsupportedExpression,
             "this",

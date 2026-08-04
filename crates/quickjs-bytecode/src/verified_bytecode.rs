@@ -516,6 +516,10 @@ pub enum CompilerExecutableKind {
     OrdinaryFunction,
     /// A nonconstructable ordinary object-literal method, getter, or setter.
     OrdinaryMethod,
+    /// A nonconstructable synchronous generator function.
+    GeneratorFunction,
+    /// A synchronous generator object-literal method.
+    GeneratorMethod,
     /// The constructor-realm global Script produced for dynamic `Function`.
     DynamicFunctionScript,
 }
@@ -2332,8 +2336,10 @@ fn verify_executable_kind(
     metadata: &UnverifiedFunctionMetadata,
 ) -> Result<(), BytecodeVerificationError> {
     match metadata.executable_kind {
-        CompilerExecutableKind::OrdinaryFunction => Ok(()),
-        CompilerExecutableKind::OrdinaryMethod => {
+        CompilerExecutableKind::OrdinaryFunction | CompilerExecutableKind::GeneratorFunction => {
+            Ok(())
+        }
+        CompilerExecutableKind::OrdinaryMethod | CompilerExecutableKind::GeneratorMethod => {
             let has_function_name_binding =
                 metadata.variables.iter().any(|definition| {
                     definition.policy.kind() == CompilerBindingKind::FunctionName
@@ -2372,6 +2378,10 @@ fn verify_executable_kind(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "all compiler executable kinds and their exact pinned headers are audited together"
+)]
 fn verify_header(
     id: FunctionTemplateId,
     executable_kind: CompilerExecutableKind,
@@ -2406,6 +2416,52 @@ fn verify_header(
         CompilerExecutableKind::OrdinaryMethod => {
             if header.kind() != FunctionKind::Normal
                 || !matches!(header.flags().bits(), 0x0740 | 0x0742)
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() > arguments
+                || (header.flags().has_simple_parameter_list()
+                    && header.defined_argument_count() != arguments)
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DefinedArgumentCountMismatch {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::GeneratorFunction => {
+            if header.kind() != FunctionKind::Generator
+                || !matches!(header.flags().bits(), 0x0650 | 0x0652)
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() > arguments
+                || (header.flags().has_simple_parameter_list()
+                    && header.defined_argument_count() != arguments)
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DefinedArgumentCountMismatch {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::GeneratorMethod => {
+            if header.kind() != FunctionKind::Generator
+                || !matches!(header.flags().bits(), 0x0750 | 0x0752)
                 || header.mode().bits() & !1 != 0
             {
                 return Err(BytecodeVerificationError::function(
@@ -3807,7 +3863,10 @@ fn verify_method_definitions(
             else {
                 continue;
             };
-            if child_metadata.executable_kind != CompilerExecutableKind::OrdinaryMethod {
+            if !matches!(
+                child_metadata.executable_kind,
+                CompilerExecutableKind::OrdinaryMethod | CompilerExecutableKind::GeneratorMethod
+            ) {
                 continue;
             }
             let pair = index.checked_add(1).and_then(|definition_index| {
@@ -3857,7 +3916,10 @@ fn verify_method_definitions(
     }
 
     for (index, (metadata, &definitions)) in metadata.iter().zip(&definition_counts).enumerate() {
-        if metadata.executable_kind != CompilerExecutableKind::OrdinaryMethod {
+        if !matches!(
+            metadata.executable_kind,
+            CompilerExecutableKind::OrdinaryMethod | CompilerExecutableKind::GeneratorMethod
+        ) {
             continue;
         }
         let child = function_id(index)?;
@@ -3985,8 +4047,10 @@ fn inferred_function_name_pair(
     let child_metadata = usize::try_from(child.get())
         .ok()
         .and_then(|index| metadata.get(index))?;
-    (child_metadata.executable_kind == CompilerExecutableKind::OrdinaryFunction
-        && child_metadata.function_name.is_none())
+    (matches!(
+        child_metadata.executable_kind,
+        CompilerExecutableKind::OrdinaryFunction | CompilerExecutableKind::GeneratorFunction
+    ) && child_metadata.function_name.is_none())
     .then_some(*child)
 }
 
@@ -4029,7 +4093,10 @@ fn method_definition_pair(
     };
     let child_index = usize::try_from(child.get()).ok()?;
     let child_metadata = metadata.get(child_index)?;
-    if child_metadata.executable_kind != CompilerExecutableKind::OrdinaryMethod {
+    if !matches!(
+        child_metadata.executable_kind,
+        CompilerExecutableKind::OrdinaryMethod | CompilerExecutableKind::GeneratorMethod
+    ) {
         return None;
     }
     let arguments = graph
@@ -5095,6 +5162,10 @@ fn atom_contents(
     atoms.get(index).map(crate::CompilerAtom::string)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "opcode admission and function-kind restrictions share one auditable pass"
+)]
 fn verify_supported_opcodes(
     id: FunctionTemplateId,
     flow: &VerifiedControlFlow,
@@ -5103,6 +5174,11 @@ fn verify_supported_opcodes(
 ) -> Result<(), BytecodeVerificationError> {
     let mut arguments_object_count = 0_u8;
     let mut rest_parameter_count = 0_u8;
+    let generator = matches!(
+        executable_kind,
+        CompilerExecutableKind::GeneratorFunction | CompilerExecutableKind::GeneratorMethod
+    );
+    let mut initial_yield = None;
     let mapped_arguments_authority = flow
         .compiler_capture_layout()
         .and_then(CompilerCaptureLayout::mapped_arguments)
@@ -5116,8 +5192,23 @@ fn verify_supported_opcodes(
             arguments_object_count = arguments_object_count.saturating_add(1);
         } else if opcode == FinalOpcode::Rest {
             rest_parameter_count = rest_parameter_count.saturating_add(1);
+        } else if opcode == FinalOpcode::InitialYield
+            && initial_yield.replace(decoded.pc()).is_some()
+        {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                    pc: decoded.pc(),
+                    opcode,
+                },
+            ));
         }
         if !supported_compiler_opcode(opcode)
+            || (matches!(
+                opcode,
+                FinalOpcode::InitialYield | FinalOpcode::Yield | FinalOpcode::ReturnAsync
+            ) && !generator)
+            || (matches!(opcode, FinalOpcode::Return | FinalOpcode::ReturnUndef) && generator)
             || (opcode == FinalOpcode::PushThis
                 && !flow.function_header().mode().is_strict()
                 && executable_kind != CompilerExecutableKind::OrdinaryMethod
@@ -5138,6 +5229,8 @@ fn verify_supported_opcodes(
                         executable_kind,
                         CompilerExecutableKind::OrdinaryFunction
                             | CompilerExecutableKind::OrdinaryMethod
+                            | CompilerExecutableKind::GeneratorFunction
+                            | CompilerExecutableKind::GeneratorMethod
                     )
                         || arguments_object_count != 1
                         || rest_parameter_count != 0
@@ -5152,6 +5245,8 @@ fn verify_supported_opcodes(
                             executable_kind,
                             CompilerExecutableKind::OrdinaryFunction
                                 | CompilerExecutableKind::OrdinaryMethod
+                                | CompilerExecutableKind::GeneratorFunction
+                                | CompilerExecutableKind::GeneratorMethod
                         )
                         || rest_parameter_count != 1
             )
@@ -5177,6 +5272,15 @@ fn verify_supported_opcodes(
             BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
                 pc: BytecodePc::ZERO,
                 opcode: FinalOpcode::SpecialObject,
+            },
+        ));
+    }
+    if generator && initial_yield.is_none() {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                pc: BytecodePc::ZERO,
+                opcode: FinalOpcode::InitialYield,
             },
         ));
     }
@@ -5218,6 +5322,9 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Perm3
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
+            | FinalOpcode::ReturnAsync
+            | FinalOpcode::InitialYield
+            | FinalOpcode::Yield
             | FinalOpcode::Throw
             | FinalOpcode::Catch
             | FinalOpcode::NipCatch

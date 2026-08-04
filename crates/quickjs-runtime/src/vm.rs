@@ -29,8 +29,8 @@ use std::{cell::RefCell, error::Error, fmt, rc::Rc, sync::Arc};
 
 use quickjs_bytecode::{
     BytecodePc, CompilerBindingKind, CompilerClosureBinding, CompilerClosureSource,
-    CompilerExecutableKind, FinalOpcode, FunctionTemplateId, InstructionIndex, Operands,
-    SourceByteSpan, VerifiedBytecodeFunction, VerifiedSuccessorKind,
+    CompilerExecutableKind, FinalOpcode, FunctionKind, FunctionTemplateId, InstructionIndex,
+    Operands, SourceByteSpan, VerifiedBytecodeFunction, VerifiedSuccessorKind,
 };
 
 use crate::runtime::StringHtmlMethod;
@@ -89,6 +89,7 @@ mod errors;
 mod exceptions;
 mod execution;
 mod from_entries;
+mod generator;
 mod group_by;
 mod instanceof;
 mod iterators;
@@ -117,10 +118,10 @@ use {
     aggregate_error::*, array_callbacks::*, array_copiers::*, array_flatten::*, array_join::*,
     array_mutators::*, array_search::*, array_sort::*, array_statics::*, bigint_intrinsics::*,
     bindings::*, conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*,
-    errors::*, exceptions::*, execution::*, from_entries::*, group_by::*, iterators::*,
-    json_parse::*, json_stringify::*, locale_string::*, math::*, math_sum_precise::*, native::*,
-    object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*, stack::*,
-    string_methods::*, string_raw::*, string_replace::*, uri::*,
+    errors::*, exceptions::*, execution::*, from_entries::*, generator::*, group_by::*,
+    iterators::*, json_parse::*, json_stringify::*, locale_string::*, math::*, math_sum_precise::*,
+    native::*, object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*,
+    stack::*, string_methods::*, string_raw::*, string_replace::*, uri::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -252,7 +253,7 @@ enum OperandStackEntry {
     FinallyReturn { continuation: InstructionIndex },
 }
 
-struct Frame {
+pub(crate) struct Frame {
     function: FunctionId,
     code: InstalledCodeId,
     template: FunctionTemplateId,
@@ -265,6 +266,9 @@ struct Frame {
     transient_cleanup_pending: bool,
     ordinary_constructor: bool,
     native_caller: Option<SyntheticNativeFrame>,
+    generator_resume: Option<ObjectId>,
+    generator_result: Option<ObjectId>,
+    resume_abrupt: Option<PendingException>,
     reserved_values: u64,
     arguments_snapshot_use: ArgumentsSnapshotUse,
     arguments_snapshot: Option<Vec<StoredValue>>,
@@ -274,6 +278,19 @@ struct Frame {
     own_cell_bindings: Vec<FrameBindingAddress>,
     environment: Vec<EnvironmentBinding>,
     stack: Vec<OperandStackEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GeneratorLifecycle {
+    SuspendedStart,
+    SuspendedYield,
+    Executing,
+    Completed,
+}
+
+pub(crate) struct GeneratorRecord {
+    pub(crate) state: GeneratorLifecycle,
+    pub(crate) frame: Option<Frame>,
 }
 
 /// The pinned `call (native)` / `apply (native)` entry `QuickJS` places
@@ -1760,7 +1777,7 @@ fn trace_native_continuation_roots(
     }
 }
 
-fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRoot)) {
+pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRoot)) {
     mark(CollectionRoot::Heap(HeapReference::Function(
         frame.function,
     )));
@@ -1788,6 +1805,17 @@ fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRoot)) {
     }
     for continuation in &frame.native_returns {
         trace_native_continuation_roots(continuation, mark);
+    }
+    if let Some(generator) = frame.generator_resume {
+        mark(CollectionRoot::Heap(HeapReference::Object(generator)));
+    }
+    if let Some(result) = frame.generator_result {
+        mark(CollectionRoot::Heap(HeapReference::Object(result)));
+    }
+    if let Some(pending) = &frame.resume_abrupt
+        && let PendingExceptionPayload::ThrownValue(value) = &pending.payload
+    {
+        trace_stored_value_root(value, mark);
     }
     if let Some(dynamic) = &frame.dynamic_return {
         mark(CollectionRoot::Heap(HeapReference::Function(
@@ -2080,6 +2108,8 @@ enum Step {
         return_to: CallReturn,
     },
     Abrupt(PendingException),
+    InitialYield,
+    Yield(StoredValue),
     Return(StoredValue),
 }
 
@@ -2621,6 +2651,11 @@ fn execute_prepared_frames_with_budget(
         compiler,
         execution_budget,
     );
+    let generator_cleanup = if result.is_err() {
+        complete_active_generator_resumes(runtime, &frames)
+    } else {
+        Ok(())
+    };
     let reclaim_temporary_receivers = frames_have_temporary_receiver(&frames);
     let cleanup = retire_active_dynamic_roots(runtime, &mut frames);
     if let Err(fault) = cleanup {
@@ -2631,6 +2666,15 @@ fn execute_prepared_frames_with_budget(
             }
         }
         return Err(fault.into());
+    }
+    if let Err(error) = generator_cleanup {
+        if reclaim_temporary_receivers {
+            frames.clear();
+            if runtime.collection_pending {
+                let _ = runtime.collect_cycles();
+            }
+        }
+        return Err(error);
     }
     if result.is_err() {
         if reclaim_temporary_receivers {
@@ -2679,6 +2723,21 @@ fn execute_frame_loop(
             return Err(ExecutionError::Interrupted {
                 executed: execution_budget.executed_instructions,
             });
+        }
+        let frame = frames.last_mut().ok_or(EngineFault::MissingInstruction {
+            function: FunctionTemplateId::new(0),
+            instruction: 0,
+        })?;
+        if let Some(pending) = frame.resume_abrupt.take() {
+            dispatch_pending_exception(
+                runtime,
+                frames,
+                active_frame_values,
+                pending,
+                compiler,
+                execution_budget,
+            )?;
+            continue;
         }
         let frame = frames.last_mut().ok_or(EngineFault::MissingInstruction {
             function: FunctionTemplateId::new(0),
@@ -3659,6 +3718,113 @@ fn execute_frame_loop(
                     execution_budget,
                 )?;
             }
+            Step::InitialYield => {
+                let mut initial = frames.pop().ok_or(EngineFault::MissingInstruction {
+                    function: FunctionTemplateId::new(0),
+                    instruction: 0,
+                })?;
+                *active_frame_values = active_frame_values.saturating_sub(initial.reserved_values);
+                let return_to = initial.return_to;
+                let native_returns = std::mem::take(&mut initial.native_returns);
+                initial.reserved_values = initial
+                    .reserved_values
+                    .saturating_sub(native_continuation_values(&native_returns));
+                let mut result = create_generator(runtime, initial)?;
+                if !native_returns.is_empty() {
+                    match resume_suspended_native_returns(
+                        runtime,
+                        frames,
+                        active_frame_values,
+                        native_returns,
+                        result,
+                        return_to,
+                        compiler,
+                        execution_budget,
+                    )? {
+                        SuspendedNativeReturn::Value(value) => result = value,
+                        SuspendedNativeReturn::Continued => continue,
+                    }
+                }
+                if let Some(parent) = frames.last_mut() {
+                    push_call_result(
+                        parent,
+                        result,
+                        return_to.ok_or(EngineFault::RuntimeInvariant {
+                            message: "nested generator creation has no caller continuation",
+                        })?,
+                    )?;
+                    continue;
+                }
+                if return_to.is_some() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "host generator creation has a caller continuation",
+                    }
+                    .into());
+                }
+                return Ok(result);
+            }
+            Step::Yield(value) => {
+                let mut suspended = frames.pop().ok_or(EngineFault::MissingInstruction {
+                    function: FunctionTemplateId::new(0),
+                    instruction: 0,
+                })?;
+                *active_frame_values =
+                    active_frame_values.saturating_sub(suspended.reserved_values);
+                let generator =
+                    suspended
+                        .generator_resume
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "yielding frame has no generator resume identity",
+                        })?;
+                let result =
+                    suspended
+                        .generator_result
+                        .take()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "yielding frame has no reserved iterator result",
+                        })?;
+                suspended.reserved_values = suspended.reserved_values.saturating_sub(1);
+                let return_to = suspended.return_to;
+                let native_returns = std::mem::take(&mut suspended.native_returns);
+                suspended.reserved_values = suspended
+                    .reserved_values
+                    .saturating_sub(native_continuation_values(&native_returns));
+                runtime.finish_iterator_result(result, value, false)?;
+                suspend_generator_frame(runtime, generator, suspended)?;
+                let mut result = StoredValue::Object(result);
+                if !native_returns.is_empty() {
+                    match resume_suspended_native_returns(
+                        runtime,
+                        frames,
+                        active_frame_values,
+                        native_returns,
+                        result,
+                        return_to,
+                        compiler,
+                        execution_budget,
+                    )? {
+                        SuspendedNativeReturn::Value(value) => result = value,
+                        SuspendedNativeReturn::Continued => continue,
+                    }
+                }
+                if let Some(parent) = frames.last_mut() {
+                    push_call_result(
+                        parent,
+                        result,
+                        return_to.ok_or(EngineFault::RuntimeInvariant {
+                            message: "nested generator resume has no caller continuation",
+                        })?,
+                    )?;
+                    continue;
+                }
+                if return_to.is_some() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "host generator resume has a caller continuation",
+                    }
+                    .into());
+                }
+                return Ok(result);
+            }
             Step::Return(value) => {
                 let mut finished = frames.pop().ok_or(EngineFault::MissingInstruction {
                     function: FunctionTemplateId::new(0),
@@ -3666,7 +3832,16 @@ fn execute_frame_loop(
                 })?;
                 *active_frame_values = active_frame_values.saturating_sub(finished.reserved_values);
                 let return_to = finished.return_to;
-                let mut value = if let Some(dynamic) = finished.dynamic_return.take() {
+                let mut value = if let Some(generator) = finished.generator_resume {
+                    let result = finished.generator_result.take().ok_or(
+                        EngineFault::RuntimeInvariant {
+                            message: "returning generator frame has no reserved iterator result",
+                        },
+                    )?;
+                    runtime.finish_iterator_result(result, value, true)?;
+                    complete_generator_resume(runtime, generator)?;
+                    StoredValue::Object(result)
+                } else if let Some(dynamic) = finished.dynamic_return.take() {
                     match finish_dynamic_function_return(runtime, dynamic, value)? {
                         DynamicFunctionCompletion::Value(value) => value,
                         DynamicFunctionCompletion::Abrupt(pending) => {
@@ -3858,6 +4033,164 @@ fn execute_frame_loop(
                 return Ok(value);
             }
         }
+    }
+}
+
+enum SuspendedNativeReturn {
+    Value(StoredValue),
+    Continued,
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "a yielded generator can resume the same native continuation graph as a returning bytecode frame"
+)]
+fn resume_suspended_native_returns(
+    runtime: &mut Runtime,
+    frames: &mut Vec<Frame>,
+    active_frame_values: &mut u64,
+    native_returns: Vec<NativeContinuation>,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<SuspendedNativeReturn, ExecutionError> {
+    if frames.try_reserve(1).is_err() {
+        if native_continuations_have_temporary_receiver(&native_returns) {
+            if let Some(frame) = frames.last_mut() {
+                frame.transient_cleanup_pending = true;
+            } else if runtime.collection_pending {
+                let _ = runtime.collect_cycles();
+            }
+        }
+        return Err(ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        });
+    }
+    let active_frames = active_execution_frames(frames);
+    let dispatch = resume_native_continuations(
+        runtime,
+        native_returns,
+        value,
+        return_to,
+        frames,
+        active_frames,
+        *active_frame_values,
+        compiler,
+        execution_budget,
+    );
+    let dispatch = match dispatch {
+        Ok(dispatch) => resolve_native_dispatch(
+            runtime,
+            dispatch,
+            frames,
+            active_frames,
+            *active_frame_values,
+            compiler,
+            execution_budget,
+        ),
+        Err(error) => Err(error),
+    };
+    match dispatch {
+        Ok(NativeDispatch::Immediate(value)) => Ok(SuspendedNativeReturn::Value(value)),
+        Ok(NativeDispatch::Pair(original, updated)) => {
+            let parent = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                message: "operator continuation has no executing frame",
+            })?;
+            let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
+                message: "operator continuation has no caller continuation",
+            })?;
+            push_operator_pair(parent, original, updated, return_to)?;
+            Ok(SuspendedNativeReturn::Continued)
+        }
+        Ok(NativeDispatch::ForOfRecord { iterator, next }) => {
+            let parent = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                message: "for-of start continuation has no executing frame",
+            })?;
+            let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
+                message: "for-of start continuation has no caller continuation",
+            })?;
+            push_for_of_record(parent, iterator, next, return_to)?;
+            Ok(SuspendedNativeReturn::Continued)
+        }
+        Ok(NativeDispatch::ForOfStep {
+            value,
+            done,
+            offset,
+        }) => {
+            let parent = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                message: "for-of step continuation has no executing frame",
+            })?;
+            let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
+                message: "for-of step continuation has no caller continuation",
+            })?;
+            finish_for_of_step(parent, value, done, return_to, offset)?;
+            Ok(SuspendedNativeReturn::Continued)
+        }
+        Ok(NativeDispatch::ForOfClosed) => {
+            let parent = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                message: "for-of close continuation has no executing frame",
+            })?;
+            let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
+                message: "for-of close continuation has no caller continuation",
+            })?;
+            finish_for_of_close(parent, return_to)?;
+            Ok(SuspendedNativeReturn::Continued)
+        }
+        Ok(NativeDispatch::CopyDataPropertiesDone) => {
+            let parent = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                message: "copy-data-properties continuation has no executing frame",
+            })?;
+            let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
+                message: "copy-data-properties continuation has no caller continuation",
+            })?;
+            if !matches!(return_to.disposition, ReturnDisposition::Discard) {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "copy-data-properties reached a value-producing continuation",
+                }
+                .into());
+            }
+            parent.instruction = return_to.instruction;
+            Ok(SuspendedNativeReturn::Continued)
+        }
+        Ok(NativeDispatch::Frame(child)) => {
+            *active_frame_values = active_frame_values.saturating_add(child.reserved_values);
+            frames.push(child);
+            Ok(SuspendedNativeReturn::Continued)
+        }
+        Ok(NativeDispatch::Call(_)) => Err(EngineFault::RuntimeInvariant {
+            message: "native continuation resolver returned an unresolved call",
+        }
+        .into()),
+        Err(NativeFailure::Abrupt(pending)) => {
+            dispatch_pending_exception(
+                runtime,
+                frames,
+                active_frame_values,
+                pending,
+                compiler,
+                execution_budget,
+            )?;
+            Ok(SuspendedNativeReturn::Continued)
+        }
+        Err(NativeFailure::AbruptAfterTransient(pending)) => {
+            let frame = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
+                message: "transient native throw has no executing frame",
+            })?;
+            frame.transient_cleanup_pending = true;
+            dispatch_pending_exception(
+                runtime,
+                frames,
+                active_frame_values,
+                pending,
+                compiler,
+                execution_budget,
+            )?;
+            Ok(SuspendedNativeReturn::Continued)
+        }
+        Err(NativeFailure::Execution(error)) => Err(error),
     }
 }
 

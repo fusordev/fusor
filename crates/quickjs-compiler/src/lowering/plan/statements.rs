@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use super::super::{
     BindingPattern, CatchClause, CompilationContext, CompiledConstantPool, DeclarationKind,
-    DoWhileStatement, ExpressionStatement, FinalOpcode, ForInStatement, ForOfStatement,
-    ForStatement, ForStatementInit, FrameLayout, FunctionPlanningContext, FunctionTreeLayout,
-    GetSpan, IfStatement, InitializationPolicy, LabelIdentifier, LabeledStatement,
-    LeafCompilationError, Operands, PlannedControlFlow, ReturnStatement, StoragePlacement,
-    ThrowStatement, TryStatement, UnsupportedLeafFeature, WhileStatement, WritePolicy,
-    compact_put_local, plan_put_slot, unsupported,
+    DoWhileStatement, ExecutableKind, ExpressionStatement, FinalOpcode, ForInStatement,
+    ForOfStatement, ForStatement, ForStatementInit, FrameLayout, FunctionPlanningContext,
+    FunctionTreeLayout, GetSpan, IfStatement, InitializationPolicy, LabelIdentifier,
+    LabeledStatement, LeafCompilationError, Operands, PlannedControlFlow, ReturnStatement,
+    StoragePlacement, ThrowStatement, TryStatement, UnsupportedLeafFeature, WhileStatement,
+    WritePolicy, compact_put_local, plan_put_slot, unsupported,
 };
 
 use oxc_ast::ast::{
@@ -248,6 +248,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 planning.layout,
                 planning.tree_layout,
                 planning.constants,
+                &state.abrupt_markers,
                 flow,
             )?,
             StatementWork::ForOfHead(left) => {
@@ -258,6 +259,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 planning.layout,
                 planning.tree_layout,
                 planning.constants,
+                &state.abrupt_markers,
                 flow,
             )?,
             StatementWork::ForOfAssignment(left) => self.plan_for_of_assignment(
@@ -265,16 +267,18 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 planning.layout,
                 planning.tree_layout,
                 planning.constants,
+                &state.abrupt_markers,
                 flow,
             )?,
             StatementWork::ForOfRotate(scope) => {
                 self.plan_for_of_rotation(planning.executable, scope, planning.layout, flow)?;
             }
-            StatementWork::Expression(expression) => self.plan_expression(
+            StatementWork::Expression(expression) => self.plan_expression_with_abrupt_markers(
                 expression,
                 planning.layout,
                 planning.tree_layout,
                 planning.constants,
+                &state.abrupt_markers,
                 flow,
             )?,
             StatementWork::Declaration(declaration) => self.validate_declaration(
@@ -282,6 +286,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 planning.layout,
                 planning.tree_layout,
                 planning.constants,
+                &state.abrupt_markers,
                 flow,
             )?,
             StatementWork::Emit(instruction) => flow.emit(instruction)?,
@@ -348,7 +353,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 )?;
             }
             Statement::VariableDeclaration(declaration) => {
-                self.validate_declaration(declaration, layout, tree_layout, constants, flow)?;
+                self.validate_declaration(
+                    declaration,
+                    layout,
+                    tree_layout,
+                    constants,
+                    &state.abrupt_markers,
+                    flow,
+                )?;
             }
             Statement::ExpressionStatement(statement) => {
                 Self::schedule_expression_statement(statement, state.completion, &mut state.work);
@@ -362,9 +374,26 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             }
             Statement::EmptyStatement(_) => {}
             Statement::ReturnStatement(statement) => {
+                let executable = self.planned.plan.executable(layout.executable).ok_or(
+                    LeafCompilationError::InvalidExecutable {
+                        executable: layout.executable,
+                    },
+                )?;
+                let return_opcode = if matches!(
+                    executable.kind(),
+                    ExecutableKind::Function {
+                        asynchronous: false,
+                        generator: true,
+                    }
+                ) {
+                    FinalOpcode::ReturnAsync
+                } else {
+                    FinalOpcode::Return
+                };
                 Self::schedule_return_statement(
                     statement,
                     &state.abrupt_markers,
+                    return_opcode,
                     flow,
                     &mut state.work,
                 )?;
@@ -502,6 +531,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     fn schedule_return_statement<'statement>(
         statement: &'statement ReturnStatement<'arena>,
         abrupt_markers: &[AbruptMarker],
+        return_opcode: FinalOpcode,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -523,7 +553,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         if let Some(argument) = &statement.argument {
             Self::reserve_return_work(abrupt_markers, work)?;
             work.push(StatementWork::Emit(PlannedInstruction::new(
-                FinalOpcode::Return,
+                return_opcode,
                 Operands::None,
                 statement.span,
             )));
@@ -535,7 +565,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         {
             Self::reserve_return_work(abrupt_markers, work)?;
             work.push(StatementWork::Emit(PlannedInstruction::new(
-                FinalOpcode::Return,
+                return_opcode,
                 Operands::None,
                 statement.span,
             )));
@@ -565,11 +595,24 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     AbruptMarkerKind::FinallySubroutine => {}
                 }
             }
-            flow.emit(PlannedInstruction::new(
-                FinalOpcode::ReturnUndef,
-                Operands::None,
-                statement.span,
-            ))?;
+            if return_opcode == FinalOpcode::ReturnAsync {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Undefined,
+                    Operands::None,
+                    statement.span,
+                ))?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::ReturnAsync,
+                    Operands::None,
+                    statement.span,
+                ))?;
+            } else {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::ReturnUndef,
+                    Operands::None,
+                    statement.span,
+                ))?;
+            }
         }
         Ok(())
     }

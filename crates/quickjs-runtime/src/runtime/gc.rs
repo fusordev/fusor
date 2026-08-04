@@ -299,6 +299,7 @@ impl Runtime {
                 promise,
                 symbol,
                 iterators,
+                generators,
             } = realm.intrinsics
             {
                 mark_heap_reference(
@@ -429,6 +430,8 @@ impl Runtime {
                     iterators.iterator_prototype,
                     iterators.array_iterator_prototype,
                     iterators.string_iterator_prototype,
+                    generators.function_prototype,
+                    generators.generator_prototype,
                 ] {
                     mark_heap_reference(
                         HeapReference::Object(prototype),
@@ -437,6 +440,12 @@ impl Runtime {
                         &mut work,
                     );
                 }
+                mark_heap_reference(
+                    HeapReference::Function(generators.function_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
             }
         }
         for job in &self.promise_jobs {
@@ -631,6 +640,21 @@ impl Runtime {
                     }
                 }
                 GraphNode::Object(id) => {
+                    if let Some(frame) = self
+                        .generator_states
+                        .get(&id)
+                        .and_then(|generator| generator.frame.as_ref())
+                    {
+                        crate::vm::trace_frame_roots(frame, &mut |root| {
+                            mark_collection_root(
+                                root,
+                                &mut marked_functions,
+                                &mut marked_objects,
+                                &mut marked_cells,
+                                &mut work,
+                            );
+                        });
+                    }
                     if let Some(object) = self.objects.get(id) {
                         for cell in object.arguments_cells() {
                             if marked_cells.insert(cell) {
@@ -784,6 +808,7 @@ impl Runtime {
             }
         }
         for id in dead_objects {
+            self.generator_states.remove(&id);
             if let Some(object) = self.objects.remove(id) {
                 self.object_properties = self
                     .object_properties

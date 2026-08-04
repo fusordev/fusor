@@ -464,6 +464,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        abrupt_markers: &[super::abrupt::AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let ForStatementLeft::VariableDeclaration(declaration) = left else {
@@ -490,7 +491,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         if let Some(span) = anonymous_named_evaluation_span(initializer) {
             return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
         }
-        self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
+        self.plan_expression_with_abrupt_markers(
+            initializer,
+            layout,
+            tree_layout,
+            constants,
+            abrupt_markers,
+            flow,
+        )?;
         self.emit_for_in_declaration_write(declaration.kind, identifier, layout, tree_layout, flow)
     }
 
@@ -571,6 +579,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        abrupt_markers: &[super::abrupt::AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         if let ForStatementLeft::VariableDeclaration(declaration) = left {
@@ -620,7 +629,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 }
             }
             AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
-                self.plan_expression(&member.object, layout, tree_layout, constants, flow)?;
+                self.plan_expression_with_abrupt_markers(
+                    &member.object,
+                    layout,
+                    tree_layout,
+                    constants,
+                    abrupt_markers,
+                    flow,
+                )?;
                 flow.emit(PlannedInstruction::new(
                     FinalOpcode::Swap,
                     Operands::None,
@@ -633,8 +649,22 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 ))?;
             }
             AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
-                self.plan_expression(&member.object, layout, tree_layout, constants, flow)?;
-                self.plan_expression(&member.expression, layout, tree_layout, constants, flow)?;
+                self.plan_expression_with_abrupt_markers(
+                    &member.object,
+                    layout,
+                    tree_layout,
+                    constants,
+                    abrupt_markers,
+                    flow,
+                )?;
+                self.plan_expression_with_abrupt_markers(
+                    &member.expression,
+                    layout,
+                    tree_layout,
+                    constants,
+                    abrupt_markers,
+                    flow,
+                )?;
                 flow.emit(PlannedInstruction::new(
                     FinalOpcode::Rot3l,
                     Operands::None,
@@ -664,12 +694,20 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        abrupt_markers: &[super::abrupt::AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         if let ForStatementLeft::VariableDeclaration(declaration) = left {
             let pattern = Self::validate_for_of_declaration(declaration)?;
             if matches!(pattern, BindingPattern::BindingIdentifier(_)) {
-                return self.plan_for_in_assignment(left, layout, tree_layout, constants, flow);
+                return self.plan_for_in_assignment(
+                    left,
+                    layout,
+                    tree_layout,
+                    constants,
+                    abrupt_markers,
+                    flow,
+                );
             }
             return self.plan_destructuring_pattern_value(
                 pattern,
@@ -677,6 +715,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 layout,
                 tree_layout,
                 constants,
+                abrupt_markers,
                 flow,
             );
         }
@@ -706,7 +745,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         }
                         ExpressionWork::Bind(label) => flow.bind(&label)?,
                         ExpressionWork::Visit(expression) => {
-                            self.plan_expression(expression, layout, tree_layout, constants, flow)?;
+                            self.plan_expression_with_abrupt_markers(
+                                expression,
+                                layout,
+                                tree_layout,
+                                constants,
+                                abrupt_markers,
+                                flow,
+                            )?;
                         }
                     }
                 }
@@ -714,9 +760,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             }
             AssignmentTarget::AssignmentTargetIdentifier(_)
             | AssignmentTarget::StaticMemberExpression(_)
-            | AssignmentTarget::ComputedMemberExpression(_) => {
-                self.plan_for_in_assignment(left, layout, tree_layout, constants, flow)
-            }
+            | AssignmentTarget::ComputedMemberExpression(_) => self.plan_for_in_assignment(
+                left,
+                layout,
+                tree_layout,
+                constants,
+                abrupt_markers,
+                flow,
+            ),
             AssignmentTarget::TSAsExpression(_)
             | AssignmentTarget::TSSatisfiesExpression(_)
             | AssignmentTarget::TSNonNullExpression(_)
@@ -834,6 +885,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        abrupt_markers: &[super::abrupt::AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         if declaration.declare
@@ -866,6 +918,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         layout,
                         tree_layout,
                         constants,
+                        abrupt_markers,
                         flow,
                     );
                 }
@@ -883,6 +936,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         layout,
                         tree_layout,
                         constants,
+                        abrupt_markers,
                         flow,
                     );
                 }
@@ -900,6 +954,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         layout,
                         tree_layout,
                         constants,
+                        abrupt_markers,
                         flow,
                     )?;
                 }
@@ -910,6 +965,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
 
     #[allow(
         clippy::too_many_arguments,
+        clippy::too_many_lines,
         reason = "identifier declaration planning carries the same explicit frame, tree, constant, and flow authority as every other declaration form"
     )]
     fn plan_identifier_declaration(
@@ -920,6 +976,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        abrupt_markers: &[super::abrupt::AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         {
@@ -943,7 +1000,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         initializer,
                         constants,
                     )?;
-                    self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
+                    self.plan_expression_with_abrupt_markers(
+                        initializer,
+                        layout,
+                        tree_layout,
+                        constants,
+                        abrupt_markers,
+                        flow,
+                    )?;
                     if let Some(set_name) = set_name {
                         flow.emit(set_name)?;
                     }
@@ -988,7 +1052,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         initializer,
                         constants,
                     )?;
-                    self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
+                    self.plan_expression_with_abrupt_markers(
+                        initializer,
+                        layout,
+                        tree_layout,
+                        constants,
+                        abrupt_markers,
+                        flow,
+                    )?;
                     if let Some(set_name) = set_name {
                         flow.emit(set_name)?;
                     }

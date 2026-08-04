@@ -431,11 +431,6 @@ fn unsupported_leaf_shapes_fail_closed_at_source_spans() {
             "async function f(arg) { let local = arg; return local; }",
         ),
         (
-            "function *f(arg) { let local = arg; return local; }",
-            UnsupportedLeafFeature::NonOrdinaryFunction,
-            "function *f(arg) { let local = arg; return local; }",
-        ),
-        (
             "function f(arg) { function nested() {} let local = arg; return local; }",
             UnsupportedLeafFeature::NestedExecutable,
             "function nested() {}",

@@ -14,10 +14,11 @@ pub(in crate::lowering) enum OrdinaryFunctionForm {
 }
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
-    pub(in crate::lowering) fn selected_ordinary_function(
+    pub(in crate::lowering) fn selected_function(
         &self,
         executable_id: ExecutableId,
-    ) -> Result<(&Executable, &Function<'arena>, OrdinaryFunctionForm), LeafCompilationError> {
+    ) -> Result<(&Executable, &Function<'arena>, OrdinaryFunctionForm, bool), LeafCompilationError>
+    {
         let executable = self.planned.plan.executable(executable_id).ok_or(
             LeafCompilationError::InvalidExecutable {
                 executable: executable_id,
@@ -54,7 +55,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 executable.span(),
             );
         };
-        if function.r#async || function.generator {
+        if function.r#async {
             return unsupported(UnsupportedLeafFeature::NonOrdinaryFunction, function.span);
         }
         let is_declaration = function.r#type == FunctionType::FunctionDeclaration;
@@ -69,15 +70,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             .map_or(OrdinaryFunctionForm::Function, |property_span| {
                 OrdinaryFunctionForm::ObjectMethod { property_span }
             });
-        if !matches!(
-            executable.kind(),
-            ExecutableKind::Function {
+        if executable.kind()
+            != (ExecutableKind::Function {
                 asynchronous: false,
-                generator: false,
-            }
-        ) {
+                generator: function.generator,
+            })
+        {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "ordinary Oxc function has ordinary executable metadata",
+                invariant: "synchronous Oxc function has matching executable metadata",
                 span: Some(function.span),
             });
         }
@@ -99,7 +99,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 reference.span(),
             );
         }
-        Ok((executable, function, form))
+        Ok((executable, function, form, function.generator))
     }
 
     pub(in crate::lowering) fn selected_dynamic_function_script(

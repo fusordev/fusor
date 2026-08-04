@@ -237,6 +237,26 @@ impl Runtime {
         Ok(result)
     }
 
+    pub(crate) fn finish_iterator_result(
+        &mut self,
+        result: ObjectId,
+        value: StoredValue,
+        done: bool,
+    ) -> Result<(), crate::ExecutionError> {
+        let value_key = self.predefined_property_key(PredefinedAtom::Value);
+        let done_key = self.predefined_property_key(PredefinedAtom::Done);
+        let record = self.object_record_mut(HeapReference::Object(result))?;
+        if !record.replace_existing_data(&value_key, value)
+            || !record.replace_existing_data(&done_key, StoredValue::Boolean(done))
+        {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "reserved iterator result lost its data properties",
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn realm_array_iterator_prototype(
         &self,
         realm: RealmId,

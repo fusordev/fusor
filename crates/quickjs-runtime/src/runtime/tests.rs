@@ -34,8 +34,9 @@ use super::{
     global_function_replacement_layout, is_supported_opcode, usize_to_u64,
 };
 
-const REALM_PROPERTY_SLOTS: u64 = 857;
-const REALM_FUNCTION_SLOTS: u64 = 251;
+const REALM_OBJECT_SLOTS: u64 = 26;
+const REALM_PROPERTY_SLOTS: u64 = 874;
+const REALM_FUNCTION_SLOTS: u64 = 255;
 
 #[test]
 #[allow(
@@ -286,16 +287,16 @@ fn promise_any_error_allocation_is_atomic_and_inclusive() {
     };
     for (limits, resource, limit, observed) in [
         (
-            RuntimeLimits::default().with_max_heap_objects(25),
+            RuntimeLimits::default().with_max_heap_objects(REALM_OBJECT_SLOTS + 1),
             RuntimeResource::HeapObjects,
-            25,
-            26,
+            REALM_OBJECT_SLOTS + 1,
+            REALM_OBJECT_SLOTS + 2,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(860),
+            RuntimeLimits::default().with_max_object_properties(REALM_PROPERTY_SLOTS + 3),
             RuntimeResource::ObjectProperties,
-            860,
-            861,
+            REALM_PROPERTY_SLOTS + 3,
+            REALM_PROPERTY_SLOTS + 4,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -316,8 +317,8 @@ fn promise_any_error_allocation_is_atomic_and_inclusive() {
 
     let mut runtime = Runtime::try_new(
         RuntimeLimits::default()
-            .with_max_heap_objects(26)
-            .with_max_object_properties(861),
+            .with_max_heap_objects(REALM_OBJECT_SLOTS + 2)
+            .with_max_object_properties(REALM_PROPERTY_SLOTS + 4),
     )
     .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -361,16 +362,16 @@ fn promise_combinator_element_limits_are_atomic_and_shared_values_are_traced() {
     };
     for (limits, resource, limit, observed) in [
         (
-            RuntimeLimits::default().with_max_heap_functions(252),
+            RuntimeLimits::default().with_max_heap_functions(REALM_FUNCTION_SLOTS + 1),
             RuntimeResource::HeapFunctions,
-            252,
-            253,
+            REALM_FUNCTION_SLOTS + 1,
+            REALM_FUNCTION_SLOTS + 2,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(860),
+            RuntimeLimits::default().with_max_object_properties(REALM_PROPERTY_SLOTS + 3),
             RuntimeResource::ObjectProperties,
-            860,
-            861,
+            REALM_PROPERTY_SLOTS + 3,
+            REALM_PROPERTY_SLOTS + 4,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -397,8 +398,8 @@ fn promise_combinator_element_limits_are_atomic_and_shared_values_are_traced() {
 
     let mut runtime = Runtime::try_new(
         RuntimeLimits::default()
-            .with_max_heap_functions(253)
-            .with_max_object_properties(861),
+            .with_max_heap_functions(REALM_FUNCTION_SLOTS + 2)
+            .with_max_object_properties(REALM_PROPERTY_SLOTS + 4),
     )
     .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -454,7 +455,7 @@ fn promise_combinator_element_limits_are_atomic_and_shared_values_are_traced() {
     reason = "one limit test keeps the handler and thunk transactions together across both aggregate resources"
 )]
 fn promise_finally_function_limits_are_atomic_and_inclusive() {
-    let constructor_limit = 251;
+    let constructor_limit = REALM_FUNCTION_SLOTS;
     let handler_function_limit = constructor_limit + 1;
     let handler_property_limit = REALM_PROPERTY_SLOTS + 3;
 
@@ -656,7 +657,7 @@ fn realm_installs_a_rooted_branded_array_prototype_with_exact_length() {
         }) if layout == PropertyLayout::data(true, false, false)
             && value.strict_equals(JsNumber::from_i32(0))
     ));
-    assert_eq!(runtime.usage().heap_objects(), 24);
+    assert_eq!(runtime.usage().heap_objects(), REALM_OBJECT_SLOTS);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
     assert_eq!(
         runtime.usage().object_properties(),
@@ -739,8 +740,8 @@ fn realm_installs_a_realm_owned_array_constructor_with_exact_descriptors() {
         PropertyLayout::data(true, false, true),
         |value| matches!(value, StoredValue::Function(id) if id == array.constructor),
     );
-    assert_eq!(runtime.usage().heap_objects(), 24);
-    assert_eq!(runtime.usage().heap_functions(), 251);
+    assert_eq!(runtime.usage().heap_objects(), REALM_OBJECT_SLOTS);
+    assert_eq!(runtime.usage().heap_functions(), REALM_FUNCTION_SLOTS);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
 }
 
@@ -1158,6 +1159,7 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         array: _,
         symbol: _,
         iterators: _,
+        generators: _,
         promise: _,
     } = state.intrinsics
     else {
@@ -1165,8 +1167,8 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
     };
 
     assert_eq!(runtime.usage().realms(), 1);
-    assert_eq!(runtime.usage().heap_objects(), 24);
-    assert_eq!(runtime.usage().heap_functions(), 251);
+    assert_eq!(runtime.usage().heap_objects(), REALM_OBJECT_SLOTS);
+    assert_eq!(runtime.usage().heap_functions(), REALM_FUNCTION_SLOTS);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
     assert_eq!(runtime.usage().installed_code(), 0);
     assert_eq!(
@@ -1914,8 +1916,8 @@ fn realm_installs_complete_realm_owned_error_intrinsic_graph() {
         .property_key_from_string(&JsString::from_utf8("isError").expect("name"))
         .expect("isError key");
 
-    assert_eq!(runtime.usage().heap_objects(), 24);
-    assert_eq!(runtime.usage().heap_functions(), 251);
+    assert_eq!(runtime.usage().heap_objects(), REALM_OBJECT_SLOTS);
+    assert_eq!(runtime.usage().heap_functions(), REALM_FUNCTION_SLOTS);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
 
     assert_native_method_named(
@@ -2324,10 +2326,10 @@ fn engine_error_materialization_is_realm_owned_branded_and_exact() {
 fn engine_error_materialization_limit_failures_are_atomic() {
     for (limits, expected_resource, expected_limit, expected_observed, stack) in [
         (
-            RuntimeLimits::default().with_max_heap_objects(24),
+            RuntimeLimits::default().with_max_heap_objects(REALM_OBJECT_SLOTS),
             RuntimeResource::HeapObjects,
-            24,
-            25,
+            REALM_OBJECT_SLOTS,
+            REALM_OBJECT_SLOTS + 1,
             None,
         ),
         (
@@ -2396,7 +2398,7 @@ fn unrooted_engine_error_is_collected_without_reclaiming_error_prototypes() {
     assert_eq!(report.objects(), 1);
     assert!(runtime.objects.get(error).is_none());
     assert!(runtime.objects.get(prototype).is_some());
-    assert_eq!(runtime.usage().heap_objects(), 24);
+    assert_eq!(runtime.usage().heap_objects(), REALM_OBJECT_SLOTS);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
 }
 
@@ -2407,13 +2409,13 @@ fn realm_intrinsic_creation_is_failure_atomic_at_each_limit() {
             RuntimeLimits::default().with_max_heap_objects(23),
             RuntimeResource::HeapObjects,
             23,
-            24,
+            REALM_OBJECT_SLOTS,
         ),
         (
             RuntimeLimits::default().with_max_heap_functions(224),
             RuntimeResource::HeapFunctions,
             224,
-            251,
+            REALM_FUNCTION_SLOTS,
         ),
         (
             RuntimeLimits::default().with_max_object_properties(REALM_PROPERTY_SLOTS - 1),
@@ -2537,7 +2539,8 @@ fn raw_json_allocation_publishes_one_frozen_null_prototype_data_object() {
 #[test]
 fn boxed_boolean_allocation_limit_failure_is_atomic() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(24)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(REALM_OBJECT_SLOTS))
+            .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = realm.0.id;
     let usage = runtime.usage();
@@ -2552,9 +2555,9 @@ fn boxed_boolean_allocation_limit_failure_is_atomic() {
             error,
             ExecutionError::LimitExceeded {
                 resource: RuntimeResource::HeapObjects,
-                limit: 24,
-                observed: 25,
-            }
+                limit: REALM_OBJECT_SLOTS,
+                observed,
+            } if observed == REALM_OBJECT_SLOTS + 1
         ));
         assert_eq!(runtime.usage(), usage);
         assert_eq!(runtime.collection_pending, collection_pending);
@@ -2564,7 +2567,8 @@ fn boxed_boolean_allocation_limit_failure_is_atomic() {
 #[test]
 fn boxed_boolean_allocation_at_exact_limit_preserves_brand_and_prototype() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(25)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(REALM_OBJECT_SLOTS + 1))
+            .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = realm.0.id;
     let prototype = runtime
@@ -2575,7 +2579,7 @@ fn boxed_boolean_allocation_at_exact_limit_preserves_brand_and_prototype() {
         .allocate_boxed_boolean(realm_id, true)
         .expect("one boxed Boolean fits the exact limit");
 
-    assert_eq!(runtime.usage().heap_objects(), 25);
+    assert_eq!(runtime.usage().heap_objects(), REALM_OBJECT_SLOTS + 1);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
     assert_eq!(
         runtime.boxed_boolean(object).expect("live wrapper"),
@@ -2620,7 +2624,8 @@ fn boolean_brand_is_not_inferred_from_the_prototype_chain() {
 #[test]
 fn boxed_number_allocation_limit_failure_is_atomic() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(24)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(REALM_OBJECT_SLOTS))
+            .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = realm.0.id;
     let usage = runtime.usage();
@@ -2639,9 +2644,9 @@ fn boxed_number_allocation_limit_failure_is_atomic() {
             error,
             ExecutionError::LimitExceeded {
                 resource: RuntimeResource::HeapObjects,
-                limit: 24,
-                observed: 25,
-            }
+                limit: REALM_OBJECT_SLOTS,
+                observed,
+            } if observed == REALM_OBJECT_SLOTS + 1
         ));
         assert_eq!(runtime.usage(), usage);
         assert_eq!(runtime.collection_pending, collection_pending);
@@ -2651,7 +2656,8 @@ fn boxed_number_allocation_limit_failure_is_atomic() {
 #[test]
 fn boxed_number_allocation_at_exact_limit_preserves_payload_and_prototype() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(25)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(REALM_OBJECT_SLOTS + 1))
+            .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = realm.0.id;
     let prototype = runtime
@@ -2663,7 +2669,7 @@ fn boxed_number_allocation_at_exact_limit_preserves_payload_and_prototype() {
         .allocate_boxed_number(realm_id, negative_zero)
         .expect("one boxed Number fits the exact limit");
 
-    assert_eq!(runtime.usage().heap_objects(), 25);
+    assert_eq!(runtime.usage().heap_objects(), REALM_OBJECT_SLOTS + 1);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
     assert!(
         runtime
@@ -2711,10 +2717,10 @@ fn number_brand_is_not_inferred_from_the_prototype_chain() {
 fn boxed_string_allocation_limits_fail_atomically() {
     for (limits, resource, limit, observed) in [
         (
-            RuntimeLimits::default().with_max_heap_objects(24),
+            RuntimeLimits::default().with_max_heap_objects(REALM_OBJECT_SLOTS),
             RuntimeResource::HeapObjects,
-            24,
-            25,
+            REALM_OBJECT_SLOTS,
+            REALM_OBJECT_SLOTS + 1,
         ),
         (
             RuntimeLimits::default().with_max_object_properties(REALM_PROPERTY_SLOTS),
@@ -2751,7 +2757,7 @@ fn boxed_string_allocation_limits_fail_atomically() {
 #[test]
 fn boxed_string_allocation_preserves_payload_prototype_and_exact_length_property() {
     let limits = RuntimeLimits::default()
-        .with_max_heap_objects(25)
+        .with_max_heap_objects(REALM_OBJECT_SLOTS + 1)
         .with_max_object_properties(REALM_PROPERTY_SLOTS + 1);
     let mut runtime = Runtime::try_new(limits).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -2765,7 +2771,7 @@ fn boxed_string_allocation_preserves_payload_prototype_and_exact_length_property
         .allocate_boxed_string(realm_id, text.clone())
         .expect("one boxed String fits the exact limits");
 
-    assert_eq!(runtime.usage().heap_objects(), 25);
+    assert_eq!(runtime.usage().heap_objects(), REALM_OBJECT_SLOTS + 1);
     assert_eq!(
         runtime.usage().object_properties(),
         REALM_PROPERTY_SLOTS + 1
@@ -2906,7 +2912,7 @@ fn realm_function_intrinsics_remain_roots_during_collection() {
     let report = runtime.collect_cycles().expect("collection");
 
     assert_eq!(report.functions(), 0);
-    assert_eq!(runtime.usage().heap_functions(), 251);
+    assert_eq!(runtime.usage().heap_functions(), REALM_FUNCTION_SLOTS);
     assert_eq!(runtime.usage().installed_code(), 0);
     assert_eq!(
         runtime
@@ -3443,7 +3449,7 @@ fn for_in_boxes_primitives_and_enumerates_utf16_string_indices() {
 fn for_in_limits_roll_back_primitive_wrappers_and_gc_traces_iterator_current() {
     let mut limited = Runtime::try_new(
         RuntimeLimits::default()
-            .with_max_heap_objects(26)
+            .with_max_heap_objects(REALM_OBJECT_SLOTS + 2)
             .with_max_for_in_entries(0),
     )
     .expect("runtime");

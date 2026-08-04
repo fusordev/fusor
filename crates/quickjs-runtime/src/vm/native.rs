@@ -2446,6 +2446,38 @@ pub(super) fn dispatch_native_call_with_frames(
             native.realm,
             origin.unwrap_or_else(native_function_host_origin),
         ),
+        NativeFunctionKind::GeneratorPrototypeNext
+        | NativeFunctionKind::GeneratorPrototypeReturn
+        | NativeFunctionKind::GeneratorPrototypeThrow => {
+            let mode = match native.kind {
+                NativeFunctionKind::GeneratorPrototypeNext => GeneratorResumeMode::Next,
+                NativeFunctionKind::GeneratorPrototypeReturn => GeneratorResumeMode::Return,
+                NativeFunctionKind::GeneratorPrototypeThrow => GeneratorResumeMode::Throw,
+                _ => unreachable!("generator resume arm is exhaustively selected"),
+            };
+            begin_generator_resume(
+                runtime,
+                inputs.receiver,
+                inputs.arguments,
+                mode,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                active_frame_values,
+            )
+        }
+        NativeFunctionKind::GeneratorFunctionConstructor => {
+            Err(NativeFailure::Abrupt(PendingException {
+                realm: native.realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: JsString::from_utf8(
+                        "dynamic GeneratorFunction compilation is not implemented",
+                    )?,
+                },
+                origin: origin.unwrap_or_else(native_function_host_origin),
+            }))
+        }
         NativeFunctionKind::FunctionPrototypeToString => {
             let StoredValue::Function(function) = inputs.receiver else {
                 let Some(origin) = origin else {

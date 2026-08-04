@@ -38,15 +38,16 @@ use super::{
     Arc, Arena, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics, ArrayMutator,
     ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic, AtomError, AtomTable,
     BigIntIntrinsics, BooleanIntrinsics, Context, ErrorIntrinsic, ErrorIntrinsicKind,
-    ErrorIntrinsics, FunctionId, FunctionImplementation, GlobalNumericFunction, HandleError,
-    HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
-    IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, MathMethod, NativeFunction,
-    NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord,
-    PredefinedAtom, PromiseIntrinsics, PromiseRejectionState, PromiseStatic, PropertyKey,
-    PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, ReflectMethod,
-    ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource,
-    StoredValue, StringHtmlMethod, StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction,
-    VecDeque, check_limit, predefined_string, usize_to_u64,
+    ErrorIntrinsics, FunctionId, FunctionImplementation, GeneratorIntrinsics,
+    GlobalNumericFunction, HandleError, HandleKind, HashMap, HeapFunction, HeapObject,
+    HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod,
+    MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberIntrinsics,
+    NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PromiseIntrinsics,
+    PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId,
+    RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError,
+    RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringHtmlMethod,
+    StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction, VecDeque, check_limit,
+    predefined_string, usize_to_u64,
 };
 
 use allocation::IntrinsicRecords;
@@ -553,6 +554,7 @@ impl Runtime {
             interrupts: InterruptState::default(),
             promise_rejections: PromiseRejectionState::default(),
             promise_jobs: VecDeque::new(),
+            generator_states: HashMap::new(),
             next_math_random_seed: 1,
         })
     }
@@ -705,6 +707,11 @@ impl RealmBuildTransaction<'_> {
                 array_iterator_prototype: object(IntrinsicObjectId::ArrayIteratorPrototype),
                 string_iterator_prototype: object(IntrinsicObjectId::StringIteratorPrototype),
                 array_values: function(NativeFunctionKind::ArrayPrototypeValues),
+            },
+            generators: GeneratorIntrinsics {
+                function_constructor: function(NativeFunctionKind::GeneratorFunctionConstructor),
+                function_prototype: object(IntrinsicObjectId::GeneratorFunctionPrototype),
+                generator_prototype: object(IntrinsicObjectId::GeneratorPrototype),
             },
         }
     }

@@ -30,6 +30,7 @@ pub(crate) const DEFAULT_CONTROL_FLOW_CORPUS: &str = "tests/control-flow/manifes
 pub(crate) const DEFAULT_ERROR_CORPUS: &str = "tests/error/manifest.json";
 pub(crate) const DEFAULT_FUNCTION_APPLY_CORPUS: &str = "tests/function-apply/manifest.json";
 pub(crate) const DEFAULT_FUNCTION_BIND_CORPUS: &str = "tests/function-bind/manifest.json";
+pub(crate) const DEFAULT_GENERATOR_CORPUS: &str = "tests/generator/manifest.json";
 pub(crate) const DEFAULT_ITERATOR_CORPUS: &str = "tests/iterator/manifest.json";
 pub(crate) const DEFAULT_CALL_SPREAD_CORPUS: &str = "tests/call-spread/manifest.json";
 pub(crate) const DEFAULT_OBJECT_LEGACY_CORPUS: &str = "tests/object-legacy/manifest.json";
@@ -432,12 +433,36 @@ const PROMISE_CORE_REQUIRED_COVERAGE: &[&str] = &[
     "with-resolvers-generic",
 ];
 
+const GENERATOR_REQUIRED_COVERAGE: &[&str] = &[
+    "call-apply",
+    "completed-next",
+    "completed-return",
+    "completed-throw",
+    "parameter-initialization",
+    "for-of-consumption",
+    "function-prototype-chain",
+    "generator-method",
+    "instance-prototype-chain",
+    "next-first-argument",
+    "next-resume-value",
+    "nonconstructable",
+    "prestart-return",
+    "prestart-throw",
+    "reentrancy",
+    "return-finally",
+    "return-nested-close",
+    "throw-catch",
+    "uncaught-completes",
+    "yield",
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeDifferentialSuite {
     ControlFlow,
     Error,
     FunctionApply,
     FunctionBind,
+    Generator,
     Iterator,
     CallSpread,
     ObjectLegacy,
@@ -452,6 +477,7 @@ impl RuntimeDifferentialSuite {
             Self::Error => "error",
             Self::FunctionApply => "function-apply",
             Self::FunctionBind => "function-bind",
+            Self::Generator => "generator",
             Self::Iterator => "iterator",
             Self::CallSpread => "call-spread",
             Self::ObjectLegacy => "object-legacy",
@@ -466,6 +492,7 @@ impl RuntimeDifferentialSuite {
             Self::Error => ERROR_REQUIRED_COVERAGE,
             Self::FunctionApply => FUNCTION_APPLY_REQUIRED_COVERAGE,
             Self::FunctionBind => FUNCTION_BIND_REQUIRED_COVERAGE,
+            Self::Generator => GENERATOR_REQUIRED_COVERAGE,
             Self::Iterator => ITERATOR_REQUIRED_COVERAGE,
             Self::CallSpread => CALL_SPREAD_REQUIRED_COVERAGE,
             Self::ObjectLegacy => OBJECT_LEGACY_REQUIRED_COVERAGE,
@@ -498,6 +525,13 @@ pub(crate) struct FunctionApplyDifferentialOptions {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct FunctionBindDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct GeneratorDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -606,6 +640,17 @@ pub(crate) fn run_function_bind_differential(
         &options.corpus,
         options.timeout,
         RuntimeDifferentialSuite::FunctionBind,
+    )
+}
+
+pub(crate) fn run_generator_differential(
+    options: &GeneratorDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::Generator,
     )
 }
 
@@ -2119,6 +2164,20 @@ mod tests {
         )
         .expect("checked-in function-bind manifest");
         assert_eq!(corpus.cases.len(), 21);
+    }
+
+    #[test]
+    fn checked_in_generator_manifest_satisfies_the_strict_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/generator/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in generator manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::Generator,
+        )
+        .expect("checked-in generator manifest");
+        assert_eq!(corpus.cases.len(), 9);
+        assert_eq!(super::GENERATOR_REQUIRED_COVERAGE.len(), 20);
     }
 
     #[test]

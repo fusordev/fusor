@@ -1,0 +1,66 @@
+use quickjs_bytecode::{FinalOpcode, FunctionKind, VerificationLimits};
+use quickjs_compiler::{CompilationContext, CompiledLeafFunction};
+use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
+
+fn compile(source: &str, name: &str) -> CompiledLeafFunction {
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage plan");
+            let executable = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some(name))
+                .expect("named generator");
+            context
+                .compile_leaf(&executable, VerificationLimits::default())
+                .expect("generator lowering")
+        },
+    )
+    .expect("frontend")
+}
+
+#[test]
+fn generator_yield_resume_and_return_use_the_verified_suspension_program() {
+    let compiled = compile("function* g(a) { const b = yield a; return b + 1; }", "g");
+    let flow = compiled.control_flow();
+    assert_eq!(flow.function_header().kind(), FunctionKind::Generator);
+    assert!(!flow.function_header().flags().has_prototype());
+    assert_eq!(
+        flow.instructions()
+            .iter()
+            .map(|instruction| instruction.decoded().instruction().opcode())
+            .collect::<Vec<_>>(),
+        [
+            FinalOpcode::SetLocUninitialized,
+            FinalOpcode::InitialYield,
+            FinalOpcode::GetArg0,
+            FinalOpcode::Yield,
+            FinalOpcode::IfFalse8,
+            FinalOpcode::ReturnAsync,
+            FinalOpcode::PutLoc0,
+            FinalOpcode::GetLocCheck,
+            FinalOpcode::Push1,
+            FinalOpcode::Add,
+            FinalOpcode::ReturnAsync,
+        ]
+    );
+}
+
+#[test]
+fn empty_generator_has_an_explicit_undefined_async_return() {
+    let compiled = compile("function* empty() {}", "empty");
+    assert_eq!(
+        compiled
+            .control_flow()
+            .instructions()
+            .iter()
+            .map(|instruction| instruction.decoded().instruction().opcode())
+            .collect::<Vec<_>>(),
+        [
+            FinalOpcode::InitialYield,
+            FinalOpcode::Undefined,
+            FinalOpcode::ReturnAsync,
+        ]
+    );
+}

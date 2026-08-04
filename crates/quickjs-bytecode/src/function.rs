@@ -165,6 +165,9 @@ impl UnverifiedFunctionHeader {
     const STRIPPED_ORDINARY_SOURCE_FLAGS: u16 = (1 << 0) | (1 << 1) | (1 << 6) | (1 << 9);
     const ORDINARY_SOURCE_FLAGS: u16 = Self::STRIPPED_ORDINARY_SOURCE_FLAGS | (1 << 10);
     const ORDINARY_METHOD_FLAGS: u16 = (1 << 1) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
+    const GENERATOR_SOURCE_FLAGS: u16 = (1 << 1) | (1 << 4) | (1 << 6) | (1 << 9) | (1 << 10);
+    const GENERATOR_METHOD_FLAGS: u16 =
+        (1 << 1) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
     const DYNAMIC_FUNCTION_SCRIPT_FLAGS: u16 = 1 << 10;
 
     /// Creates an unverified function header.
@@ -260,6 +263,42 @@ impl UnverifiedFunctionHeader {
     ) -> Self {
         Self::new(
             Self::ORDINARY_METHOD_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates a synchronous generator source-function header with retained
+    /// debug source and a typed capture layout.
+    ///
+    /// `QuickJS` records generator kind separately from the ordinary
+    /// `has_prototype` bit. Generator functions are nonconstructable, while
+    /// their observable own `prototype` object is materialized from the kind.
+    #[must_use]
+    pub const fn generator_source_function_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::GENERATOR_SOURCE_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates a synchronous generator object-method header with retained
+    /// debug source and a typed capture layout.
+    #[must_use]
+    pub const fn generator_method_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::GENERATOR_METHOD_FLAGS,
             if strict { 1 } else { 0 },
             defined_argument_count,
             variable_reference_count,

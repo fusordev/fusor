@@ -100,6 +100,7 @@ impl RealmSnapshot {
             promise,
             symbol,
             iterators,
+            generators,
             ..
         } = state.intrinsics
         else {
@@ -133,6 +134,11 @@ impl RealmSnapshot {
                 iterators.string_iterator_prototype,
                 "%StringIterator.prototype%",
             ),
+            (
+                generators.function_prototype,
+                "%GeneratorFunction.prototype%",
+            ),
+            (generators.generator_prototype, "%Generator.prototype%"),
         ] {
             register_identity(HeapReference::Object(object), identity, &mut identities);
         }
@@ -405,9 +411,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 275;
-    const REALM_PROPERTIES: u64 = 857;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 12_326_023_515_109_552_071;
+    const REALM_NODES: usize = 281;
+    const REALM_PROPERTIES: u64 = 874;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 7_765_413_786_881_728_849;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {

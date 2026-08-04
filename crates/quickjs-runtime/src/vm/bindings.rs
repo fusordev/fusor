@@ -126,7 +126,15 @@ pub(super) fn create_closure(
         }
         .into());
     }
-    let (sources, expected, realm, function_name, defined_argument_count, has_prototype) = {
+    let (
+        sources,
+        expected,
+        realm,
+        function_name,
+        defined_argument_count,
+        has_prototype,
+        function_kind,
+    ) = {
         let code = code(runtime, frame.code)?;
         let function = code
             .authority
@@ -169,12 +177,23 @@ pub(super) fn create_closure(
             function_name,
             header.defined_argument_count(),
             header.flags().has_prototype(),
+            header.kind(),
         )
     };
-    let function_prototype = runtime.realm_function_prototype(realm)?;
-    let object_prototype = has_prototype
-        .then(|| runtime.realm_object_prototype(realm))
-        .transpose()?;
+    let generator = function_kind == FunctionKind::Generator;
+    let creates_prototype = has_prototype || generator;
+    let function_prototype = if generator {
+        HeapReference::Object(runtime.realm_generator_function_prototype(realm)?)
+    } else {
+        HeapReference::Function(runtime.realm_function_prototype(realm)?)
+    };
+    let object_prototype = if generator {
+        Some(runtime.realm_generator_prototype(realm)?)
+    } else {
+        has_prototype
+            .then(|| runtime.realm_object_prototype(realm))
+            .transpose()?
+    };
     if sources.len() != expected {
         return Err(EngineFault::InvalidClosureEnvironment { function: child }.into());
     }
@@ -303,13 +322,13 @@ pub(super) fn create_closure(
         runtime.limits.max_heap_functions,
         usize_to_u64(runtime.functions.len()).saturating_add(1),
     )?;
-    let function_property_count = 2_usize + usize::from(has_prototype);
+    let function_property_count = 2_usize + usize::from(creates_prototype);
     let prototype_property_count = usize::from(has_prototype);
     let new_property_count = function_property_count.saturating_add(prototype_property_count);
     check_execution_limit(
         RuntimeResource::HeapObjects,
         runtime.limits.max_heap_objects,
-        usize_to_u64(runtime.objects.len()).saturating_add(usize::from(has_prototype) as u64),
+        usize_to_u64(runtime.objects.len()).saturating_add(usize::from(creates_prototype) as u64),
     )?;
     check_execution_limit(
         RuntimeResource::ObjectProperties,
@@ -332,10 +351,10 @@ pub(super) fn create_closure(
         })?;
     runtime
         .objects
-        .try_reserve(usize::from(has_prototype))
+        .try_reserve(usize::from(creates_prototype))
         .map_err(|_| ExecutionError::AllocationFailed {
             resource: RuntimeResource::HeapObjects,
-            additional: usize::from(has_prototype),
+            additional: usize::from(creates_prototype),
         })?;
     runtime
         .cells
@@ -364,8 +383,7 @@ pub(super) fn create_closure(
     let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
     let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
     let constructor_key = runtime.predefined_property_key(PredefinedAtom::Constructor);
-    let mut function_record =
-        crate::object::ObjectRecord::empty(Some(HeapReference::Function(function_prototype)));
+    let mut function_record = crate::object::ObjectRecord::empty(Some(function_prototype));
     function_record
         .try_reserve_data(function_property_count)
         .map_err(|_| ExecutionError::AllocationFailed {
@@ -395,7 +413,7 @@ pub(super) fn create_closure(
     let mut prototype_record = object_prototype.map(|object_prototype| {
         crate::object::ObjectRecord::empty(Some(HeapReference::Object(object_prototype)))
     });
-    if let Some(record) = prototype_record.as_mut() {
+    if has_prototype && let Some(record) = prototype_record.as_mut() {
         record
             .try_reserve_data(1)
             .map_err(|_| ExecutionError::AllocationFailed {
@@ -512,7 +530,7 @@ pub(super) fn create_closure(
             additional: 1,
         });
     };
-    if let Some(object) = prototype_object {
+    if has_prototype && let Some(object) = prototype_object {
         let updated = runtime.objects.get_mut(object).is_some_and(|prototype| {
             prototype
                 .record

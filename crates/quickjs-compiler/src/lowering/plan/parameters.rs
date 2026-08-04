@@ -352,6 +352,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 planning.layout,
                 planning.tree_layout,
                 planning.constants,
+                &[],
                 flow,
             )?;
         }
@@ -372,6 +373,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 planning.layout,
                 planning.tree_layout,
                 planning.constants,
+                &[],
                 flow,
             )?;
         }

@@ -255,6 +255,26 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             layout,
             tree_layout,
             constants,
+            &[],
+            flow,
+        )
+    }
+
+    fn plan_expression_with_abrupt_markers<'expression>(
+        &self,
+        expression: &'expression Expression<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        abrupt_markers: &[plan::abrupt::AbruptMarker],
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        ExpressionPlanner::new(self).plan_expression(
+            expression,
+            layout,
+            tree_layout,
+            constants,
+            abrupt_markers,
             flow,
         )
     }

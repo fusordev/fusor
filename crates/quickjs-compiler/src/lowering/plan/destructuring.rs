@@ -11,6 +11,7 @@ use super::super::{
     UnsupportedLeafFeature, WritePolicy, anonymous_named_evaluation_span,
     anonymous_ordinary_function_span, plan_put_slot, unsupported,
 };
+use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 
 #[derive(Clone, Copy)]
 pub(in crate::lowering) enum DestructuringBindingInitialization {
@@ -31,15 +32,24 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        abrupt_markers: &[AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
+        self.plan_expression_with_abrupt_markers(
+            initializer,
+            layout,
+            tree_layout,
+            constants,
+            abrupt_markers,
+            flow,
+        )?;
         self.plan_array_destructuring_value(
             pattern,
             DestructuringBindingInitialization::Declaration(declaration_kind),
             layout,
             tree_layout,
             constants,
+            abrupt_markers,
             flow,
         )
     }
@@ -59,6 +69,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        abrupt_markers: &[AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         self.plan_array_destructuring_elements(
@@ -68,6 +79,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             layout,
             tree_layout,
             constants,
+            abrupt_markers,
             flow,
             pattern.span,
         )
@@ -85,15 +97,24 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        abrupt_markers: &[AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        self.plan_expression(initializer, layout, tree_layout, constants, flow)?;
+        self.plan_expression_with_abrupt_markers(
+            initializer,
+            layout,
+            tree_layout,
+            constants,
+            abrupt_markers,
+            flow,
+        )?;
         self.plan_object_destructuring_value(
             pattern,
             DestructuringBindingInitialization::Declaration(declaration_kind),
             layout,
             tree_layout,
             constants,
+            abrupt_markers,
             flow,
         )
     }
@@ -125,6 +146,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        abrupt_markers: &[AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let has_rest = pattern.rest.is_some();
@@ -154,7 +176,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         span: Some(span),
                     },
                 )?;
-                self.plan_expression(key, layout, tree_layout, constants, flow)?;
+                self.plan_expression_with_abrupt_markers(
+                    key,
+                    layout,
+                    tree_layout,
+                    constants,
+                    abrupt_markers,
+                    flow,
+                )?;
                 if has_rest {
                     // Record the key in the exclude list below the source.
                     // The verifier's object-definition pass converts the key
@@ -237,6 +266,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 layout,
                 tree_layout,
                 constants,
+                abrupt_markers,
                 flow,
             )?;
         }
@@ -258,6 +288,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 layout,
                 tree_layout,
                 constants,
+                abrupt_markers,
                 flow,
             )?;
             flow.emit(PlannedInstruction::new(
@@ -292,6 +323,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        abrupt_markers: &[AbruptMarker],
         flow: &mut PlannedControlFlow,
         span: Span,
     ) -> Result<(), LeafCompilationError> {
@@ -300,6 +332,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             Operands::None,
             span,
         ))?;
+        let mut element_abrupt_markers = Vec::new();
+        element_abrupt_markers
+            .try_reserve_exact(abrupt_markers.len().saturating_add(1))
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "destructuring abrupt-marker stack",
+            })?;
+        element_abrupt_markers.extend_from_slice(abrupt_markers);
+        element_abrupt_markers.push(AbruptMarker::new(AbruptMarkerKind::ForOf, 0));
         for element in elements {
             match element {
                 None => {
@@ -339,6 +379,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         layout,
                         tree_layout,
                         constants,
+                        &element_abrupt_markers,
                         flow,
                     )?;
                 }
@@ -351,6 +392,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 layout,
                 tree_layout,
                 constants,
+                &element_abrupt_markers,
                 flow,
             )?;
         }
@@ -361,6 +403,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         ))
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "rest binding keeps iterator cleanup markers beside the existing explicit lowering authorities"
+    )]
     fn plan_destructuring_rest<'pattern>(
         &self,
         rest: &'pattern BindingRestElement<'arena>,
@@ -368,6 +414,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        abrupt_markers: &[AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         // `[first, ...rest]`: collect the remaining values into a fresh
@@ -432,6 +479,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             layout,
             tree_layout,
             constants,
+            abrupt_markers,
             flow,
         )
     }
@@ -447,6 +495,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        abrupt_markers: &[AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         match pattern {
@@ -493,7 +542,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     | BindingPattern::ArrayPattern(_)
                     | BindingPattern::ObjectPattern(_) => None,
                 };
-                self.plan_expression(&assignment.right, layout, tree_layout, constants, flow)?;
+                self.plan_expression_with_abrupt_markers(
+                    &assignment.right,
+                    layout,
+                    tree_layout,
+                    constants,
+                    abrupt_markers,
+                    flow,
+                )?;
                 if let Some(set_name) = inferred_name {
                     flow.emit(set_name)?;
                 }
@@ -504,6 +560,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     layout,
                     tree_layout,
                     constants,
+                    abrupt_markers,
                     flow,
                 )
             }
@@ -513,6 +570,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 layout,
                 tree_layout,
                 constants,
+                abrupt_markers,
                 flow,
             ),
             BindingPattern::ObjectPattern(pattern) => self.plan_object_destructuring_value(
@@ -521,6 +579,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 layout,
                 tree_layout,
                 constants,
+                abrupt_markers,
                 flow,
             ),
         }

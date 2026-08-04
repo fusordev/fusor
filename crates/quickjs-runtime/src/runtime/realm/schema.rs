@@ -29,6 +29,8 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     IteratorPrototype,
     ArrayIteratorPrototype,
     StringIteratorPrototype,
+    GeneratorFunctionPrototype,
+    GeneratorPrototype,
     SymbolPrototype,
     PromisePrototype,
     Reflect,
@@ -37,7 +39,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 24] = [
+    pub(in crate::runtime) const ALL: [Self; 26] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -57,6 +59,8 @@ impl IntrinsicObjectId {
         Self::IteratorPrototype,
         Self::ArrayIteratorPrototype,
         Self::StringIteratorPrototype,
+        Self::GeneratorFunctionPrototype,
+        Self::GeneratorPrototype,
         Self::SymbolPrototype,
         Self::PromisePrototype,
         Self::Reflect,

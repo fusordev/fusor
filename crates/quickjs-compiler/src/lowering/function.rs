@@ -64,6 +64,7 @@ impl FunctionPlanningContext<'_> {
 
 enum FunctionTerminal {
     Ordinary,
+    Generator,
     Script(LocalSlot),
 }
 
@@ -100,30 +101,44 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
             function.node_id.get(),
             function.span,
         )?;
+        let flow = PlannedControlFlow::new(limits);
+        let terminal = if function.generator {
+            FunctionTerminal::Generator
+        } else {
+            FunctionTerminal::Ordinary
+        };
+        let mut work = vec![
+            StatementWork::PopScope(function_scope),
+            StatementWork::VisitList {
+                statements: &body.statements,
+                next: 0,
+            },
+        ];
+        if function.generator {
+            work.push(StatementWork::Emit(super::PlannedInstruction::new(
+                quickjs_bytecode::FinalOpcode::InitialYield,
+                quickjs_bytecode::Operands::None,
+                function.span,
+            )));
+        }
+        work.push(StatementWork::PushScope {
+            scope: function_scope,
+            creator: function.node_id.get(),
+            span: function.span,
+        });
         Ok(Self {
             compiler,
             planning,
             body_span: body.span,
             state: StatementPlanningState {
-                work: vec![
-                    StatementWork::PopScope(function_scope),
-                    StatementWork::VisitList {
-                        statements: &body.statements,
-                        next: 0,
-                    },
-                    StatementWork::PushScope {
-                        scope: function_scope,
-                        creator: function.node_id.get(),
-                        span: function.span,
-                    },
-                ],
+                work,
                 active_scopes: Vec::new(),
                 controls: StatementControlStack::default(),
                 abrupt_markers: Vec::new(),
                 completion: StatementCompletion::Discard,
             },
-            flow: PlannedControlFlow::new(limits),
-            terminal: FunctionTerminal::Ordinary,
+            flow,
+            terminal,
         })
     }
 
@@ -183,6 +198,9 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                     FunctionTerminal::Ordinary => {
                         "statement planning closes every scope and control region"
                     }
+                    FunctionTerminal::Generator => {
+                        "generator planning closes every scope and control region"
+                    }
                     FunctionTerminal::Script(_) => {
                         "Program planning closes every scope and control region"
                     }
@@ -192,6 +210,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         }
         match self.terminal {
             FunctionTerminal::Ordinary => self.flow.ensure_terminal(self.body_span)?,
+            FunctionTerminal::Generator => self.flow.ensure_generator_terminal(self.body_span)?,
             FunctionTerminal::Script(completion) => self
                 .flow
                 .ensure_script_terminal(completion, self.body_span)?,
@@ -226,7 +245,7 @@ impl CompilationContext<'_, '_, '_> {
         tree_layout: &FunctionTreeLayout,
         limits: VerificationLimits,
     ) -> Result<ValidatedFunction, LeafCompilationError> {
-        let (executable, function, form) = self.selected_ordinary_function(executable_id)?;
+        let (executable, function, form, generator) = self.selected_function(executable_id)?;
         let layout = FrameLayout::new(FrameLayoutInput::new(&self.planned.plan, executable_id))?;
         let body = function
             .body
@@ -255,7 +274,11 @@ impl CompilationContext<'_, '_, '_> {
         let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
         let (executable_kind, function_span, function_name, function_name_span) = match form {
             OrdinaryFunctionForm::Function => (
-                CompilerExecutableKind::OrdinaryFunction,
+                if generator {
+                    CompilerExecutableKind::GeneratorFunction
+                } else {
+                    CompilerExecutableKind::OrdinaryFunction
+                },
                 function.span,
                 executable
                     .name()
@@ -266,7 +289,11 @@ impl CompilationContext<'_, '_, '_> {
             OrdinaryFunctionForm::ObjectMethod {
                 property_span: source_span,
             } => (
-                CompilerExecutableKind::OrdinaryMethod,
+                if generator {
+                    CompilerExecutableKind::GeneratorMethod
+                } else {
+                    CompilerExecutableKind::OrdinaryMethod
+                },
                 source_span,
                 None,
                 None,
@@ -434,6 +461,20 @@ const fn executable_header(
         }
         CompilerExecutableKind::OrdinaryMethod => {
             UnverifiedFunctionHeader::ordinary_method_with_variable_references(
+                strict,
+                defined_argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::GeneratorFunction => {
+            UnverifiedFunctionHeader::generator_source_function_with_variable_references(
+                strict,
+                defined_argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::GeneratorMethod => {
+            UnverifiedFunctionHeader::generator_method_with_variable_references(
                 strict,
                 defined_argument_count,
                 variable_reference_count,

@@ -430,23 +430,14 @@ fn captured_cells_close_before_protected_and_finalizer_cleanup() {
 }
 
 #[test]
-fn async_and_generator_try_finally_remain_typed_fail_closed() {
-    for (source, name) in [
-        (
-            "async function asyncFinally(){try{}finally{}}",
-            "asyncFinally",
-        ),
-        (
-            "function* generatorFinally(){try{}finally{}}",
-            "generatorFinally",
-        ),
-    ] {
-        let LeafCompilationError::Unsupported { feature, .. } = compile_error(source, name) else {
-            panic!("unsupported function kind must fail closed");
-        };
-        assert!(matches!(
-            feature,
-            UnsupportedLeafFeature::UnsupportedBody | UnsupportedLeafFeature::NonOrdinaryFunction
-        ));
-    }
+fn async_try_finally_remains_typed_fail_closed() {
+    let source = "async function asyncFinally(){try{}finally{}}";
+    let LeafCompilationError::Unsupported { feature, .. } = compile_error(source, "asyncFinally")
+    else {
+        panic!("unsupported async function must fail closed");
+    };
+    assert!(matches!(
+        feature,
+        UnsupportedLeafFeature::UnsupportedBody | UnsupportedLeafFeature::NonOrdinaryFunction
+    ));
 }
