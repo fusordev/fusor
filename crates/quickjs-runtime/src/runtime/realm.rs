@@ -42,11 +42,11 @@ use super::{
     HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
     IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, MathMethod, NativeFunction,
     NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord,
-    PredefinedAtom, PromiseIntrinsics, PromiseStatic, PropertyKey, PropertyLayout, Realm,
-    RealmHandle, RealmId, RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime,
-    RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, StoredValue, StringHtmlMethod,
-    StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction, VecDeque, check_limit,
-    predefined_string, usize_to_u64,
+    PredefinedAtom, PromiseIntrinsics, PromiseRejectionState, PromiseStatic, PropertyKey,
+    PropertyLayout, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, ReflectMethod,
+    ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource,
+    StoredValue, StringHtmlMethod, StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction,
+    VecDeque, check_limit, predefined_string, usize_to_u64,
 };
 
 use allocation::IntrinsicRecords;
@@ -551,6 +551,7 @@ impl Runtime {
             public_roots: 0,
             collection_pending: false,
             interrupts: InterruptState::default(),
+            promise_rejections: PromiseRejectionState::default(),
             promise_jobs: VecDeque::new(),
             next_math_random_seed: 1,
         })

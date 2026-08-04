@@ -5,10 +5,13 @@ use quickjs_frontend::{
     with_dynamic_function_source,
 };
 use quickjs_runtime::{
-    Context, DynamicFunctionCompileFailure, ExecutionError, ExecutionLimits, Function, JsString,
-    OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, Runtime, RuntimeLimits,
-    RuntimeResource,
+    Context, DynamicFunctionCompileFailure, ExecutionError, ExecutionLimits, Function, JsNumber,
+    JsString, OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
+    OwnedPromiseRejectionEvent, PromiseRejectionEvent, PromiseRejectionOperation,
+    PromiseRejectionTracker, Runtime, RuntimeLimits, RuntimeResource, ValueKind,
 };
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::{error::Error, fmt};
 
@@ -24,6 +27,46 @@ impl fmt::Display for TestCompileError {
 impl Error for TestCompileError {}
 
 struct TestCompiler;
+
+#[derive(Default)]
+struct RetainingRejectionTracker {
+    events: RefCell<Vec<OwnedPromiseRejectionEvent>>,
+}
+
+impl PromiseRejectionTracker for RetainingRejectionTracker {
+    fn promise_rejection(&self, mut event: PromiseRejectionEvent<'_>) {
+        self.events
+            .borrow_mut()
+            .push(event.retain().expect("retain rejection event"));
+    }
+}
+
+#[derive(Default)]
+struct BorrowingRejectionTracker {
+    events: RefCell<Vec<(PromiseRejectionOperation, ValueKind)>>,
+}
+
+impl PromiseRejectionTracker for BorrowingRejectionTracker {
+    fn promise_rejection(&self, event: PromiseRejectionEvent<'_>) {
+        self.events
+            .borrow_mut()
+            .push((event.operation(), event.reason().kind()));
+    }
+}
+
+#[derive(Default)]
+struct FailedRetainTracker {
+    failed: RefCell<Vec<PromiseRejectionOperation>>,
+}
+
+impl PromiseRejectionTracker for FailedRetainTracker {
+    fn promise_rejection(&self, mut event: PromiseRejectionEvent<'_>) {
+        let operation = event.operation();
+        if event.retain().is_err() {
+            self.failed.borrow_mut().push(operation);
+        }
+    }
+}
 
 impl OrdinaryDynamicFunctionCompiler for TestCompiler {
     fn compile(
@@ -102,6 +145,179 @@ fn turn_result(setup: &str, projection: &str) -> Result<String, ExecutionError> 
         .expect("String projection")
         .to_utf8_lossy()
         .map_err(ExecutionError::from)
+}
+
+#[test]
+fn promise_rejection_tracker_reports_reject_then_only_the_first_handle() {
+    let tracker = Rc::new(RetainingRejectionTracker::default());
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    assert!(!runtime.has_promise_rejection_tracker());
+    runtime.set_promise_rejection_tracker(Rc::clone(&tracker) as Rc<dyn PromiseRejectionTracker>);
+    assert!(runtime.has_promise_rejection_tracker());
+    let realm = runtime.create_realm().expect("realm");
+    {
+        let mut context = runtime.context(&realm).expect("context");
+
+        let reject = dynamic_function(
+            &mut context,
+            "let promise=Promise.reject({tag:'reason'});return promise;",
+        );
+        let promise = context
+            .call(&reject, &[], ExecutionLimits::default())
+            .expect("rejected Promise")
+            .into_object()
+            .expect("Promise object");
+        {
+            let events = tracker.events.borrow();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].operation(), PromiseRejectionOperation::Reject);
+            assert!(!events[0].operation().is_handled());
+            assert!(
+                events[0]
+                    .promise()
+                    .same_identity(&promise)
+                    .expect("identity")
+            );
+            assert_eq!(
+                events[0].reason().kind().expect("live reason"),
+                ValueKind::Object
+            );
+        }
+
+        let handle = dynamic_function(
+            &mut context,
+            "arguments[0].catch(function(){});arguments[0].catch(function(){});return arguments[0];",
+        );
+        let returned = context
+            .call(&handle, &[promise.as_value()], ExecutionLimits::default())
+            .expect("handled Promise")
+            .into_object()
+            .expect("Promise object");
+        {
+            let events = tracker.events.borrow();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[1].operation(), PromiseRejectionOperation::Handle);
+            assert!(events[1].operation().is_handled());
+            assert!(
+                events[0]
+                    .promise()
+                    .same_identity(events[1].promise())
+                    .expect("event identity")
+            );
+            assert!(
+                events[1]
+                    .promise()
+                    .same_identity(&returned)
+                    .expect("returned identity")
+            );
+            let first_reason = events[0]
+                .reason()
+                .clone()
+                .into_object()
+                .expect("first reason object");
+            let second_reason = events[1]
+                .reason()
+                .clone()
+                .into_object()
+                .expect("second reason object");
+            assert!(
+                first_reason
+                    .same_identity(&second_reason)
+                    .expect("reason identity")
+            );
+        }
+    }
+
+    runtime.collect_cycles().expect("collect retained events");
+    assert_eq!(
+        tracker.events.borrow()[0].reason().kind(),
+        Ok(ValueKind::Object)
+    );
+    assert_eq!(runtime.usage().public_roots(), 4);
+    runtime.clear_promise_rejection_tracker();
+    assert!(!runtime.has_promise_rejection_tracker());
+    tracker.events.borrow_mut().clear();
+    runtime.collect_cycles().expect("collect released events");
+    assert_eq!(runtime.usage().public_roots(), 0);
+}
+
+#[test]
+fn promise_rejection_tracker_stays_silent_when_handled_before_rejection() {
+    let tracker = Rc::new(BorrowingRejectionTracker::default());
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    runtime.set_promise_rejection_tracker(Rc::clone(&tracker) as Rc<dyn PromiseRejectionTracker>);
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        "let record=Promise.withResolvers();record.promise.catch(function(){});record.reject('late');return 1;",
+    );
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("pre-handled rejection");
+    let actual = result.as_number().expect("live result").expect("Number");
+    assert!(actual.strict_equals(JsNumber::from_i32(1)));
+    assert!(tracker.events.borrow().is_empty());
+}
+
+#[test]
+fn borrowed_rejection_notifications_add_no_public_or_gc_roots() {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    runtime.set_promise_rejection_tracker(Rc::new({
+        let events = Rc::clone(&events);
+        move |event: PromiseRejectionEvent<'_>| {
+            events
+                .borrow_mut()
+                .push((event.operation(), event.reason().kind()));
+        }
+    }));
+    let realm = runtime.create_realm().expect("realm");
+    {
+        let mut context = runtime.context(&realm).expect("context");
+        let run = dynamic_function(&mut context, "Promise.reject({});return 0;");
+        let before = context.runtime_usage();
+        let result = context
+            .call(&run, &[], ExecutionLimits::default())
+            .expect("unhandled rejection");
+        let actual = result.as_number().expect("live result").expect("Number");
+        assert!(actual.strict_equals(JsNumber::from_i32(0)));
+        let after = context.runtime_usage();
+        assert_eq!(after.public_roots(), before.public_roots());
+        assert_eq!(after.pending_releases(), before.pending_releases());
+    }
+    assert_eq!(
+        events.borrow().as_slice(),
+        &[(PromiseRejectionOperation::Reject, ValueKind::Object)]
+    );
+}
+
+#[test]
+fn failed_host_retention_does_not_change_promise_rejection_semantics() {
+    let tracker = Rc::new(FailedRetainTracker::default());
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_public_roots(2)).expect("runtime");
+    runtime.set_promise_rejection_tracker(Rc::clone(&tracker) as Rc<dyn PromiseRejectionTracker>);
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        "let promise=Promise.reject({});promise.catch(function(){});return 7;",
+    );
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("tracker retention failure is host-local");
+    let actual = result.as_number().expect("live result").expect("Number");
+    assert!(actual.strict_equals(JsNumber::from_i32(7)));
+    assert_eq!(
+        tracker.failed.borrow().as_slice(),
+        &[
+            PromiseRejectionOperation::Reject,
+            PromiseRejectionOperation::Handle,
+        ]
+    );
+    assert_eq!(context.runtime_usage().public_roots(), 1);
+    assert_eq!(context.runtime_usage().pending_releases(), 0);
 }
 
 #[test]

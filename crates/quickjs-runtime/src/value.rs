@@ -559,6 +559,10 @@ impl Function {
 pub struct Object(JsValue);
 
 impl Object {
+    pub(crate) const fn from_root(value: JsValue) -> Self {
+        Self(value)
+    }
+
     /// Returns this object as an arbitrary value root.
     #[must_use]
     pub fn as_value(&self) -> JsValue {

@@ -138,6 +138,22 @@ impl Runtime {
         Ok(JsValue::rooted_heap(&self.mailbox, reference))
     }
 
+    pub(crate) fn public_value_pair(
+        &mut self,
+        first: StoredValue,
+        second: StoredValue,
+    ) -> Result<(JsValue, JsValue), crate::ExecutionError> {
+        let first = self.public_value(first)?;
+        match self.public_value(second) {
+            Ok(second) => Ok((first, second)),
+            Err(error) => {
+                drop(first);
+                self.drain_releases();
+                Err(error)
+            }
+        }
+    }
+
     pub(crate) fn retire_internal_root(
         &mut self,
         root: FunctionId,

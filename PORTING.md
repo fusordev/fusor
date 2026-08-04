@@ -164,9 +164,11 @@ does not imply complete ECMAScript or QuickJS compatibility.
   Jobs, pending reactions, results, and resolving functions are explicit GC
   edges; the turn shares one fuel/interrupt budget. Tokio never defines
   JavaScript job order.
-- [ ] Complete Promise rejection tracking; then add generators, async
-  functions/generators, and their dynamic constructors on verified
-  continuations.
+- [x] Host Promise rejection tracking reports `reject` at unhandled settlement
+  and `handle` at the first later reaction. Borrowed callback values add no GC
+  roots; hosts explicitly retain owned handles when needed.
+- [ ] Add generators, async functions/generators, and their dynamic
+  constructors on verified continuations.
 - [ ] Implement module linking/evaluation, cycles, resolver semantics, dynamic
   import, and top-level `await`. Module parsing alone is not an execution claim.
 - [ ] Finish the Rust embedding API, ESM REPL, `qjs`, Rust-native `qjsc`,

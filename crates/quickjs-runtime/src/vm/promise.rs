@@ -20,6 +20,7 @@ use super::{
 use crate::object::{
     HeapObject, PromiseCapability, PromiseReaction, PromiseReactionKind, PromiseState,
 };
+use crate::promise_rejection::PromiseRejectionOperation;
 use crate::runtime::PromiseFinallyHandlerKind;
 
 pub(super) fn begin_promise_constructor(
@@ -1341,6 +1342,19 @@ fn finish_promise_resolution_after_then_get(
     Ok(NativeDispatch::Immediate(completion))
 }
 
+enum PromiseThenDisposition {
+    Pending,
+    Fulfilled(StoredValue),
+    Rejected {
+        reason: StoredValue,
+        is_handled: bool,
+    },
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the three Promise-state branches keep HostPromiseRejectionTracker ordering visible"
+)]
 fn perform_promise_then(
     runtime: &mut Runtime,
     promise: ObjectId,
@@ -1358,21 +1372,44 @@ fn perform_promise_then(
         handler: on_rejected,
         capability,
     };
-    let state = runtime
+    let disposition = match runtime
         .objects
-        .get_mut(promise)
-        .and_then(HeapObject::promise_state_mut)
+        .get(promise)
+        .and_then(HeapObject::promise_state)
         .ok_or(EngineFault::StaleHeapEdge {
             edge: "Promise",
             index: promise.index(),
             generation: promise.generation(),
-        })?;
-    match state {
-        PromiseState::Pending {
-            fulfill_reactions,
-            reject_reactions,
-            is_handled,
-        } => {
+        })? {
+        PromiseState::Pending { .. } => PromiseThenDisposition::Pending,
+        PromiseState::Fulfilled(value) => PromiseThenDisposition::Fulfilled(value.duplicate()),
+        PromiseState::Rejected { reason, is_handled } => PromiseThenDisposition::Rejected {
+            reason: reason.duplicate(),
+            is_handled: *is_handled,
+        },
+    };
+    match disposition {
+        PromiseThenDisposition::Pending => {
+            let state = runtime
+                .objects
+                .get_mut(promise)
+                .and_then(HeapObject::promise_state_mut)
+                .ok_or(EngineFault::StaleHeapEdge {
+                    edge: "Promise",
+                    index: promise.index(),
+                    generation: promise.generation(),
+                })?;
+            let PromiseState::Pending {
+                fulfill_reactions,
+                reject_reactions,
+                is_handled,
+            } = state
+            else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "Promise state changed without runtime re-entry",
+                }
+                .into());
+            };
             fulfill_reactions
                 .try_reserve(1)
                 .map_err(|_| ExecutionError::AllocationFailed {
@@ -1389,8 +1426,7 @@ fn perform_promise_then(
             reject_reactions.push(reject_reaction);
             *is_handled = true;
         }
-        PromiseState::Fulfilled(value) => {
-            let argument = value.duplicate();
+        PromiseThenDisposition::Fulfilled(argument) => {
             enqueue_promise_job(
                 runtime,
                 PromiseJob::Reaction {
@@ -1399,16 +1435,35 @@ fn perform_promise_then(
                 },
             )?;
         }
-        PromiseState::Rejected { reason, is_handled } => {
-            let argument = reason.duplicate();
+        PromiseThenDisposition::Rejected { reason, is_handled } => {
+            reserve_promise_jobs(runtime, 1)?;
+            if !is_handled {
+                runtime.dispatch_promise_rejection(
+                    PromiseRejectionOperation::Handle,
+                    promise,
+                    reason.duplicate(),
+                );
+            }
+            runtime.promise_jobs.push_back(PromiseJob::Reaction {
+                reaction: reject_reaction,
+                argument: reason,
+            });
+            let state = runtime
+                .objects
+                .get_mut(promise)
+                .and_then(HeapObject::promise_state_mut)
+                .ok_or(EngineFault::StaleHeapEdge {
+                    edge: "Promise",
+                    index: promise.index(),
+                    generation: promise.generation(),
+                })?;
+            let PromiseState::Rejected { is_handled, .. } = state else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "rejected Promise state changed without runtime re-entry",
+                }
+                .into());
+            };
             *is_handled = true;
-            enqueue_promise_job(
-                runtime,
-                PromiseJob::Reaction {
-                    reaction: reject_reaction,
-                    argument,
-                },
-            )?;
         }
     }
     runtime.collection_pending = true;
@@ -1437,7 +1492,7 @@ fn settle_promise(
     value: StoredValue,
     kind: PromiseReactionKind,
 ) -> Result<(), NativeFailure> {
-    let reaction_count = {
+    let (reaction_count, notify_rejection) = {
         let state = runtime
             .objects
             .get(promise)
@@ -1453,13 +1508,15 @@ fn settle_promise(
                 PromiseState::Pending {
                     fulfill_reactions, ..
                 },
-            ) => fulfill_reactions.len(),
+            ) => (fulfill_reactions.len(), false),
             (
                 PromiseReactionKind::Reject,
                 PromiseState::Pending {
-                    reject_reactions, ..
+                    reject_reactions,
+                    is_handled,
+                    ..
                 },
-            ) => reject_reactions.len(),
+            ) => (reject_reactions.len(), !is_handled),
             (_, PromiseState::Fulfilled(_) | PromiseState::Rejected { .. }) => return Ok(()),
         }
     };
@@ -1511,6 +1568,13 @@ fn settle_promise(
             return Ok(());
         }
     };
+    if notify_rejection {
+        runtime.dispatch_promise_rejection(
+            PromiseRejectionOperation::Reject,
+            promise,
+            argument.duplicate(),
+        );
+    }
     for reaction in reactions {
         runtime.promise_jobs.push_back(PromiseJob::Reaction {
             reaction,

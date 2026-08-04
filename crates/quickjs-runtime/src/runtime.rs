@@ -36,6 +36,7 @@ use quickjs_bytecode::{
     FinalOpcode, FunctionTemplateId, Operands, VerifiedBytecode,
 };
 
+use crate::promise_rejection::PromiseRejectionState;
 use crate::{
     ArrayIndex, Atom, AtomError, AtomLimits, AtomTable, AtomUsage, DynamicFunctionScriptError,
     ExceptionKind, ExecutionLimits, Function, HandleError, HandleKind, InstallError, JsBigInt,
@@ -1839,6 +1840,7 @@ pub struct Runtime {
     public_roots: u64,
     pub(crate) collection_pending: bool,
     pub(crate) interrupts: InterruptState,
+    pub(crate) promise_rejections: PromiseRejectionState,
     pub(crate) promise_jobs: VecDeque<PromiseJob>,
     /// Next non-zero seed assigned after a realm transaction commits.
     next_math_random_seed: u64,
