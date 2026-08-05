@@ -431,9 +431,9 @@ fn unsupported_leaf_shapes_fail_closed_at_source_spans() {
             "function nested() {}",
         ),
         (
-            "function f(arg) { let local = missing; return local; }",
-            UnsupportedLeafFeature::UnresolvedReference,
-            "missing",
+            "function f(arg) { const fixed = 1; fixed = arg; return fixed; }",
+            UnsupportedLeafFeature::UnsupportedReference,
+            "fixed",
         ),
     ];
 

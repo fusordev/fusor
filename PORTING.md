@@ -68,8 +68,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
   before runtime mutation.
 - [x] Iterative lowering covers the admitted ordinary profile, closures,
   control flow, calls/spread, destructuring, exceptions, sync generators,
-  async functions, async generators, and delegated `yield*`. Typed suspension
-  and iterator records preserve resume, close, and `finally` order.
+  async functions/generators, delegated `yield*`, and untagged templates with
+  immediate spec-ordered `ToString`. Typed suspension and iterator records
+  preserve resume, close, and `finally` order.
 - [x] Explicit VM frame/continuation stacks handle bytecode and native re-entry,
   coercion, construction, abrupt completion, and traces. Deterministic fuel is
   separate from the pinned 10,000-instruction uncatchable host interrupt.
@@ -229,6 +230,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
   `@@match`/`@@search`/`@@replace`/`@@split` lookup for primitive pattern,
   search, or separator values. ES2025 `GetMethod` observes the primitive wrapper
   prototype; this port follows the specification and Node.
+- `QJS-TEMPLATE-001`: pinned QuickJS lowers untagged templates through an
+  observable `String.prototype.concat` lookup. ECMA-262 requires intrinsic
+  string concatenation with immediate `ToString`; this port follows the spec.
 - `QJS-REGEXP-001`: pinned QuickJS rejects a Unicode-set string disjunction in
   lookbehind. ECMA-262's backwards matcher and Node accept it; this port follows
   the specification.

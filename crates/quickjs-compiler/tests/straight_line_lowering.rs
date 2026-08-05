@@ -442,19 +442,39 @@ fn regexp_literal_pattern_errors_are_reported_at_the_literal_span() {
 }
 
 #[test]
+fn untagged_template_substitutions_lower_to_immediate_string_hint_conversions() {
+    let compiled = compile(
+        "function f(first, second){ return `head:${first}:middle:${second}:tail`; }",
+        "f",
+    );
+
+    assert_eq!(
+        opcodes(&compiled),
+        [
+            FinalOpcode::PushAtomValue,
+            FinalOpcode::GetArg0,
+            FinalOpcode::ToPropKey,
+            FinalOpcode::Add,
+            FinalOpcode::PushAtomValue,
+            FinalOpcode::Add,
+            FinalOpcode::GetArg1,
+            FinalOpcode::ToPropKey,
+            FinalOpcode::Add,
+            FinalOpcode::PushAtomValue,
+            FinalOpcode::Add,
+            FinalOpcode::Return,
+        ]
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 2);
+}
+
+#[test]
 fn unsupported_expression_families_fail_closed_at_the_exact_span() {
-    let cases = [
-        (
-            "function f(){ return `value ${1}`; }",
-            UnsupportedLeafFeature::UnsupportedLiteral,
-            "`value ${1}`",
-        ),
-        (
-            "function f(){ return 2147483648n; }",
-            UnsupportedLeafFeature::UnsupportedLiteral,
-            "2147483648n",
-        ),
-    ];
+    let cases = [(
+        "function f(){ return 2147483648n; }",
+        UnsupportedLeafFeature::UnsupportedLiteral,
+        "2147483648n",
+    )];
 
     for (source, expected_feature, expected_source) in cases {
         let error = compile_error(source, "f");

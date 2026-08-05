@@ -91,9 +91,9 @@ pub(in crate::lowering) fn plan_literal(
                     Some(cooked) if cooked.is_empty() => Ok(PlannedInstruction::new(
                         FinalOpcode::PushEmptyString,
                         Operands::None,
-                        template.span,
+                        quasi.span,
                     )),
-                    Some(_) => constants.plan_string(template.span),
+                    Some(_) => constants.plan_string(quasi.span),
                 }
             } else {
                 Err(LeafCompilationError::SemanticInvariant {
@@ -101,9 +101,6 @@ pub(in crate::lowering) fn plan_literal(
                     span: Some(template.span),
                 })
             }
-        }
-        Expression::TemplateLiteral(template) => {
-            unsupported(UnsupportedLeafFeature::UnsupportedLiteral, template.span)
         }
         _ => return None,
     };
@@ -299,6 +296,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             work.push(ExpressionWork::Visit(&binary.right));
                             work.push(ExpressionWork::Visit(&binary.left));
                         }
+                        Expression::TemplateLiteral(template) => {
+                            Self::plan_untagged_template_literal(template, constants, &mut work)?;
+                        }
                         Expression::ParenthesizedExpression(parenthesized) => {
                             work.push(ExpressionWork::Visit(&parenthesized.expression));
                         }
@@ -452,6 +452,100 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         let mut cleanup = Vec::new();
         Self::append_yield_return_cleanup(abrupt_markers, span, &mut cleanup);
         work.extend(cleanup.into_iter().rev());
+    }
+
+    fn plan_untagged_template_literal<'expression>(
+        template: &'expression oxc_ast::ast::TemplateLiteral<'arena>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if template.quasis.len() != template.expressions.len().saturating_add(1) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "untagged template has one more quasi than substitutions",
+                span: Some(template.span),
+            });
+        }
+
+        let mut planned = Vec::new();
+        let first = template
+            .quasis
+            .first()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "untagged template has an initial quasi",
+                span: Some(template.span),
+            })?;
+        planned.push(ExpressionWork::Emit(Self::plan_template_quasi(
+            first, constants,
+        )?));
+
+        for (expression, quasi) in template
+            .expressions
+            .iter()
+            .zip(template.quasis.iter().skip(1))
+        {
+            planned.push(ExpressionWork::Visit(expression));
+            // `ToPropertyKey` is the final QuickJS opcode that performs
+            // `ToPrimitive` with a String hint. For every non-Symbol it also
+            // performs `ToString`; a Symbol remains a Symbol so the guaranteed
+            // String-left `Add` below raises the required TypeError. This keeps
+            // every conversion ahead of the next expression and avoids an
+            // observable `String.prototype.concat` lookup.
+            planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::ToPropKey,
+                Operands::None,
+                expression.span(),
+            )));
+            planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Add,
+                Operands::None,
+                expression.span(),
+            )));
+
+            let cooked =
+                quasi
+                    .value
+                    .cooked
+                    .as_ref()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "untagged template quasi has a cooked value",
+                        span: Some(quasi.span),
+                    })?;
+            if !cooked.is_empty() {
+                planned.push(ExpressionWork::Emit(constants.plan_string(quasi.span)?));
+                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Add,
+                    Operands::None,
+                    quasi.span,
+                )));
+            }
+        }
+
+        work.extend(planned.into_iter().rev());
+        Ok(())
+    }
+
+    fn plan_template_quasi(
+        quasi: &oxc_ast::ast::TemplateElement<'arena>,
+        constants: &CompiledConstantPool,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        let cooked =
+            quasi
+                .value
+                .cooked
+                .as_ref()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "untagged template quasi has a cooked value",
+                    span: Some(quasi.span),
+                })?;
+        if cooked.is_empty() {
+            Ok(PlannedInstruction::new(
+                FinalOpcode::PushEmptyString,
+                Operands::None,
+                quasi.span,
+            ))
+        } else {
+            constants.plan_string(quasi.span)
+        }
     }
 
     fn append_yield_return_cleanup<'expression>(

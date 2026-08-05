@@ -994,11 +994,6 @@ fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
             UnsupportedLeafFeature::UnsupportedExpression,
             "key",
         ),
-        (
-            "function make(){return this;}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "this",
-        ),
     ];
 
     for (source, expected_feature, expected_fragment) in cases {

@@ -8,6 +8,15 @@ fn number(value: &quickjs_runtime::JsValue) -> JsNumber {
     value.as_number().expect("live value").expect("Number")
 }
 
+fn string(value: &quickjs_runtime::JsValue) -> String {
+    value
+        .as_string()
+        .expect("live value")
+        .expect("String")
+        .to_utf8_lossy()
+        .expect("UTF-8")
+}
+
 fn exception_kind(error: ScriptEvaluationError) -> ExceptionKind {
     let ScriptEvaluationError::Runtime(GlobalScriptError::Execution(ExecutionError::Exception(
         exception,
@@ -41,6 +50,22 @@ fn global_script_executes_as_a_whole_graph_and_retains_object_bindings() {
     )
     .expect("second Script");
     assert!(number(&second).strict_equals(JsNumber::from_i32(43)));
+}
+
+#[test]
+fn global_anonymous_function_initializers_receive_their_binding_name() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "var inferred = function () { return inferred.name; }; inferred();",
+        "global-inferred-name.js",
+        ScriptLimits::default(),
+    )
+    .expect("global anonymous function initializer");
+    assert_eq!(string(&value), "inferred");
 }
 
 #[test]
@@ -231,4 +256,46 @@ fn explicit_error_objects_can_be_classified_without_observable_property_access()
             .expect("classification"),
         Some(ErrorObjectKind::EvalError)
     );
+}
+
+#[test]
+fn untagged_templates_apply_tostring_in_substitution_order_without_builtin_lookup() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        r#"
+            var order = "";
+            var first = {
+                toString() { order += "toString"; return "A"; },
+                valueOf() { order += "valueOf"; return 1; }
+            };
+            String.prototype.concat = function () { throw new Error("observable concat"); };
+            var rendered = `head:${first}:${(order += "|second", "B")}\n`;
+            rendered + "|" + order;
+        "#,
+        "template-order.js",
+        ScriptLimits::default(),
+    )
+    .expect("untagged template");
+
+    assert_eq!(string(&value), "head:A:B\n|toString|second");
+}
+
+#[test]
+fn untagged_template_rejects_symbol_substitutions() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let error = evaluate_script(
+        &mut context,
+        "`${Symbol('description')}`;",
+        "template-symbol.js",
+        ScriptLimits::default(),
+    )
+    .expect_err("template ToString(Symbol)");
+    assert_eq!(exception_kind(error), ExceptionKind::TypeError);
 }

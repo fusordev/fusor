@@ -76,6 +76,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok(pools.into_boxed_slice())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the single executable walk keeps every metadata atom owner and key auditable"
+    )]
     fn record_metadata_atom_candidates(
         &self,
         tree_layout: &FunctionTreeLayoutSeed,
@@ -123,7 +127,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             )? {
                 if !matches!(
                     binding.placement(),
-                    StoragePlacement::Argument { .. } | StoragePlacement::Local
+                    StoragePlacement::Argument { .. }
+                        | StoragePlacement::Local
+                        | StoragePlacement::GlobalObject
+                        | StoragePlacement::GlobalLexical
                 ) {
                     continue;
                 }
@@ -327,28 +334,34 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 if !matches!(
                     nodes.parent_kind(node_id),
                     AstKind::TaggedTemplateExpression(_)
-                ) && template.expressions.is_empty()
-                    && template.quasis.len() == 1 =>
+                ) =>
             {
-                let quasi = &template.quasis[0];
-                if !quasi.tail {
+                if template.quasis.len() != template.expressions.len().saturating_add(1) {
                     return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "no-substitution template has one tail quasi",
+                        invariant: "untagged template has one more quasi than substitutions",
                         span: Some(template.span),
                     });
                 }
-                let cooked =
-                    quasi
-                        .value
-                        .cooked
-                        .as_ref()
-                        .ok_or(LeafCompilationError::SemanticInvariant {
-                            invariant: "untagged no-substitution template has a cooked value",
-                            span: Some(template.span),
-                        })?;
-                let value =
-                    decode_compiler_string(cooked.as_str(), quasi.lone_surrogates, template.span)?;
-                record_string_candidate(owner, value, template.span, candidates, atom_candidates)?;
+                for (index, quasi) in template.quasis.iter().enumerate() {
+                    if quasi.tail != (index + 1 == template.quasis.len()) {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "untagged template marks only its final quasi as tail",
+                            span: Some(quasi.span),
+                        });
+                    }
+                    let cooked = quasi.value.cooked.as_ref().ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "untagged template quasi has a cooked value",
+                            span: Some(quasi.span),
+                        },
+                    )?;
+                    if cooked.is_empty() {
+                        continue;
+                    }
+                    let value =
+                        decode_compiler_string(cooked.as_str(), quasi.lone_surrogates, quasi.span)?;
+                    record_string_candidate(owner, value, quasi.span, candidates, atom_candidates)?;
+                }
             }
             AstKind::RegExpLiteral(literal) => {
                 Self::record_regexp_literal_candidate(owner, literal, candidates, atom_candidates)?;
