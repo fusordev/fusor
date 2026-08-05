@@ -153,6 +153,27 @@ impl CompiledRegExp {
         Ok(Self { flags, program })
     }
 
+    /// Parses and compiles exact ECMAScript UTF-16 pattern and flag strings.
+    ///
+    /// This entry point preserves lone surrogates without using lossy Unicode
+    /// conversion. It is intended for the `RegExp` constructor, whose inputs
+    /// are JavaScript strings rather than source-code scalar text.
+    ///
+    /// # Errors
+    ///
+    /// Returns an exact flag, grammar, unsupported-feature, allocation, or
+    /// resource-limit failure before producing an executable matcher.
+    pub fn compile_utf16(
+        pattern: &[u16],
+        flags: &[u16],
+        limits: CompileLimits,
+    ) -> Result<Self, CompileError> {
+        let flags = ascii_flags(flags)?;
+        let parsed_flags = flags::RegExpFlags::parse(&flags)?;
+        let pattern = parser_pattern_source(pattern, parsed_flags.unicode_mode(), limits)?;
+        Self::compile(&pattern, &flags, limits)
+    }
+
     /// Returns flags in the canonical ECMAScript accessor order.
     #[must_use]
     pub fn flags(&self) -> &str {
@@ -172,5 +193,128 @@ impl CompiledRegExp {
         limits: ExecLimits,
     ) -> Result<Option<Match>, ExecError> {
         executor::execute(&self.program, input, start_index, limits)
+    }
+}
+
+fn ascii_flags(flags: &[u16]) -> Result<String, CompileError> {
+    let mut source = String::new();
+    source
+        .try_reserve_exact(flags.len())
+        .map_err(|_| CompileError::ResourceLimit("flag source allocation"))?;
+    for &unit in flags {
+        let unit = u8::try_from(unit).map_err(|_| CompileError::InvalidFlags)?;
+        if !unit.is_ascii() {
+            return Err(CompileError::InvalidFlags);
+        }
+        source.push(char::from(unit));
+    }
+    Ok(source)
+}
+
+fn parser_pattern_source(
+    pattern: &[u16],
+    unicode_mode: bool,
+    limits: CompileLimits,
+) -> Result<String, CompileError> {
+    let output_bytes = parser_pattern_source_bytes(pattern, unicode_mode)?;
+    if output_bytes > limits.max_pattern_bytes {
+        return Err(CompileError::ResourceLimit("source length"));
+    }
+    let mut source = String::new();
+    source
+        .try_reserve_exact(output_bytes)
+        .map_err(|_| CompileError::ResourceLimit("source allocation"))?;
+    let mut index = 0;
+    let mut slash_run = 0_usize;
+    while index < pattern.len() {
+        let first = pattern[index];
+        if unicode_mode
+            && (0xd800..=0xdbff).contains(&first)
+            && let Some(&second) = pattern.get(index + 1)
+            && (0xdc00..=0xdfff).contains(&second)
+        {
+            let high = u32::from(first) - 0xd800;
+            let low = u32::from(second) - 0xdc00;
+            source.push(
+                char::from_u32(0x1_0000 + (high << 10) + low)
+                    .expect("a validated surrogate pair is a Unicode scalar"),
+            );
+            slash_run = 0;
+            index += 2;
+            continue;
+        }
+        if (0xd800..=0xdfff).contains(&first) {
+            if slash_run % 2 == 1 {
+                if unicode_mode {
+                    return Err(CompileError::Syntax(
+                        "invalid identity escape in Unicode mode".to_owned(),
+                    ));
+                }
+                let removed = source.pop();
+                debug_assert_eq!(removed, Some('\\'));
+            }
+            push_unicode_escape(&mut source, first);
+            slash_run = 0;
+            index += 1;
+            continue;
+        }
+        let character = char::from_u32(u32::from(first))
+            .expect("a non-surrogate UTF-16 unit is a Unicode scalar");
+        source.push(character);
+        if character == '\\' {
+            slash_run += 1;
+        } else {
+            slash_run = 0;
+        }
+        index += 1;
+    }
+    Ok(source)
+}
+
+fn parser_pattern_source_bytes(pattern: &[u16], unicode_mode: bool) -> Result<usize, CompileError> {
+    let mut bytes = 0_usize;
+    let mut index = 0;
+    let mut slash_run = 0_usize;
+    while index < pattern.len() {
+        let first = pattern[index];
+        let (additional, consumed, next_slash_run) = if unicode_mode
+            && (0xd800..=0xdbff).contains(&first)
+            && pattern
+                .get(index + 1)
+                .is_some_and(|second| (0xdc00..=0xdfff).contains(second))
+        {
+            (4, 2, 0)
+        } else if (0xd800..=0xdfff).contains(&first) {
+            if unicode_mode && slash_run % 2 == 1 {
+                return Err(CompileError::Syntax(
+                    "invalid identity escape in Unicode mode".to_owned(),
+                ));
+            }
+            (if slash_run % 2 == 1 { 5 } else { 6 }, 1, 0)
+        } else {
+            let character = char::from_u32(u32::from(first))
+                .expect("a non-surrogate UTF-16 unit is a Unicode scalar");
+            (
+                character.len_utf8(),
+                1,
+                if character == '\\' { slash_run + 1 } else { 0 },
+            )
+        };
+        bytes = bytes
+            .checked_add(additional)
+            .ok_or(CompileError::ResourceLimit("source length"))?;
+        slash_run = next_slash_run;
+        index += consumed;
+    }
+    Ok(bytes)
+}
+
+fn push_unicode_escape(source: &mut String, unit: u16) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    source.push('\\');
+    source.push('u');
+    for shift in [12, 8, 4, 0] {
+        let digit = usize::from((unit >> shift) & 0x0f);
+        source.push(char::from(HEX[digit]));
     }
 }

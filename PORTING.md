@@ -103,9 +103,11 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] A safe, bounded RegExp core parses ES2025 grammar through pinned Oxc,
   lowers to an owned explicit-backtracking VM, preserves UTF-16 positions,
   covers lookaround/backreferences/Unicode sets and most properties of strings,
-  and validates/executes literals through verified bytecode. Shared core
-  corpus: 63/63 QuickJS and Node cases. Constructor/prototype protocols remain
-  open; RGI ZWJ string properties currently reject explicitly.
+  losslessly compiles constructor UTF-16 sources (including legacy surrogate
+  element semantics), and validates/executes literals through verified
+  bytecode. Shared core corpus: 63/63 QuickJS and Node cases.
+  Constructor/prototype protocols remain open; RGI ZWJ string properties
+  currently reject explicitly.
 - [x] Full admitted `Array`, including generic array-like behavior and
   spec-ordered, resource-traced `fromAsync` iterator/array-like suspension.
 - [x] `Map`: ordered SameValueZero storage, `AddEntriesFromIterable` close

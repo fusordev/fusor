@@ -112,3 +112,66 @@ fn execution_budget_fails_closed_on_exponential_backtracking() {
         Err(ExecError::StepLimit)
     );
 }
+
+#[test]
+fn constructor_sources_preserve_lone_surrogates_and_utf16_escape_rules() {
+    let lone = [0xd800];
+    for flags in ["", "u"] {
+        let expression = CompiledRegExp::compile_utf16(
+            &lone,
+            &flags.encode_utf16().collect::<Vec<_>>(),
+            CompileLimits::default(),
+        )
+        .expect("a literal lone surrogate is valid in both modes");
+        assert_eq!(
+            expression
+                .execute(&lone, 0, ExecLimits::default())
+                .expect("bounded execution")
+                .expect("lone surrogate match")
+                .range(),
+            0..1
+        );
+    }
+
+    let identity_escape = [u16::from(b'\\'), 0xd800];
+    let legacy_identity =
+        CompiledRegExp::compile_utf16(&identity_escape, &[], CompileLimits::default())
+            .expect("legacy identity escape accepts a surrogate");
+    assert_eq!(
+        legacy_identity
+            .execute(&lone, 0, ExecLimits::default())
+            .expect("bounded execution")
+            .expect("escaped lone surrogate match")
+            .range(),
+        0..1
+    );
+    assert!(matches!(
+        CompiledRegExp::compile_utf16(
+            &identity_escape,
+            &[u16::from(b'u')],
+            CompileLimits::default(),
+        ),
+        Err(CompileError::Syntax(_))
+    ));
+    assert!(matches!(
+        CompiledRegExp::compile_utf16(&lone, &[0xd800], CompileLimits::default()),
+        Err(CompileError::InvalidFlags)
+    ));
+
+    let smile = [0xd83d, 0xde00];
+    let legacy = CompiledRegExp::compile_utf16(&smile, &[], CompileLimits::default())
+        .expect("legacy mode interprets each UTF-16 element as one BMP code point");
+    let unicode =
+        CompiledRegExp::compile_utf16(&smile, &[u16::from(b'u')], CompileLimits::default())
+            .expect("Unicode mode decodes a valid surrogate pair");
+    for expression in [&legacy, &unicode] {
+        assert_eq!(
+            expression
+                .execute(&smile, 0, ExecLimits::default())
+                .expect("bounded execution")
+                .expect("paired surrogate match")
+                .range(),
+            0..2
+        );
+    }
+}
