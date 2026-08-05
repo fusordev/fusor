@@ -110,6 +110,7 @@ mod object_intrinsics;
 mod promise;
 mod promise_combinators;
 mod properties;
+mod proxy;
 mod reflect;
 mod regexp;
 mod set;
@@ -136,8 +137,8 @@ use {
     conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*,
     exceptions::*, execution::*, from_entries::*, generator::*, group_by::*, iterators::*,
     json_parse::*, json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*,
-    native::*, object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*,
-    regexp::*, set::*, stack::*, string_methods::*, string_raw::*, string_replace::*,
+    native::*, object_intrinsics::*, promise::*, promise_combinators::*, properties::*, proxy::*,
+    reflect::*, regexp::*, set::*, stack::*, string_methods::*, string_raw::*, string_replace::*,
     string_split::*, uri::*, weak_collections::*, weak_references::*,
 };
 
@@ -387,6 +388,291 @@ struct DynamicFunctionReturn {
     origin: Option<JsStackFrame>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProxyGetStage {
+    TrapLookup,
+    TrapCall,
+}
+
+struct ProxyGetContinuation {
+    proxy: HeapReference,
+    target: HeapReference,
+    handler: HeapReference,
+    key: PropertyKey,
+    receiver: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+    stage: ProxyGetStage,
+}
+
+impl ProxyGetContinuation {
+    #[allow(
+        clippy::unused_self,
+        reason = "all Proxy continuations expose one uniform retained-value accounting method"
+    )]
+    const fn retained_values(&self) -> u64 {
+        4
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProxyCallStage {
+    TrapLookup,
+    TrapCall,
+}
+
+struct ProxyCallContinuation {
+    proxy: FunctionId,
+    target: FunctionId,
+    handler: HeapReference,
+    receiver: StoredValue,
+    arguments: CallArguments,
+    new_target: Option<FunctionId>,
+    realm: RealmId,
+    origin: JsStackFrame,
+    stage: ProxyCallStage,
+}
+
+impl ProxyCallContinuation {
+    fn retained_values(&self) -> u64 {
+        usize_to_u64(self.arguments.remaining().len())
+            .saturating_add(3)
+            .saturating_add(u64::from(self.new_target.is_some()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProxyBooleanKind {
+    Has,
+    Delete,
+    Set,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProxyBooleanStage {
+    TrapLookup,
+    TrapCall,
+    TargetDescriptor,
+    TargetExtensible,
+}
+
+enum ProxyBooleanCompletion {
+    Boolean,
+    Write { strict: bool },
+    Delete { strict: bool },
+}
+
+struct ProxyBooleanContinuation {
+    proxy: HeapReference,
+    target: HeapReference,
+    handler: HeapReference,
+    key: PropertyKey,
+    value: Option<StoredValue>,
+    receiver: Option<StoredValue>,
+    realm: RealmId,
+    origin: JsStackFrame,
+    kind: ProxyBooleanKind,
+    stage: ProxyBooleanStage,
+    completion: ProxyBooleanCompletion,
+    trap_result: Option<bool>,
+}
+
+impl ProxyBooleanContinuation {
+    fn retained_values(&self) -> u64 {
+        4_u64
+            .saturating_add(u64::from(self.value.is_some()))
+            .saturating_add(u64::from(self.receiver.is_some()))
+            .saturating_add(u64::from(self.trap_result.is_some()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProxyMetaKind {
+    GetPrototypeOf,
+    SetPrototypeOf,
+    IsExtensible,
+    PreventExtensions,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProxyMetaStage {
+    TrapLookup,
+    TrapCall,
+    ExtensibleCheck,
+    TargetPrototypeCheck,
+}
+
+#[allow(
+    clippy::option_option,
+    reason = "the outer option selects [[SetPrototypeOf]] and the inner option represents null"
+)]
+struct ProxyMetaContinuation {
+    proxy: HeapReference,
+    target: HeapReference,
+    handler: HeapReference,
+    requested_prototype: Option<Option<HeapReference>>,
+    trap_result: Option<StoredValue>,
+    realm: RealmId,
+    origin: JsStackFrame,
+    kind: ProxyMetaKind,
+    stage: ProxyMetaStage,
+}
+
+impl ProxyMetaContinuation {
+    fn retained_values(&self) -> u64 {
+        4_u64.saturating_add(u64::from(self.trap_result.is_some()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProxyDescriptorStage {
+    TrapLookup,
+    TrapCall,
+    DescriptorRead,
+    TargetDescriptor,
+    TargetDescriptorRead,
+    ExtensibleCheck,
+}
+
+#[allow(
+    clippy::option_option,
+    reason = "validation distinguishes not-yet-read, absent, and present descriptors"
+)]
+struct ProxyDescriptorContinuation {
+    proxy: HeapReference,
+    target: HeapReference,
+    handler: HeapReference,
+    key: PropertyKey,
+    reader: Option<DescriptorReadState>,
+    trap_descriptor: Option<Option<OwnProperty>>,
+    target_descriptor: Option<Option<OwnProperty>>,
+    realm: RealmId,
+    origin: JsStackFrame,
+    stage: ProxyDescriptorStage,
+}
+
+impl ProxyDescriptorContinuation {
+    fn retained_values(&self) -> u64 {
+        4_u64
+            .saturating_add(
+                self.reader
+                    .as_ref()
+                    .map_or(0, DescriptorReadState::retained_values),
+            )
+            .saturating_add(u64::from(self.trap_descriptor.is_some()))
+            .saturating_add(u64::from(self.target_descriptor.is_some()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProxyDefineStage {
+    TrapLookup,
+    TargetDefine,
+    TrapCall,
+    TargetDescriptor,
+    TargetDescriptorRead,
+    ExtensibleCheck,
+}
+
+#[allow(
+    clippy::option_option,
+    reason = "validation distinguishes not-yet-read, absent, and present descriptors"
+)]
+struct ProxyDefineContinuation {
+    proxy: HeapReference,
+    target: HeapReference,
+    handler: HeapReference,
+    key: PropertyKey,
+    definition: PropertyDefinition,
+    descriptor: ObjectId,
+    target_descriptor: Option<Option<OwnProperty>>,
+    reader: Option<DescriptorReadState>,
+    realm: RealmId,
+    origin: JsStackFrame,
+    result: DefinePropertyResult,
+    stage: ProxyDefineStage,
+}
+
+impl ProxyDefineContinuation {
+    fn retained_values(&self) -> u64 {
+        5_u64
+            .saturating_add(u64::from(self.target_descriptor.is_some()))
+            .saturating_add(
+                self.reader
+                    .as_ref()
+                    .map_or(0, DescriptorReadState::retained_values),
+            )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProxyOwnKeysStage {
+    TrapLookup,
+    TrapCall,
+    ResultLength,
+    ResultIndex,
+    TargetKeys,
+    TargetExtensible,
+    TargetDescriptor,
+}
+
+struct ProxyOwnKeysContinuation {
+    proxy: HeapReference,
+    target: HeapReference,
+    handler: HeapReference,
+    result: Option<HeapReference>,
+    length: usize,
+    next_index: usize,
+    trap_keys: Vec<PropertyKey>,
+    target_keys: Vec<PropertyKey>,
+    next_target_key: usize,
+    non_configurable_keys: Vec<PropertyKey>,
+    target_extensible: Option<bool>,
+    realm: RealmId,
+    origin: JsStackFrame,
+    stage: ProxyOwnKeysStage,
+}
+
+enum ObjectMetaCompletion {
+    Target(StoredValue),
+    Undefined,
+}
+
+struct ObjectMetaContinuation {
+    completion: ObjectMetaCompletion,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+#[derive(Clone, Copy)]
+enum OwnDescriptorQuery {
+    Present,
+    Enumerable,
+}
+
+struct OwnDescriptorQueryContinuation {
+    query: OwnDescriptorQuery,
+}
+
+impl ObjectMetaContinuation {
+    const fn retained_values(&self) -> u64 {
+        match self.completion {
+            ObjectMetaCompletion::Target(_) => 1,
+            ObjectMetaCompletion::Undefined => 0,
+        }
+    }
+}
+
+impl ProxyOwnKeysContinuation {
+    fn retained_values(&self) -> u64 {
+        4_u64
+            .saturating_add(u64::from(self.result.is_some()))
+            .saturating_add(usize_to_u64(self.trap_keys.len()))
+            .saturating_add(usize_to_u64(self.target_keys.len()))
+            .saturating_add(usize_to_u64(self.non_configurable_keys.len()))
+    }
+}
+
 enum NativeContinuation {
     FunctionSource(FunctionSourceContinuation),
     FunctionApply(FunctionApplyContinuation),
@@ -419,6 +705,8 @@ enum NativeContinuation {
     IteratorClose(IteratorCloseContinuation),
     CopyDataProperties(CopyDataPropertiesContinuation),
     EnumerableOwnProperties(Box<EnumerableOwnPropertiesContinuation>),
+    ObjectKeyListing(Box<ObjectKeyListingContinuation>),
+    ProxyEnumerable(Box<ProxyEnumerableContinuation>),
     ObjectAssign(Box<ObjectAssignContinuation>),
     ArrayJoin(Box<ArrayJoinContinuation>),
     ArraySearch(Box<ArraySearchContinuation>),
@@ -441,6 +729,15 @@ enum NativeContinuation {
     InstanceOf(InstanceOfContinuation),
     Promise(PromiseContinuation),
     PromiseCombinator(Box<PromiseCombinatorContinuation>),
+    ProxyGet(Box<ProxyGetContinuation>),
+    ProxyCall(Box<ProxyCallContinuation>),
+    ProxyBoolean(Box<ProxyBooleanContinuation>),
+    ProxyMeta(Box<ProxyMetaContinuation>),
+    ProxyDescriptor(Box<ProxyDescriptorContinuation>),
+    ProxyDefine(Box<ProxyDefineContinuation>),
+    ProxyOwnKeys(Box<ProxyOwnKeysContinuation>),
+    ObjectMeta(ObjectMetaContinuation),
+    OwnDescriptorQuery(OwnDescriptorQueryContinuation),
     AsyncAwait {
         origin: JsStackFrame,
     },
@@ -453,6 +750,8 @@ enum NativeContinuation {
     /// Ignore an accessor setter's return value and complete `Reflect.set`
     /// with the internal-method success Boolean.
     ReflectSet,
+    /// Convert an ordinary `[[Set]]` Boolean into a language write completion.
+    ProxyWrite,
     FunctionCall,
 }
 
@@ -491,6 +790,8 @@ impl NativeContinuation {
             Self::IteratorClose(state) => state.retained_values(),
             Self::CopyDataProperties(state) => state.retained_values(),
             Self::EnumerableOwnProperties(state) => state.retained_values(),
+            Self::ObjectKeyListing(state) => state.retained_values(),
+            Self::ProxyEnumerable(state) => state.retained_values(),
             Self::ObjectAssign(state) => state.retained_values(),
             Self::ArrayJoin(_) => ArrayJoinContinuation::retained_values(),
             Self::ArraySearch(_) => ArraySearchContinuation::retained_values(),
@@ -513,7 +814,19 @@ impl NativeContinuation {
             Self::InstanceOf(state) => state.retained_values(),
             Self::Promise(state) => state.retained_values(),
             Self::PromiseCombinator(state) => state.retained_values(),
-            Self::AsyncAwait { .. } | Self::ReflectSet | Self::FunctionCall => 0,
+            Self::ProxyGet(state) => state.retained_values(),
+            Self::ProxyCall(state) => state.retained_values(),
+            Self::ProxyBoolean(state) => state.retained_values(),
+            Self::ProxyMeta(state) => state.retained_values(),
+            Self::ProxyDescriptor(state) => state.retained_values(),
+            Self::ProxyDefine(state) => state.retained_values(),
+            Self::ProxyOwnKeys(state) => state.retained_values(),
+            Self::ObjectMeta(state) => state.retained_values(),
+            Self::OwnDescriptorQuery(_)
+            | Self::AsyncAwait { .. }
+            | Self::ReflectSet
+            | Self::ProxyWrite
+            | Self::FunctionCall => 0,
             Self::AsyncGeneratorReturnAwait { .. } => 1,
         }
     }
@@ -1088,6 +1401,8 @@ impl IteratorAppendContinuation {
 
 #[derive(Clone, Copy)]
 enum CopyDataPropertiesStage {
+    AwaitKeys,
+    AwaitDescriptor,
     Next,
     ReadValue,
 }
@@ -1096,7 +1411,7 @@ struct CopyDataPropertiesContinuation {
     target: StoredValue,
     source: StoredValue,
     excluded: Option<StoredValue>,
-    snapshot: ForInSnapshot,
+    snapshot: Vec<PropertyKey>,
     next: usize,
     current_key: Option<PropertyKey>,
     realm: RealmId,
@@ -1106,7 +1421,9 @@ struct CopyDataPropertiesContinuation {
 
 impl CopyDataPropertiesContinuation {
     fn retained_values(&self) -> u64 {
-        3_u64.saturating_add(u64::from(self.current_key.is_some()))
+        3_u64
+            .saturating_add(usize_to_u64(self.snapshot.len()))
+            .saturating_add(u64::from(self.current_key.is_some()))
     }
 }
 
@@ -1258,6 +1575,7 @@ enum PropertyKeyTarget {
     ReflectGet {
         target: StoredValue,
         receiver: StoredValue,
+        realm: RealmId,
     },
     ReflectSet {
         target: StoredValue,
@@ -1278,6 +1596,10 @@ enum PropertyKeyTarget {
         target: StoredValue,
         realm: RealmId,
     },
+    In {
+        target: StoredValue,
+        realm: RealmId,
+    },
 }
 
 impl PropertyKeyTarget {
@@ -1291,7 +1613,8 @@ impl PropertyKeyTarget {
             | Self::PropertyIsEnumerable { .. }
             | Self::LegacyLookupAccessor { .. }
             | Self::ReflectOwnPropertyDescriptor { .. }
-            | Self::ReflectHas { .. } => 1,
+            | Self::ReflectHas { .. }
+            | Self::In { .. } => 1,
             Self::Write { .. }
             | Self::DefineMethod { .. }
             | Self::DefineProperty { .. }
@@ -1511,6 +1834,7 @@ enum OperatorPrimitiveTarget {
     ErrorToStringMessage(ErrorToStringContinuation),
     ArrayIteratorLength(ArrayIteratorNextContinuation),
     FunctionApplyLength(FunctionApplyContinuation),
+    ProxyOwnKeysLength(Box<ProxyOwnKeysContinuation>),
     /// `BigInt.prototype.toString`'s radix, awaiting `ToNumber`.
     BigIntToString {
         value: Arc<JsBigInt>,
@@ -1612,6 +1936,7 @@ impl OperatorPrimitiveTarget {
             }
             Self::ArrayIteratorLength(state) => state.retained_values(),
             Self::FunctionApplyLength(state) => state.retained_values(),
+            Self::ProxyOwnKeysLength(state) => state.retained_values(),
             Self::ArrayJoinSeparator(_) | Self::ArrayJoinElement(_) => {
                 ArrayJoinContinuation::retained_values()
             }
@@ -1745,7 +2070,8 @@ fn trace_property_key_target_roots(
         | PropertyKeyTarget::PropertyIsEnumerable { target: base, .. }
         | PropertyKeyTarget::LegacyLookupAccessor { target: base, .. }
         | PropertyKeyTarget::ReflectOwnPropertyDescriptor { target: base, .. }
-        | PropertyKeyTarget::ReflectHas { target: base, .. } => {
+        | PropertyKeyTarget::ReflectHas { target: base, .. }
+        | PropertyKeyTarget::In { target: base, .. } => {
             trace_stored_value_root(base, mark);
         }
         PropertyKeyTarget::DefineProperty {
@@ -1844,6 +2170,14 @@ fn trace_operator_primitive_target_roots(
         }
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             trace_function_apply_roots(state, mark);
+        }
+        OperatorPrimitiveTarget::ProxyOwnKeysLength(state) => {
+            mark(CollectionRoot::Heap(state.proxy));
+            mark(CollectionRoot::Heap(state.target));
+            mark(CollectionRoot::Heap(state.handler));
+            if let Some(result) = state.result {
+                mark(CollectionRoot::Heap(result));
+            }
         }
         OperatorPrimitiveTarget::StringMethodSubject(state)
         | OperatorPrimitiveTarget::StringMethodArgument(state) => state.trace_roots(mark),
@@ -2122,6 +2456,8 @@ fn trace_native_continuation_roots(
             }
         }
         NativeContinuation::EnumerableOwnProperties(state) => state.trace_roots(mark),
+        NativeContinuation::ObjectKeyListing(state) => state.trace_roots(mark),
+        NativeContinuation::ProxyEnumerable(state) => state.trace_roots(mark),
         NativeContinuation::ObjectAssign(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperties(state) => state.trace_roots(mark),
         NativeContinuation::InstanceOf(state) => {
@@ -2129,11 +2465,131 @@ fn trace_native_continuation_roots(
         }
         NativeContinuation::Promise(state) => state.trace_roots(mark),
         NativeContinuation::PromiseCombinator(state) => state.trace_roots(mark),
+        NativeContinuation::ProxyGet(state) => {
+            mark(CollectionRoot::Heap(state.proxy));
+            mark(CollectionRoot::Heap(state.target));
+            mark(CollectionRoot::Heap(state.handler));
+            trace_stored_value_root(&state.receiver, mark);
+        }
+        NativeContinuation::ProxyCall(state) => {
+            mark(CollectionRoot::Heap(HeapReference::Function(state.proxy)));
+            mark(CollectionRoot::Heap(HeapReference::Function(state.target)));
+            mark(CollectionRoot::Heap(state.handler));
+            trace_stored_value_root(&state.receiver, mark);
+            for value in state.arguments.remaining() {
+                trace_stored_value_root(value, mark);
+            }
+            if let Some(new_target) = state.new_target {
+                mark(CollectionRoot::Heap(HeapReference::Function(new_target)));
+            }
+        }
+        NativeContinuation::ProxyBoolean(state) => {
+            mark(CollectionRoot::Heap(state.proxy));
+            mark(CollectionRoot::Heap(state.target));
+            mark(CollectionRoot::Heap(state.handler));
+            if let Some(value) = &state.value {
+                trace_stored_value_root(value, mark);
+            }
+            if let Some(receiver) = &state.receiver {
+                trace_stored_value_root(receiver, mark);
+            }
+        }
+        NativeContinuation::ProxyMeta(state) => {
+            mark(CollectionRoot::Heap(state.proxy));
+            mark(CollectionRoot::Heap(state.target));
+            mark(CollectionRoot::Heap(state.handler));
+            if let Some(Some(prototype)) = state.requested_prototype {
+                mark(CollectionRoot::Heap(prototype));
+            }
+            if let Some(result) = &state.trap_result {
+                trace_stored_value_root(result, mark);
+            }
+        }
+        NativeContinuation::ProxyDescriptor(state) => {
+            mark(CollectionRoot::Heap(state.proxy));
+            mark(CollectionRoot::Heap(state.target));
+            mark(CollectionRoot::Heap(state.handler));
+            if let Some(reader) = &state.reader {
+                reader.trace_roots(mark);
+            }
+            for property in [
+                state.trap_descriptor.as_ref().and_then(Option::as_ref),
+                state.target_descriptor.as_ref().and_then(Option::as_ref),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                match property {
+                    OwnProperty::Data { value, .. } => trace_stored_value_root(value, mark),
+                    OwnProperty::Accessor { getter, setter, .. } => {
+                        if let Some(getter) = getter {
+                            mark(CollectionRoot::Heap(HeapReference::Function(*getter)));
+                        }
+                        if let Some(setter) = setter {
+                            mark(CollectionRoot::Heap(HeapReference::Function(*setter)));
+                        }
+                    }
+                }
+            }
+        }
+        NativeContinuation::ProxyDefine(state) => {
+            mark(CollectionRoot::Heap(state.proxy));
+            mark(CollectionRoot::Heap(state.target));
+            mark(CollectionRoot::Heap(state.handler));
+            mark(CollectionRoot::Heap(HeapReference::Object(
+                state.descriptor,
+            )));
+            if let Some(value) = state.definition.requested_value() {
+                trace_stored_value_root(value, mark);
+            }
+            for function in [
+                state.definition.requested_getter().flatten(),
+                state.definition.requested_setter().flatten(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                mark(CollectionRoot::Heap(HeapReference::Function(function)));
+            }
+            if let Some(reader) = &state.reader {
+                reader.trace_roots(mark);
+            }
+            if let Some(OwnProperty::Data { value, .. }) =
+                state.target_descriptor.as_ref().and_then(Option::as_ref)
+            {
+                trace_stored_value_root(value, mark);
+            }
+            if let Some(OwnProperty::Accessor { getter, setter, .. }) =
+                state.target_descriptor.as_ref().and_then(Option::as_ref)
+            {
+                if let Some(getter) = getter {
+                    mark(CollectionRoot::Heap(HeapReference::Function(*getter)));
+                }
+                if let Some(setter) = setter {
+                    mark(CollectionRoot::Heap(HeapReference::Function(*setter)));
+                }
+            }
+        }
+        NativeContinuation::ProxyOwnKeys(state) => {
+            mark(CollectionRoot::Heap(state.proxy));
+            mark(CollectionRoot::Heap(state.target));
+            mark(CollectionRoot::Heap(state.handler));
+            if let Some(result) = state.result {
+                mark(CollectionRoot::Heap(result));
+            }
+        }
+        NativeContinuation::ObjectMeta(state) => {
+            if let ObjectMetaCompletion::Target(target) = &state.completion {
+                trace_stored_value_root(target, mark);
+            }
+        }
         NativeContinuation::AsyncGeneratorReturnAwait { completion, .. } => {
             trace_stored_value_root(completion, mark);
         }
-        NativeContinuation::AsyncAwait { .. }
+        NativeContinuation::OwnDescriptorQuery(_)
+        | NativeContinuation::AsyncAwait { .. }
         | NativeContinuation::ReflectSet
+        | NativeContinuation::ProxyWrite
         | NativeContinuation::FunctionCall => {}
     }
 }
@@ -2866,6 +3322,57 @@ impl Context<'_> {
                     completion,
                 );
             }
+            if node.proxy().is_some() || node.proxy_revoker().is_some() {
+                let materialized = if let Some(arguments) = owned_arguments {
+                    arguments
+                } else {
+                    let mut stored = Vec::new();
+                    stored.try_reserve_exact(arguments.len()).map_err(|_| {
+                        ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::FrameValues,
+                            additional: arguments.len(),
+                        }
+                    })?;
+                    for argument in arguments {
+                        stored.push(argument.stored()?.duplicate());
+                    }
+                    stored
+                };
+                let prepared_frames = Vec::new();
+                let dispatch = resolve_native_dispatch(
+                    self.runtime,
+                    NativeDispatch::Call(NativeCall {
+                        function: function_id,
+                        receiver,
+                        arguments: CallArguments::from_values(materialized),
+                        return_to: None,
+                        origin: native_function_host_origin(),
+                        continuations: Vec::new(),
+                        pre_call: None,
+                        new_target: None,
+                        native_caller: None,
+                    }),
+                    &prepared_frames,
+                    0,
+                    0,
+                    compiler,
+                    &mut execution_budget,
+                );
+                let completion = execute_root_dispatch_with_budget(
+                    self.runtime,
+                    dispatch,
+                    prepared_frames,
+                    compiler,
+                    &mut execution_budget,
+                )
+                .and_then(|value| self.runtime.public_value(value));
+                return complete_host_turn(
+                    self.runtime,
+                    compiler,
+                    &mut execution_budget,
+                    completion,
+                );
+            }
             let Some(bound) = node.bound() else {
                 break;
             };
@@ -3129,6 +3636,7 @@ fn execute_frame_loop(
                 let mut capability_executor = None;
                 let mut promise_finally = None;
                 let mut promise_combinator_element = None;
+                let mut proxy_function = false;
                 loop {
                     let node =
                         runtime
@@ -3157,6 +3665,10 @@ fn execute_frame_loop(
                     }
                     if let Some(value) = node.promise_combinator_element().cloned() {
                         promise_combinator_element = Some(value);
+                        break;
+                    }
+                    if node.proxy().is_some() || node.proxy_revoker().is_some() {
+                        proxy_function = true;
                         break;
                     }
                     let Some(bound) = node.bound() else {
@@ -3237,6 +3749,91 @@ fn execute_frame_loop(
                 })?;
                 let origin = instruction_location(runtime, caller, source_pc)?;
                 let operation_realm = code(runtime, caller.code)?.realm;
+                if proxy_function {
+                    let active_frames = active_execution_frames(frames);
+                    frames
+                        .try_reserve(1)
+                        .map_err(|_| ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::Frames,
+                            additional: 1,
+                        })?;
+                    let inputs = take_call_inputs(
+                        frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                            function: FunctionTemplateId::new(0),
+                            instruction: 0,
+                        })?,
+                        function,
+                        inputs,
+                    )?;
+                    let dispatch = resolve_native_dispatch(
+                        runtime,
+                        NativeDispatch::Call(NativeCall {
+                            function,
+                            receiver: inputs.receiver,
+                            arguments: inputs.arguments,
+                            return_to: Some(return_to),
+                            origin,
+                            continuations: Vec::new(),
+                            pre_call: None,
+                            new_target: inputs.new_target,
+                            native_caller: None,
+                        }),
+                        frames,
+                        active_frames,
+                        *active_frame_values,
+                        compiler,
+                        execution_budget,
+                    );
+                    match dispatch {
+                        Ok(NativeDispatch::Immediate(value)) => {
+                            let parent =
+                                frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                                    function: FunctionTemplateId::new(0),
+                                    instruction: 0,
+                                })?;
+                            push_call_result(parent, value, return_to)?;
+                        }
+                        Ok(NativeDispatch::Frame(child)) => {
+                            *active_frame_values =
+                                active_frame_values.saturating_add(child.reserved_values);
+                            frames.push(child);
+                        }
+                        Ok(NativeDispatch::Call(_)) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "Proxy dispatch remained unresolved",
+                            }
+                            .into());
+                        }
+                        Ok(
+                            NativeDispatch::Pair(_, _)
+                            | NativeDispatch::ForOfRecord { .. }
+                            | NativeDispatch::ForOfStep { .. }
+                            | NativeDispatch::ForOfClosed
+                            | NativeDispatch::CopyDataPropertiesDone
+                            | NativeDispatch::AsyncAwait { .. },
+                        ) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "Proxy function produced a structured result",
+                            }
+                            .into());
+                        }
+                        Err(
+                            NativeFailure::Abrupt(pending)
+                            | NativeFailure::AbruptAfterTransient(pending),
+                        ) => {
+                            dispatch_pending_exception(
+                                runtime,
+                                frames,
+                                active_frame_values,
+                                pending,
+                                compiler,
+                                execution_budget,
+                            )?;
+                        }
+                        Err(NativeFailure::Execution(error)) => return Err(error),
+                    }
+                    continue;
+                }
                 if let Some(native) = native {
                     if construction && !native.kind.is_constructor() {
                         let pending = PendingException {

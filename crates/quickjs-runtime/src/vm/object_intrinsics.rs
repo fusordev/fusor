@@ -211,22 +211,79 @@ fn legacy_to_object(
     }
 }
 
+pub(super) fn advance_object_meta(
+    state: ObjectMetaContinuation,
+    completion: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Boolean(success) = *completion else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "object meta internal method did not return a Boolean",
+        }
+        .into());
+    };
+    if !success {
+        return Err(NativeFailure::Abrupt(type_error(
+            state.realm,
+            Some(&state.origin),
+            "Object meta operation",
+            "Proxy trap returned false",
+        )?));
+    }
+    Ok(NativeDispatch::Immediate(match state.completion {
+        ObjectMetaCompletion::Target(target) => target,
+        ObjectMetaCompletion::Undefined => StoredValue::Undefined,
+    }))
+}
+
+fn continue_object_meta_after(
+    dispatch: NativeDispatch,
+    state: ObjectMetaContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => advance_object_meta(state, &value),
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(&mut call, vec![NativeContinuation::ObjectMeta(state)])?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(&mut frame, vec![NativeContinuation::ObjectMeta(state)])?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "object meta internal method produced a structured result",
+        }
+        .into()),
+    }
+}
+
 /// `get Object.prototype.__proto__`.
 pub(super) fn object_prototype_proto_getter(
     runtime: &mut Runtime,
     realm: RealmId,
     receiver: StoredValue,
-    origin: &JsStackFrame,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let object = legacy_to_object(runtime, realm, receiver, origin)?;
+    let object = legacy_to_object(runtime, realm, receiver, &origin)?;
     let reference = object
         .heap_reference()
         .ok_or(EngineFault::RuntimeInvariant {
             message: "Object.prototype.__proto__ getter lost its boxed receiver",
         })?;
-    Ok(NativeDispatch::Immediate(heap_reference_value(
-        runtime.object_record(reference)?.prototype(),
-    )))
+    begin_internal_get_prototype_of(
+        runtime,
+        reference,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 /// `set Object.prototype.__proto__`.
@@ -235,13 +292,15 @@ pub(super) fn object_prototype_proto_setter(
     realm: RealmId,
     receiver: &StoredValue,
     requested: &StoredValue,
-    origin: &JsStackFrame,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     // RequireObjectCoercible precedes validation of the requested prototype.
     if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
         return Err(NativeFailure::Abrupt(type_error(
             realm,
-            Some(origin),
+            Some(&origin),
             "__proto__",
             "not an object",
         )?));
@@ -262,21 +321,23 @@ pub(super) fn object_prototype_proto_setter(
     let Some(reference) = receiver.heap_reference() else {
         return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
     };
-    match runtime.set_prototype_of(reference, prototype)? {
-        SetPrototypeOutcome::Complete => Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
-        SetPrototypeOutcome::NonExtensible => Err(NativeFailure::Abrupt(type_error(
+    let dispatch = begin_internal_set_prototype_of(
+        runtime,
+        reference,
+        prototype,
+        realm,
+        return_to,
+        origin.clone(),
+        execution_budget,
+    )?;
+    continue_object_meta_after(
+        dispatch,
+        ObjectMetaContinuation {
+            completion: ObjectMetaCompletion::Undefined,
             realm,
-            Some(origin),
-            "__proto__",
-            "object is not extensible",
-        )?)),
-        SetPrototypeOutcome::CyclicPrototype => Err(NativeFailure::Abrupt(type_error(
-            realm,
-            Some(origin),
-            "__proto__",
-            "circular prototype chain",
-        )?)),
-    }
+            origin,
+        },
+    )
 }
 
 /// Starts `__defineGetter__` or `__defineSetter__` in specification order.
@@ -453,7 +514,9 @@ pub(super) fn get_prototype_of(
     runtime: &mut Runtime,
     realm: RealmId,
     argument: Option<StoredValue>,
-    origin: Option<&JsStackFrame>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let value = argument.unwrap_or(StoredValue::Undefined);
     // A primitive answers with its wrapper's prototype, which is the intrinsic
@@ -463,15 +526,21 @@ pub(super) fn get_prototype_of(
         realm,
         &value,
         PrimitivePolicy::PrototypeLookup,
-        origin,
+        Some(&origin),
         "getPrototypeOf",
     )?
     else {
         let prototype = primitive_prototype(runtime, realm, &value)?;
         return Ok(NativeDispatch::Immediate(prototype));
     };
-    let prototype = runtime.object_record(reference)?.prototype();
-    Ok(NativeDispatch::Immediate(heap_reference_value(prototype)))
+    begin_internal_get_prototype_of(
+        runtime,
+        reference,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 /// Applies `Object.create`, delegating its optional descriptor map to the
@@ -613,7 +682,9 @@ pub(super) fn set_prototype_of(
     runtime: &mut Runtime,
     realm: RealmId,
     mut arguments: CallArguments,
-    origin: Option<&JsStackFrame>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let target = arguments.take_first_or_undefined();
     let requested = arguments.take_first_or_undefined();
@@ -629,7 +700,7 @@ pub(super) fn set_prototype_of(
         | StoredValue::Symbol(_) => {
             return Err(NativeFailure::Abrupt(type_error(
                 realm,
-                origin,
+                Some(&origin),
                 "setPrototypeOf",
                 "not an object",
             )?));
@@ -640,27 +711,29 @@ pub(super) fn set_prototype_of(
         realm,
         &target,
         PrimitivePolicy::ReturnArgument,
-        origin,
+        Some(&origin),
         "setPrototypeOf",
     )?
     else {
         return Ok(NativeDispatch::Immediate(target));
     };
-    match runtime.set_prototype_of(reference, prototype)? {
-        SetPrototypeOutcome::Complete => Ok(NativeDispatch::Immediate(target)),
-        SetPrototypeOutcome::NonExtensible => Err(NativeFailure::Abrupt(type_error(
+    let dispatch = begin_internal_set_prototype_of(
+        runtime,
+        reference,
+        prototype,
+        realm,
+        return_to,
+        origin.clone(),
+        execution_budget,
+    )?;
+    continue_object_meta_after(
+        dispatch,
+        ObjectMetaContinuation {
+            completion: ObjectMetaCompletion::Target(target),
             realm,
             origin,
-            "setPrototypeOf",
-            "object is not extensible",
-        )?)),
-        SetPrototypeOutcome::CyclicPrototype => Err(NativeFailure::Abrupt(type_error(
-            realm,
-            origin,
-            "setPrototypeOf",
-            "circular prototype chain",
-        )?)),
-    }
+        },
+    )
 }
 
 /// `Object.seal(target)` and `Object.freeze(target)`.
@@ -720,7 +793,9 @@ pub(super) fn prevent_extensions(
     runtime: &mut Runtime,
     realm: RealmId,
     argument: Option<StoredValue>,
-    origin: Option<&JsStackFrame>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let target = argument.unwrap_or(StoredValue::Undefined);
     let Some(reference) = reflection_target(
@@ -728,14 +803,28 @@ pub(super) fn prevent_extensions(
         realm,
         &target,
         PrimitivePolicy::ReturnArgument,
-        origin,
+        Some(&origin),
         "preventExtensions",
     )?
     else {
         return Ok(NativeDispatch::Immediate(target));
     };
-    runtime.prevent_extensions(reference)?;
-    Ok(NativeDispatch::Immediate(target))
+    let dispatch = begin_internal_prevent_extensions(
+        runtime,
+        reference,
+        realm,
+        return_to,
+        origin.clone(),
+        execution_budget,
+    )?;
+    continue_object_meta_after(
+        dispatch,
+        ObjectMetaContinuation {
+            completion: ObjectMetaCompletion::Target(target),
+            realm,
+            origin,
+        },
+    )
 }
 
 /// `Object.isExtensible(target)`.
@@ -746,7 +835,9 @@ pub(super) fn is_extensible(
     runtime: &mut Runtime,
     realm: RealmId,
     argument: Option<StoredValue>,
-    origin: Option<&JsStackFrame>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let target = argument.unwrap_or(StoredValue::Undefined);
     let Some(reference) = reflection_target(
@@ -754,19 +845,24 @@ pub(super) fn is_extensible(
         realm,
         &target,
         PrimitivePolicy::TreatAsSealed,
-        origin,
+        Some(&origin),
         "isExtensible",
     )?
     else {
         return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
     };
-    Ok(NativeDispatch::Immediate(StoredValue::Boolean(
-        runtime.is_extensible(reference)?,
-    )))
+    begin_internal_is_extensible(
+        runtime,
+        reference,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 /// Whether a key listing reports only enumerable properties.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum KeyListing {
     /// `Object.keys`: own enumerable string-keyed properties.
     EnumerableOnly,
@@ -774,6 +870,38 @@ pub(super) enum KeyListing {
     AllStringKeys,
     /// `Object.getOwnPropertySymbols`: every own symbol-keyed property.
     AllSymbolKeys,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObjectKeyListingStage {
+    AwaitKeys,
+    AwaitDescriptor,
+}
+
+pub(super) struct ObjectKeyListingContinuation {
+    target: HeapReference,
+    keys: Vec<PropertyKey>,
+    next: usize,
+    elements: Vec<StoredValue>,
+    listing: KeyListing,
+    realm: RealmId,
+    origin: JsStackFrame,
+    stage: ObjectKeyListingStage,
+}
+
+impl ObjectKeyListingContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64
+            .saturating_add(usize_to_u64(self.keys.len()))
+            .saturating_add(usize_to_u64(self.elements.len()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(self.target));
+        for value in &self.elements {
+            trace_stored_value_root(value, mark);
+        }
+    }
 }
 
 /// Which ECMA-262 `EnumerableOwnProperties` result projection is requested.
@@ -814,13 +942,52 @@ impl EnumerableOwnPropertiesContinuation {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProxyEnumerableStage {
+    Keys,
+    Descriptor,
+    Value,
+}
+
+pub(super) struct ProxyEnumerableContinuation {
+    target: HeapReference,
+    keys: Vec<PropertyKey>,
+    next: usize,
+    current_key: Option<PropertyKey>,
+    elements: Vec<StoredValue>,
+    kind: EnumerableOwnPropertiesKind,
+    realm: RealmId,
+    origin: JsStackFrame,
+    stage: ProxyEnumerableStage,
+}
+
+impl ProxyEnumerableContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64
+            .saturating_add(usize_to_u64(self.keys.len()))
+            .saturating_add(usize_to_u64(self.elements.len()))
+            .saturating_add(u64::from(self.current_key.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(self.target));
+        for value in &self.elements {
+            trace_stored_value_root(value, mark);
+        }
+    }
+}
+
 /// Which observable operation an `Object.assign` continuation is awaiting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ObjectAssignStage {
     /// Select and snapshot the next non-nullish source.
     NextSource,
+    /// Await a Proxy source's `[[OwnPropertyKeys]]` result.
+    AwaitKeys,
     /// Recheck and read the next key of the current source.
     NextKey,
+    /// Await a Proxy source's current own descriptor.
+    AwaitDescriptor,
     /// Await a source accessor getter.
     AwaitGet,
     /// Await a target setter or an Array `length` conversion/write.
@@ -869,6 +1036,159 @@ enum ObjectAssignSet {
     Suspend(Box<NativeDispatch>),
 }
 
+fn continue_object_key_listing_after(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
+    state: ObjectKeyListingContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => {
+            advance_object_key_listing(runtime, state, value, return_to, execution_budget)
+        }
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::ObjectKeyListing(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::ObjectKeyListing(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Object key listing produced a structured result",
+        }
+        .into()),
+    }
+}
+
+fn finish_object_key_listing(
+    runtime: &mut Runtime,
+    state: ObjectKeyListingContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    Ok(NativeDispatch::Immediate(StoredValue::Object(
+        runtime.allocate_array(state.realm, state.elements)?,
+    )))
+}
+
+fn advance_object_enumerable_keys(
+    runtime: &mut Runtime,
+    mut state: ObjectKeyListingContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    while state.next < state.keys.len() {
+        let key = state.keys[state.next].clone();
+        state.next = state.next.saturating_add(1);
+        if key
+            .as_atom()
+            .is_some_and(|atom| atom.kind() != crate::AtomKind::String)
+        {
+            continue;
+        }
+        state.stage = ObjectKeyListingStage::AwaitDescriptor;
+        let dispatch = begin_internal_get_own_property(
+            runtime,
+            state.target,
+            key,
+            state.realm,
+            return_to,
+            state.origin.clone(),
+            execution_budget,
+        )?;
+        return continue_object_key_listing_after(
+            runtime,
+            dispatch,
+            state,
+            return_to,
+            execution_budget,
+        );
+    }
+    finish_object_key_listing(runtime, state)
+}
+
+pub(super) fn advance_object_key_listing(
+    runtime: &mut Runtime,
+    mut state: ObjectKeyListingContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        ObjectKeyListingStage::AwaitKeys => {
+            state.keys = generated_key_list(runtime, completion)?;
+            if state.listing == KeyListing::EnumerableOnly {
+                return advance_object_enumerable_keys(runtime, state, return_to, execution_budget);
+            }
+            for key in &state.keys {
+                match state.listing {
+                    KeyListing::AllStringKeys
+                        if key.as_index().is_some()
+                            || key
+                                .as_atom()
+                                .is_some_and(|atom| atom.kind() == crate::AtomKind::String) =>
+                    {
+                        state
+                            .elements
+                            .push(StoredValue::String(property_key_string(key)?));
+                    }
+                    KeyListing::AllSymbolKeys => {
+                        if let Some(atom) = key.as_atom()
+                            && matches!(
+                                atom.kind(),
+                                crate::AtomKind::Symbol | crate::AtomKind::GlobalSymbol
+                            )
+                        {
+                            state.elements.push(StoredValue::Symbol(atom.clone()));
+                        }
+                    }
+                    KeyListing::EnumerableOnly | KeyListing::AllStringKeys => {}
+                }
+            }
+            finish_object_key_listing(runtime, state)
+        }
+        ObjectKeyListingStage::AwaitDescriptor => {
+            if let StoredValue::Object(descriptor) = completion {
+                let enumerable_key = runtime.predefined_property_key(PredefinedAtom::Enumerable);
+                let Some(OwnProperty::Data {
+                    value: StoredValue::Boolean(enumerable),
+                    ..
+                }) =
+                    heap_own_property(runtime, HeapReference::Object(descriptor), &enumerable_key)?
+                else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "internal descriptor lacks enumerable",
+                    }
+                    .into());
+                };
+                if enumerable {
+                    let key = state.keys[state.next.saturating_sub(1)].clone();
+                    state
+                        .elements
+                        .push(StoredValue::String(property_key_string(&key)?));
+                }
+            } else if !matches!(completion, StoredValue::Undefined) {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "internal descriptor listing returned a non-descriptor",
+                }
+                .into());
+            }
+            advance_object_enumerable_keys(runtime, state, return_to, execution_budget)
+        }
+    }
+}
+
 /// `Object.keys(target)`, `Object.getOwnPropertyNames(target)`, and
 /// `Object.getOwnPropertySymbols(target)`.
 pub(super) fn own_property_keys(
@@ -876,7 +1196,8 @@ pub(super) fn own_property_keys(
     realm: RealmId,
     argument: Option<StoredValue>,
     listing: KeyListing,
-    origin: Option<&JsStackFrame>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let target = argument.unwrap_or(StoredValue::Undefined);
@@ -885,7 +1206,7 @@ pub(super) fn own_property_keys(
         realm,
         &target,
         PrimitivePolicy::NoKeys,
-        origin,
+        Some(&origin),
         "keys",
     )?
     else {
@@ -913,6 +1234,33 @@ pub(super) fn own_property_keys(
         let array = runtime.allocate_array(realm, elements)?;
         return Ok(NativeDispatch::Immediate(StoredValue::Object(array)));
     };
+    if runtime.proxy_state(reference)?.is_some() {
+        let state = ObjectKeyListingContinuation {
+            target: reference,
+            keys: Vec::new(),
+            next: 0,
+            elements: Vec::new(),
+            listing,
+            realm,
+            origin: origin.clone(),
+            stage: ObjectKeyListingStage::AwaitKeys,
+        };
+        let dispatch = begin_internal_own_keys(
+            runtime,
+            reference,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        )?;
+        return continue_object_key_listing_after(
+            runtime,
+            dispatch,
+            state,
+            return_to,
+            execution_budget,
+        );
+    }
     let phases = match listing {
         KeyListing::EnumerableOnly | KeyListing::AllStringKeys => KeyPhases::STRING_KEYS,
         KeyListing::AllSymbolKeys => KeyPhases::SYMBOL_KEYS,
@@ -983,6 +1331,158 @@ fn string_key_values(
     Ok(elements)
 }
 
+fn continue_proxy_enumerable_after(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
+    state: ProxyEnumerableContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => {
+            advance_proxy_enumerable(runtime, state, value, return_to, execution_budget)
+        }
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::ProxyEnumerable(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::ProxyEnumerable(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Proxy enumerable-own-properties produced a structured result",
+        }
+        .into()),
+    }
+}
+
+fn advance_proxy_enumerable_key(
+    runtime: &mut Runtime,
+    mut state: ProxyEnumerableContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    while state.next < state.keys.len() {
+        let key = state.keys[state.next].clone();
+        state.next = state.next.saturating_add(1);
+        if key
+            .as_atom()
+            .is_some_and(|atom| atom.kind() != crate::AtomKind::String)
+        {
+            continue;
+        }
+        state.current_key = Some(key.clone());
+        state.stage = ProxyEnumerableStage::Descriptor;
+        let dispatch = begin_internal_get_own_property(
+            runtime,
+            state.target,
+            key,
+            state.realm,
+            return_to,
+            state.origin.clone(),
+            execution_budget,
+        )?;
+        return continue_proxy_enumerable_after(
+            runtime,
+            dispatch,
+            state,
+            return_to,
+            execution_budget,
+        );
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(
+        runtime.allocate_array(state.realm, state.elements)?,
+    )))
+}
+
+pub(super) fn advance_proxy_enumerable(
+    runtime: &mut Runtime,
+    mut state: ProxyEnumerableContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        ProxyEnumerableStage::Keys => {
+            state.keys = generated_key_list(runtime, completion)?;
+            advance_proxy_enumerable_key(runtime, state, return_to, execution_budget)
+        }
+        ProxyEnumerableStage::Descriptor => {
+            let enumerable = if let StoredValue::Object(descriptor) = completion {
+                let key = runtime.predefined_property_key(PredefinedAtom::Enumerable);
+                let Some(OwnProperty::Data {
+                    value: StoredValue::Boolean(enumerable),
+                    ..
+                }) = heap_own_property(runtime, HeapReference::Object(descriptor), &key)?
+                else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "internal Proxy descriptor lacks enumerable",
+                    }
+                    .into());
+                };
+                enumerable
+            } else if matches!(completion, StoredValue::Undefined) {
+                false
+            } else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "internal Proxy descriptor is not an object",
+                }
+                .into());
+            };
+            if !enumerable {
+                state.current_key = None;
+                return advance_proxy_enumerable_key(runtime, state, return_to, execution_budget);
+            }
+            let key = state
+                .current_key
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Proxy enumerable scan lost its current key",
+                })?;
+            state.stage = ProxyEnumerableStage::Value;
+            let dispatch = begin_internal_get(
+                runtime,
+                state.target,
+                heap_reference_value(Some(state.target)),
+                key.clone(),
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            continue_proxy_enumerable_after(runtime, dispatch, state, return_to, execution_budget)
+        }
+        ProxyEnumerableStage::Value => {
+            let key = state
+                .current_key
+                .take()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Proxy enumerable value completion lost its key",
+                })?;
+            state.elements.push(enumerable_result_element(
+                runtime,
+                state.realm,
+                state.kind,
+                &key,
+                completion,
+            )?);
+            advance_proxy_enumerable_key(runtime, state, return_to, execution_budget)
+        }
+    }
+}
+
 /// Starts `Object.values` or `Object.entries`.
 pub(super) fn begin_enumerable_own_properties(
     runtime: &mut Runtime,
@@ -1005,6 +1505,35 @@ pub(super) fn begin_enumerable_own_properties(
     let Some(reference) = target.heap_reference() else {
         return primitive_enumerable_own_properties(runtime, realm, target, kind, execution_budget);
     };
+
+    if runtime.proxy_state(reference)?.is_some() {
+        let state = ProxyEnumerableContinuation {
+            target: reference,
+            keys: Vec::new(),
+            next: 0,
+            current_key: None,
+            elements: Vec::new(),
+            kind,
+            realm,
+            origin: origin.clone(),
+            stage: ProxyEnumerableStage::Keys,
+        };
+        let dispatch = begin_internal_own_keys(
+            runtime,
+            reference,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        )?;
+        return continue_proxy_enumerable_after(
+            runtime,
+            dispatch,
+            state,
+            return_to,
+            execution_budget,
+        );
+    }
 
     // The key list is fixed before any getter runs. It includes hidden String
     // keys because each descriptor's *current* enumerability is rechecked when
@@ -1269,7 +1798,48 @@ pub(super) fn begin_object_assign(
     )
 }
 
+fn continue_object_assign_after(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
+    state: ObjectAssignContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => {
+            advance_object_assign(runtime, state, Some(value), return_to, execution_budget)
+        }
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::ObjectAssign(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::ObjectAssign(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Object.assign nested internal method produced a structured result",
+        }
+        .into()),
+    }
+}
+
 /// Resumes the iterative source/key/Get/Set traversal.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the explicit source, key, descriptor, Get, and Set phases keep Object.assign re-entry ordered and auditable"
+)]
 pub(super) fn advance_object_assign(
     runtime: &mut Runtime,
     mut state: ObjectAssignContinuation,
@@ -1280,6 +1850,72 @@ pub(super) fn advance_object_assign(
     let mut completion = completion;
     loop {
         match state.stage {
+            ObjectAssignStage::AwaitKeys => {
+                let value = take_object_assign_completion(&mut completion, "ownKeys")?;
+                state.keys = generated_key_list(runtime, value)?;
+                state.next_key = 0;
+                state.stage = ObjectAssignStage::NextKey;
+            }
+            ObjectAssignStage::AwaitDescriptor => {
+                let descriptor = take_object_assign_completion(&mut completion, "descriptor")?;
+                let enumerable = if let StoredValue::Object(descriptor) = descriptor {
+                    let key = runtime.predefined_property_key(PredefinedAtom::Enumerable);
+                    let Some(OwnProperty::Data {
+                        value: StoredValue::Boolean(enumerable),
+                        ..
+                    }) = heap_own_property(runtime, HeapReference::Object(descriptor), &key)?
+                    else {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "Object.assign Proxy descriptor lacks enumerable",
+                        }
+                        .into());
+                    };
+                    enumerable
+                } else if matches!(descriptor, StoredValue::Undefined) {
+                    false
+                } else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Object.assign Proxy descriptor is invalid",
+                    }
+                    .into());
+                };
+                if !enumerable {
+                    state.current_key = None;
+                    state.stage = ObjectAssignStage::NextKey;
+                    continue;
+                }
+                let key = state
+                    .current_key
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "Object.assign Proxy descriptor lost its key",
+                    })?;
+                let source = state
+                    .source
+                    .as_ref()
+                    .and_then(StoredValue::heap_reference)
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "Object.assign Proxy source was lost",
+                    })?;
+                state.stage = ObjectAssignStage::AwaitGet;
+                let dispatch = begin_internal_get(
+                    runtime,
+                    source,
+                    heap_reference_value(Some(source)),
+                    key.clone(),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_object_assign_after(
+                    runtime,
+                    dispatch,
+                    state,
+                    return_to,
+                    execution_budget,
+                );
+            }
             ObjectAssignStage::AwaitGet => {
                 let key = state
                     .current_key
@@ -1313,9 +1949,41 @@ pub(super) fn advance_object_assign(
                 if matches!(next, StoredValue::Undefined | StoredValue::Null) {
                     continue;
                 }
-                state.keys = object_assign_source_keys(runtime, &next, execution_budget)?;
                 state.source = Some(next);
                 state.next_key = 0;
+                let source = state.source.as_ref().and_then(StoredValue::heap_reference);
+                let source_is_proxy = match source {
+                    Some(source) => runtime.proxy_state(source)?.is_some(),
+                    None => false,
+                };
+                if source_is_proxy {
+                    let source = source.ok_or(EngineFault::RuntimeInvariant {
+                        message: "Object.assign Proxy source disappeared",
+                    })?;
+                    state.stage = ObjectAssignStage::AwaitKeys;
+                    let dispatch = begin_internal_own_keys(
+                        runtime,
+                        source,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    return continue_object_assign_after(
+                        runtime,
+                        dispatch,
+                        state,
+                        return_to,
+                        execution_budget,
+                    );
+                }
+                state.keys = object_assign_source_keys(
+                    runtime,
+                    state.source.as_ref().ok_or(EngineFault::RuntimeInvariant {
+                        message: "Object.assign source disappeared",
+                    })?,
+                    execution_budget,
+                )?;
                 state.stage = ObjectAssignStage::NextKey;
             }
             ObjectAssignStage::NextKey => {
@@ -1330,6 +1998,28 @@ pub(super) fn advance_object_assign(
                 let source = state.source.as_ref().ok_or(EngineFault::RuntimeInvariant {
                     message: "Object.assign reached a key without an active source",
                 })?;
+                if let Some(reference) = source.heap_reference()
+                    && runtime.proxy_state(reference)?.is_some()
+                {
+                    state.current_key = Some(key.clone());
+                    state.stage = ObjectAssignStage::AwaitDescriptor;
+                    let dispatch = begin_internal_get_own_property(
+                        runtime,
+                        reference,
+                        key,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    return continue_object_assign_after(
+                        runtime,
+                        dispatch,
+                        state,
+                        return_to,
+                        execution_budget,
+                    );
+                }
                 charge_object_assign_lookup(runtime, source, execution_budget)?;
                 let Some(own) =
                     resolve_own_property(runtime, state.realm, source, &key, &state.origin)?
@@ -1426,6 +2116,26 @@ fn object_assign_set(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<ObjectAssignSet, NativeFailure> {
     let name = property_key_name(&key);
+    if let Some(reference) = state.target.heap_reference()
+        && runtime.proxy_state(reference)?.is_some()
+    {
+        state.stage = ObjectAssignStage::AwaitSet;
+        let dispatch = begin_internal_set(
+            runtime,
+            reference,
+            key,
+            name.clone().unwrap_or_else(JsString::empty),
+            value,
+            state.target.duplicate(),
+            true,
+            false,
+            state.realm,
+            return_to,
+            state.origin.clone(),
+            execution_budget,
+        )?;
+        return object_assign_after_nested(dispatch, state);
+    }
     if is_array_length_target(runtime, &state.target, &key)? {
         let conversion = array_length_write_target(
             state.target.duplicate(),

@@ -48,7 +48,7 @@ use crate::{
     object::{
         ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, ForInIterator, ForInSnapshot,
         HeapObject, IntegrityLevel, KeyPhases, ObjectRecord, OwnProperty, PromiseCapability,
-        PromiseReaction, PropertyDeletion, RegExpState, StringIterator,
+        PromiseReaction, PropertyDeletion, ProxyState, RegExpState, StringIterator,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
@@ -58,6 +58,7 @@ mod iterators;
 mod limits;
 mod maps;
 mod promises;
+mod proxies;
 mod regexps;
 mod sets;
 mod symbols;
@@ -1179,6 +1180,10 @@ pub(crate) enum NativeFunctionKind {
     ObjectPrototypeLookupSetter,
     /// One method on the ordinary `%Reflect%` object.
     Reflect(ReflectMethod),
+    /// The `%Proxy%` constructor.
+    ProxyConstructor,
+    /// `Proxy.revocable`.
+    ProxyRevocable,
     /// `JSON.parse`.
     JsonParse,
     /// `JSON.isRawJSON`.
@@ -1774,6 +1779,7 @@ impl NativeFunctionKind {
                 | Self::WeakSetConstructor
                 | Self::WeakRefConstructor
                 | Self::FinalizationRegistryConstructor
+                | Self::ProxyConstructor
         )
     }
 }
@@ -1792,6 +1798,17 @@ pub(crate) enum FunctionImplementation {
     PromiseCapabilityExecutor(PromiseCapabilityExecutor),
     PromiseFinally(PromiseFinallyFunction),
     PromiseCombinatorElement(PromiseCombinatorElementFunction),
+    /// A callable Proxy exotic object. Non-callable proxies live in the object
+    /// arena with the same state representation.
+    Proxy(ProxyState),
+    /// The idempotent closure created by `Proxy.revocable`.
+    ProxyRevoker(ProxyRevokerFunction),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProxyRevokerFunction {
+    pub(crate) proxy: HeapReference,
+    pub(crate) realm: RealmId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1999,6 +2016,12 @@ impl HeapFunction {
                     message: "Promise combinator element function reached the bytecode execution path",
                 })
             }
+            FunctionImplementation::Proxy(_) => Err(crate::EngineFault::RuntimeInvariant {
+                message: "Proxy function reached the bytecode execution path",
+            }),
+            FunctionImplementation::ProxyRevoker(_) => Err(crate::EngineFault::RuntimeInvariant {
+                message: "Proxy revoker reached the bytecode execution path",
+            }),
         }
     }
 
@@ -2009,7 +2032,9 @@ impl HeapFunction {
             | FunctionImplementation::PromiseResolving(_)
             | FunctionImplementation::PromiseCapabilityExecutor(_)
             | FunctionImplementation::PromiseFinally(_)
-            | FunctionImplementation::PromiseCombinatorElement(_) => None,
+            | FunctionImplementation::PromiseCombinatorElement(_)
+            | FunctionImplementation::Proxy(_)
+            | FunctionImplementation::ProxyRevoker(_) => None,
             FunctionImplementation::Native(function) => Some(function),
         }
     }
@@ -2021,7 +2046,9 @@ impl HeapFunction {
             | FunctionImplementation::PromiseResolving(_)
             | FunctionImplementation::PromiseCapabilityExecutor(_)
             | FunctionImplementation::PromiseFinally(_)
-            | FunctionImplementation::PromiseCombinatorElement(_) => None,
+            | FunctionImplementation::PromiseCombinatorElement(_)
+            | FunctionImplementation::Proxy(_)
+            | FunctionImplementation::ProxyRevoker(_) => None,
             FunctionImplementation::Bound(bound) => Some(bound),
         }
     }
@@ -2034,7 +2061,9 @@ impl HeapFunction {
             | FunctionImplementation::Bound(_)
             | FunctionImplementation::PromiseCapabilityExecutor(_)
             | FunctionImplementation::PromiseFinally(_)
-            | FunctionImplementation::PromiseCombinatorElement(_) => None,
+            | FunctionImplementation::PromiseCombinatorElement(_)
+            | FunctionImplementation::Proxy(_)
+            | FunctionImplementation::ProxyRevoker(_) => None,
         }
     }
 
@@ -2046,7 +2075,9 @@ impl HeapFunction {
             | FunctionImplementation::Bound(_)
             | FunctionImplementation::PromiseResolving(_)
             | FunctionImplementation::PromiseFinally(_)
-            | FunctionImplementation::PromiseCombinatorElement(_) => None,
+            | FunctionImplementation::PromiseCombinatorElement(_)
+            | FunctionImplementation::Proxy(_)
+            | FunctionImplementation::ProxyRevoker(_) => None,
         }
     }
 
@@ -2058,7 +2089,9 @@ impl HeapFunction {
             | FunctionImplementation::Bound(_)
             | FunctionImplementation::PromiseResolving(_)
             | FunctionImplementation::PromiseCapabilityExecutor(_)
-            | FunctionImplementation::PromiseCombinatorElement(_) => None,
+            | FunctionImplementation::PromiseCombinatorElement(_)
+            | FunctionImplementation::Proxy(_)
+            | FunctionImplementation::ProxyRevoker(_) => None,
         }
     }
 
@@ -2070,7 +2103,30 @@ impl HeapFunction {
             | FunctionImplementation::Bound(_)
             | FunctionImplementation::PromiseResolving(_)
             | FunctionImplementation::PromiseCapabilityExecutor(_)
-            | FunctionImplementation::PromiseFinally(_) => None,
+            | FunctionImplementation::PromiseFinally(_)
+            | FunctionImplementation::Proxy(_)
+            | FunctionImplementation::ProxyRevoker(_) => None,
+        }
+    }
+
+    pub(crate) const fn proxy(&self) -> Option<&ProxyState> {
+        match &self.implementation {
+            FunctionImplementation::Proxy(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn proxy_mut(&mut self) -> Option<&mut ProxyState> {
+        match &mut self.implementation {
+            FunctionImplementation::Proxy(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn proxy_revoker(&self) -> Option<ProxyRevokerFunction> {
+        match self.implementation {
+            FunctionImplementation::ProxyRevoker(revoker) => Some(revoker),
+            _ => None,
         }
     }
 }
@@ -2622,6 +2678,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::StrictEq
             | FinalOpcode::StrictNeq
             | FinalOpcode::InstanceOf
+            | FinalOpcode::In
             | FinalOpcode::And
             | FinalOpcode::Xor
             | FinalOpcode::Or

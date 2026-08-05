@@ -1143,6 +1143,33 @@ fn object_assign_routes_array_length_through_array_set_length() {
     );
 }
 
+#[test]
+fn object_assign_routes_proxy_sources_and_targets_through_internal_methods() {
+    assert_eq!(
+        text(
+            "var log='';var source=new Proxy({},{\
+               ownKeys(){log=log+'o';return ['x'];},\
+               getOwnPropertyDescriptor(){log=log+'d';return {enumerable:true,configurable:true};},\
+               get(){log=log+'g';return 7;}});\
+             var backing={};var target=new Proxy(backing,{set(t,k,v,r){\
+               log=log+'s';t[k]=v;return true;}});\
+             var result=Object.assign(target,source);\
+             return (result===target)+'|'+backing.x+'|'+log;"
+        ),
+        "true|7|odgs"
+    );
+    assert_eq!(
+        text(
+            "var log='';var source=new Proxy({},{\
+               ownKeys(){log=log+'o';return ['x'];},\
+               getOwnPropertyDescriptor(){log=log+'d';return {enumerable:true,configurable:true};},\
+               get(){log=log+'g';return 8;}});\
+             var copy;({...copy}=source);return copy.x+'|'+log;"
+        ),
+        "8|odg"
+    );
+}
+
 /// ECMA-262 28.1 defines `%Reflect%` as a non-callable ordinary object whose
 /// prototype is `%Object.prototype%`; all thirteen methods have their exact
 /// identity and the object has the specification @@toStringTag descriptor.
@@ -1385,5 +1412,494 @@ fn reflect_validates_targets_before_observable_conversions() {
              return log;"
         ),
         ""
+    );
+}
+
+/// Proxy `[[Get]]` observes the handler lookup before the trap, supplies the
+/// target/key/receiver tuple, and uses the target internal method when the trap
+/// is absent. Static, computed, and Reflect access share that dispatcher.
+#[test]
+fn proxy_get_is_resumable_and_shared_by_language_and_reflect_access() {
+    assert_eq!(
+        text(
+            "var log='';var target={x:3};var receiver={tag:'r'};\
+             var handler={get get(){log=log+'l';return function(t,k,r){\
+               log=log+k+(r===receiver?'r':'p');return t[k]+1;};}};\
+             var proxy=new Proxy(target,handler);var key='x';\
+             var fallback=new Proxy(target,{});\
+             return proxy.x+'|'+proxy[key]+'|'+\
+                    Reflect.get(proxy,'x',receiver)+'|'+fallback.x+'|'+log;"
+        ),
+        "4|4|4|3|lxplxplxr"
+    );
+}
+
+/// A `get` trap cannot lie about frozen data or getterless accessor properties.
+#[test]
+fn proxy_get_enforces_non_configurable_target_invariants() {
+    assert_exception_kind(
+        "var target={};Object.defineProperty(target,'x',{value:1});\
+         return new Proxy(target,{get(){return 2;}}).x;",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "var target={};Object.defineProperty(target,'x',{get:undefined});\
+         return new Proxy(target,{get(){return 1;}}).x;",
+        ExceptionKind::TypeError,
+    );
+}
+
+/// `%Proxy%` has no ordinary call behavior and `Proxy.revocable` publishes its
+/// result record in the specification's `proxy`, `revoke` order.
+#[test]
+fn proxy_constructor_and_revocable_surface_are_installed() {
+    assert_eq!(
+        text(
+            "var pair=Proxy.revocable({x:1},{});\
+             return typeof Proxy+'|'+Proxy.length+'|'+\
+                    Object.prototype.hasOwnProperty.call(Proxy,'prototype')+'|'+\
+                    Reflect.ownKeys(pair).join(',')+'|'+pair.proxy.x+'|'+\
+                    typeof pair.revoke;"
+        ),
+        "function|2|false|proxy,revoke|1|function"
+    );
+    assert_exception_kind("return Proxy({},{});", ExceptionKind::TypeError);
+    assert_exception_kind("return new Proxy(1,{});", ExceptionKind::TypeError);
+    assert_exception_kind("return new Proxy({},1);", ExceptionKind::TypeError);
+}
+
+/// Callable proxies use `apply`/`construct` traps with a fresh argument-list
+/// Array, preserve the original `newTarget`, and delegate when a trap is absent.
+#[test]
+fn proxy_call_and_construct_traps_are_resumable() {
+    assert_eq!(
+        text(
+            "function target(a,b){return this.base+a+b;}\
+             var log='';var handler={\
+               get apply(){log=log+'l';return function(t,r,args){\
+                 return t.apply(r,args)+1;};}};\
+             var proxy=new Proxy(target,handler);\
+             var fallback=new Proxy(target,{});\
+             return proxy.call({base:1},2,3)+'|'+\
+                    fallback.call({base:1},2,3)+'|'+log;"
+        ),
+        "7|6|l"
+    );
+    assert_eq!(
+        text(
+            "function Target(value){this.value=value;}\
+             function NewTarget(){}NewTarget.prototype={marker:1};\
+             var seen=false;var proxy=new Proxy(Target,{construct(t,args,n){\
+               seen=n===NewTarget;return Reflect.construct(t,args,n);}});\
+             var value=Reflect.construct(proxy,[4],NewTarget);\
+             return value.value+'|'+value.marker+'|'+seen;"
+        ),
+        "4|1|true"
+    );
+    assert_exception_kind(
+        "function Target(){};var proxy=new Proxy(Target,{construct(){return 1;}});\
+         return new proxy();",
+        ExceptionKind::TypeError,
+    );
+}
+
+/// The revoker is idempotent and all essential operations reject after it has
+/// atomically cleared the Proxy's target and handler slots.
+#[test]
+fn proxy_revocation_affects_objects_and_callable_proxies() {
+    assert_eq!(
+        text(
+            "var pair=Proxy.revocable({},{});\
+             return String(pair.revoke()===undefined&&pair.revoke()===undefined);"
+        ),
+        "true"
+    );
+    assert_exception_kind(
+        "var pair=Proxy.revocable({x:1},{});pair.revoke();return pair.proxy.x;",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "var pair=Proxy.revocable(function(){return 1;},{});\
+         pair.revoke();return pair.proxy();",
+        ExceptionKind::TypeError,
+    );
+}
+
+/// `[[Set]]`, `[[HasProperty]]`, and `[[Delete]]` share resumable trap lookup,
+/// exact argument tuples, and their operation-specific Boolean completions.
+#[test]
+fn proxy_boolean_internal_methods_cover_language_and_reflect_paths() {
+    assert_eq!(
+        text(
+            "var log='';var target={x:1};var receiver={};var handler={\
+             set(t,k,v,r){log=log+'s'+k+v+(r===receiver?'r':'p');t[k]=v;return true;},\
+             has(t,k){log=log+'h'+k;return k==='x';},\
+             deleteProperty(t,k){log=log+'d'+k;return delete t[k];}};\
+             var proxy=new Proxy(target,handler);proxy.x=2;proxy['x']=3;\
+             var reflected=Reflect.set(proxy,'x',4,receiver);\
+             var has=Reflect.has(proxy,'x');var inResult='x' in proxy;\
+             var deleted=delete proxy.x;\
+             return reflected+'|'+has+'|'+inResult+'|'+deleted+'|'+target.x+'|'+log;"
+        ),
+        "true|true|true|true|undefined|sx2psx3psx4rhxhxdx"
+    );
+    assert_eq!(
+        text("var proxy=new Proxy({x:1},{set(){return false;}});proxy.x=2;return String(proxy.x);"),
+        "1"
+    );
+    assert_eq!(
+        text(
+            "var log='';var receiver={};var prototype=new Proxy({},{set(t,k,v,r){\
+               log=log+k+v+(r===receiver?'r':'?');return true;}});\
+             var target=Object.create(prototype);\
+             return Reflect.set(target,'x',5,receiver)+'|'+log;"
+        ),
+        "true|x5r"
+    );
+    assert_exception_kind(
+        "'use strict';var proxy=new Proxy({x:1},{set(){return false;}});\
+         proxy.x=2;return 0;",
+        ExceptionKind::TypeError,
+    );
+}
+
+/// Boolean traps cannot hide protected properties, delete non-configurable
+/// properties, or claim incompatible writes to frozen target descriptors.
+#[test]
+fn proxy_boolean_traps_enforce_target_invariants() {
+    assert_exception_kind(
+        "var target={};Object.defineProperty(target,'x',{value:1});\
+         return Reflect.has(new Proxy(target,{has(){return false;}}),'x');",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "var target={};Object.defineProperty(target,'x',{value:1});\
+         return delete new Proxy(target,{deleteProperty(){return true;}}).x;",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "var target={};Object.defineProperty(target,'x',{value:1,writable:false});\
+         return Reflect.set(new Proxy(target,{set(){return true;}}),'x',2);",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "var target={};Object.defineProperty(target,'x',{value:1,writable:false});\
+         var inner=new Proxy(target,{getOwnPropertyDescriptor(t,k){\
+           return Reflect.getOwnPropertyDescriptor(t,k);}});\
+         return Reflect.set(new Proxy(inner,{set(){return true;}}),'x',2);",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "var target={x:1};Object.preventExtensions(target);\
+         var inner=new Proxy(target,{getOwnPropertyDescriptor(t,k){\
+           return Reflect.getOwnPropertyDescriptor(t,k);},\
+           isExtensible(t){return Reflect.isExtensible(t);}});\
+         return Reflect.has(new Proxy(inner,{has(){return false;}}),'x');",
+        ExceptionKind::TypeError,
+    );
+}
+
+/// Prototype and extensibility traps preserve their distinct return types and
+/// validate the target state after the trap has run.
+#[test]
+fn proxy_meta_internal_methods_are_resumable_and_spec_ordered() {
+    assert_eq!(
+        text(
+            "var log='';var first={first:1};var second={second:1};\
+             var target=Object.create(first);var handler={\
+               getPrototypeOf(t){log=log+'g';return second;},\
+               setPrototypeOf(t,p){log=log+'s'+p.marker;return true;},\
+               isExtensible(t){log=log+'i';return Object.isExtensible(t);},\
+               preventExtensions(t){log=log+'p';Object.preventExtensions(t);return true;}};\
+             var proxy=new Proxy(target,handler);var requested={marker:'r'};\
+             var got=Reflect.getPrototypeOf(proxy)===second;\
+             var set=Reflect.setPrototypeOf(proxy,requested);\
+             var before=Reflect.isExtensible(proxy);\
+             var prevented=Reflect.preventExtensions(proxy);\
+             var after=Reflect.isExtensible(proxy);\
+             return got+'|'+set+'|'+before+'|'+prevented+'|'+after+'|'+log;"
+        ),
+        "true|true|true|true|false|gsripi"
+    );
+    assert_eq!(
+        text(
+            "var log='';var prototype={p:1};var target={};var handler={\
+               getPrototypeOf(t){log=log+'g';return prototype;},\
+               setPrototypeOf(t,p){log=log+'s';return true;},\
+               isExtensible(t){log=log+'i';return Object.isExtensible(t);},\
+               preventExtensions(t){log=log+'p';Object.preventExtensions(t);return true;}};\
+             var proxy=new Proxy(target,handler);var requested={};\
+             var got=Object.getPrototypeOf(proxy)===prototype;\
+             var set=Object.setPrototypeOf(proxy,requested)===proxy;\
+             var legacyGet=proxy.__proto__===prototype;proxy.__proto__=requested;\
+             var before=Object.isExtensible(proxy);\
+             var prevented=Object.preventExtensions(proxy)===proxy;\
+             var after=Object.isExtensible(proxy);\
+             return got+'|'+set+'|'+legacyGet+'|'+before+'|'+prevented+'|'+after+'|'+log;"
+        ),
+        "true|true|true|true|true|false|gsgsipi"
+    );
+}
+
+/// Non-extensible targets pin their prototype, `isExtensible` must report the
+/// target's exact bit, and a successful `preventExtensions` trap must clear it.
+#[test]
+fn proxy_meta_traps_enforce_target_invariants() {
+    assert_exception_kind(
+        "var target={};Object.preventExtensions(target);\
+         return Reflect.getPrototypeOf(new Proxy(target,{getPrototypeOf(){return {};}}));",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "var target={};Object.preventExtensions(target);\
+         return Reflect.setPrototypeOf(new Proxy(target,{setPrototypeOf(){return true;}}),{});",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "return Reflect.isExtensible(new Proxy({},{isExtensible(){return false;}}));",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "return Reflect.preventExtensions(new Proxy({},{preventExtensions(){return true;}}));",
+        ExceptionKind::TypeError,
+    );
+}
+
+/// `[[GetOwnProperty]]` converts a trap descriptor in the normative field
+/// order, completes omitted fields, and returns a fresh ordinary descriptor.
+#[test]
+fn proxy_get_own_property_descriptor_is_resumable_and_complete() {
+    assert_eq!(
+        text(
+            "var log='';var target={};\
+             Object.defineProperty(target,'x',{value:1,writable:false,\
+               enumerable:false,configurable:false});\
+             var descriptor={\
+               get enumerable(){log=log+'e';return false;},\
+               get configurable(){log=log+'c';return false;},\
+               get value(){log=log+'v';return 1;},\
+               get writable(){log=log+'w';return false;}};\
+             var proxy=new Proxy(target,{getOwnPropertyDescriptor(){return descriptor;}});\
+             var result=Reflect.getOwnPropertyDescriptor(proxy,'x');\
+             result.value=4;\
+             return log+'|'+result.value+'|'+result.writable+'|'+\
+                    result.enumerable+'|'+result.configurable+'|'+target.x;"
+        ),
+        "ecvw|4|false|false|false|1"
+    );
+    assert_eq!(
+        text(
+            "var target={x:1};var proxy=new Proxy(target,{});\
+             var result=Object.getOwnPropertyDescriptor(proxy,'x');\
+             return result.value+'|'+result.writable+'|'+\
+                    result.enumerable+'|'+result.configurable;"
+        ),
+        "1|true|true|true"
+    );
+    assert_eq!(
+        text(
+            "var log='';var target={x:1};var proxy=new Proxy(target,{\
+               getOwnPropertyDescriptor(t,k){log=log+k;return Reflect.getOwnPropertyDescriptor(t,k);}});\
+             return Object.hasOwn(proxy,'x')+'|'+\
+                    Object.prototype.hasOwnProperty.call(proxy,'x')+'|'+\
+                    Object.prototype.propertyIsEnumerable.call(proxy,'x')+'|'+log;"
+        ),
+        "true|true|true|xxx"
+    );
+}
+
+/// A descriptor trap cannot hide a protected property or report a descriptor
+/// that is incompatible with the target's current extensibility and layout.
+#[test]
+fn proxy_get_own_property_descriptor_enforces_target_invariants() {
+    assert_exception_kind(
+        "var target={};Object.defineProperty(target,'x',{value:1});\
+         return Reflect.getOwnPropertyDescriptor(\
+           new Proxy(target,{getOwnPropertyDescriptor(){return undefined;}}),'x');",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "var target={x:1};Object.preventExtensions(target);\
+         return Reflect.getOwnPropertyDescriptor(\
+           new Proxy(target,{getOwnPropertyDescriptor(){return undefined;}}),'x');",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "return Reflect.getOwnPropertyDescriptor(\
+           new Proxy({},{getOwnPropertyDescriptor(){return {configurable:false};}}),'x');",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "return Reflect.getOwnPropertyDescriptor(\
+           new Proxy({},{getOwnPropertyDescriptor(){return 1;}}),'x');",
+        ExceptionKind::TypeError,
+    );
+    assert_eq!(
+        text(
+            "var log='';var target={x:1};\
+             var inner=new Proxy(target,{\
+               getOwnPropertyDescriptor(t,k){log=log+'d';return Reflect.getOwnPropertyDescriptor(t,k);},\
+               isExtensible(t){log=log+'e';return Reflect.isExtensible(t);}});\
+             var outer=new Proxy(inner,{getOwnPropertyDescriptor(t,k){\
+               log=log+'o';return {value:2,writable:true,enumerable:true,configurable:true};}});\
+             var result=Reflect.getOwnPropertyDescriptor(outer,'x');\
+             return result.value+'|'+log;"
+        ),
+        "2|ode"
+    );
+}
+
+/// Proxy `[[DefineOwnProperty]]` receives a fresh partial descriptor object,
+/// preserves absent fields, and maps its Boolean result to Object/Reflect.
+#[test]
+fn proxy_define_own_property_is_resumable_and_shared_by_object_and_reflect() {
+    assert_eq!(
+        text(
+            "var log='';var target={};var handler={defineProperty(t,k,d){\
+               log=log+(this===handler?'h':'?')+(t===target?'t':'?')+k+'|'+\
+                 Reflect.ownKeys(d).join(',');return true;}};\
+             var proxy=new Proxy(target,handler);\
+             var reflected=Reflect.defineProperty(proxy,'x',{value:3,writable:true,\
+               enumerable:true,configurable:true});\
+             var returned=Object.defineProperty(proxy,'y',{value:4,configurable:true});\
+             return reflected+'|'+(returned===proxy)+'|'+target.x+'|'+target.y+'|'+log;"
+        ),
+        "true|true|undefined|undefined|htx|enumerable,configurable,value,writablehty|configurable,value"
+    );
+    assert_eq!(
+        text(
+            "var target={};var proxy=new Proxy(target,{});\
+             var returned=Object.defineProperty(proxy,'x',{value:7});\
+             return (returned===proxy)+'|'+target.x+'|'+\
+                    Object.getOwnPropertyDescriptor(target,'x').writable;"
+        ),
+        "true|7|false"
+    );
+    assert_eq!(
+        text(
+            "var log='';var value={valueOf(){log=log+'v';return 1;}};\
+             var proxy=new Proxy([1,2,3],{});\
+             var result=Reflect.defineProperty(proxy,'length',{value:value});\
+             return result+'|'+proxy.length+'|'+log;"
+        ),
+        "true|1|vv"
+    );
+    assert_eq!(
+        text(
+            "return String(Reflect.defineProperty(\
+               new Proxy({},{defineProperty(){return false;}}),'x',{value:1}));"
+        ),
+        "false"
+    );
+    assert_exception_kind(
+        "return Object.defineProperty(\
+           new Proxy({},{defineProperty(){return false;}}),'x',{value:1});",
+        ExceptionKind::TypeError,
+    );
+}
+
+/// A successful define trap must still describe a definition compatible with
+/// the target's current own property and extensibility state.
+#[test]
+fn proxy_define_own_property_enforces_target_invariants() {
+    assert_exception_kind(
+        "var target={};Object.preventExtensions(target);\
+         return Reflect.defineProperty(new Proxy(target,{defineProperty(){return true;}}),\
+           'x',{value:1});",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "return Reflect.defineProperty(new Proxy({},{defineProperty(){return true;}}),\
+           'x',{configurable:false});",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "var target={};Object.defineProperty(target,'x',{value:1});\
+         return Reflect.defineProperty(new Proxy(target,{defineProperty(){return true;}}),\
+           'x',{value:2});",
+        ExceptionKind::TypeError,
+    );
+}
+
+/// `[[OwnPropertyKeys]]` performs `CreateListFromArrayLike` through observable
+/// length/index reads, preserves trap order, and returns string/Symbol keys.
+#[test]
+fn proxy_own_keys_is_resumable_and_preserves_the_trap_list() {
+    assert_eq!(
+        text(
+            "var log='';var symbol=Symbol('s');var result={\
+               get length(){log=log+'l';return {valueOf(){log=log+'v';return 2;}};},\
+               get 0(){log=log+'0';return 'x';},\
+               get 1(){log=log+'1';return symbol;}};\
+             var target={a:1};var proxy=new Proxy(target,{\
+               get ownKeys(){log=log+'g';return function(t){log=log+'t';return result;};}});\
+             var keys=Reflect.ownKeys(proxy);\
+             return keys[0]+'|'+(keys[1]===symbol)+'|'+log;"
+        ),
+        "x|true|gtlv01"
+    );
+    assert_eq!(
+        text(
+            "var symbol=Symbol('s');var target={2:1,a:2};target[symbol]=3;\
+             return Reflect.ownKeys(new Proxy(target,{})).map(function(k){\
+               return typeof k==='symbol'?'s':k;}).join(',');"
+        ),
+        "2,a,s"
+    );
+    assert_eq!(
+        text(
+            "var log='';var symbol=Symbol('s');var target={};\
+             Object.defineProperty(target,'hidden',{value:1});target[symbol]=2;\
+             var proxy=new Proxy(target,{\
+               ownKeys(){log=log+'o';return ['virtual','hidden',symbol];},\
+               getOwnPropertyDescriptor(t,k){log=log+'d';if(k==='virtual'){\
+                 return {value:3,enumerable:true,configurable:true};}\
+                 return Reflect.getOwnPropertyDescriptor(t,k);}});\
+             var keys=Object.keys(proxy).join(',');\
+             var names=Object.getOwnPropertyNames(proxy).join(',');\
+             var symbols=Object.getOwnPropertySymbols(proxy);\
+             return keys+'|'+names+'|'+(symbols[0]===symbol)+'|'+log;"
+        ),
+        "virtual|virtual,hidden|true|oddoo"
+    );
+    assert_eq!(
+        text(
+            "var log='';var proxy=new Proxy({},{\
+               ownKeys(){log=log+'o';return ['x'];},\
+               getOwnPropertyDescriptor(){log=log+'d';return {enumerable:true,configurable:true};},\
+               get(){log=log+'g';return 9;}});\
+             var values=Object.values(proxy);var entries=Object.entries(proxy);\
+             return values[0]+'|'+entries[0][0]+'|'+entries[0][1]+'|'+log;"
+        ),
+        "9|x|9|odgodg"
+    );
+}
+
+/// Proxy own-key results reject duplicates/non-keys and must contain protected
+/// keys; a non-extensible target additionally requires an exact key set.
+#[test]
+fn proxy_own_keys_enforces_target_invariants() {
+    assert_exception_kind(
+        "return Reflect.ownKeys(new Proxy({},{ownKeys(){return ['x','x'];}}));",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "return Reflect.ownKeys(new Proxy({},{ownKeys(){return [1];}}));",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "var target={};Object.defineProperty(target,'x',{value:1});\
+         return Reflect.ownKeys(new Proxy(target,{ownKeys(){return [];}}));",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "var target={x:1};Object.preventExtensions(target);\
+         return Reflect.ownKeys(new Proxy(target,{ownKeys(){return [];}}));",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "var target={x:1};Object.preventExtensions(target);\
+         return Reflect.ownKeys(new Proxy(target,{ownKeys(){return ['x','y'];}}));",
+        ExceptionKind::TypeError,
     );
 }

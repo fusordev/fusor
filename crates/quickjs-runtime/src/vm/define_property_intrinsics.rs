@@ -138,7 +138,7 @@ pub(super) enum DefinePropertyResult {
 /// distinction the descriptor validation needs: a present `undefined` differs
 /// from an absent field.
 #[derive(Default)]
-struct CollectedFields {
+pub(super) struct CollectedFields {
     value: Option<StoredValue>,
     writable: Option<bool>,
     get: Option<StoredValue>,
@@ -165,24 +165,24 @@ impl CollectedFields {
 }
 
 /// The reusable, resumable part of `ToPropertyDescriptor`.
-struct DescriptorReadState {
+pub(super) struct DescriptorReadState {
     descriptor: StoredValue,
     fields: CollectedFields,
     next: usize,
 }
 
 impl DescriptorReadState {
-    fn retained_values(&self) -> u64 {
+    pub(super) fn retained_values(&self) -> u64 {
         1_u64.saturating_add(self.fields.retained_values())
     }
 
-    fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         trace_stored_value_root(&self.descriptor, mark);
         self.fields.trace_roots(mark);
     }
 }
 
-enum DescriptorReadOutcome {
+pub(super) enum DescriptorReadOutcome {
     Complete(CollectedFields),
     Getter {
         function: FunctionId,
@@ -349,7 +349,7 @@ pub(super) fn advance_define_property(
     }
 }
 
-fn begin_descriptor_read(
+pub(super) fn begin_descriptor_read(
     descriptor: StoredValue,
     realm: RealmId,
     origin: &JsStackFrame,
@@ -371,7 +371,7 @@ fn begin_descriptor_read(
     })
 }
 
-fn advance_descriptor_read(
+pub(super) fn advance_descriptor_read(
     runtime: &mut Runtime,
     state: &mut DescriptorReadState,
     completion: Option<StoredValue>,
@@ -526,6 +526,22 @@ fn apply_collected_descriptor(
 
     let definition = property_definition_from_fields(fields, realm, &origin)?;
 
+    if let Some(reference) = target.heap_reference()
+        && runtime.proxy_state(reference)?.is_some()
+    {
+        return begin_internal_define_own_property(
+            runtime,
+            reference,
+            key,
+            definition,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+            result,
+        );
+    }
+
     let outcome = define_own_property(runtime, &target, key, &definition, execution_budget)?;
     match outcome {
         PropertyDefinitionOutcome::Complete => Ok(NativeDispatch::Immediate(match result {
@@ -541,7 +557,7 @@ fn apply_collected_descriptor(
     }
 }
 
-fn validate_collected_fields(
+pub(super) fn validate_collected_fields(
     fields: &CollectedFields,
     realm: RealmId,
     origin: &JsStackFrame,
@@ -562,7 +578,7 @@ fn validate_collected_fields(
     Ok(())
 }
 
-fn property_definition_from_fields(
+pub(super) fn property_definition_from_fields(
     fields: CollectedFields,
     realm: RealmId,
     origin: &JsStackFrame,
@@ -590,6 +606,31 @@ fn property_definition_from_fields(
     Ok(definition
         .with_enumerable(requested_flag(fields.enumerable))
         .with_configurable(requested_flag(fields.configurable)))
+}
+
+/// Applies `CompletePropertyDescriptor` to one converted descriptor and
+/// materializes the runtime's complete own-property representation.
+pub(super) fn complete_own_property_from_fields(
+    fields: CollectedFields,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<OwnProperty, NativeFailure> {
+    validate_collected_fields(&fields, realm, origin)?;
+    let enumerable = fields.enumerable.unwrap_or(false);
+    let configurable = fields.configurable.unwrap_or(false);
+    if fields.get.is_some() || fields.set.is_some() {
+        let getter = accessor_function(fields.get.as_ref(), realm, origin, "getter")?;
+        let setter = accessor_function(fields.set.as_ref(), realm, origin, "setter")?;
+        return Ok(OwnProperty::Accessor {
+            layout: PropertyLayout::accessor(enumerable, configurable),
+            getter,
+            setter,
+        });
+    }
+    Ok(OwnProperty::Data {
+        layout: PropertyLayout::data(fields.writable.unwrap_or(false), enumerable, configurable),
+        value: fields.value.unwrap_or(StoredValue::Undefined),
+    })
 }
 
 /// Starts the specification `ObjectDefineProperties(target, properties)`
@@ -1181,6 +1222,77 @@ pub(super) fn build_descriptor_object(
         field,
         StoredValue::Boolean(layout.is_configurable()),
     )?;
+    Ok(object)
+}
+
+/// Materializes a partial property descriptor for Proxy
+/// `[[DefineOwnProperty]]`'s trap argument. Only present fields are created.
+pub(super) fn build_definition_object(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    definition: &PropertyDefinition,
+) -> Result<ObjectId, NativeFailure> {
+    let prototype = runtime.realm_object_prototype(realm)?;
+    let object = runtime.allocate_ordinary_object(prototype)?;
+    let reference = HeapReference::Object(object);
+    let field = PropertyLayout::data(true, true, true);
+    if let Some(enumerable) = definition.requested_enumerable() {
+        append_descriptor_field(
+            runtime,
+            reference,
+            PredefinedAtom::Enumerable,
+            field,
+            StoredValue::Boolean(enumerable),
+        )?;
+    }
+    if let Some(configurable) = definition.requested_configurable() {
+        append_descriptor_field(
+            runtime,
+            reference,
+            PredefinedAtom::Configurable,
+            field,
+            StoredValue::Boolean(configurable),
+        )?;
+    }
+    if definition.is_accessor_descriptor() {
+        if let Some(getter) = definition.requested_getter() {
+            append_descriptor_field(
+                runtime,
+                reference,
+                PredefinedAtom::Get,
+                field,
+                accessor_slot_value(getter),
+            )?;
+        }
+        if let Some(setter) = definition.requested_setter() {
+            append_descriptor_field(
+                runtime,
+                reference,
+                PredefinedAtom::SetProperty,
+                field,
+                accessor_slot_value(setter),
+            )?;
+        }
+    } else {
+        if let Some(value) = definition.requested_value() {
+            append_descriptor_field(
+                runtime,
+                reference,
+                PredefinedAtom::Value,
+                field,
+                value.duplicate(),
+            )?;
+        }
+        if let Some(writable) = definition.requested_writable() {
+            append_descriptor_field(
+                runtime,
+                reference,
+                PredefinedAtom::Writable,
+                field,
+                StoredValue::Boolean(writable),
+            )?;
+        }
+    }
     Ok(object)
 }
 

@@ -1410,24 +1410,60 @@ pub(super) fn begin_copy_data_properties(
     // CopyDataProperties snapshots all own keys, including Symbols. Whether a
     // snapshotted key is still present and enumerable is rechecked when that
     // key is reached after any earlier getter re-entry.
-    let (snapshot, snapshot_work) = runtime.try_own_key_snapshot(reference, 0, KeyPhases::ALL)?;
-    execution_budget.charge_instructions(snapshot_work)?;
     let excluded = if matches!(excluded, StoredValue::Undefined) {
         None
     } else {
         Some(excluded)
     };
-    let state = CopyDataPropertiesContinuation {
+    let mut state = CopyDataPropertiesContinuation {
         target,
         source,
         excluded,
-        snapshot,
+        snapshot: Vec::new(),
         next: 0,
         current_key: None,
         realm,
         stage: CopyDataPropertiesStage::Next,
         origin,
     };
+    if runtime.proxy_state(reference)?.is_some() {
+        state.stage = CopyDataPropertiesStage::AwaitKeys;
+        let dispatch = begin_internal_own_keys(
+            runtime,
+            reference,
+            realm,
+            return_to,
+            state.origin.clone(),
+            execution_budget,
+        )?;
+        return continue_copy_data_properties_after(
+            runtime,
+            dispatch,
+            state,
+            return_to,
+            execution_budget,
+        );
+    }
+    let (snapshot, snapshot_work) = runtime.try_own_key_snapshot(reference, 0, KeyPhases::ALL)?;
+    execution_budget.charge_instructions(snapshot_work)?;
+    state
+        .snapshot
+        .try_reserve_exact(snapshot.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: snapshot.len(),
+        })?;
+    for index in 0..snapshot.len() {
+        state.snapshot.push(
+            snapshot
+                .get(index)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "copy-data-properties own-key snapshot shrank",
+                })?
+                .key()
+                .clone(),
+        );
+    }
     advance_copy_data_properties(
         runtime,
         state,
@@ -1435,6 +1471,38 @@ pub(super) fn begin_copy_data_properties(
         return_to,
         execution_budget,
     )
+}
+
+fn continue_copy_data_properties_after(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
+    state: CopyDataPropertiesContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => {
+            advance_copy_data_properties(runtime, state, &value, return_to, execution_budget)
+        }
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::CopyDataProperties(state)],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::CopyDataProperties(state)],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        _ => Err(EngineFault::RuntimeInvariant {
+            message: "copy-data-properties nested internal method produced a structured result",
+        }
+        .into()),
+    }
 }
 
 #[allow(
@@ -1450,6 +1518,72 @@ pub(super) fn advance_copy_data_properties(
 ) -> Result<NativeDispatch, NativeFailure> {
     loop {
         match state.stage {
+            CopyDataPropertiesStage::AwaitKeys => {
+                state.snapshot = generated_key_list(runtime, completion.duplicate())?;
+                state.stage = CopyDataPropertiesStage::Next;
+            }
+            CopyDataPropertiesStage::AwaitDescriptor => {
+                let enumerable = if let StoredValue::Object(descriptor) = completion {
+                    let key = runtime.predefined_property_key(PredefinedAtom::Enumerable);
+                    let Some(OwnProperty::Data {
+                        value: StoredValue::Boolean(enumerable),
+                        ..
+                    }) = heap_own_property(runtime, HeapReference::Object(*descriptor), &key)?
+                    else {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "copy-data-properties Proxy descriptor lacks enumerable",
+                        }
+                        .into());
+                    };
+                    enumerable
+                } else if matches!(completion, StoredValue::Undefined) {
+                    false
+                } else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "copy-data-properties Proxy descriptor is invalid",
+                    }
+                    .into());
+                };
+                if !enumerable {
+                    state.current_key = None;
+                    state.stage = CopyDataPropertiesStage::Next;
+                    continue;
+                }
+                let key = state
+                    .current_key
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "copy-data-properties Proxy descriptor lost its key",
+                    })?;
+                let source =
+                    state
+                        .source
+                        .heap_reference()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "copy-data-properties lost its Proxy source",
+                        })?;
+                state.stage = CopyDataPropertiesStage::ReadValue;
+                let dispatch = begin_internal_get(
+                    runtime,
+                    source,
+                    match source {
+                        HeapReference::Function(function) => StoredValue::Function(function),
+                        HeapReference::Object(object) => StoredValue::Object(object),
+                    },
+                    key.clone(),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_copy_data_properties_after(
+                    runtime,
+                    dispatch,
+                    state,
+                    return_to,
+                    execution_budget,
+                );
+            }
             CopyDataPropertiesStage::Next => {
                 let Some(candidate) = state.snapshot.get(state.next).cloned() else {
                     return Ok(NativeDispatch::CopyDataPropertiesDone);
@@ -1475,7 +1609,7 @@ pub(super) fn advance_copy_data_properties(
                     };
                     if runtime
                         .object_record(reference)?
-                        .own_property(candidate.key())
+                        .own_property(&candidate)
                         .is_some()
                     {
                         continue;
@@ -1488,20 +1622,40 @@ pub(super) fn advance_copy_data_properties(
                         .ok_or(EngineFault::RuntimeInvariant {
                             message: "copy-data-properties lost its object source",
                         })?;
+                if runtime.proxy_state(source_reference)?.is_some() {
+                    state.current_key = Some(candidate.clone());
+                    state.stage = CopyDataPropertiesStage::AwaitDescriptor;
+                    let dispatch = begin_internal_get_own_property(
+                        runtime,
+                        source_reference,
+                        candidate,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    return continue_copy_data_properties_after(
+                        runtime,
+                        dispatch,
+                        state,
+                        return_to,
+                        execution_budget,
+                    );
+                }
                 charge_heap_property_lookup(runtime, &state.source, execution_budget)?;
-                let Some(own) = own_property_of(runtime, source_reference, candidate.key())? else {
+                let Some(own) = own_property_of(runtime, source_reference, &candidate)? else {
                     continue;
                 };
                 if !own.layout().is_enumerable() {
                     continue;
                 }
                 charge_heap_property_lookup(runtime, &state.source, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.source, candidate.key())? {
+                match read_static_property(runtime, state.realm, &state.source, &candidate)? {
                     PropertyReadOutcome::Value(value) => {
                         match define_static_property(
                             runtime,
                             &state.target,
-                            candidate.key().clone(),
+                            candidate.clone(),
                             value,
                             execution_budget,
                         )? {
@@ -1524,7 +1678,7 @@ pub(super) fn advance_copy_data_properties(
                     }
                     PropertyReadOutcome::Getter { function, receiver } => {
                         state.stage = CopyDataPropertiesStage::ReadValue;
-                        state.current_key = Some(candidate.key().clone());
+                        state.current_key = Some(candidate.clone());
                         let origin = state.origin.clone();
                         return iterator_getter_call(
                             function,

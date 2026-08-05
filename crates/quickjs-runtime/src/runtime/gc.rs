@@ -815,6 +815,27 @@ impl Runtime {
                                     );
                                 }
                             }
+                            if let FunctionImplementation::Proxy(proxy) = &function.implementation {
+                                for reference in [proxy.target, proxy.handler].into_iter().flatten()
+                                {
+                                    mark_heap_reference(
+                                        reference,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
+                            }
+                            if let FunctionImplementation::ProxyRevoker(revoker) =
+                                &function.implementation
+                            {
+                                mark_heap_reference(
+                                    revoker.proxy,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
                             mark_object_record(
                                 &function.object,
                                 &mut marked_functions,
@@ -903,6 +924,17 @@ impl Runtime {
                             }
                         }
                         if let Some(object) = self.objects.get(id) {
+                            if let Some(proxy) = object.proxy_state() {
+                                for reference in [proxy.target, proxy.handler].into_iter().flatten()
+                                {
+                                    mark_heap_reference(
+                                        reference,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
+                            }
                             for cell in object.arguments_cells() {
                                 if marked_cells.insert(cell) {
                                     work.push(GraphNode::Cell(cell));

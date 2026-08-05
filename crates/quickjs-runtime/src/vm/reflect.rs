@@ -125,7 +125,11 @@ pub(super) fn begin_reflect_method(
             begin_property_key_conversion(
                 runtime,
                 key,
-                PropertyKeyTarget::ReflectGet { target, receiver },
+                PropertyKeyTarget::ReflectGet {
+                    target,
+                    receiver,
+                    realm,
+                },
                 realm,
                 return_to,
                 origin,
@@ -149,8 +153,14 @@ pub(super) fn begin_reflect_method(
         ReflectMethod::GetPrototypeOf => {
             let target = arguments.take_first_or_undefined();
             let reference = require_object(&target, realm, &origin)?;
-            let prototype = runtime.object_record(reference)?.prototype();
-            Ok(NativeDispatch::Immediate(heap_reference_value(prototype)))
+            begin_internal_get_prototype_of(
+                runtime,
+                reference,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
         }
         ReflectMethod::Has => {
             let target = arguments.take_first_or_undefined();
@@ -169,20 +179,38 @@ pub(super) fn begin_reflect_method(
         ReflectMethod::IsExtensible => {
             let target = arguments.take_first_or_undefined();
             let reference = require_object(&target, realm, &origin)?;
-            Ok(NativeDispatch::Immediate(StoredValue::Boolean(
-                runtime.is_extensible(reference)?,
-            )))
+            begin_internal_is_extensible(
+                runtime,
+                reference,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
         }
         ReflectMethod::OwnKeys => {
             let target = arguments.take_first_or_undefined();
             let reference = require_object(&target, realm, &origin)?;
-            reflect_own_keys(runtime, realm, reference, execution_budget)
+            begin_internal_own_keys(
+                runtime,
+                reference,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
         }
         ReflectMethod::PreventExtensions => {
             let target = arguments.take_first_or_undefined();
             let reference = require_object(&target, realm, &origin)?;
-            runtime.prevent_extensions(reference)?;
-            Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
+            begin_internal_prevent_extensions(
+                runtime,
+                reference,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
         }
         ReflectMethod::Set => {
             let target = arguments.take_first_or_undefined();
@@ -214,11 +242,15 @@ pub(super) fn begin_reflect_method(
                 StoredValue::Object(object) => Some(HeapReference::Object(object)),
                 _ => return Err(reflect_type_error(realm, &origin, "not an object")),
             };
-            let changed = matches!(
-                runtime.set_prototype_of(reference, prototype)?,
-                SetPrototypeOutcome::Complete
-            );
-            Ok(NativeDispatch::Immediate(StoredValue::Boolean(changed)))
+            begin_internal_set_prototype_of(
+                runtime,
+                reference,
+                prototype,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
         }
     }
 }
@@ -259,64 +291,6 @@ fn reflect_type_error(realm: RealmId, origin: &JsStackFrame, message: &str) -> N
     }
 }
 
-fn heap_reference_value(reference: Option<HeapReference>) -> StoredValue {
-    match reference {
-        None => StoredValue::Null,
-        Some(HeapReference::Function(function)) => StoredValue::Function(function),
-        Some(HeapReference::Object(object)) => StoredValue::Object(object),
-    }
-}
-
-fn reflect_own_keys(
-    runtime: &mut Runtime,
-    realm: RealmId,
-    reference: HeapReference,
-    execution_budget: &mut ExecutionBudget,
-) -> Result<NativeDispatch, NativeFailure> {
-    let (snapshot, work) = runtime.try_own_key_snapshot(reference, 0, KeyPhases::ALL)?;
-    execution_budget.charge_instructions(work)?;
-    let mut elements = Vec::new();
-    elements
-        .try_reserve_exact(snapshot.len())
-        .map_err(|_| ExecutionError::AllocationFailed {
-            resource: RuntimeResource::FrameValues,
-            additional: snapshot.len(),
-        })?;
-    for index in 0..snapshot.len() {
-        let candidate = snapshot.get(index).ok_or(EngineFault::RuntimeInvariant {
-            message: "Reflect.ownKeys snapshot shrank during materialization",
-        })?;
-        let key = candidate.key();
-        let value = if let Some(index) = key.as_index() {
-            StoredValue::String(JsNumber::from_u32(index.get()).to_radix_string(10)?)
-        } else {
-            let atom = key.as_atom().ok_or(EngineFault::RuntimeInvariant {
-                message: "Reflect.ownKeys candidate is neither an index nor an atom",
-            })?;
-            match atom.kind() {
-                crate::AtomKind::String => StoredValue::String(atom.description().cloned().ok_or(
-                    EngineFault::RuntimeInvariant {
-                        message: "Reflect.ownKeys string atom has no description",
-                    },
-                )?),
-                crate::AtomKind::Symbol | crate::AtomKind::GlobalSymbol => {
-                    StoredValue::Symbol(atom.clone())
-                }
-                crate::AtomKind::Private => {
-                    return Err(EngineFault::RuntimeInvariant {
-                        message: "private name escaped through Reflect.ownKeys",
-                    }
-                    .into());
-                }
-            }
-        };
-        elements.push(value);
-    }
-    Ok(NativeDispatch::Immediate(StoredValue::Object(
-        runtime.allocate_array(realm, elements)?,
-    )))
-}
-
 /// Applies `OrdinarySet` with an explicit receiver and returns the internal
 /// method Boolean rather than turning a rejected write into an exception.
 #[allow(
@@ -335,6 +309,24 @@ pub(super) fn reflect_set_property(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(reference) = target.heap_reference()
+        && runtime.proxy_state(reference)?.is_some()
+    {
+        return begin_internal_set(
+            runtime,
+            reference,
+            key,
+            name,
+            value,
+            receiver,
+            false,
+            true,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
     if target.strict_equals(&receiver) {
         if is_array_length_target(runtime, &target, &key)? {
             let conversion = array_length_write_target(target, name, false, true, &value);

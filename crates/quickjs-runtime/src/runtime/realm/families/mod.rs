@@ -13,6 +13,7 @@ mod map;
 mod math;
 mod primitives;
 mod promise;
+mod proxy;
 mod reflect;
 mod regexp;
 mod set;
@@ -135,7 +136,7 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 342,
+                expected: 344,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -287,6 +288,8 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::PromisePrototypeThen
             | NativeFunctionKind::PromisePrototypeCatch
             | NativeFunctionKind::PromisePrototypeFinally
+            | NativeFunctionKind::ProxyConstructor
+            | NativeFunctionKind::ProxyRevocable
             | NativeFunctionKind::MapConstructor
             | NativeFunctionKind::MapGroupBy
             | NativeFunctionKind::MapSpeciesGetter
@@ -870,6 +873,7 @@ fn visit_object_specs(visit: ObjectSink<'_>) {
     async_generator::visit_objects(visit);
     symbol::visit_objects(visit);
     promise::visit_objects(visit);
+    proxy::visit_objects(visit);
     map::visit_objects(visit);
     set::visit_objects(visit);
     weak_collections::visit_objects(visit);
@@ -892,6 +896,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
     async_generator::visit_functions(visit);
     symbol::visit_functions(visit);
     promise::visit_functions(visit);
+    proxy::visit_functions(visit);
     map::visit_functions(visit);
     set::visit_functions(visit);
     weak_collections::visit_functions(visit);
@@ -916,6 +921,7 @@ fn visit_property_specs(visit: PropertySink<'_>) {
     async_generator::visit_properties(visit);
     symbol::visit_properties(visit);
     promise::visit_properties(visit);
+    proxy::visit_properties(visit);
     map::visit_properties(visit);
     set::visit_properties(visit);
     weak_collections::visit_properties(visit);
@@ -1030,7 +1036,7 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 342);
+        assert_eq!(schema.specs().len(), 344);
         assert_eq!(schema.constructor_prototypes.len(), 28);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(

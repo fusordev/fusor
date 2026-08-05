@@ -934,7 +934,9 @@ pub(super) fn function_is_constructor(
             FunctionImplementation::PromiseResolving(_)
             | FunctionImplementation::PromiseCapabilityExecutor(_)
             | FunctionImplementation::PromiseFinally(_)
-            | FunctionImplementation::PromiseCombinatorElement(_) => return Ok(false),
+            | FunctionImplementation::PromiseCombinatorElement(_)
+            | FunctionImplementation::ProxyRevoker(_) => return Ok(false),
+            FunctionImplementation::Proxy(proxy) => return Ok(proxy.constructable),
             FunctionImplementation::Bound(bound) => {
                 if remaining == 0 {
                     return Err(EngineFault::RuntimeInvariant {

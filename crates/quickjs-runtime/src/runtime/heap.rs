@@ -741,6 +741,8 @@ impl Runtime {
                 FunctionImplementation::PromiseCombinatorElement(function) => {
                     return Ok(function.realm);
                 }
+                FunctionImplementation::Proxy(proxy) => return Ok(proxy.realm),
+                FunctionImplementation::ProxyRevoker(revoker) => return Ok(revoker.realm),
                 FunctionImplementation::Bound(bound) => {
                     if remaining == 0 {
                         return Err(crate::EngineFault::RuntimeInvariant {

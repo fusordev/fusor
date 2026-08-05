@@ -307,6 +307,7 @@ fn visit_core_name_order(
         RealmNameId::Deref,
         RealmNameId::Register,
         RealmNameId::Unregister,
+        RealmNameId::ProxyRevocable,
     ] {
         visit(id)?;
     }
@@ -364,6 +365,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::Deref => "deref",
         RealmNameId::Register => "register",
         RealmNameId::Unregister => "unregister",
+        RealmNameId::ProxyRevocable => "revocable",
         RealmNameId::Reflect => "Reflect",
         RealmNameId::JsonIsRawJson => "isRawJSON",
         RealmNameId::JsonParse => "parse",

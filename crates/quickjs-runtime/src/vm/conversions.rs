@@ -1735,6 +1735,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             finish_function_apply_length(runtime, state, value, return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::ProxyOwnKeysLength(state) => {
+            finish_proxy_own_keys_length(runtime, *state, value, return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::BigIntToString { value: receiver } => {
             let radix = operator_to_number(value, realm, origin)?;
             let radix = validated_radix(radix, realm, origin)?;
@@ -2644,6 +2647,20 @@ fn finish_property_key_target(
         }
         .into()),
         PropertyKeyTarget::Read { base, realm } => {
+            if let Some(reference) = base.heap_reference()
+                && runtime.proxy_state(reference)?.is_some()
+            {
+                return begin_internal_get(
+                    runtime,
+                    reference,
+                    base.duplicate(),
+                    property.key,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                );
+            }
             match read_static_property(runtime, realm, &base, &property.key)? {
                 PropertyReadOutcome::Value(value) => Ok(NativeDispatch::Immediate(value)),
                 PropertyReadOutcome::Getter { function, receiver } => {
@@ -2677,6 +2694,22 @@ fn finish_property_key_target(
                     value,
                     OperatorPrimitiveHint::Number,
                     target,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                );
+            }
+            if let Some(reference) = base.heap_reference() {
+                return begin_internal_set(
+                    runtime,
+                    reference,
+                    property.key,
+                    property.name,
+                    value,
+                    base,
+                    strict,
+                    false,
                     realm,
                     return_to,
                     origin.clone(),
@@ -2758,18 +2791,67 @@ fn finish_property_key_target(
         ),
         PropertyKeyTarget::OwnPropertyDescriptor { target, realm }
         | PropertyKeyTarget::ReflectOwnPropertyDescriptor { target, realm } => {
+            if let Some(reference) = target.heap_reference()
+                && runtime.proxy_state(reference)?.is_some()
+            {
+                return begin_internal_get_own_property(
+                    runtime,
+                    reference,
+                    property.key,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                );
+            }
             own_property_descriptor(runtime, realm, &target, &property.key, origin)
         }
         // `Object.hasOwn`, `hasOwnProperty`, and `propertyIsEnumerable` share
         // one own-property resolution with `getOwnPropertyDescriptor`, so all
         // four agree on every admitted exotic case.
         PropertyKeyTarget::HasOwnProperty { target, realm } => {
+            if let Some(reference) = target.heap_reference()
+                && runtime.proxy_state(reference)?.is_some()
+            {
+                let dispatch = begin_internal_get_own_property(
+                    runtime,
+                    reference,
+                    property.key,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_own_descriptor_query_after(
+                    runtime,
+                    dispatch,
+                    OwnDescriptorQuery::Present,
+                );
+            }
             let own = resolve_own_property(runtime, realm, &target, &property.key, origin)?;
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(
                 own.is_some(),
             )))
         }
         PropertyKeyTarget::PropertyIsEnumerable { target, realm } => {
+            if let Some(reference) = target.heap_reference()
+                && runtime.proxy_state(reference)?.is_some()
+            {
+                let dispatch = begin_internal_get_own_property(
+                    runtime,
+                    reference,
+                    property.key,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_own_descriptor_query_after(
+                    runtime,
+                    dispatch,
+                    OwnDescriptorQuery::Enumerable,
+                );
+            }
             // An absent property is not enumerable, and neither is an inherited
             // one: the test is on the own property only.
             let own = resolve_own_property(runtime, realm, &target, &property.key, origin)?;
@@ -2804,77 +2886,111 @@ fn finish_property_key_target(
         PropertyKeyTarget::LegacyLookupAccessor { target, kind } => {
             finish_legacy_lookup_accessor(runtime, &target, kind, &property.key, execution_budget)
         }
-        PropertyKeyTarget::ReflectHas { target, realm } => Ok(NativeDispatch::Immediate(
-            StoredValue::Boolean(has_property(runtime, realm, &target, &property.key)?),
-        )),
-        PropertyKeyTarget::ReflectGet { target, receiver } => {
+        PropertyKeyTarget::ReflectHas { target, realm }
+        | PropertyKeyTarget::In { target, realm } => {
+            let reference = target
+                .heap_reference()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Reflect.has lost its validated target",
+                })?;
+            begin_internal_has(
+                runtime,
+                reference,
+                property.key,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
+        PropertyKeyTarget::ReflectGet {
+            target,
+            receiver,
+            realm,
+        } => {
             charge_heap_property_lookup(runtime, &target, execution_budget)?;
             let reference = target
                 .heap_reference()
                 .ok_or(EngineFault::RuntimeInvariant {
                     message: "Reflect.get lost its validated target",
                 })?;
-            match read_heap_property_for_receiver(runtime, reference, receiver, &property.key)? {
-                PropertyReadOutcome::Value(value) => Ok(NativeDispatch::Immediate(value)),
-                PropertyReadOutcome::Getter { function, receiver } => {
-                    Ok(NativeDispatch::Call(NativeCall {
-                        function,
-                        receiver,
-                        arguments: CallArguments::empty(),
-                        return_to,
-                        origin: origin.clone(),
-                        continuations: Vec::new(),
-                        pre_call: None,
-                        new_target: None,
-                        native_caller: None,
-                    }))
-                }
-                PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-                    message: "Reflect.get failed an object-valued property read",
-                }
-                .into()),
-            }
+            begin_internal_get(
+                runtime,
+                reference,
+                receiver,
+                property.key,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
         }
         PropertyKeyTarget::ReflectSet {
             target,
             receiver,
             value,
             realm,
-        } => reflect_set_property(
-            runtime,
-            realm,
-            target,
-            property.key,
-            property.name,
-            value,
-            receiver,
-            return_to,
-            origin.clone(),
-            execution_budget,
-        ),
+        } => {
+            let reference = target
+                .heap_reference()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Reflect.set target lost its object reference",
+                })?;
+            begin_internal_set(
+                runtime,
+                reference,
+                property.key,
+                property.name,
+                value,
+                receiver,
+                false,
+                true,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         PropertyKeyTarget::Delete {
             base,
             strict,
             realm,
-        } => match delete_static_property(runtime, &base, &property.key)? {
-            PropertyDeleteOutcome::Deleted => {
-                Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
-            }
-            PropertyDeleteOutcome::Refused if strict => {
-                Err(NativeFailure::Abrupt(property_exception_at(
+        } => {
+            if let Some(reference) = base.heap_reference()
+                && runtime.proxy_state(reference)?.is_some()
+            {
+                return begin_internal_delete(
+                    runtime,
+                    reference,
+                    property.key,
+                    strict,
+                    false,
                     realm,
+                    return_to,
                     origin.clone(),
-                    Some(&property.name),
-                    PropertyFailure::NotDeletable,
-                )?))
+                    execution_budget,
+                );
             }
-            PropertyDeleteOutcome::Refused => {
-                Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+            match delete_static_property(runtime, &base, &property.key)? {
+                PropertyDeleteOutcome::Deleted => {
+                    Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
+                }
+                PropertyDeleteOutcome::Refused if strict => {
+                    Err(NativeFailure::Abrupt(property_exception_at(
+                        realm,
+                        origin.clone(),
+                        Some(&property.name),
+                        PropertyFailure::NotDeletable,
+                    )?))
+                }
+                PropertyDeleteOutcome::Refused => {
+                    Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+                }
+                PropertyDeleteOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
+                    property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
+                )),
             }
-            PropertyDeleteOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
-                property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
-            )),
-        },
+        }
         PropertyKeyTarget::DefineMethod {
             base,
             function,

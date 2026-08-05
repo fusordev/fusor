@@ -541,6 +541,20 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::ObjectKeyListing(state) => advance_object_key_listing(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::ProxyEnumerable(state) => advance_proxy_enumerable(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::ObjectAssign(state) => advance_object_assign(
                 runtime,
                 *state,
@@ -691,6 +705,59 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::ProxyGet(state) => advance_proxy_get(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::ProxyCall(state) => advance_proxy_call(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::ProxyBoolean(state) => advance_proxy_boolean(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::ProxyMeta(state) => advance_proxy_meta(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::ProxyDescriptor(state) => advance_proxy_descriptor(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::ProxyDefine(state) => advance_proxy_define(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::ProxyOwnKeys(state) => advance_proxy_own_keys(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::ObjectMeta(state) => advance_object_meta(state, &value)?,
+            NativeContinuation::OwnDescriptorQuery(state) => {
+                advance_own_descriptor_query(runtime, state, value.duplicate())?
+            }
             NativeContinuation::AsyncAwait { origin } => finish_async_await(&value, origin)?,
             NativeContinuation::AsyncGeneratorReturnAwait {
                 generator,
@@ -701,6 +768,7 @@ pub(super) fn resume_native_continuations(
                 runtime, generator, kind, origin, completion, &value,
             )?,
             NativeContinuation::ReflectSet => NativeDispatch::Immediate(StoredValue::Boolean(true)),
+            NativeContinuation::ProxyWrite => NativeDispatch::Immediate(StoredValue::Undefined),
             NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
         };
         match dispatch {
@@ -820,6 +888,102 @@ fn resolve_native_dispatch_inner(
         let capability_executor = node.promise_capability_executor().cloned();
         let promise_finally = node.promise_finally().cloned();
         let promise_combinator_element = node.promise_combinator_element().cloned();
+        let proxy = node.proxy().copied();
+        let proxy_revoker = node.proxy_revoker();
+        if let Some(revoker) = proxy_revoker {
+            if call.new_target.is_some() {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    realm: revoker.realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("Proxy revoker is not a constructor")?,
+                    },
+                    origin: call.origin,
+                }));
+            }
+            apply_native_pre_call(runtime, call.pre_call.as_ref())?;
+            runtime.revoke_proxy(revoker.proxy)?;
+            dispatch = resume_native_continuations(
+                runtime,
+                call.continuations,
+                StoredValue::Undefined,
+                call.return_to,
+                active_root_frames,
+                active_frames,
+                active_frame_values,
+                compiler,
+                execution_budget,
+            )?;
+            continue;
+        }
+        if proxy.is_some() {
+            apply_native_pre_call(runtime, call.pre_call.as_ref())?;
+            let outcome = begin_proxy_function_call(
+                runtime,
+                call.function,
+                call.receiver,
+                call.arguments,
+                call.new_target,
+                call.return_to,
+                call.origin,
+                execution_budget,
+            );
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(
+                    NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending),
+                ) => {
+                    dispatch = resume_iterator_abrupt_continuations(
+                        runtime,
+                        call.continuations,
+                        pending,
+                        call.return_to,
+                        active_root_frames,
+                        active_frames,
+                        active_frame_values,
+                        compiler,
+                        execution_budget,
+                    )?;
+                    continue;
+                }
+                Err(NativeFailure::Execution(error)) => {
+                    return Err(NativeFailure::Execution(error));
+                }
+            };
+            dispatch = match outcome {
+                NativeDispatch::Immediate(value) => resume_native_continuations(
+                    runtime,
+                    call.continuations,
+                    value,
+                    call.return_to,
+                    active_root_frames,
+                    active_frames,
+                    active_frame_values,
+                    compiler,
+                    execution_budget,
+                )?,
+                NativeDispatch::Call(mut inner) => {
+                    prepend_native_continuations(&mut inner, call.continuations)?;
+                    NativeDispatch::Call(inner)
+                }
+                NativeDispatch::Frame(mut frame) => {
+                    attach_native_continuations(&mut frame, call.continuations)?;
+                    NativeDispatch::Frame(frame)
+                }
+                NativeDispatch::Pair(_, _)
+                | NativeDispatch::ForOfRecord { .. }
+                | NativeDispatch::ForOfStep { .. }
+                | NativeDispatch::ForOfClosed
+                | NativeDispatch::CopyDataPropertiesDone
+                | NativeDispatch::AsyncAwait { .. } => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Proxy function produced a structured result",
+                    }
+                    .into());
+                }
+            };
+            continue;
+        }
         if native.is_none()
             && let Some(bound) = node.bound()
         {
@@ -1580,7 +1744,9 @@ pub(super) fn dispatch_native_call_with_frames(
                 runtime,
                 native.realm,
                 arguments.take_first(),
-                origin.as_ref(),
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
             )
         }
         NativeFunctionKind::ObjectCreate => object_create(
@@ -1591,16 +1757,23 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
-        NativeFunctionKind::ObjectSetPrototypeOf => {
-            set_prototype_of(runtime, native.realm, inputs.arguments, origin.as_ref())
-        }
+        NativeFunctionKind::ObjectSetPrototypeOf => set_prototype_of(
+            runtime,
+            native.realm,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::ObjectPreventExtensions => {
             let mut arguments = inputs.arguments;
             prevent_extensions(
                 runtime,
                 native.realm,
                 arguments.take_first(),
-                origin.as_ref(),
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
             )
         }
         NativeFunctionKind::ObjectIsExtensible => {
@@ -1609,7 +1782,9 @@ pub(super) fn dispatch_native_call_with_frames(
                 runtime,
                 native.realm,
                 arguments.take_first(),
-                origin.as_ref(),
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
             )
         }
         NativeFunctionKind::ObjectSeal | NativeFunctionKind::ObjectFreeze => {
@@ -1657,7 +1832,8 @@ pub(super) fn dispatch_native_call_with_frames(
                 native.realm,
                 arguments.take_first(),
                 listing,
-                origin.as_ref(),
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
                 execution_budget,
             )
         }
@@ -1867,7 +2043,9 @@ pub(super) fn dispatch_native_call_with_frames(
             runtime,
             native.realm,
             inputs.receiver,
-            &origin.unwrap_or_else(native_function_host_origin),
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
         ),
         NativeFunctionKind::ObjectPrototypeProtoSetter => {
             let requested = inputs.arguments.take_first_or_undefined();
@@ -1876,7 +2054,9 @@ pub(super) fn dispatch_native_call_with_frames(
                 native.realm,
                 &inputs.receiver,
                 &requested,
-                &origin.unwrap_or_else(native_function_host_origin),
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
             )
         }
         NativeFunctionKind::ObjectPrototypeDefineGetter
@@ -1917,6 +2097,18 @@ pub(super) fn dispatch_native_call_with_frames(
             active_frames,
             active_frame_values,
             execution_budget,
+        ),
+        NativeFunctionKind::ProxyConstructor => begin_proxy_constructor(
+            runtime,
+            native.realm,
+            inputs,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::ProxyRevocable => begin_proxy_revocable(
+            runtime,
+            native.realm,
+            inputs.arguments,
+            origin.unwrap_or_else(native_function_host_origin),
         ),
         NativeFunctionKind::JsonParse => begin_json_parse(
             runtime,

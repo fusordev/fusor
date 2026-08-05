@@ -1464,6 +1464,31 @@ pub(super) fn execute_one(
             } else {
                 peek(frame)?.duplicate()
             };
+            if let Some(reference) = base.heap_reference()
+                && runtime.proxy_state(reference)?.is_some()
+            {
+                let return_to =
+                    CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                        EngineFault::InvalidSuccessor {
+                            function: frame.template,
+                            pc: source_pc,
+                        },
+                    )?);
+                let origin = instruction_location(runtime, frame, source_pc)?;
+                return native_step(
+                    begin_internal_get(
+                        runtime,
+                        reference,
+                        base,
+                        property.key,
+                        realm,
+                        Some(return_to),
+                        origin,
+                        execution_budget,
+                    ),
+                    return_to,
+                );
+            }
             match read_static_property(runtime, realm, &base, &property.key)? {
                 PropertyReadOutcome::Value(value) => push(frame, value),
                 PropertyReadOutcome::Getter { function, receiver } => {
@@ -1501,6 +1526,35 @@ pub(super) fn execute_one(
             let property = static_property_operand(runtime, frame, operands)?;
             let value = pop(frame)?;
             let base = pop(frame)?;
+            if let Some(reference) = base.heap_reference()
+                && runtime.proxy_state(reference)?.is_some()
+            {
+                let return_to =
+                    CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
+                        EngineFault::InvalidSuccessor {
+                            function: frame.template,
+                            pc: source_pc,
+                        },
+                    )?);
+                let origin = instruction_location(runtime, frame, source_pc)?;
+                return native_step(
+                    begin_internal_set(
+                        runtime,
+                        reference,
+                        property.key,
+                        property.name,
+                        value,
+                        base,
+                        frame.strict,
+                        false,
+                        realm,
+                        Some(return_to),
+                        origin,
+                        execution_budget,
+                    ),
+                    return_to,
+                );
+            }
             if is_array_length_target(runtime, &base, &property.key)? {
                 let return_to =
                     CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
@@ -2308,6 +2362,45 @@ pub(super) fn execute_one(
                 execution_budget,
             );
             return native_step(dispatch, return_to);
+        }
+        FinalOpcode::In => {
+            let realm = code(runtime, frame.code)?.realm;
+            let right = pop(frame)?;
+            if right.heap_reference().is_none() {
+                let origin = instruction_location(runtime, frame, source_pc)?;
+                return Ok(Step::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("right operand of 'in' is not an object")?,
+                    },
+                    origin,
+                }));
+            }
+            let left = pop(frame)?;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_property_key_conversion(
+                    runtime,
+                    left,
+                    PropertyKeyTarget::In {
+                        target: right,
+                        realm,
+                    },
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
         }
         FinalOpcode::Lnot => {
             let value = pop(frame)?;

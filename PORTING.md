@@ -88,9 +88,13 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 382 Realm-local identities and 1,167 ordered properties.
-- [ ] Implement Proxy and the remaining exotic-object internal methods, with
-  spec-ordered traps and invariant enforcement.
+  snapshot pins 384 Realm-local identities and 1,173 ordered properties.
+- [ ] Finish Proxy integration and the remaining exotic-object algorithms. All
+  11 Proxy internal methods, revocation, nested-target invariants, `in`,
+  Reflect/Object meta and key APIs, values/entries, assign, and object-rest
+  copying are spec-ordered and tested. Remaining gates are Proxy-backed
+  `ToPropertyDescriptor`, integrity-level operations, and legacy prototype
+  walks before this milestone may be checked.
 - [ ] Intern object shapes and transitions without changing descriptor, key
   order, prototype, or GC behavior.
 - [ ] Add dense indexed storage with exact hole, `length`, descriptor, and

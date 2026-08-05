@@ -144,6 +144,7 @@ pub(in crate::runtime) enum RealmNameId {
     RegExpCompile,
     RegExpTest,
     PromiseStatic(PromiseStatic),
+    ProxyRevocable,
     MapMethod(MapMethod),
     SetMethod(SetMethod),
     Deref,

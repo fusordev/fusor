@@ -1700,6 +1700,9 @@ impl RegExpState {
 
 pub(crate) enum HeapObjectKind {
     Ordinary,
+    /// A non-callable Proxy exotic object. Callable proxies live in the
+    /// function arena but share the same specification-level state.
+    Proxy(ProxyState),
     /// An ordinary or exotic arguments object with `[[ParameterMap]]` state.
     Arguments(ArgumentsState),
     /// An ordinary null-prototype object with the `[[IsRawJSON]]` slot.
@@ -1728,6 +1731,41 @@ pub(crate) enum HeapObjectKind {
     WeakRef(WeakRefState),
     /// An ECMAScript `FinalizationRegistry` with strongly held cleanup state.
     FinalizationRegistry(FinalizationRegistryState),
+}
+
+/// Specification-level Proxy slots shared by callable and non-callable proxy
+/// allocation paths. Revocation clears both strong edges atomically while the
+/// call/construct profile remains fixed for the proxy's lifetime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProxyState {
+    pub(crate) target: Option<HeapReference>,
+    pub(crate) handler: Option<HeapReference>,
+    pub(crate) callable: bool,
+    pub(crate) constructable: bool,
+    pub(crate) realm: RealmId,
+}
+
+impl ProxyState {
+    pub(crate) const fn new(
+        target: HeapReference,
+        handler: HeapReference,
+        callable: bool,
+        constructable: bool,
+        realm: RealmId,
+    ) -> Self {
+        Self {
+            target: Some(target),
+            handler: Some(handler),
+            callable,
+            constructable,
+            realm,
+        }
+    }
+
+    pub(crate) const fn revoke(&mut self) {
+        self.target = None;
+        self.handler = None;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1804,6 +1842,7 @@ impl HeapObjectKind {
     pub(crate) const fn boxed_primitive(&self) -> Option<&BoxedPrimitive> {
         match self {
             Self::Ordinary
+            | Self::Proxy(_)
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
@@ -1829,6 +1868,7 @@ impl HeapObjectKind {
         match self {
             Self::Array(state) => Some(state),
             Self::Ordinary
+            | Self::Proxy(_)
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Error
@@ -1853,6 +1893,7 @@ impl HeapObjectKind {
         match self {
             Self::Array(state) => Some(state),
             Self::Ordinary
+            | Self::Proxy(_)
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Error
@@ -1877,6 +1918,7 @@ impl HeapObjectKind {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::Proxy(_)
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
@@ -1901,6 +1943,7 @@ impl HeapObjectKind {
         match self {
             Self::ForInIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::Proxy(_)
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
@@ -1925,6 +1968,7 @@ impl HeapObjectKind {
         match self {
             Self::ArrayIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::Proxy(_)
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
@@ -1949,6 +1993,7 @@ impl HeapObjectKind {
         match self {
             Self::ArrayIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::Proxy(_)
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
@@ -1973,6 +2018,7 @@ impl HeapObjectKind {
         match self {
             Self::StringIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::Proxy(_)
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
@@ -1997,6 +2043,7 @@ impl HeapObjectKind {
         match self {
             Self::StringIterator(iterator) => Some(iterator),
             Self::Ordinary
+            | Self::Proxy(_)
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
@@ -2157,6 +2204,15 @@ impl HeapObject {
     pub(crate) const fn ordinary(record: ObjectRecord) -> Self {
         Self {
             kind: HeapObjectKind::Ordinary,
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn proxy(record: ObjectRecord, state: ProxyState) -> Self {
+        Self {
+            kind: HeapObjectKind::Proxy(state),
             record,
             public_roots: 0,
         }
@@ -2348,6 +2404,20 @@ impl HeapObject {
         &self.kind
     }
 
+    pub(crate) const fn proxy_state(&self) -> Option<&ProxyState> {
+        match &self.kind {
+            HeapObjectKind::Proxy(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn proxy_state_mut(&mut self) -> Option<&mut ProxyState> {
+        match &mut self.kind {
+            HeapObjectKind::Proxy(state) => Some(state),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub(crate) const fn is_error(&self) -> bool {
         matches!(self.kind, HeapObjectKind::Error)
@@ -2389,6 +2459,7 @@ impl HeapObject {
         match &self.kind {
             HeapObjectKind::Arguments(state) => state.cell(index),
             HeapObjectKind::Ordinary
+            | HeapObjectKind::Proxy(_)
             | HeapObjectKind::RawJson
             | HeapObjectKind::Array(_)
             | HeapObjectKind::Error
@@ -2413,6 +2484,7 @@ impl HeapObject {
         match &self.kind {
             HeapObjectKind::Arguments(state) => Some(state.cells()),
             HeapObjectKind::Ordinary
+            | HeapObjectKind::Proxy(_)
             | HeapObjectKind::RawJson
             | HeapObjectKind::Array(_)
             | HeapObjectKind::Error
@@ -2439,6 +2511,7 @@ impl HeapObject {
         match &mut self.kind {
             HeapObjectKind::Arguments(state) => state.detach(index),
             HeapObjectKind::Ordinary
+            | HeapObjectKind::Proxy(_)
             | HeapObjectKind::RawJson
             | HeapObjectKind::Array(_)
             | HeapObjectKind::Error
@@ -2463,6 +2536,7 @@ impl HeapObject {
         match &self.kind {
             HeapObjectKind::Arguments(state) => state.mapping_len(),
             HeapObjectKind::Ordinary
+            | HeapObjectKind::Proxy(_)
             | HeapObjectKind::RawJson
             | HeapObjectKind::Array(_)
             | HeapObjectKind::Error
