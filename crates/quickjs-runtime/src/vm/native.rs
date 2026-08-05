@@ -653,6 +653,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::StringSplit(state) => advance_string_split(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::LocaleString(state) => advance_locale_string(
                 runtime,
                 *state,
@@ -2393,6 +2400,15 @@ pub(super) fn dispatch_native_call_with_frames(
         ) => begin_string_replace(
             runtime,
             matches!(method, StringMethod::ReplaceAll),
+            native.realm,
+            inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::StringPrototypeMethod(StringMethod::Split) => begin_string_split(
+            runtime,
             native.realm,
             inputs.receiver,
             inputs.arguments,

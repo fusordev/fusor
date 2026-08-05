@@ -87,7 +87,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 356 Realm-local identities and 1,090 ordered properties.
+  snapshot pins 357 Realm-local identities and 1,093 ordered properties.
 - [ ] Add Proxy and remaining exotics, shape/transition interning, dense indexed
   storage, and complete reflection/diagnostics.
 
@@ -96,8 +96,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Globals; admitted `Object`; all 13 `Reflect` methods; `Error`, native
   subclasses, and `AggregateError`; `Boolean`, `Number`, `BigInt`, and `Symbol`.
 - [x] Broad non-RegExp `String`, Unicode/normalization behavior, resumable
-  `replace`/`replaceAll` protocol and plain-string paths, Annex B HTML wrappers,
-  and pinned ICU4X data. `replaceAll`: 6/6 shared cases, 14/14 feature tags.
+  `replace`/`replaceAll`/`split` protocols and plain-string paths, Annex B HTML
+  wrappers, and pinned ICU4X data. Shared corpora: `replaceAll` 6/6 cases and
+  14/14 tags; `split` 6/6 cases and 17/17 tags.
 - [x] Full admitted `Array`, including generic array-like behavior and
   spec-ordered, resource-traced `fromAsync` iterator/array-like suspension.
 - [x] `Map`: ordered SameValueZero storage, `AddEntriesFromIterable` close
@@ -123,9 +124,8 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Iterative `%JSON%` plus `rawJSON`; complete pinned `%Math%`, including
   exact `sumPrecise`; and intrinsic Promise core/combinators with bounded FIFO
   jobs and typed close/order continuations (29/29, 46/46 feature tags).
-- [ ] Complete the remaining RegExp-coupled String methods (`match`, `matchAll`,
-  `search`, and `split`); implement RegExp, Date, Temporal, Proxy, binary
-  data/typed arrays, and Atomics.
+- [ ] Complete `String.prototype.match`, `matchAll`, and `search`; implement
+  RegExp, Date, Temporal, Proxy, binary data/typed arrays, and Atomics.
 
 ### Jobs, asynchronous semantics, and modules
 
@@ -180,10 +180,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
   pinned QuickJS deletes that entry and appends the computed result. ECMA-262
   rescans and updates the callback-created entry in place; this port follows the
   specification and preserves its insertion position.
-- `QJS-STRING-001`: pinned QuickJS skips inherited `@@replace` lookup when the
-  `replace` or `replaceAll` search value is primitive. ECMA-262 `GetMethod`
-  observes the primitive wrapper prototype; this port follows the specification,
-  matching Node.
+- `QJS-STRING-001`: pinned QuickJS skips inherited `@@replace`/`@@split` lookup
+  for primitive search or separator values. ES2025 `GetMethod` observes the
+  primitive wrapper prototype; this port follows the specification and Node.
 
 ## Completion gates
 
@@ -216,6 +215,7 @@ QuickJS `qjs` or `qjsc`. Current corpus results are:
 | Legacy `Object.prototype` | 15/15, 15/15 feature tags |
 | Annex B String HTML | 6/6, 18/18 feature tags |
 | `String.prototype.replaceAll` | 6/6, 14/14 feature tags (QuickJS and Node) |
+| `String.prototype.split` | 6/6, 17/17 feature tags (QuickJS and Node) |
 | Promise core | 29/29, 46/46 feature tags |
 | `Array.fromAsync` | 5/5 (Node; absent in pinned QuickJS) |
 | Map | 6/6, 13/13 feature tags (QuickJS and Node) |

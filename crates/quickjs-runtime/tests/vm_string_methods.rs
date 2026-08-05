@@ -64,6 +64,8 @@
 //! replace conversion order => "get,recv,search,repl"
 //! "ababa".replaceAll("a", "X") => "XbXbX"
 //! "ab".replaceAll("", callback) callback positions => "0,1,2"
+//! "a,,b,".split(",") => ["a", "", "b", ""]
+//! "aaaa".split("aa") => ["", "", ""]
 //! ```
 
 use std::{error::Error, fmt, sync::Arc};
@@ -483,6 +485,104 @@ fn replace_all_rejects_regexp_like_objects_without_a_global_flag() {
     );
 }
 
+/// The plain-string `split` path finds non-overlapping UTF-16 matches and
+/// preserves leading, adjacent, and trailing empty substrings.
+#[test]
+fn split_applies_plain_string_separator_and_uint32_limit() {
+    assert_all(&[
+        ("'a,b,c'.split(',').join('|')", "a|b|c"),
+        ("'a,,b,'.split(',').join('|')", "a||b|"),
+        ("'aaaa'.split('aa').join('|')", "||"),
+        ("'abc'.split('z').join('|')", "abc"),
+        ("'a,b,c'.split(',', 2).join('|')", "a|b"),
+        ("'a,b'.split(',', 0).length", "0"),
+        ("'a,b'.split(',', -1).join('|')", "a|b"),
+        ("'a,b'.split(',', 4294967297).join('|')", "a"),
+        ("'a,b'.split(',', 4294967296).length", "0"),
+        ("'a,b'.split(',', Infinity).length", "0"),
+        ("'a,b'.split(',', NaN).length", "0"),
+        ("'a,b,c'.split(',', 2.9).join('|')", "a|b"),
+        ("'abc'.split(undefined).join('|')", "abc"),
+        ("'null'.split(null).length", "2"),
+    ]);
+}
+
+/// An empty separator splits into UTF-16 code units, including lone
+/// surrogates, and the empty-subject corner cases follow the specification.
+#[test]
+fn split_handles_empty_separator_and_utf16_boundaries() {
+    assert_all(&[
+        ("'ab'.split('').join('|')", "a|b"),
+        ("''.split('').length", "0"),
+        ("''.split('x').length", "1"),
+        ("''.split('x')[0]", ""),
+        (
+            "(function(){const a=String.fromCharCode(0xD800,120).split('');return a.length+'|'+a[0].charCodeAt(0)+'|'+a[1].charCodeAt(0);})()",
+            "2|55296|120",
+        ),
+    ]);
+}
+
+/// `GetMethod(separator, @@split)` precedes every fallback coercion and a
+/// callable protocol receives the original receiver and limit unchanged.
+#[test]
+fn split_dispatches_symbol_protocol_before_fallback_coercion() {
+    assert_all(&[
+        (
+            "(function(){let log=[];const receiver={toString(){log.push('receiver');return 'a,b';}};const limit={valueOf(){log.push('limit');return 1;}};const separator={get [Symbol.split](){log.push('get');return function(r,l){log.push('call');return (this===separator)+'|'+(r===receiver)+'|'+(l===limit);};},toString(){throw 1;}};const result=String.prototype.split.call(receiver,separator,limit);return result+'#'+log.join(',');})()",
+            "true|true|true#get,call",
+        ),
+        (
+            "(function(){let log=[];const receiver={toString(){log.push('receiver');return 'a,b';}};const limit={valueOf(){log.push('limit');return 1;}};const separator={get [Symbol.split](){log.push('get');return undefined;},toString(){log.push('separator');return ',';}};const result=String.prototype.split.call(receiver,separator,limit);return result.join('|')+'#'+log.join(',');})()",
+            "a#get,receiver,limit,separator",
+        ),
+        // ES2025 GetMethod applies to non-null primitives as well as objects.
+        (
+            "(function(){String.prototype[Symbol.split]=function(receiver,limit){return this+'|'+receiver+'|'+limit;};return 'abc'.split('b',2);})()",
+            "b|abc|2",
+        ),
+        (
+            "(function(){const separator={[Symbol.split]:null,toString(){return ',';}};return 'a,b'.split(separator).join('|');})()",
+            "a|b",
+        ),
+    ]);
+    assert_throws(
+        "return 'abc'.split({[Symbol.split]: 1});",
+        ExceptionKind::TypeError,
+        "not a function",
+    );
+}
+
+/// `RequireObjectCoercible` precedes even the `@@split` getter, while the
+/// fallback always converts receiver, limit, and separator in normative order.
+#[test]
+fn split_preserves_nullish_and_fallback_observation_order() {
+    assert_all(&[
+        (
+            "(function(){let touched=false;const separator={get [Symbol.split](){touched=true;}};try{String.prototype.split.call(null,separator);}catch(error){}return touched;})()",
+            "false",
+        ),
+        // The separator conversion is observable even when limit becomes 0.
+        (
+            "(function(){let log=[];const receiver={toString(){log.push('receiver');return 'a,b';}};const limit={valueOf(){log.push('limit');return 0;}};const separator={get [Symbol.split](){log.push('get');return undefined;},toString(){log.push('separator');return ',';}};const result=String.prototype.split.call(receiver,separator,limit);return result.length+'#'+log.join(',');})()",
+            "0#get,receiver,limit,separator",
+        ),
+        (
+            "(function(){let log=[];const separator={get [Symbol.split](){log.push('get');return undefined;},toString(){log.push('separator');throw 3;}};const receiver={toString(){log.push('receiver');return 'a,b';}};const limit={valueOf(){log.push('limit');throw 2;}};try{String.prototype.split.call(receiver,separator,limit);}catch(error){log.push('throw'+error);}return log.join(',');})()",
+            "get,receiver,limit,throw2",
+        ),
+        (
+            "(function(){let log=[];const separator={get [Symbol.split](){log.push('get');throw 1;}};const receiver={toString(){log.push('receiver');return 'a,b';}};try{String.prototype.split.call(receiver,separator);}catch(error){log.push('throw'+error);}return log.join(',');})()",
+            "get,throw1",
+        ),
+    ]);
+    assert_throws(
+        "return String.prototype.split.call(undefined, ',');",
+        ExceptionKind::TypeError,
+        "null or undefined are forbidden",
+    );
+}
+
 /// `repeat` truncates its count and rejects a negative or infinite one.
 #[test]
 fn repeat_rejects_a_negative_or_infinite_count() {
@@ -721,6 +821,8 @@ fn the_installed_methods_have_the_pinned_shape() {
         ("String.prototype.replace.name", "replace"),
         ("String.prototype.replaceAll.length", "2"),
         ("String.prototype.replaceAll.name", "replaceAll"),
+        ("String.prototype.split.length", "2"),
+        ("String.prototype.split.name", "split"),
         ("String.prototype.trim.length", "0"),
         ("String.prototype.trim.name", "trim"),
         ("String.prototype.isWellFormed.length", "0"),
@@ -790,7 +892,7 @@ fn supported_string_prototype_names_preserve_the_pinned_quickjs_order() {
     assert_eq!(
         rendered("Object.getOwnPropertyNames(String.prototype).join('|')"),
         "length|at|charCodeAt|charAt|concat|codePointAt|isWellFormed|toWellFormed|\
-         indexOf|lastIndexOf|includes|endsWith|startsWith|substring|substr|slice|repeat|\
+         indexOf|lastIndexOf|includes|endsWith|startsWith|split|substring|substr|slice|repeat|\
          replace|replaceAll|padEnd|padStart|trim|trimEnd|trimRight|trimStart|trimLeft|toString|\
          valueOf|toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase|anchor|big|\
          blink|bold|fixed|fontcolor|fontsize|italics|link|small|strike|sub|sup|\

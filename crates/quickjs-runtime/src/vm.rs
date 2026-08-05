@@ -116,6 +116,7 @@ mod stack;
 mod string_methods;
 mod string_raw;
 mod string_replace;
+mod string_split;
 mod uri;
 mod weak_collections;
 mod weak_references;
@@ -135,7 +136,7 @@ use {
     exceptions::*, execution::*, from_entries::*, generator::*, group_by::*, iterators::*,
     json_parse::*, json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*,
     native::*, object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*,
-    set::*, stack::*, string_methods::*, string_raw::*, string_replace::*, uri::*,
+    set::*, stack::*, string_methods::*, string_raw::*, string_replace::*, string_split::*, uri::*,
     weak_collections::*, weak_references::*,
 };
 
@@ -426,6 +427,7 @@ enum NativeContinuation {
     ArrayFromAsync(Box<ArrayFromAsyncRecord>),
     StringRaw(Box<StringRawContinuation>),
     StringReplace(Box<StringReplaceContinuation>),
+    StringSplit(Box<StringSplitContinuation>),
     LocaleString(Box<LocaleStringContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
@@ -496,6 +498,7 @@ impl NativeContinuation {
             Self::ArrayFromAsync(state) => state.retained_values(),
             Self::StringRaw(state) => state.retained_values(),
             Self::StringReplace(state) => state.retained_values(),
+            Self::StringSplit(state) => state.retained_values(),
             Self::LocaleString(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
@@ -1541,6 +1544,9 @@ enum OperatorPrimitiveTarget {
     /// One `String.prototype.replace` fallback operand or callback result,
     /// awaiting `ToString`.
     StringReplaceValue(Box<StringReplaceContinuation>),
+    /// A `String.prototype.split` fallback operand awaiting primitive
+    /// conversion to String or Number.
+    StringSplitValue(Box<StringSplitContinuation>),
     /// A locale-string length or invocation result awaiting primitive conversion.
     LocaleStringValue(Box<LocaleStringContinuation>),
     ArrayLengthWrite(ArrayLengthWriteState),
@@ -1614,6 +1620,7 @@ impl OperatorPrimitiveTarget {
             Self::ArrayStaticLength(state) => state.retained_values(),
             Self::StringRawValue(state) => state.retained_values(),
             Self::StringReplaceValue(state) => state.retained_values(),
+            Self::StringSplitValue(state) => state.retained_values(),
             Self::LocaleStringValue(state) => state.retained_values(),
             Self::MathExtrema(state) => state.retained_values(),
             Self::MathHypot(state) => state.retained_values(),
@@ -1842,6 +1849,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::SetRecordSize(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::StringRawValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::StringReplaceValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::StringSplitValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::LocaleStringValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::MathExtrema(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::MathHypot(state) => state.trace_roots(mark),
@@ -1928,6 +1936,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ArrayFromAsync(state) => state.trace_roots(mark),
         NativeContinuation::StringRaw(state) => state.trace_roots(mark),
         NativeContinuation::StringReplace(state) => state.trace_roots(mark),
+        NativeContinuation::StringSplit(state) => state.trace_roots(mark),
         NativeContinuation::LocaleString(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {

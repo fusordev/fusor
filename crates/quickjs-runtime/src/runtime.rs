@@ -835,6 +835,9 @@ pub(crate) enum StringMethod {
     /// `String.prototype.replaceAll`, which additionally performs the
     /// observable `IsRegExp` and global-flags checks before `@@replace`.
     ReplaceAll,
+    /// `String.prototype.split`, whose `@@split` protocol dispatch precedes
+    /// the receiver, limit, and fallback separator conversions.
+    Split,
     Slice,
     StartsWith,
     Substr,
@@ -879,6 +882,7 @@ impl StringMethod {
             | Self::Concat
             | Self::Replace
             | Self::ReplaceAll
+            | Self::Split
             | Self::FromCharCode
             | Self::FromCodePoint => &[],
             Self::Html(method) => {

@@ -17,20 +17,21 @@ use control_flow_differential::{
     DEFAULT_FUNCTION_APPLY_CORPUS, DEFAULT_FUNCTION_BIND_CORPUS, DEFAULT_GENERATOR_CORPUS,
     DEFAULT_ITERATOR_CORPUS, DEFAULT_MAP_CORPUS, DEFAULT_OBJECT_LEGACY_CORPUS,
     DEFAULT_PROMISE_CORE_CORPUS, DEFAULT_SET_CORPUS, DEFAULT_STRING_HTML_CORPUS,
-    DEFAULT_STRING_REPLACE_ALL_CORPUS, DEFAULT_WEAK_COLLECTIONS_CORPUS,
-    DEFAULT_WEAK_REFERENCES_CORPUS, ErrorDifferentialOptions, FunctionApplyDifferentialOptions,
-    FunctionBindDifferentialOptions, GeneratorDifferentialOptions, IteratorDifferentialOptions,
-    MAX_CONTROL_FLOW_TIMEOUT_MS, MapDifferentialOptions, ObjectLegacyDifferentialOptions,
-    PromiseCoreDifferentialOptions, SetDifferentialOptions, StringHtmlDifferentialOptions,
-    StringReplaceAllDifferentialOptions, WeakCollectionsDifferentialOptions,
+    DEFAULT_STRING_REPLACE_ALL_CORPUS, DEFAULT_STRING_SPLIT_CORPUS,
+    DEFAULT_WEAK_COLLECTIONS_CORPUS, DEFAULT_WEAK_REFERENCES_CORPUS, ErrorDifferentialOptions,
+    FunctionApplyDifferentialOptions, FunctionBindDifferentialOptions,
+    GeneratorDifferentialOptions, IteratorDifferentialOptions, MAX_CONTROL_FLOW_TIMEOUT_MS,
+    MapDifferentialOptions, ObjectLegacyDifferentialOptions, PromiseCoreDifferentialOptions,
+    SetDifferentialOptions, StringHtmlDifferentialOptions, StringReplaceAllDifferentialOptions,
+    StringSplitDifferentialOptions, WeakCollectionsDifferentialOptions,
     WeakReferencesDifferentialOptions, run_async_function_differential,
     run_async_generator_differential, run_call_spread_differential,
     run_control_flow_candidate_worker, run_control_flow_differential, run_error_differential,
     run_function_apply_differential, run_function_bind_differential, run_generator_differential,
     run_iterator_differential, run_map_differential, run_object_legacy_differential,
     run_promise_core_differential, run_set_differential, run_string_html_differential,
-    run_string_replace_all_differential, run_weak_collections_differential,
-    run_weak_references_differential,
+    run_string_replace_all_differential, run_string_split_differential,
+    run_weak_collections_differential, run_weak_references_differential,
 };
 use dynamic_function_differential::{
     DynamicFunctionDifferentialOptions, run_dynamic_function_differential,
@@ -220,6 +221,16 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Ok(Args::StringSplitDifferential(options)) => {
+            match run_string_split_differential(&options) {
+                Ok(true) => ExitCode::SUCCESS,
+                Ok(false) => ExitCode::FAILURE,
+                Err(error) => {
+                    eprintln!("xtask: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Ok(Args::MapDifferential(options)) => match run_map_differential(&options) {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::FAILURE,
@@ -294,6 +305,7 @@ Usage:
   cargo xtask promise-core-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask string-html-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask string-replace-all-differential --oracle QJS_PATH [OPTIONS]
+  cargo xtask string-split-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask map-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask set-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask weak-collections-differential --oracle QJS_PATH [OPTIONS]
@@ -316,6 +328,7 @@ Options:
                       Promise core manifest default: {DEFAULT_PROMISE_CORE_CORPUS};
                       Annex B String HTML manifest default: {DEFAULT_STRING_HTML_CORPUS};
                       String replaceAll manifest default: {DEFAULT_STRING_REPLACE_ALL_CORPUS};
+                      String split manifest default: {DEFAULT_STRING_SPLIT_CORPUS};
                       Map manifest default: {DEFAULT_MAP_CORPUS};
                       Set manifest default: {DEFAULT_SET_CORPUS};
                       weak collections manifest default: {DEFAULT_WEAK_COLLECTIONS_CORPUS};
@@ -350,6 +363,8 @@ Annex B String HTML --oracle must be the pinned QuickJS 2026-06-04 qjs
 interpreter; its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
 String replaceAll --oracle must be the pinned QuickJS 2026-06-04 qjs
 interpreter; its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
+String split --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
+its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
 Map --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
 its timeout must be 1..={MAX_CONTROL_FLOW_TIMEOUT_MS} milliseconds.
 Set --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter;
@@ -382,6 +397,7 @@ enum Args {
     PromiseCoreDifferential(PromiseCoreDifferentialOptions),
     StringHtmlDifferential(StringHtmlDifferentialOptions),
     StringReplaceAllDifferential(StringReplaceAllDifferentialOptions),
+    StringSplitDifferential(StringSplitDifferentialOptions),
     MapDifferential(MapDifferentialOptions),
     SetDifferential(SetDifferentialOptions),
     WeakCollectionsDifferential(WeakCollectionsDifferentialOptions),
@@ -487,6 +503,10 @@ impl Args {
             "string-replace-all-differential" => {
                 parse_string_replace_all_differential_options(arguments.into_iter())
                     .map(Self::StringReplaceAllDifferential)
+            }
+            "string-split-differential" => {
+                parse_string_split_differential_options(arguments.into_iter())
+                    .map(Self::StringSplitDifferential)
             }
             "map-differential" => {
                 parse_map_differential_options(arguments.into_iter()).map(Self::MapDifferential)
@@ -1067,6 +1087,41 @@ fn parse_string_replace_all_differential_options(
     })
 }
 
+fn parse_string_split_differential_options(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<StringSplitDifferentialOptions, String> {
+    let mut oracle = None;
+    let mut corpus = PathBuf::from(DEFAULT_STRING_SPLIT_CORPUS);
+    let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+
+    while let Some(option) = arguments.next() {
+        match option.to_string_lossy().as_ref() {
+            "--oracle" => oracle = Some(required_path(&mut arguments, "--oracle")?),
+            "--corpus" => corpus = required_path(&mut arguments, "--corpus")?,
+            "--timeout-ms" => {
+                timeout = required_timeout(&mut arguments)?;
+                let milliseconds = timeout.as_millis();
+                if milliseconds == 0 || milliseconds > u128::from(MAX_CONTROL_FLOW_TIMEOUT_MS) {
+                    return Err(format!(
+                        "string-split --timeout-ms must be between 1 and {MAX_CONTROL_FLOW_TIMEOUT_MS}"
+                    ));
+                }
+            }
+            unknown => {
+                return Err(format!(
+                    "unknown string-split-differential option `{unknown}`"
+                ));
+            }
+        }
+    }
+
+    Ok(StringSplitDifferentialOptions {
+        oracle: oracle.ok_or("missing required --oracle PATH")?,
+        corpus,
+        timeout,
+    })
+}
+
 fn parse_map_differential_options(
     mut arguments: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<MapDifferentialOptions, String> {
@@ -1550,6 +1605,7 @@ mod tests {
     use crate::control_flow_differential::SetDifferentialOptions;
     use crate::control_flow_differential::StringHtmlDifferentialOptions;
     use crate::control_flow_differential::StringReplaceAllDifferentialOptions;
+    use crate::control_flow_differential::StringSplitDifferentialOptions;
     use crate::control_flow_differential::WeakCollectionsDifferentialOptions;
     use crate::control_flow_differential::WeakReferencesDifferentialOptions;
     use crate::dynamic_function_differential::DynamicFunctionDifferentialOptions;
@@ -2146,6 +2202,44 @@ mod tests {
             assert_eq!(
                 Args::parse(arguments),
                 Err("string-replace-all --timeout-ms must be between 1 and 60000".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn string_split_differential_uses_the_pinned_corpus_by_default() {
+        let arguments = ["string-split-differential", "--oracle", "/tmp/qjs"]
+            .into_iter()
+            .map(OsString::from);
+
+        assert_eq!(
+            Args::parse(arguments),
+            Ok(Args::StringSplitDifferential(
+                StringSplitDifferentialOptions {
+                    oracle: PathBuf::from("/tmp/qjs"),
+                    corpus: PathBuf::from("tests/string-split/manifest.json"),
+                    timeout: Duration::from_secs(5),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_unbounded_string_split_timeouts() {
+        for timeout in ["0", "60001"] {
+            let arguments = [
+                "string-split-differential",
+                "--oracle",
+                "/tmp/qjs",
+                "--timeout-ms",
+                timeout,
+            ]
+            .into_iter()
+            .map(OsString::from);
+
+            assert_eq!(
+                Args::parse(arguments),
+                Err("string-split --timeout-ms must be between 1 and 60000".to_owned())
             );
         }
     }

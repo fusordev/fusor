@@ -39,6 +39,7 @@ pub(crate) const DEFAULT_OBJECT_LEGACY_CORPUS: &str = "tests/object-legacy/manif
 pub(crate) const DEFAULT_PROMISE_CORE_CORPUS: &str = "tests/promise-core/manifest.json";
 pub(crate) const DEFAULT_STRING_HTML_CORPUS: &str = "tests/string-html/manifest.json";
 pub(crate) const DEFAULT_STRING_REPLACE_ALL_CORPUS: &str = "tests/string-replace-all/manifest.json";
+pub(crate) const DEFAULT_STRING_SPLIT_CORPUS: &str = "tests/string-split/manifest.json";
 pub(crate) const DEFAULT_MAP_CORPUS: &str = "tests/map/manifest.json";
 pub(crate) const DEFAULT_SET_CORPUS: &str = "tests/set/manifest.json";
 pub(crate) const DEFAULT_WEAK_COLLECTIONS_CORPUS: &str = "tests/weak-collections/manifest.json";
@@ -410,6 +411,26 @@ const STRING_REPLACE_ALL_REQUIRED_COVERAGE: &[&str] = &[
     "replace-all-utf16",
 ];
 
+const STRING_SPLIT_REQUIRED_COVERAGE: &[&str] = &[
+    "split-descriptor",
+    "split-empty-separator",
+    "split-empty-subject",
+    "split-fallback-order",
+    "split-get-method-errors",
+    "split-leading-adjacent-trailing",
+    "split-limit-uint32",
+    "split-limit-zero",
+    "split-limit-zero-separator-order",
+    "split-no-match",
+    "split-non-overlap",
+    "split-nullish-order",
+    "split-protocol-arguments",
+    "split-surface",
+    "split-symbol-protocol",
+    "split-undefined-separator",
+    "split-utf16",
+];
+
 const MAP_REQUIRED_COVERAGE: &[&str] = &[
     "map-brand",
     "map-constructor-close",
@@ -659,6 +680,7 @@ enum RuntimeDifferentialSuite {
     PromiseCore,
     StringHtml,
     StringReplaceAll,
+    StringSplit,
     Map,
     Set,
     WeakCollections,
@@ -681,6 +703,7 @@ impl RuntimeDifferentialSuite {
             Self::PromiseCore => "promise-core",
             Self::StringHtml => "string-html",
             Self::StringReplaceAll => "string-replace-all",
+            Self::StringSplit => "string-split",
             Self::Map => "map",
             Self::Set => "set",
             Self::WeakCollections => "weak-collections",
@@ -703,6 +726,7 @@ impl RuntimeDifferentialSuite {
             Self::PromiseCore => PROMISE_CORE_REQUIRED_COVERAGE,
             Self::StringHtml => STRING_HTML_REQUIRED_COVERAGE,
             Self::StringReplaceAll => STRING_REPLACE_ALL_REQUIRED_COVERAGE,
+            Self::StringSplit => STRING_SPLIT_REQUIRED_COVERAGE,
             Self::Map => MAP_REQUIRED_COVERAGE,
             Self::Set => SET_REQUIRED_COVERAGE,
             Self::WeakCollections => WEAK_COLLECTIONS_REQUIRED_COVERAGE,
@@ -801,6 +825,13 @@ pub(crate) struct StringHtmlDifferentialOptions {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct StringReplaceAllDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct StringSplitDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -1001,6 +1032,17 @@ pub(crate) fn run_string_replace_all_differential(
         &options.corpus,
         options.timeout,
         RuntimeDifferentialSuite::StringReplaceAll,
+    )
+}
+
+pub(crate) fn run_string_split_differential(
+    options: &StringSplitDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::StringSplit,
     )
 }
 
@@ -2655,6 +2697,21 @@ mod tests {
         .expect("checked-in String replaceAll manifest");
         assert_eq!(corpus.cases.len(), 6);
         assert_eq!(super::STRING_REPLACE_ALL_REQUIRED_COVERAGE.len(), 14);
+    }
+
+    #[test]
+    fn checked_in_string_split_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/string-split/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in String split manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::StringSplit,
+        )
+        .expect("checked-in String split manifest");
+        assert_eq!(corpus.cases.len(), 6);
+        assert_eq!(super::STRING_SPLIT_REQUIRED_COVERAGE.len(), 17);
     }
 
     #[test]

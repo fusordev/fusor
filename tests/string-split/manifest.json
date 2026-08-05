@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "surface-metadata-and-descriptor",
+      "covers": ["split-surface", "split-descriptor"],
+      "body": "let descriptor=Object.getOwnPropertyDescriptor(String.prototype,'split');return [String.prototype.split.name,String.prototype.split.length,descriptor.enumerable,descriptor.writable,descriptor.configurable].join('|');",
+      "expect": {"kind": "string", "value": "split|2|false|true|true"}
+    },
+    {
+      "id": "plain-nonoverlap-and-empty-pieces",
+      "covers": ["split-non-overlap", "split-leading-adjacent-trailing", "split-no-match"],
+      "body": "return ['a,,b,'.split(',').join('|'),'aaaa'.split('aa').join('|'),',a'.split(',').join('|'),'abc'.split('z').join('|')].join('#');",
+      "expect": {"kind": "string", "value": "a||b|#||#|a#abc"}
+    },
+    {
+      "id": "empty-separator-and-utf16",
+      "covers": ["split-empty-separator", "split-empty-subject", "split-utf16"],
+      "body": "let parts=String.fromCharCode(55296,120).split('');return [''.split('').length,''.split('x').length,parts.length,parts[0].charCodeAt(0),parts[1].charCodeAt(0)].join('|');",
+      "expect": {"kind": "string", "value": "0|1|2|55296|120"}
+    },
+    {
+      "id": "uint32-limit-and-undefined-separator",
+      "covers": ["split-limit-uint32", "split-limit-zero", "split-undefined-separator"],
+      "body": "return ['a,b,c'.split(',',2.9).join('|'),'a,b'.split(',',0).length,'a,b'.split(',',-1).join('|'),'a,b'.split(',',4294967297).join('|'),'abc'.split(undefined).join('|')].join('#');",
+      "expect": {"kind": "string", "value": "a|b#0#a|b#a#abc"}
+    },
+    {
+      "id": "protocol-and-fallback-order",
+      "covers": ["split-symbol-protocol", "split-protocol-arguments", "split-fallback-order"],
+      "body": "let log=[];let receiver={toString(){log.push('receiver');return 'a,b';}};let limit={valueOf(){log.push('limit');return 1;}};let separator={get [Symbol.split](){log.push('get');return undefined;},toString(){log.push('separator');return ',';}};let fallback=String.prototype.split.call(receiver,separator,limit).join('|');let protocolSeparator={[Symbol.split](value,count){log.push('call');return this===protocolSeparator&&value===receiver&&count===limit;}};let protocol=String.prototype.split.call(receiver,protocolSeparator,limit);return fallback+'|'+protocol+'#'+log.join(',');",
+      "expect": {"kind": "string", "value": "a|true#get,receiver,limit,separator,call"}
+    },
+    {
+      "id": "nullish-and-get-method-errors",
+      "covers": ["split-nullish-order", "split-get-method-errors", "split-limit-zero-separator-order"],
+      "body": "let touched=false;try{String.prototype.split.call(null,{get [Symbol.split](){touched=true;}});}catch(error){}let errors=[];try{'abc'.split({[Symbol.split]:1});}catch(error){errors.push(error.name);}let log=[];let result=String.prototype.split.call({toString(){log.push('receiver');return 'a,b';}},{get [Symbol.split](){log.push('get');return undefined;},toString(){log.push('separator');return ',';}},{valueOf(){log.push('limit');return 0;}});return touched+'|'+errors.join('|')+'|'+result.length+'#'+log.join(',');",
+      "expect": {"kind": "string", "value": "false|TypeError|0#get,receiver,limit,separator"}
+    }
+  ]
+}
