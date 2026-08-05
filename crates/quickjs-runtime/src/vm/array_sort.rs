@@ -63,6 +63,7 @@ enum ArraySortStage {
     AwaitLength,
     AwaitLengthConversion,
     NextRead,
+    AwaitPresence,
     AwaitRead,
     NextMerge,
     AwaitComparator,
@@ -173,6 +174,7 @@ pub(super) fn begin_array_sort(
 /// Advances collection, stable merging, comparison, and result publication.
 #[allow(
     clippy::too_many_lines,
+    clippy::needless_continue,
     reason = "the explicit stages keep every accessor, comparator, conversion, write, and deletion suspension in specification order"
 )]
 pub(super) fn advance_array_sort(
@@ -183,24 +185,43 @@ pub(super) fn advance_array_sort(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut completion = completion;
+    macro_rules! await_get {
+        ($operation:expr) => {
+            match $operation? {
+                GetContinuationDispatch::Ready {
+                    state: resumed,
+                    value,
+                } => {
+                    state = resumed;
+                    completion = Some(value);
+                    continue;
+                }
+                GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+            }
+        };
+    }
     loop {
         match state.stage {
             ArraySortStage::AwaitLength => {
                 let key = runtime.predefined_property_key(PredefinedAtom::Length);
                 charge_sort_lookup(runtime, &state.target, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArraySortStage::AwaitLengthConversion;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArraySortStage::AwaitLengthConversion;
-                        return suspend_sort(state, function, receiver, Vec::new(), return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(sort_property_failure(&state, failure));
-                    }
-                }
+                state.stage = ArraySortStage::AwaitLengthConversion;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.target,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_sort_continuation,
+                    "Array sort length Get produced a structured result",
+                ));
             }
             ArraySortStage::AwaitLengthConversion => {
                 let value = take_sort_completion(&mut completion)?;
@@ -230,22 +251,43 @@ pub(super) fn advance_array_sort(
                 let index = state.next_read;
                 state.next_read = state.next_read.saturating_add(1);
                 let key = sort_element_key(runtime, index)?;
-                charge_sort_lookup(runtime, &state.target, execution_budget)?;
-                if !state.method.copies()
-                    && !has_property(runtime, state.realm, &state.target, &key)?
-                {
+                if !state.method.copies() {
+                    charge_sort_lookup(runtime, &state.target, execution_budget)?;
+                    state.stage = ArraySortStage::AwaitPresence;
+                    let dispatch = begin_value_has(
+                        runtime,
+                        &state.target,
+                        key,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_sort_continuation,
+                        "Array sort HasProperty produced a structured result",
+                    ));
+                }
+                await_get!(begin_array_sort_element_get(
+                    runtime,
+                    state,
+                    return_to,
+                    execution_budget,
+                ));
+            }
+            ArraySortStage::AwaitPresence => {
+                if !take_sort_completion(&mut completion)?.is_truthy() {
+                    state.stage = ArraySortStage::NextRead;
                     continue;
                 }
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => append_sort_value(&mut state, value)?,
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArraySortStage::AwaitRead;
-                        return suspend_sort(state, function, receiver, Vec::new(), return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(sort_property_failure(&state, failure));
-                    }
-                }
+                await_get!(begin_array_sort_element_get(
+                    runtime,
+                    state,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArraySortStage::AwaitRead => {
                 append_sort_value(&mut state, take_sort_completion(&mut completion)?)?;
@@ -646,6 +688,38 @@ fn convert_sort_value(
         return_to,
         origin,
         execution_budget,
+    )
+}
+
+fn array_sort_continuation(state: ArraySortContinuation) -> NativeContinuation {
+    NativeContinuation::ArraySort(Box::new(state))
+}
+
+fn begin_array_sort_element_get(
+    runtime: &mut Runtime,
+    mut state: ArraySortContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<GetContinuationDispatch<ArraySortContinuation>, NativeFailure> {
+    let index = state.next_read.saturating_sub(1);
+    let key = sort_element_key(runtime, index)?;
+    charge_sort_lookup(runtime, &state.target, execution_budget)?;
+    state.stage = ArraySortStage::AwaitRead;
+    let dispatch = begin_value_get(
+        runtime,
+        &state.target,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_state_after(
+        dispatch,
+        state,
+        array_sort_continuation,
+        "Array sort element Get produced a structured result",
     )
 }
 

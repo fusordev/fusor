@@ -160,6 +160,15 @@ fn flat_uses_depth_first_array_only_flattening_and_skips_holes() {
             })()",
             "2|1|true",
         ),
+        (
+            "(function(){let log='';const nested=new Proxy([2,3],{\
+                has(target,key){log+='h'+key+',';return Reflect.has(target,key);},\
+                get(target,key,receiver){log+='g'+key+',';\
+                  return Reflect.get(target,key,receiver);}\
+              });const result=[1,nested].flat();\
+              return JSON.stringify(result)+'|'+log;})()",
+            "[1,2,3]|glength,h0,g0,h1,g1,",
+        ),
     ]);
 }
 

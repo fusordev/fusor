@@ -279,6 +279,24 @@ fn the_loop_stops_at_the_first_match() {
     ]);
 }
 
+/// `indexOf` performs `HasProperty` before `Get` at each visited Proxy index.
+#[test]
+fn index_of_uses_proxy_has_and_get() {
+    assert_all(&[(
+        "(function(){\
+            let log='';\
+            const target={length:2,1:'x'};\
+            const proxy=new Proxy(target,{\
+                get:function(t,k){log+='g'+k+';';return t[k];},\
+                has:function(t,k){log+='h'+k+';';return k in t;}\
+            });\
+            const result=Array.prototype.indexOf.call(proxy,'x');\
+            return log+'|'+result;\
+        })()",
+        "glength;h0;h1;g1;|1",
+    )]);
+}
+
 /// A nullish receiver is rejected before the length is read.
 #[test]
 fn a_nullish_receiver_is_rejected() {

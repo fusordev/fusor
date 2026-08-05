@@ -50,6 +50,10 @@ use super::*;
 /// Which stage of the copier a continuation resumes into.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ArrayCopierStage {
+    /// Ready to evaluate `IsConcatSpreadable` for the current concat source.
+    CheckSpreadability,
+    /// Awaiting the current source's `@@isConcatSpreadable` value.
+    AwaitSpreadability,
     /// Awaiting the current source's `length` read.
     AwaitLength,
     /// Awaiting `ToLength` of the length value.
@@ -60,6 +64,8 @@ enum ArrayCopierStage {
     AwaitEnd,
     /// Ready to read the next source element.
     NextElement,
+    /// Awaiting `HasProperty` for a hole-preserving source element.
+    AwaitPresence,
     /// Ready to append the next `toSpliced` insertion argument.
     NextInsertion,
     /// Awaiting an element read that may have entered a getter.
@@ -174,22 +180,14 @@ pub(super) fn begin_array_copier(
             None
         }
     };
-    // `concat` applies the same spread test to its receiver as to every later
-    // source: only a real Array is spread. An array-like receiver therefore
-    // becomes a single element, which the oracle confirms with
-    // `Array.prototype.concat.call({length:2,0:"a"},9)` reporting length 2.
-    // Every other copier always reads its receiver's elements.
-    let spreading = match (copier, &receiver) {
-        (
-            ArrayCopier::Slice
-            | ArrayCopier::At
-            | ArrayCopier::ToReversed
-            | ArrayCopier::ToSpliced
-            | ArrayCopier::With,
-            _,
-        ) => true,
-        (ArrayCopier::Concat, StoredValue::Object(object)) => runtime.is_array_object(*object)?,
-        (ArrayCopier::Concat, _) => false,
+    // Every non-concat copier reads its receiver's elements. Concat first
+    // performs the observable `@@isConcatSpreadable` Get and then falls back
+    // to Proxy-aware IsArray.
+    let spreading = !matches!(copier, ArrayCopier::Concat);
+    let initial_stage = if matches!(copier, ArrayCopier::Concat) {
+        ArrayCopierStage::CheckSpreadability
+    } else {
+        ArrayCopierStage::AwaitLength
     };
     let state = ArrayCopierContinuation {
         copier,
@@ -208,7 +206,7 @@ pub(super) fn begin_array_copier(
         skipped: 0,
         inserted: false,
         realm,
-        stage: ArrayCopierStage::AwaitLength,
+        stage: initial_stage,
         origin,
     };
     advance_array_copier(runtime, state, None, return_to, execution_budget)
@@ -217,6 +215,7 @@ pub(super) fn begin_array_copier(
 /// Resumes a copying method after an awaited read or conversion.
 #[allow(
     clippy::too_many_lines,
+    clippy::needless_continue,
     reason = "the length, range, insertion, element, and source-advance stages form one traced continuation shared by all six copying methods"
 )]
 pub(super) fn advance_array_copier(
@@ -227,8 +226,64 @@ pub(super) fn advance_array_copier(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut completion = completion;
+    macro_rules! await_get {
+        ($operation:expr) => {
+            match $operation? {
+                GetContinuationDispatch::Ready {
+                    state: resumed,
+                    value,
+                } => {
+                    state = resumed;
+                    completion = Some(value);
+                    continue;
+                }
+                GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+            }
+        };
+    }
     loop {
         match state.stage {
+            ArrayCopierStage::CheckSpreadability => {
+                if state.source.heap_reference().is_none() {
+                    state.spreading = false;
+                    state.stage = ArrayCopierStage::AwaitLength;
+                    continue;
+                }
+                let key = runtime
+                    .predefined_symbol_property_key(PredefinedAtom::SymbolIsConcatSpreadable);
+                charge_copier_lookup(runtime, &state.source, execution_budget)?;
+                state.stage = ArrayCopierStage::AwaitSpreadability;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.source,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_copier_continuation,
+                    "concat spreadability Get produced a structured result",
+                ));
+            }
+            ArrayCopierStage::AwaitSpreadability => {
+                let spreadable = take_completion(&mut completion)?;
+                state.spreading = if matches!(spreadable, StoredValue::Undefined) {
+                    proxy_aware_is_array(
+                        runtime,
+                        state.source.duplicate(),
+                        state.realm,
+                        state.origin.clone(),
+                    )?
+                } else {
+                    spreadable.is_truthy()
+                };
+                state.stage = ArrayCopierStage::AwaitLength;
+            }
             ArrayCopierStage::AwaitLength => {
                 // A `concat` source that is not a real Array contributes itself
                 // as one element, so it never has its length read.
@@ -240,19 +295,23 @@ pub(super) fn advance_array_copier(
                 }
                 let key = runtime.predefined_property_key(PredefinedAtom::Length);
                 charge_copier_lookup(runtime, &state.source, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.source, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArrayCopierStage::AwaitLengthConversion;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayCopierStage::AwaitLengthConversion;
-                        return suspend(state, function, receiver, return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(copier_failure(&state, failure));
-                    }
-                }
+                state.stage = ArrayCopierStage::AwaitLengthConversion;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.source,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_copier_continuation,
+                    "array copier length Get produced a structured result",
+                ));
             }
             ArrayCopierStage::AwaitLengthConversion => {
                 let value = take_completion(&mut completion)?;
@@ -426,36 +485,63 @@ pub(super) fn advance_array_copier(
                 } else {
                     index
                 };
-                let key = source_element_key(runtime, source_index)?;
-                charge_copier_lookup(runtime, &state.source, execution_budget)?;
                 // The older copying methods preserve holes. The change-by-copy
                 // methods use Get directly and therefore materialize a missing
                 // source index as an own `undefined` property.
                 if !matches!(
                     state.copier,
                     ArrayCopier::ToReversed | ArrayCopier::ToSpliced | ArrayCopier::With
-                ) && !has_property(runtime, state.realm, &state.source, &key)?
-                {
+                ) {
+                    let key = source_element_key(runtime, source_index)?;
+                    charge_copier_lookup(runtime, &state.source, execution_budget)?;
+                    state.stage = ArrayCopierStage::AwaitPresence;
+                    let dispatch = begin_value_has(
+                        runtime,
+                        &state.source,
+                        key,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_copier_continuation,
+                        "array copier HasProperty produced a structured result",
+                    ));
+                }
+                await_get!(begin_array_copier_element_get(
+                    runtime,
+                    state,
+                    source_index,
+                    return_to,
+                    execution_budget,
+                ));
+            }
+            ArrayCopierStage::AwaitPresence => {
+                if !take_completion(&mut completion)?.is_truthy() {
                     if matches!(state.copier, ArrayCopier::At) {
                         state.stage = ArrayCopierStage::Done;
                         continue;
                     }
                     state.written = state.written.saturating_add(1);
+                    state.stage = ArrayCopierStage::NextElement;
                     continue;
                 }
-                match read_static_property(runtime, state.realm, &state.source, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArrayCopierStage::AwaitElement;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayCopierStage::AwaitElement;
-                        return suspend(state, function, receiver, return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(copier_failure(&state, failure));
-                    }
-                }
+                let index = state.next.saturating_sub(1);
+                let source_index = if matches!(state.copier, ArrayCopier::ToReversed) {
+                    state.length.saturating_sub(index).saturating_sub(1)
+                } else {
+                    index
+                };
+                await_get!(begin_array_copier_element_get(
+                    runtime,
+                    state,
+                    source_index,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArrayCopierStage::AwaitElement => {
                 let value = take_completion(&mut completion)?;
@@ -495,14 +581,8 @@ pub(super) fn advance_array_copier(
                 };
                 let next = next.duplicate();
                 state.next_source = state.next_source.saturating_add(1);
-                // Only a real Array spreads; everything else, including an
-                // array-like, is appended as a single element.
-                state.spreading = match next {
-                    StoredValue::Object(object) => runtime.is_array_object(object)?,
-                    _ => false,
-                };
                 state.source = next;
-                state.stage = ArrayCopierStage::AwaitLength;
+                state.stage = ArrayCopierStage::CheckSpreadability;
             }
             ArrayCopierStage::Done => {
                 return Ok(NativeDispatch::Immediate(match state.destination {
@@ -706,41 +786,36 @@ fn finish_destination(
     }
 }
 
-/// Suspends into a getter call that resumes this continuation.
-fn suspend(
-    state: ArrayCopierContinuation,
-    function: FunctionId,
-    receiver: StoredValue,
-    return_to: Option<CallReturn>,
-) -> Result<NativeDispatch, NativeFailure> {
-    let origin = state.origin.clone();
-    let mut continuations = Vec::new();
-    continuations
-        .try_reserve_exact(1)
-        .map_err(|_| ExecutionError::AllocationFailed {
-            resource: RuntimeResource::Frames,
-            additional: 1,
-        })?;
-    continuations.push(NativeContinuation::ArrayCopier(Box::new(state)));
-    Ok(NativeDispatch::Call(NativeCall {
-        function,
-        receiver,
-        arguments: CallArguments::empty(),
-        return_to,
-        origin,
-        continuations,
-        pre_call: None,
-        new_target: None,
-        native_caller: None,
-    }))
+fn array_copier_continuation(state: ArrayCopierContinuation) -> NativeContinuation {
+    NativeContinuation::ArrayCopier(Box::new(state))
 }
 
-/// Builds the exception a failed property read reports.
-fn copier_failure(state: &ArrayCopierContinuation, failure: PropertyFailure) -> NativeFailure {
-    match property_exception_at(state.realm, state.origin.clone(), None, failure) {
-        Ok(exception) => NativeFailure::Abrupt(exception),
-        Err(error) => error.into(),
-    }
+fn begin_array_copier_element_get(
+    runtime: &mut Runtime,
+    mut state: ArrayCopierContinuation,
+    source_index: u64,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<GetContinuationDispatch<ArrayCopierContinuation>, NativeFailure> {
+    let key = source_element_key(runtime, source_index)?;
+    charge_copier_lookup(runtime, &state.source, execution_budget)?;
+    state.stage = ArrayCopierStage::AwaitElement;
+    let dispatch = begin_value_get(
+        runtime,
+        &state.source,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_state_after(
+        dispatch,
+        state,
+        array_copier_continuation,
+        "array copier element Get produced a structured result",
+    )
 }
 
 /// Builds one realm-owned exception for a change-by-copy precondition.

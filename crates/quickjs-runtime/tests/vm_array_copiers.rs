@@ -190,12 +190,12 @@ fn at_answers_one_element() {
     ]);
 }
 
-/// `concat` spreads only a real Array.
+/// `concat` honors `@@isConcatSpreadable` before falling back to `IsArray`.
 ///
 /// An array-like becomes a single element, and nesting is not flattened, so the
 /// two cases below differ even though both arguments are objects.
 #[test]
-fn concat_spreads_only_a_real_array() {
+fn concat_uses_is_concat_spreadable_then_is_array() {
     assert_all(&[
         ("[1,2].concat([3,4]).join()", "1,2,3,4"),
         ("[1,2].concat().join()", "1,2"),
@@ -226,6 +226,24 @@ fn concat_spreads_only_a_real_array() {
                 return Array.isArray(r)+'|'+r.length+'|'+(typeof r[0]);\
             })()",
             "true|2|object",
+        ),
+        (
+            "(function(){let log='';const proxy=new Proxy([2,3],{\
+                has(target,key){log+='h'+key+',';return Reflect.has(target,key);},\
+                get(target,key,receiver){log+='g'+(typeof key==='symbol'?'@':key)+',';\
+                  return Reflect.get(target,key,receiver);}\
+              });const result=[1].concat(proxy);return result.join()+'|'+log;})()",
+            "1,2,3|g@,glength,h0,g0,h1,g1,",
+        ),
+        (
+            "(function(){const value={0:'a',1:'b',length:2};\
+              value[Symbol.isConcatSpreadable]=true;return [1].concat(value).join();})()",
+            "1,a,b",
+        ),
+        (
+            "(function(){const value=[2,3];value[Symbol.isConcatSpreadable]=false;\
+              const result=[1].concat(value);return result.length+'|'+(result[1]===value);})()",
+            "2|true",
         ),
     ]);
 }

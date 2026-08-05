@@ -174,6 +174,47 @@ pub(super) fn continue_get_after<State>(
     }
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "this short-lived control-flow carrier avoids boxing every suspended native dispatch on the hot Get path"
+)]
+pub(super) enum GetContinuationDispatch<State> {
+    Ready { state: State, value: StoredValue },
+    Suspended(NativeDispatch),
+}
+
+pub(super) fn continue_get_state_after<State>(
+    dispatch: NativeDispatch,
+    state: State,
+    continuation: fn(State) -> NativeContinuation,
+    structured_result_message: &'static str,
+) -> Result<GetContinuationDispatch<State>, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => Ok(GetContinuationDispatch::Ready { state, value }),
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(&mut call, vec![continuation(state)])?;
+            Ok(GetContinuationDispatch::Suspended(NativeDispatch::Call(
+                call,
+            )))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(&mut frame, vec![continuation(state)])?;
+            Ok(GetContinuationDispatch::Suspended(NativeDispatch::Frame(
+                frame,
+            )))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: structured_result_message,
+        }
+        .into()),
+    }
+}
+
 pub(super) fn take_iterator_abrupt_handler(
     continuations: &mut Vec<NativeContinuation>,
 ) -> Option<NativeContinuation> {

@@ -244,7 +244,12 @@ pub(super) fn begin_object_prototype_to_string(
             HeapReference::Object(*object),
             if runtime.is_arguments_object(*object)? {
                 ObjectPrototypeTag::Arguments
-            } else if runtime.is_array_object(*object)? {
+            } else if proxy_aware_is_array(
+                runtime,
+                receiver.duplicate(),
+                realm,
+                origin.clone().unwrap_or_else(native_function_host_origin),
+            )? {
                 ObjectPrototypeTag::Array
             } else if runtime.boxed_boolean(*object)?.is_some() {
                 ObjectPrototypeTag::Boolean

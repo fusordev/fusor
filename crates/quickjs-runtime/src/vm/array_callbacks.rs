@@ -65,6 +65,8 @@ enum ArrayCallbackStage {
     AwaitLengthConversion,
     /// Ready to visit the next index.
     NextElement,
+    /// Awaiting `HasProperty` for a hole-skipping method.
+    AwaitPresence,
     /// Awaiting an element read that may have entered a getter.
     AwaitElement,
     /// Awaiting the callback's result.
@@ -190,6 +192,7 @@ pub(super) fn begin_array_callback(
 /// Resumes the loop after an awaited read or callback.
 #[allow(
     clippy::too_many_lines,
+    clippy::needless_continue,
     reason = "the length, element, and callback stages form one traced continuation shared by all nine methods"
 )]
 pub(super) fn advance_array_callback(
@@ -200,24 +203,43 @@ pub(super) fn advance_array_callback(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut completion = completion;
+    macro_rules! await_get {
+        ($operation:expr) => {
+            match $operation? {
+                GetContinuationDispatch::Ready {
+                    state: resumed,
+                    value,
+                } => {
+                    state = resumed;
+                    completion = Some(value);
+                    continue;
+                }
+                GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+            }
+        };
+    }
     loop {
         match state.stage {
             ArrayCallbackStage::AwaitLength => {
                 let key = runtime.predefined_property_key(PredefinedAtom::Length);
                 charge_callback_lookup(runtime, &state.target, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArrayCallbackStage::AwaitLengthConversion;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayCallbackStage::AwaitLengthConversion;
-                        return suspend(state, function, receiver, Vec::new(), return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(callback_failure(&state, failure));
-                    }
-                }
+                state.stage = ArrayCallbackStage::AwaitLengthConversion;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.target,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_callback_continuation,
+                    "Array callback length Get produced a structured result",
+                ));
             }
             ArrayCallbackStage::AwaitLengthConversion => {
                 // The length is snapshotted once, so a callback that grows the
@@ -243,31 +265,49 @@ pub(super) fn advance_array_callback(
                 state.advance();
 
                 let key = element_key(index)?;
-                charge_callback_lookup(runtime, &state.target, execution_budget)?;
                 // Most methods skip a missing index; the `find` family visits it
                 // and sees `undefined`.
-                if state.method.skips_holes()
-                    && !has_property(runtime, state.realm, &state.target, &key)?
-                {
+                if state.method.skips_holes() {
+                    charge_callback_lookup(runtime, &state.target, execution_budget)?;
+                    state.stage = ArrayCallbackStage::AwaitPresence;
+                    let dispatch = begin_value_has(
+                        runtime,
+                        &state.target,
+                        key,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_callback_continuation,
+                        "Array callback HasProperty produced a structured result",
+                    ));
+                }
+                await_get!(begin_array_callback_element_get(
+                    runtime,
+                    state,
+                    return_to,
+                    execution_budget,
+                ));
+            }
+            ArrayCallbackStage::AwaitPresence => {
+                if !take_completion(&mut completion)?.is_truthy() {
                     // `map` still counts the hole so the result keeps its shape.
                     if matches!(state.method, ArrayCallback::Map) {
                         state.written = state.written.saturating_add(1);
                     }
+                    state.stage = ArrayCallbackStage::NextElement;
                     continue;
                 }
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArrayCallbackStage::AwaitElement;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayCallbackStage::AwaitElement;
-                        return suspend(state, function, receiver, Vec::new(), return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(callback_failure(&state, failure));
-                    }
-                }
+                await_get!(begin_array_callback_element_get(
+                    runtime,
+                    state,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArrayCallbackStage::AwaitElement => {
                 let element = take_completion(&mut completion)?;
@@ -473,12 +513,35 @@ fn suspend(
     }))
 }
 
-/// Builds the exception a failed property read reports.
-fn callback_failure(state: &ArrayCallbackContinuation, failure: PropertyFailure) -> NativeFailure {
-    match property_exception_at(state.realm, state.origin.clone(), None, failure) {
-        Ok(exception) => NativeFailure::Abrupt(exception),
-        Err(error) => error.into(),
-    }
+fn array_callback_continuation(state: ArrayCallbackContinuation) -> NativeContinuation {
+    NativeContinuation::ArrayCallback(Box::new(state))
+}
+
+fn begin_array_callback_element_get(
+    runtime: &mut Runtime,
+    mut state: ArrayCallbackContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<GetContinuationDispatch<ArrayCallbackContinuation>, NativeFailure> {
+    let key = element_key(state.current)?;
+    charge_callback_lookup(runtime, &state.target, execution_budget)?;
+    state.stage = ArrayCallbackStage::AwaitElement;
+    let dispatch = begin_value_get(
+        runtime,
+        &state.target,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_state_after(
+        dispatch,
+        state,
+        array_callback_continuation,
+        "Array callback element Get produced a structured result",
+    )
 }
 
 /// Charges one property lookup, tolerating a primitive receiver.
@@ -537,10 +600,14 @@ enum ArrayReductionStage {
     AwaitLengthConversion,
     /// Looking for the first present element to seed the accumulator.
     SeedAccumulator,
+    /// Awaiting `HasProperty` while locating the seed element.
+    AwaitSeedPresence,
     /// Awaiting the seed element's read.
     AwaitSeedRead,
     /// Ready to visit the next index.
     NextElement,
+    /// Awaiting `HasProperty` for one reduction element.
+    AwaitElementPresence,
     /// Awaiting an element read that may have entered a getter.
     AwaitElement,
     /// Awaiting the callback's result, which becomes the accumulator.
@@ -655,6 +722,7 @@ pub(super) fn begin_array_reduction(
 /// Resumes a reduction after an awaited read or callback.
 #[allow(
     clippy::too_many_lines,
+    clippy::needless_continue,
     reason = "the length, seeding, element, and callback stages form one traced continuation shared by both reductions"
 )]
 pub(super) fn advance_array_reduction(
@@ -665,24 +733,43 @@ pub(super) fn advance_array_reduction(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut completion = completion;
+    macro_rules! await_get {
+        ($operation:expr) => {
+            match $operation? {
+                GetContinuationDispatch::Ready {
+                    state: resumed,
+                    value,
+                } => {
+                    state = resumed;
+                    completion = Some(value);
+                    continue;
+                }
+                GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+            }
+        };
+    }
     loop {
         match state.stage {
             ArrayReductionStage::AwaitLength => {
                 let key = runtime.predefined_property_key(PredefinedAtom::Length);
                 charge_callback_lookup(runtime, &state.target, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArrayReductionStage::AwaitLengthConversion;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayReductionStage::AwaitLengthConversion;
-                        return suspend_reduction(state, function, receiver, Vec::new(), return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(reduction_failure(&state, failure));
-                    }
-                }
+                state.stage = ArrayReductionStage::AwaitLengthConversion;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.target,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_reduction_continuation,
+                    "Array reduction length Get produced a structured result",
+                ));
             }
             ArrayReductionStage::AwaitLengthConversion => {
                 let value = take_completion(&mut completion)?;
@@ -715,25 +802,39 @@ pub(super) fn advance_array_reduction(
                 }
                 execution_budget.charge_instructions(1)?;
                 let index = state.next;
+                state.current = index;
                 state.advance();
                 let key = element_key(index)?;
                 charge_callback_lookup(runtime, &state.target, execution_budget)?;
-                if !has_property(runtime, state.realm, &state.target, &key)? {
+                state.stage = ArrayReductionStage::AwaitSeedPresence;
+                let dispatch = begin_value_has(
+                    runtime,
+                    &state.target,
+                    key,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_reduction_continuation,
+                    "Array reduction seed HasProperty produced a structured result",
+                ));
+            }
+            ArrayReductionStage::AwaitSeedPresence => {
+                if !take_completion(&mut completion)?.is_truthy() {
+                    state.stage = ArrayReductionStage::SeedAccumulator;
                     continue;
                 }
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArrayReductionStage::AwaitSeedRead;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayReductionStage::AwaitSeedRead;
-                        return suspend_reduction(state, function, receiver, Vec::new(), return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(reduction_failure(&state, failure));
-                    }
-                }
+                await_get!(begin_array_reduction_element_get(
+                    runtime,
+                    state,
+                    ArrayReductionStage::AwaitSeedRead,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArrayReductionStage::AwaitSeedRead => {
                 state.accumulator = Some(take_completion(&mut completion)?);
@@ -751,22 +852,35 @@ pub(super) fn advance_array_reduction(
                 let key = element_key(index)?;
                 charge_callback_lookup(runtime, &state.target, execution_budget)?;
                 // A hole is skipped: the callback never sees it.
-                if !has_property(runtime, state.realm, &state.target, &key)? {
+                state.stage = ArrayReductionStage::AwaitElementPresence;
+                let dispatch = begin_value_has(
+                    runtime,
+                    &state.target,
+                    key,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_reduction_continuation,
+                    "Array reduction HasProperty produced a structured result",
+                ));
+            }
+            ArrayReductionStage::AwaitElementPresence => {
+                if !take_completion(&mut completion)?.is_truthy() {
+                    state.stage = ArrayReductionStage::NextElement;
                     continue;
                 }
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArrayReductionStage::AwaitElement;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayReductionStage::AwaitElement;
-                        return suspend_reduction(state, function, receiver, Vec::new(), return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(reduction_failure(&state, failure));
-                    }
-                }
+                await_get!(begin_array_reduction_element_get(
+                    runtime,
+                    state,
+                    ArrayReductionStage::AwaitElement,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArrayReductionStage::AwaitElement => {
                 let element = take_completion(&mut completion)?;
@@ -815,6 +929,38 @@ pub(super) fn advance_array_reduction(
     }
 }
 
+fn array_reduction_continuation(state: ArrayReductionContinuation) -> NativeContinuation {
+    NativeContinuation::ArrayReduction(Box::new(state))
+}
+
+fn begin_array_reduction_element_get(
+    runtime: &mut Runtime,
+    mut state: ArrayReductionContinuation,
+    next_stage: ArrayReductionStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<GetContinuationDispatch<ArrayReductionContinuation>, NativeFailure> {
+    let key = element_key(state.current)?;
+    charge_callback_lookup(runtime, &state.target, execution_budget)?;
+    state.stage = next_stage;
+    let dispatch = begin_value_get(
+        runtime,
+        &state.target,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_state_after(
+        dispatch,
+        state,
+        array_reduction_continuation,
+        "Array reduction element Get produced a structured result",
+    )
+}
+
 /// Suspends into a call that resumes this reduction.
 fn suspend_reduction(
     state: ArrayReductionContinuation,
@@ -843,15 +989,4 @@ fn suspend_reduction(
         new_target: None,
         native_caller: None,
     }))
-}
-
-/// Builds the exception a failed property read reports.
-fn reduction_failure(
-    state: &ArrayReductionContinuation,
-    failure: PropertyFailure,
-) -> NativeFailure {
-    match property_exception_at(state.realm, state.origin.clone(), None, failure) {
-        Ok(exception) => NativeFailure::Abrupt(exception),
-        Err(error) => error.into(),
-    }
 }

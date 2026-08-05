@@ -213,6 +213,24 @@ fn the_reductions_accept_an_array_like_receiver() {
     ]);
 }
 
+/// Seeding and folding both route through a Proxy's indexed internal methods.
+#[test]
+fn reductions_use_proxy_internal_methods() {
+    assert_all(&[(
+        "(function(){\
+            let log='';\
+            const target={length:2,0:1,1:2};\
+            const proxy=new Proxy(target,{\
+                get:function(t,k){log+='g'+k+';';return t[k];},\
+                has:function(t,k){log+='h'+k+';';return k in t;}\
+            });\
+            const result=Array.prototype.reduce.call(proxy,function(a,v){return a+v;});\
+            return log+'|'+result;\
+        })()",
+        "glength;h0;g0;h1;g1;|3",
+    )]);
+}
+
 /// Both reductions report arity 1 with the pinned descriptors.
 #[test]
 fn the_reductions_have_the_pinned_shape() {

@@ -181,6 +181,25 @@ fn sort_skips_holes_and_deletes_the_trailing_indices() {
     ]);
 }
 
+/// `toSorted` calls `SortIndexedProperties` with read-through-holes, so it
+/// collects a Proxy's entries with `Get` directly after the single length read.
+#[test]
+fn to_sorted_uses_proxy_internal_methods_while_collecting() {
+    assert_all(&[(
+        "(function(){\
+            let log='';\
+            const target={length:2,0:'b',1:'a'};\
+            const proxy=new Proxy(target,{\
+                get:function(t,k){log+='g'+k+';';return t[k];},\
+                has:function(t,k){log+='h'+k+';';return k in t;}\
+            });\
+            const result=Array.prototype.toSorted.call(proxy);\
+            return log+'|'+result.join();\
+        })()",
+        "glength;g0;g1;|a,b",
+    )]);
+}
+
 #[test]
 fn to_sorted_returns_a_fresh_dense_array() {
     assert_all(&[

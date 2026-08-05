@@ -1782,6 +1782,15 @@ fn array_is_array_unwraps_proxies_and_rejects_revoked_proxies() {
         "var pair=Proxy.revocable([],{});pair.revoke();return Array.isArray(pair.proxy);",
         ExceptionKind::TypeError,
     );
+    assert_eq!(
+        text("return Object.prototype.toString.call(new Proxy([],{}));"),
+        "[object Array]"
+    );
+    assert_exception_kind(
+        "var pair=Proxy.revocable([],{});pair.revoke();\
+         return Object.prototype.toString.call(pair.proxy);",
+        ExceptionKind::TypeError,
+    );
 }
 
 /// `[[Set]]`, `[[HasProperty]]`, and `[[Delete]]` share resumable trap lookup,

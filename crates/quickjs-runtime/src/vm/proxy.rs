@@ -2840,6 +2840,52 @@ pub(super) fn begin_value_get(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the generic HasProperty boundary preserves primitive virtual properties and Proxy-aware prototype traversal"
+)]
+pub(super) fn begin_value_has(
+    runtime: &mut Runtime,
+    base: &StoredValue,
+    key: PropertyKey,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let reference = match base {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Boolean(_) => HeapReference::Object(runtime.realm_boolean_prototype(realm)?),
+        StoredValue::Number(_) => HeapReference::Object(runtime.realm_number_prototype(realm)?),
+        StoredValue::BigInt(_) => HeapReference::Object(runtime.realm_bigint_prototype(realm)?),
+        StoredValue::Symbol(_) => HeapReference::Object(runtime.realm_symbol_prototype(realm)?),
+        StoredValue::String(value) => {
+            if key
+                .as_index()
+                .is_some_and(|index| index.get() < value.len())
+                || key.as_atom().and_then(crate::Atom::predefined_atom)
+                    == Some(PredefinedAtom::Length)
+            {
+                return Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)));
+            }
+            HeapReference::Object(runtime.realm_string_prototype(realm)?)
+        }
+        StoredValue::Undefined | StoredValue::Null => {
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
+        }
+    };
+    begin_internal_has(
+        runtime,
+        reference,
+        key,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
 fn begin_proxy_get(
     runtime: &mut Runtime,
     proxy: HeapReference,

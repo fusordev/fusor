@@ -74,6 +74,7 @@ enum ArrayFlattenStage {
     AwaitSpecies,
     AwaitSpeciesConstruct,
     NextElement,
+    AwaitElementPresence,
     AwaitElement,
     AwaitCallback,
     ProcessElement,
@@ -188,6 +189,7 @@ pub(super) fn begin_array_flatten(
 /// Advances species selection and the explicit depth-first flattening stack.
 #[allow(
     clippy::too_many_lines,
+    clippy::needless_continue,
     reason = "explicit stages keep species access, conversion, callback, getter, and nested length suspension in specification order"
 )]
 pub(super) fn advance_array_flatten(
@@ -198,31 +200,35 @@ pub(super) fn advance_array_flatten(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut completion = completion;
+    macro_rules! await_get {
+        ($operation:expr) => {
+            match $operation? {
+                GetContinuationDispatch::Ready {
+                    state: resumed,
+                    value,
+                } => {
+                    state = resumed;
+                    completion = Some(value);
+                    continue;
+                }
+                GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+            }
+        };
+    }
     loop {
         match state.stage {
             ArrayFlattenStage::AwaitSourceLength => {
                 let key = runtime.predefined_property_key(PredefinedAtom::Length);
-                charge_flatten_lookup(runtime, &state.source, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.source, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArrayFlattenStage::AwaitSourceLengthConversion;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayFlattenStage::AwaitSourceLengthConversion;
-                        return suspend_flatten(
-                            state,
-                            function,
-                            receiver,
-                            Vec::new(),
-                            None,
-                            return_to,
-                        );
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(flatten_property_failure(&state, failure));
-                    }
-                }
+                let source = state.source.duplicate();
+                await_get!(begin_flatten_get(
+                    runtime,
+                    state,
+                    &source,
+                    key,
+                    ArrayFlattenStage::AwaitSourceLengthConversion,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArrayFlattenStage::AwaitSourceLengthConversion => {
                 let value = take_flatten_completion(&mut completion)?;
@@ -278,33 +284,22 @@ pub(super) fn advance_array_flatten(
                 state.stage = ArrayFlattenStage::SelectSpecies;
             }
             ArrayFlattenStage::SelectSpecies => {
-                if !is_array_value(runtime, &state.source)? {
+                if !is_array_value(runtime, &state.source, state.realm, &state.origin)? {
                     allocate_flatten_destination(runtime, &mut state)?;
                     start_flattening(&mut state)?;
                     continue;
                 }
                 let key = runtime.predefined_property_key(PredefinedAtom::Constructor);
-                charge_flatten_lookup(runtime, &state.source, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.source, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArrayFlattenStage::AwaitConstructor;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayFlattenStage::AwaitConstructor;
-                        return suspend_flatten(
-                            state,
-                            function,
-                            receiver,
-                            Vec::new(),
-                            None,
-                            return_to,
-                        );
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(flatten_property_failure(&state, failure));
-                    }
-                }
+                let source = state.source.duplicate();
+                await_get!(begin_flatten_get(
+                    runtime,
+                    state,
+                    &source,
+                    key,
+                    ArrayFlattenStage::AwaitConstructor,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArrayFlattenStage::AwaitConstructor => {
                 let constructor = take_flatten_completion(&mut completion)?;
@@ -325,27 +320,15 @@ pub(super) fn advance_array_flatten(
                     StoredValue::Function(_) | StoredValue::Object(_)
                 ) {
                     let key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies);
-                    charge_flatten_lookup(runtime, &constructor, execution_budget)?;
-                    match read_static_property(runtime, state.realm, &constructor, &key)? {
-                        PropertyReadOutcome::Value(value) => {
-                            completion = Some(value);
-                            state.stage = ArrayFlattenStage::AwaitSpecies;
-                        }
-                        PropertyReadOutcome::Getter { function, receiver } => {
-                            state.stage = ArrayFlattenStage::AwaitSpecies;
-                            return suspend_flatten(
-                                state,
-                                function,
-                                receiver,
-                                Vec::new(),
-                                None,
-                                return_to,
-                            );
-                        }
-                        PropertyReadOutcome::Failed(failure) => {
-                            return Err(flatten_property_failure(&state, failure));
-                        }
-                    }
+                    await_get!(begin_flatten_get(
+                        runtime,
+                        state,
+                        &constructor,
+                        key,
+                        ArrayFlattenStage::AwaitSpecies,
+                        return_to,
+                        execution_budget,
+                    ));
                 } else if matches!(constructor, StoredValue::Undefined) {
                     allocate_flatten_destination(runtime, &mut state)?;
                     start_flattening(&mut state)?;
@@ -414,29 +397,43 @@ pub(super) fn advance_array_flatten(
                 let source = frame.source.duplicate();
                 let key = flatten_element_key(runtime, index)?;
                 charge_flatten_lookup(runtime, &source, execution_budget)?;
-                if !has_property(runtime, state.realm, &source, &key)? {
+                state.stage = ArrayFlattenStage::AwaitElementPresence;
+                let dispatch = begin_value_has(
+                    runtime,
+                    &source,
+                    key,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_flatten_continuation,
+                    "FlattenIntoArray HasProperty produced a structured result",
+                ));
+            }
+            ArrayFlattenStage::AwaitElementPresence => {
+                if !take_flatten_completion(&mut completion)?.is_truthy() {
+                    state.stage = ArrayFlattenStage::NextElement;
                     continue;
                 }
-                match read_static_property(runtime, state.realm, &source, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        state.element = Some(value);
-                        state.stage = ArrayFlattenStage::AwaitElement;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayFlattenStage::AwaitElement;
-                        return suspend_flatten(
-                            state,
-                            function,
-                            receiver,
-                            Vec::new(),
-                            None,
-                            return_to,
-                        );
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(flatten_property_failure(&state, failure));
-                    }
-                }
+                let frame = state.frames.last().ok_or(EngineFault::RuntimeInvariant {
+                    message: "FlattenIntoArray lost its source after HasProperty",
+                })?;
+                let index = frame.next_index.saturating_sub(1);
+                let source = frame.source.duplicate();
+                let key = flatten_element_key(runtime, index)?;
+                await_get!(begin_flatten_get(
+                    runtime,
+                    state,
+                    &source,
+                    key,
+                    ArrayFlattenStage::AwaitElement,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArrayFlattenStage::AwaitElement => {
                 if state.element.is_none() {
@@ -489,7 +486,9 @@ pub(super) fn advance_array_flatten(
                         message: "FlattenIntoArray lost the active depth",
                     })?
                     .depth;
-                if depth.can_descend() && is_array_value(runtime, &element)? {
+                if depth.can_descend()
+                    && is_array_value(runtime, &element, state.realm, &state.origin)?
+                {
                     state.nested_source = Some(element);
                     state.stage = ArrayFlattenStage::AwaitNestedLength;
                     continue;
@@ -506,27 +505,15 @@ pub(super) fn advance_array_flatten(
                     })?
                     .duplicate();
                 let key = runtime.predefined_property_key(PredefinedAtom::Length);
-                charge_flatten_lookup(runtime, &source, execution_budget)?;
-                match read_static_property(runtime, state.realm, &source, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArrayFlattenStage::AwaitNestedLengthConversion;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayFlattenStage::AwaitNestedLengthConversion;
-                        return suspend_flatten(
-                            state,
-                            function,
-                            receiver,
-                            Vec::new(),
-                            None,
-                            return_to,
-                        );
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(flatten_property_failure(&state, failure));
-                    }
-                }
+                await_get!(begin_flatten_get(
+                    runtime,
+                    state,
+                    &source,
+                    key,
+                    ArrayFlattenStage::AwaitNestedLengthConversion,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArrayFlattenStage::AwaitNestedLengthConversion => {
                 let value = take_flatten_completion(&mut completion)?;
@@ -653,18 +640,13 @@ fn create_flattened_element(
     }
 }
 
-fn is_array_value(runtime: &Runtime, value: &StoredValue) -> Result<bool, NativeFailure> {
-    match value {
-        StoredValue::Object(object) => Ok(runtime.is_array_object(*object)?),
-        StoredValue::Function(_)
-        | StoredValue::Undefined
-        | StoredValue::Null
-        | StoredValue::Boolean(_)
-        | StoredValue::Number(_)
-        | StoredValue::BigInt(_)
-        | StoredValue::String(_)
-        | StoredValue::Symbol(_) => Ok(false),
-    }
+fn is_array_value(
+    runtime: &Runtime,
+    value: &StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<bool, NativeFailure> {
+    proxy_aware_is_array(runtime, value.duplicate(), realm, origin.clone())
 }
 
 fn convert_flatten_value(
@@ -685,6 +667,43 @@ fn convert_flatten_value(
         return_to,
         origin,
         execution_budget,
+    )
+}
+
+fn array_flatten_continuation(state: ArrayFlattenContinuation) -> NativeContinuation {
+    NativeContinuation::ArrayFlatten(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one reusable flattening Get boundary carries its source, next stage, caller continuation, and execution authority"
+)]
+fn begin_flatten_get(
+    runtime: &mut Runtime,
+    mut state: ArrayFlattenContinuation,
+    base: &StoredValue,
+    key: PropertyKey,
+    next_stage: ArrayFlattenStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<GetContinuationDispatch<ArrayFlattenContinuation>, NativeFailure> {
+    charge_flatten_lookup(runtime, base, execution_budget)?;
+    state.stage = next_stage;
+    let dispatch = begin_value_get(
+        runtime,
+        base,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_state_after(
+        dispatch,
+        state,
+        array_flatten_continuation,
+        "array flatten Get produced a structured result",
     )
 }
 
