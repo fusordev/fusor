@@ -1,6 +1,7 @@
 use quickjs::{ScriptEvaluationError, ScriptLimits, evaluate_script};
 use quickjs_runtime::{
-    ExceptionKind, ExecutionError, GlobalScriptError, JsNumber, Runtime, RuntimeLimits,
+    ErrorObjectKind, ExceptionKind, ExecutionError, GlobalScriptError, JsNumber, Runtime,
+    RuntimeLimits,
 };
 
 fn number(value: &quickjs_runtime::JsValue) -> JsNumber {
@@ -198,4 +199,36 @@ fn realm_lexical_cells_keep_heap_values_alive_across_cycle_collection() {
     )
     .expect("realm lexical survives collection");
     assert!(number(&value).strict_equals(JsNumber::from_i32(42)));
+}
+
+#[test]
+fn explicit_error_objects_can_be_classified_without_observable_property_access() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let observer_realm = runtime.create_realm().expect("observer realm");
+    let exception = {
+        let mut context = runtime.context(&realm).expect("context");
+        let error = evaluate_script(
+            &mut context,
+            "throw new EvalError('expected');",
+            "explicit-error.js",
+            ScriptLimits::default(),
+        )
+        .expect_err("explicit throw");
+        let ScriptEvaluationError::Runtime(GlobalScriptError::Execution(
+            ExecutionError::Exception(exception),
+        )) = error
+        else {
+            panic!("expected a JavaScript exception");
+        };
+        exception
+    };
+    assert_eq!(exception.kind(), None);
+    let observer = runtime.context(&observer_realm).expect("observer context");
+    assert_eq!(
+        observer
+            .error_object_kind(exception.thrown_value().expect("thrown value"))
+            .expect("classification"),
+        Some(ErrorObjectKind::EvalError)
+    );
 }

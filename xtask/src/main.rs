@@ -8,6 +8,7 @@ mod number_radix_differential;
 mod parser_diagnostics;
 mod parser_differential;
 mod parser_productions;
+mod test262;
 
 use control_flow_differential::{
     ASYNC_FUNCTION_CANDIDATE_WORKER_COMMAND, AsyncFunctionDifferentialOptions,
@@ -49,6 +50,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use test262::{Test262Options, run_test262};
 
 const DEFAULT_CORPUS: &str = "tests/differential";
 const DEFAULT_PARSER_CORPUS: &str = "tests/parser";
@@ -267,6 +269,14 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Ok(Args::Test262(options)) => match run_test262(&options) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(error) => {
+                eprintln!("xtask: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Ok(Args::ControlFlowCandidateWorker { read_async_result }) => {
             match run_control_flow_candidate_worker(read_async_result) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -310,6 +320,7 @@ Usage:
   cargo xtask set-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask weak-collections-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask weak-references-differential --oracle QJS_PATH [OPTIONS]
+  cargo xtask test262 --suite TEST262_PATH [OPTIONS]
 
 Options:
   --corpus PATH       Corpus directory (runtime default: {DEFAULT_CORPUS};
@@ -334,6 +345,13 @@ Options:
                       weak collections manifest default: {DEFAULT_WEAK_COLLECTIONS_CORPUS};
                       weak references manifest default: {DEFAULT_WEAK_REFERENCES_CORPUS})
   --timeout-ms N      Per-process timeout (default: {DEFAULT_TIMEOUT_MS})
+  --baseline PATH     Test262 baseline artifacts (default: tests/test262/upstream)
+  --filter PATH       Restrict Test262 to one file or subtree below test/
+  --limit N           Stop Test262 inventory after N matching source files
+  --report PATH       Write the deterministic Test262 JSON report
+  --inventory-only    Verify and classify Test262 without executing cases
+  --instruction-fuel N
+                      Per-Script Test262 interpreter fuel (default: 10000000)
   -h, --help          Show this help
 
 Dynamic Function --oracle must be the pinned QuickJS 2026-06-04 qjsc compiler.
@@ -402,6 +420,7 @@ enum Args {
     SetDifferential(SetDifferentialOptions),
     WeakCollectionsDifferential(WeakCollectionsDifferentialOptions),
     WeakReferencesDifferential(WeakReferencesDifferentialOptions),
+    Test262(Test262Options),
     ControlFlowCandidateWorker { read_async_result: bool },
 }
 
@@ -522,6 +541,7 @@ impl Args {
                 parse_weak_references_differential_options(arguments.into_iter())
                     .map(Self::WeakReferencesDifferential)
             }
+            "test262" => test262::parse_options(arguments.into_iter()).map(Self::Test262),
             unknown => Err(format!("unknown task `{unknown}`")),
         }
     }

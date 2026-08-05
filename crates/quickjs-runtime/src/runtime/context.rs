@@ -27,12 +27,12 @@
 
 use super::{
     Arc, AtomError, BytecodeFunction, CompilerExecutableKind, Context, DynamicFunctionScriptError,
-    ExceptionKind, ExecutionLimits, Function, FunctionImplementation, GlobalScriptError,
-    HeapFunction, HeapObject, HeapReference, InstallError, InstalledCode, InstalledRoot,
-    InstalledTemplate, JsNumber, JsString, JsValue, ObjectId, ObjectRecord,
-    OrdinaryDynamicFunctionCompiler, PendingRootEnvironment, PredefinedAtom, PrimitiveValue,
-    PropertyKey, PropertyLayout, RootPublication, Runtime, RuntimeResource, RuntimeUsage,
-    StoredValue, VerifiedBytecode, check_install_limit, global_declaration_error,
+    ErrorObjectKind, ExceptionKind, ExecutionLimits, Function, FunctionImplementation,
+    GlobalScriptError, HandleKind, HeapFunction, HeapObject, HeapReference, InstallError,
+    InstalledCode, InstalledRoot, InstalledTemplate, JsNumber, JsString, JsValue, ObjectId,
+    ObjectRecord, OrdinaryDynamicFunctionCompiler, PendingRootEnvironment, PredefinedAtom,
+    PrimitiveValue, PropertyKey, PropertyLayout, RootPublication, Runtime, RuntimeResource,
+    RuntimeUsage, StoredValue, VerifiedBytecode, check_install_limit, global_declaration_error,
     preflight_opcodes, require_root_kind, usize_to_u64,
 };
 
@@ -223,6 +223,29 @@ impl Context<'_> {
         let symbol = self.runtime.atoms.predefined(atom);
         (symbol.kind() == crate::AtomKind::Symbol)
             .then(|| JsValue::primitive(&self.runtime.mailbox, PrimitiveValue::Symbol(symbol)))
+    }
+
+    /// Classifies a same-runtime JavaScript Error object by its intrinsic
+    /// prototype lineage.
+    ///
+    /// Arbitrary non-Error values return `None`. This lets a host classify an
+    /// explicit JavaScript `throw` without evaluating additional source or
+    /// invoking observable property accessors.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned, foreign, or stale value, or an
+    /// engine fault if the runtime's intrinsic prototype graph is inconsistent.
+    pub fn error_object_kind(
+        &self,
+        value: &JsValue,
+    ) -> Result<Option<ErrorObjectKind>, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let StoredValue::Object(object) = value.stored()? else {
+            return Ok(None);
+        };
+        self.runtime.error_object_kind(*object).map_err(Into::into)
     }
 
     /// Transactionally installs complete verified bytecode and materializes

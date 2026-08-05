@@ -183,9 +183,12 @@ does not imply complete ECMAScript or QuickJS compatibility.
 
 ### Conformance, performance, and optional layers
 
-- [ ] Add the inventory/execution runner for pinned Test262
-  `5c8206929d81b2d3d727ca6aac56c18358c8d790` on `evaluate_script`, retain its
-  patch/configuration/expected errors, and close every in-profile failure.
+- [x] `cargo xtask test262` verifies pinned Test262
+  `5c8206929d81b2d3d727ca6aac56c18358c8d790`, the release patch/configuration/
+  expected-errors fingerprints, inventories exact modes/skips, and executes
+  admitted fresh-realm cases through `evaluate_script` with typed JSON results.
+- [ ] Close every admitted Test262 failure and remove temporary host/module/
+  async skips as those capabilities land; keep ECMA-402 explicitly low priority.
 - [ ] Establish startup, memory, interpreter, and compile benchmarks; require no
   unexplained supported-platform crashes or undefined behavior.
 - [ ] Complete API, source-map, platform/resource, cancellation, dependency, and

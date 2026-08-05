@@ -409,6 +409,52 @@ pub enum ExceptionKind {
     UriError,
 }
 
+/// Intrinsic Error family carried by a JavaScript Error object.
+///
+/// This is distinct from [`ExceptionKind`]: explicit JavaScript `throw`
+/// completions carry arbitrary values, so a host must inspect an Error
+/// object's intrinsic prototype lineage to classify it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ErrorObjectKind {
+    /// `%Error%`.
+    Error,
+    /// `%EvalError%`.
+    EvalError,
+    /// `%RangeError%`.
+    RangeError,
+    /// `%ReferenceError%`.
+    ReferenceError,
+    /// `%SyntaxError%`.
+    SyntaxError,
+    /// `%TypeError%`.
+    TypeError,
+    /// `%URIError%`.
+    UriError,
+    /// QuickJS-compatible `%InternalError%`.
+    InternalError,
+    /// `%AggregateError%`.
+    AggregateError,
+}
+
+impl ErrorObjectKind {
+    /// Returns the ECMAScript constructor name used by Test262 negative
+    /// metadata and diagnostics.
+    #[must_use]
+    pub const fn constructor_name(self) -> &'static str {
+        match self {
+            Self::Error => "Error",
+            Self::EvalError => "EvalError",
+            Self::RangeError => "RangeError",
+            Self::ReferenceError => "ReferenceError",
+            Self::SyntaxError => "SyntaxError",
+            Self::TypeError => "TypeError",
+            Self::UriError => "URIError",
+            Self::InternalError => "InternalError",
+            Self::AggregateError => "AggregateError",
+        }
+    }
+}
+
 /// One verified caller location retained on an escaping JavaScript exception.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JsStackFrame {

@@ -26,13 +26,13 @@
 //! Realm-owned objects, prototypes, boxed primitives, and ordinary properties.
 
 use super::{
-    Arc, Atom, AtomError, BindingCell, BoxedPrimitive, ErrorIntrinsicKind, ExceptionKind,
-    FunctionId, FunctionImplementation, HandleError, HandleKind, HeapFunction, HeapObject,
-    HeapReference, JsBigInt, JsNumber, JsString, NativeFunction, NativeFunctionKind, ObjectId,
-    ObjectRecord, OwnProperty, PredefinedAtom, PropertyDeletion, PropertyKey, PropertyLayout,
-    PropertyLayoutKind, Rc, RealmId, RealmIntrinsics, ReleaseMailbox, Runtime, RuntimeResource,
-    SetPrototypeOutcome, SlotValue, StoredValue, array_length_from_number, check_execution_limit,
-    stale_heap_reference, usize_to_u64,
+    Arc, Atom, AtomError, BindingCell, BoxedPrimitive, ErrorIntrinsicKind, ErrorObjectKind,
+    ExceptionKind, FunctionId, FunctionImplementation, HandleError, HandleKind, HeapFunction,
+    HeapObject, HeapReference, JsBigInt, JsNumber, JsString, NativeFunction, NativeFunctionKind,
+    ObjectId, ObjectRecord, OwnProperty, PredefinedAtom, PropertyDeletion, PropertyKey,
+    PropertyLayout, PropertyLayoutKind, Rc, RealmId, RealmIntrinsics, ReleaseMailbox, Runtime,
+    RuntimeResource, SetPrototypeOutcome, SlotValue, StoredValue, array_length_from_number,
+    check_execution_limit, stale_heap_reference, usize_to_u64,
 };
 
 #[derive(Clone, Copy)]
@@ -632,6 +632,54 @@ impl Runtime {
                 generation: object.generation(),
             },
         )
+    }
+
+    pub(crate) fn error_object_kind(
+        &self,
+        object: ObjectId,
+    ) -> Result<Option<ErrorObjectKind>, crate::EngineFault> {
+        let object_record = self
+            .objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "Error object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        if !object_record.is_error() {
+            return Ok(None);
+        }
+        let mut prototype = object_record.record.prototype();
+        let mut remaining = self.objects.len().saturating_add(1);
+        while remaining != 0 {
+            remaining -= 1;
+            let Some(HeapReference::Object(current)) = prototype else {
+                return Ok(None);
+            };
+            for (_, state) in self.realms.iter() {
+                let RealmIntrinsics::Ready { errors, .. } = state.intrinsics else {
+                    continue;
+                };
+                for kind in ErrorIntrinsicKind::ALL {
+                    if errors.intrinsic(kind).prototype == current {
+                        return Ok(Some(kind.public_kind()));
+                    }
+                }
+            }
+            prototype = self
+                .objects
+                .get(current)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "Error prototype chain",
+                    index: current.index(),
+                    generation: current.generation(),
+                })?
+                .record
+                .prototype();
+        }
+        Err(crate::EngineFault::RuntimeInvariant {
+            message: "Error prototype chain is cyclic",
+        })
     }
 
     pub(crate) fn materialize_error_object(

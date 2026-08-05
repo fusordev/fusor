@@ -42,9 +42,9 @@ pub use atom::{
 };
 pub use bigint::{BigIntError, JsBigInt};
 pub use error::{
-    DynamicFunctionCompileFailure, DynamicFunctionScriptError, EngineFault, ExceptionKind,
-    ExecutionError, GlobalScriptError, HandleError, HandleKind, InstallError, JsException,
-    JsStackFrame, RuntimeError, RuntimeResource, ValueKind,
+    DynamicFunctionCompileFailure, DynamicFunctionScriptError, EngineFault, ErrorObjectKind,
+    ExceptionKind, ExecutionError, GlobalScriptError, HandleError, HandleKind, InstallError,
+    JsException, JsStackFrame, RuntimeError, RuntimeResource, ValueKind,
 };
 pub use host::{
     DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,

@@ -39,9 +39,10 @@ use quickjs_bytecode::{
 use crate::promise_rejection::PromiseRejectionState;
 use crate::{
     ArrayIndex, Atom, AtomError, AtomLimits, AtomTable, AtomUsage, DynamicFunctionScriptError,
-    ExceptionKind, ExecutionLimits, Function, GlobalScriptError, HandleError, HandleKind,
-    InstallError, JsBigInt, JsNumber, JsString, JsValue, OrdinaryDynamicFunctionCompiler,
-    PredefinedAtom, PropertyKey, PropertyLayout, PropertyLayoutKind, RuntimeError, RuntimeResource,
+    ErrorObjectKind, ExceptionKind, ExecutionLimits, Function, GlobalScriptError, HandleError,
+    HandleKind, InstallError, JsBigInt, JsNumber, JsString, JsValue,
+    OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey, PropertyLayout,
+    PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     interrupt::InterruptState,
@@ -139,19 +140,23 @@ impl ErrorIntrinsicKind {
         Self::AggregateError,
     ];
 
+    const fn public_kind(self) -> ErrorObjectKind {
+        match self {
+            Self::Error => ErrorObjectKind::Error,
+            Self::EvalError => ErrorObjectKind::EvalError,
+            Self::RangeError => ErrorObjectKind::RangeError,
+            Self::ReferenceError => ErrorObjectKind::ReferenceError,
+            Self::SyntaxError => ErrorObjectKind::SyntaxError,
+            Self::TypeError => ErrorObjectKind::TypeError,
+            Self::UriError => ErrorObjectKind::UriError,
+            Self::InternalError => ErrorObjectKind::InternalError,
+            Self::AggregateError => ErrorObjectKind::AggregateError,
+        }
+    }
+
     #[cfg(test)]
     const fn name(self) -> &'static str {
-        match self {
-            Self::Error => "Error",
-            Self::EvalError => "EvalError",
-            Self::RangeError => "RangeError",
-            Self::ReferenceError => "ReferenceError",
-            Self::SyntaxError => "SyntaxError",
-            Self::TypeError => "TypeError",
-            Self::UriError => "URIError",
-            Self::InternalError => "InternalError",
-            Self::AggregateError => "AggregateError",
-        }
+        self.public_kind().constructor_name()
     }
 
     const fn index(self) -> usize {
