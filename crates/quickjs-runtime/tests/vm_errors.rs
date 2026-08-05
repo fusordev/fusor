@@ -164,6 +164,27 @@ fn error_message_and_cause_follow_quickjs_conversion_and_get_order() {
 }
 
 #[test]
+fn error_constructor_routes_proxy_prototype_and_cause_internal_methods() {
+    let result = call(
+        "\
+            let log='';let prototype={};\
+            let newTarget=new Proxy(function(){},{get(target,key,receiver){\
+                if(key==='prototype'){log=log+'p';return prototype;}\
+                return Reflect.get(target,key,receiver);\
+            }});\
+            let options=new Proxy({},{\
+                has(target,key){log=log+'h';return key==='cause';},\
+                get(target,key,receiver){log=log+'g';return 17;}\
+            });\
+            let error=Reflect.construct(Error,['boom',options],newTarget);\
+            return (Object.getPrototypeOf(error)===prototype)+'|'+error.message+'|'+\
+                error.cause+'|'+log;",
+        string,
+    );
+    assert_eq!(result, "true|boom|17|phg");
+}
+
+#[test]
 fn error_prototype_to_string_gets_and_converts_name_before_message() {
     let result = call(
         "\

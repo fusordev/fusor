@@ -1912,9 +1912,9 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 201,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_590,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 201,
+            live_atoms: PREDEFINED_ATOM_COUNT + 202,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_599,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 202,
         }
     );
 
@@ -2568,9 +2568,9 @@ fn function_call_is_realm_owned_while_its_dynamic_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 201,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_590,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 201,
+            live_atoms: PREDEFINED_ATOM_COUNT + 202,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_599,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 202,
         }
     );
 }
@@ -2617,9 +2617,9 @@ fn function_apply_is_realm_owned_while_its_predefined_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 201,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_590,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 201,
+            live_atoms: PREDEFINED_ATOM_COUNT + 202,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_599,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 202,
         }
     );
 }

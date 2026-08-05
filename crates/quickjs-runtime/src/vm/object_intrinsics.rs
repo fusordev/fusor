@@ -55,6 +55,43 @@ enum PrimitivePolicy {
     PrototypeLookup,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntegrityOperation {
+    Set,
+    Test,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntegrityStage {
+    PreventExtensions,
+    IsExtensible,
+    OwnKeys,
+    Descriptor,
+    Define,
+}
+
+pub(super) struct IntegrityLevelContinuation {
+    target: StoredValue,
+    reference: HeapReference,
+    keys: Vec<PropertyKey>,
+    next: usize,
+    level: IntegrityLevel,
+    operation: IntegrityOperation,
+    stage: IntegrityStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl IntegrityLevelContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(usize_to_u64(self.keys.len()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.target, mark);
+    }
+}
+
 /// Resolves a static reflection method's argument to a heap reference.
 ///
 /// Returns `Ok(None)` when the argument is a primitive that the policy answers
@@ -226,7 +263,10 @@ pub(super) fn advance_object_meta(
             state.realm,
             Some(&state.origin),
             "Object meta operation",
-            "Proxy trap returned false",
+            match state.failure {
+                ObjectMetaFailure::NonExtensible => "object is not extensible",
+                ObjectMetaFailure::ProxyTrap => "Proxy trap returned false",
+            },
         )?));
     }
     Ok(NativeDispatch::Immediate(match state.completion {
@@ -334,6 +374,7 @@ pub(super) fn object_prototype_proto_setter(
         dispatch,
         ObjectMetaContinuation {
             completion: ObjectMetaCompletion::Undefined,
+            failure: ObjectMetaFailure::NonExtensible,
             realm,
             origin,
         },
@@ -402,7 +443,11 @@ pub(super) fn begin_legacy_lookup_accessor(
     begin_property_key_conversion(
         runtime,
         key,
-        PropertyKeyTarget::LegacyLookupAccessor { target, kind },
+        PropertyKeyTarget::LegacyLookupAccessor {
+            target,
+            kind,
+            realm,
+        },
         realm,
         return_to,
         origin,
@@ -417,6 +462,72 @@ pub(super) struct LegacyAccessorDefinition {
     pub(super) realm: RealmId,
     pub(super) key: PropertyKey,
     pub(super) name: JsString,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegacyAccessorLookupStage {
+    Descriptor,
+    Prototype,
+}
+
+pub(super) struct LegacyAccessorLookupContinuation {
+    current: HeapReference,
+    key: PropertyKey,
+    kind: LegacyAccessorKind,
+    realm: RealmId,
+    origin: JsStackFrame,
+    stage: LegacyAccessorLookupStage,
+}
+
+impl LegacyAccessorLookupContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(self.current));
+    }
+}
+
+enum LegacyAccessorLookupDispatch {
+    Resume(LegacyAccessorLookupContinuation, StoredValue),
+    Suspend(Box<NativeDispatch>),
+}
+
+fn continue_legacy_accessor_lookup_after(
+    dispatch: NativeDispatch,
+    state: LegacyAccessorLookupContinuation,
+) -> Result<LegacyAccessorLookupDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => Ok(LegacyAccessorLookupDispatch::Resume(state, value)),
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::LegacyAccessorLookup(Box::new(state))],
+            )?;
+            Ok(LegacyAccessorLookupDispatch::Suspend(Box::new(
+                NativeDispatch::Call(call),
+            )))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::LegacyAccessorLookup(Box::new(state))],
+            )?;
+            Ok(LegacyAccessorLookupDispatch::Suspend(Box::new(
+                NativeDispatch::Frame(frame),
+            )))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "legacy accessor lookup produced a structured result",
+        }
+        .into()),
+    }
 }
 
 /// Completes a legacy accessor definition after `ToPropertyKey`.
@@ -463,49 +574,119 @@ pub(super) fn finish_legacy_define_accessor(
     }
 }
 
-/// Completes a legacy accessor lookup after `ToPropertyKey`.
-pub(super) fn finish_legacy_lookup_accessor(
-    runtime: &Runtime,
-    target: &StoredValue,
-    kind: LegacyAccessorKind,
-    key: &PropertyKey,
+/// Continues a legacy accessor lookup through Proxy-aware internal methods.
+pub(super) fn advance_legacy_accessor_lookup(
+    runtime: &mut Runtime,
+    mut state: LegacyAccessorLookupContinuation,
+    mut completion: StoredValue,
+    return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let mut current = target
+    loop {
+        let next = match state.stage {
+            LegacyAccessorLookupStage::Descriptor => {
+                if let Some(property) = internal_complete_own_property(runtime, &completion)? {
+                    let function = match property {
+                        OwnProperty::Accessor { getter, setter, .. } => match state.kind {
+                            LegacyAccessorKind::Getter => getter,
+                            LegacyAccessorKind::Setter => setter,
+                        },
+                        OwnProperty::Data { .. } => None,
+                    };
+                    return Ok(NativeDispatch::Immediate(
+                        function.map_or(StoredValue::Undefined, StoredValue::Function),
+                    ));
+                }
+                state.stage = LegacyAccessorLookupStage::Prototype;
+                execution_budget.charge_instructions(1)?;
+                let dispatch = begin_internal_get_prototype_of(
+                    runtime,
+                    state.current,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                continue_legacy_accessor_lookup_after(dispatch, state)?
+            }
+            LegacyAccessorLookupStage::Prototype => {
+                let Some(prototype) = completion.heap_reference() else {
+                    if matches!(completion, StoredValue::Null) {
+                        return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+                    }
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "[[GetPrototypeOf]] returned neither object nor null",
+                    }
+                    .into());
+                };
+                state.current = prototype;
+                state.stage = LegacyAccessorLookupStage::Descriptor;
+                execution_budget.charge_instructions(1)?;
+                let dispatch = begin_internal_get_own_property(
+                    runtime,
+                    prototype,
+                    state.key.clone(),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                continue_legacy_accessor_lookup_after(dispatch, state)?
+            }
+        };
+        match next {
+            LegacyAccessorLookupDispatch::Resume(next_state, next_completion) => {
+                state = next_state;
+                completion = next_completion;
+            }
+            LegacyAccessorLookupDispatch::Suspend(dispatch) => return Ok(*dispatch),
+        }
+    }
+}
+
+/// Starts a legacy accessor lookup after `ToPropertyKey`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-ToPropertyKey legacy lookup carries the internal-method operands and the standard resume authority"
+)]
+pub(super) fn finish_legacy_lookup_accessor(
+    runtime: &mut Runtime,
+    target: &StoredValue,
+    kind: LegacyAccessorKind,
+    key: PropertyKey,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let current = target
         .heap_reference()
         .ok_or(EngineFault::RuntimeInvariant {
             message: "legacy accessor lookup lost its boxed receiver",
         })?;
-    let mut remaining = runtime
-        .functions
-        .len()
-        .saturating_add(runtime.objects.len())
-        .saturating_add(1);
-    loop {
-        if remaining == 0 {
-            return Err(EngineFault::RuntimeInvariant {
-                message: "ordinary prototype chain contains a cycle",
-            }
-            .into());
+    let state = LegacyAccessorLookupContinuation {
+        current,
+        key: key.clone(),
+        kind,
+        realm,
+        origin: origin.clone(),
+        stage: LegacyAccessorLookupStage::Descriptor,
+    };
+    execution_budget.charge_instructions(1)?;
+    let dispatch = begin_internal_get_own_property(
+        runtime,
+        current,
+        key,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_legacy_accessor_lookup_after(dispatch, state)? {
+        LegacyAccessorLookupDispatch::Resume(state, completion) => {
+            advance_legacy_accessor_lookup(runtime, state, completion, return_to, execution_budget)
         }
-        remaining -= 1;
-        execution_budget.charge_instructions(1)?;
-        if let Some(property) = heap_own_property(runtime, current, key)? {
-            let function = match property {
-                OwnProperty::Accessor { getter, setter, .. } => match kind {
-                    LegacyAccessorKind::Getter => getter,
-                    LegacyAccessorKind::Setter => setter,
-                },
-                OwnProperty::Data { .. } => None,
-            };
-            return Ok(NativeDispatch::Immediate(
-                function.map_or(StoredValue::Undefined, StoredValue::Function),
-            ));
-        }
-        let Some(prototype) = runtime.object_record(current)?.prototype() else {
-            return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
-        };
-        current = prototype;
+        LegacyAccessorLookupDispatch::Suspend(dispatch) => Ok(*dispatch),
     }
 }
 
@@ -591,52 +772,147 @@ pub(super) fn object_create(
     )
 }
 
+pub(super) struct IsPrototypeOfContinuation {
+    target: HeapReference,
+    current: HeapReference,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl IsPrototypeOfContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        2
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(self.target));
+        mark(CollectionRoot::Heap(self.current));
+    }
+}
+
+enum IsPrototypeOfDispatch {
+    Resume(IsPrototypeOfContinuation, StoredValue),
+    Suspend(Box<NativeDispatch>),
+}
+
+fn continue_is_prototype_of_after(
+    dispatch: NativeDispatch,
+    state: IsPrototypeOfContinuation,
+) -> Result<IsPrototypeOfDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => Ok(IsPrototypeOfDispatch::Resume(state, value)),
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::IsPrototypeOf(Box::new(state))],
+            )?;
+            Ok(IsPrototypeOfDispatch::Suspend(Box::new(
+                NativeDispatch::Call(call),
+            )))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::IsPrototypeOf(Box::new(state))],
+            )?;
+            Ok(IsPrototypeOfDispatch::Suspend(Box::new(
+                NativeDispatch::Frame(frame),
+            )))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "isPrototypeOf [[GetPrototypeOf]] produced a structured result",
+        }
+        .into()),
+    }
+}
+
+pub(super) fn advance_is_prototype_of(
+    runtime: &mut Runtime,
+    mut state: IsPrototypeOfContinuation,
+    mut completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    loop {
+        let Some(prototype) = completion.heap_reference() else {
+            if matches!(completion, StoredValue::Null) {
+                return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
+            }
+            return Err(EngineFault::RuntimeInvariant {
+                message: "[[GetPrototypeOf]] returned neither object nor null",
+            }
+            .into());
+        };
+        if prototype == state.target {
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)));
+        }
+        state.current = prototype;
+        execution_budget.charge_instructions(1)?;
+        let dispatch = begin_internal_get_prototype_of(
+            runtime,
+            prototype,
+            state.realm,
+            return_to,
+            state.origin.clone(),
+            execution_budget,
+        )?;
+        match continue_is_prototype_of_after(dispatch, state)? {
+            IsPrototypeOfDispatch::Resume(next_state, next_completion) => {
+                state = next_state;
+                completion = next_completion;
+            }
+            IsPrototypeOfDispatch::Suspend(dispatch) => return Ok(*dispatch),
+        }
+    }
+}
+
 /// Applies `Object.prototype.isPrototypeOf`.
 ///
-/// The walk starts at the *candidate's* prototype, not the candidate itself, so
-/// a receiver never precedes itself and `p.isPrototypeOf(p)` is `false`. A
-/// primitive candidate has no chain of its own, so the answer is `false` without
-/// consulting its wrapper prototype, which the pinned oracle confirms:
-/// `({}).isPrototypeOf(1)` is `false`.
+/// The candidate type check precedes `ToObject(this)`, then each step uses the
+/// candidate's observable `[[GetPrototypeOf]]` internal method.
 pub(super) fn object_prototype_is_prototype_of(
     runtime: &mut Runtime,
     realm: RealmId,
-    receiver: &StoredValue,
+    receiver: StoredValue,
     candidate: &StoredValue,
-    origin: &JsStackFrame,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    // `ToObject(this)` runs first, so a nullish receiver throws even when the
-    // candidate would have answered `false`.
-    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
-        return Err(NativeFailure::Abrupt(PendingException {
-            realm,
-            payload: PendingExceptionPayload::EngineError {
-                kind: ExceptionKind::TypeError,
-                message: JsString::from_utf8("cannot convert to object")?,
-            },
-            origin: origin.clone(),
-        }));
-    }
-    let Some(target) = receiver.heap_reference() else {
-        // A primitive receiver is not on any prototype chain.
-        return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
-    };
     let Some(start) = candidate.heap_reference() else {
         return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
     };
-
-    let mut current = runtime.object_record(start)?.prototype();
-    while let Some(reference) = current {
-        // The walk is bounded by the same budget every prototype lookup uses, so
-        // a long chain cannot run unaccounted.
-        execution_budget.charge_instructions(1)?;
-        if reference == target {
-            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)));
+    let target = legacy_to_object(runtime, realm, receiver, &origin)?
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "isPrototypeOf lost its boxed receiver",
+        })?;
+    let state = IsPrototypeOfContinuation {
+        target,
+        current: start,
+        realm,
+        origin: origin.clone(),
+    };
+    execution_budget.charge_instructions(1)?;
+    let dispatch = begin_internal_get_prototype_of(
+        runtime,
+        start,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_is_prototype_of_after(dispatch, state)? {
+        IsPrototypeOfDispatch::Resume(state, completion) => {
+            advance_is_prototype_of(runtime, state, completion, return_to, execution_budget)
         }
-        current = runtime.object_record(reference)?.prototype();
+        IsPrototypeOfDispatch::Suspend(dispatch) => Ok(*dispatch),
     }
-    Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
 }
 
 /// Returns the intrinsic prototype a primitive's wrapper would inherit.
@@ -730,10 +1006,336 @@ pub(super) fn set_prototype_of(
         dispatch,
         ObjectMetaContinuation {
             completion: ObjectMetaCompletion::Target(target),
+            failure: ObjectMetaFailure::NonExtensible,
             realm,
             origin,
         },
     )
+}
+
+enum IntegrityDispatch {
+    Resume(IntegrityLevelContinuation, StoredValue),
+    Suspend(Box<NativeDispatch>),
+}
+
+fn continue_integrity_after(
+    dispatch: NativeDispatch,
+    state: IntegrityLevelContinuation,
+) -> Result<IntegrityDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => Ok(IntegrityDispatch::Resume(state, value)),
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::IntegrityLevel(Box::new(state))],
+            )?;
+            Ok(IntegrityDispatch::Suspend(Box::new(NativeDispatch::Call(
+                call,
+            ))))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::IntegrityLevel(Box::new(state))],
+            )?;
+            Ok(IntegrityDispatch::Suspend(Box::new(NativeDispatch::Frame(
+                frame,
+            ))))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "integrity-level internal method produced a structured result",
+        }
+        .into()),
+    }
+}
+
+fn integrity_type_error(
+    state: &IntegrityLevelContinuation,
+) -> Result<NativeFailure, NativeFailure> {
+    Ok(NativeFailure::Abrupt(type_error(
+        state.realm,
+        Some(&state.origin),
+        "integrity level",
+        "integrity operation was rejected",
+    )?))
+}
+
+fn internal_descriptor_field(
+    runtime: &Runtime,
+    descriptor: ObjectId,
+    atom: PredefinedAtom,
+) -> Result<Option<StoredValue>, NativeFailure> {
+    let key = runtime.predefined_property_key(atom);
+    match heap_own_property(runtime, HeapReference::Object(descriptor), &key)? {
+        Some(OwnProperty::Data { value, .. }) => Ok(Some(value)),
+        Some(OwnProperty::Accessor { .. }) => Err(EngineFault::RuntimeInvariant {
+            message: "internal descriptor field is not a data property",
+        }
+        .into()),
+        None => Ok(None),
+    }
+}
+
+fn internal_descriptor_flag(
+    runtime: &Runtime,
+    descriptor: ObjectId,
+    atom: PredefinedAtom,
+) -> Result<bool, NativeFailure> {
+    let Some(StoredValue::Boolean(value)) = internal_descriptor_field(runtime, descriptor, atom)?
+    else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "internal descriptor flag is missing or not Boolean",
+        }
+        .into());
+    };
+    Ok(value)
+}
+
+fn internal_descriptor_accessor(value: &StoredValue) -> Result<Option<FunctionId>, NativeFailure> {
+    match value {
+        StoredValue::Undefined => Ok(None),
+        StoredValue::Function(function) => Ok(Some(*function)),
+        StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::Object(_) => Err(EngineFault::RuntimeInvariant {
+            message: "internal descriptor accessor is neither callable nor undefined",
+        }
+        .into()),
+    }
+}
+
+pub(super) fn internal_complete_own_property(
+    runtime: &Runtime,
+    completion: &StoredValue,
+) -> Result<Option<OwnProperty>, NativeFailure> {
+    let descriptor = match completion {
+        StoredValue::Undefined => return Ok(None),
+        StoredValue::Object(descriptor) => *descriptor,
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "internal own-property result is neither descriptor nor undefined",
+            }
+            .into());
+        }
+    };
+    let enumerable = internal_descriptor_flag(runtime, descriptor, PredefinedAtom::Enumerable)?;
+    let configurable = internal_descriptor_flag(runtime, descriptor, PredefinedAtom::Configurable)?;
+    let value = internal_descriptor_field(runtime, descriptor, PredefinedAtom::Value)?;
+    let writable = internal_descriptor_field(runtime, descriptor, PredefinedAtom::Writable)?;
+    let getter = internal_descriptor_field(runtime, descriptor, PredefinedAtom::Get)?;
+    let setter = internal_descriptor_field(runtime, descriptor, PredefinedAtom::SetProperty)?;
+    match (value, writable, getter, setter) {
+        (Some(value), Some(StoredValue::Boolean(writable)), None, None) => {
+            Ok(Some(OwnProperty::Data {
+                layout: PropertyLayout::data(writable, enumerable, configurable),
+                value,
+            }))
+        }
+        (None, None, Some(getter), Some(setter)) => Ok(Some(OwnProperty::Accessor {
+            layout: PropertyLayout::accessor(enumerable, configurable),
+            getter: internal_descriptor_accessor(&getter)?,
+            setter: internal_descriptor_accessor(&setter)?,
+        })),
+        _ => Err(EngineFault::RuntimeInvariant {
+            message: "internal descriptor is not complete",
+        }
+        .into()),
+    }
+}
+
+fn finish_integrity_level(state: IntegrityLevelContinuation, result: bool) -> NativeDispatch {
+    NativeDispatch::Immediate(match state.operation {
+        IntegrityOperation::Set => state.target,
+        IntegrityOperation::Test => StoredValue::Boolean(result),
+    })
+}
+
+fn begin_integrity_key_operation(
+    runtime: &mut Runtime,
+    mut state: IntegrityLevelContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<IntegrityDispatch, NativeFailure> {
+    if state.next >= state.keys.len() {
+        return Ok(IntegrityDispatch::Suspend(Box::new(
+            finish_integrity_level(state, true),
+        )));
+    }
+    let key = state.keys[state.next].clone();
+    let dispatch =
+        if state.operation == IntegrityOperation::Set && state.level == IntegrityLevel::Sealed {
+            state.stage = IntegrityStage::Define;
+            begin_internal_define_own_property(
+                runtime,
+                state.reference,
+                key,
+                PropertyDefinition::generic().with_configurable(Requested::Present(false)),
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+                DefinePropertyResult::Boolean,
+            )?
+        } else {
+            state.stage = IntegrityStage::Descriptor;
+            begin_internal_get_own_property(
+                runtime,
+                state.reference,
+                key,
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?
+        };
+    continue_integrity_after(dispatch, state)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the iterative SetIntegrityLevel/TestIntegrityLevel driver keeps the normative internal-method order in one typed state machine"
+)]
+pub(super) fn advance_integrity_level(
+    runtime: &mut Runtime,
+    mut state: IntegrityLevelContinuation,
+    mut completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    loop {
+        let next = match state.stage {
+            IntegrityStage::PreventExtensions => {
+                let StoredValue::Boolean(success) = completion else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "[[PreventExtensions]] did not return a Boolean",
+                    }
+                    .into());
+                };
+                if !success {
+                    return Err(integrity_type_error(&state)?);
+                }
+                state.stage = IntegrityStage::OwnKeys;
+                let dispatch = begin_internal_own_keys(
+                    runtime,
+                    state.reference,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                continue_integrity_after(dispatch, state)?
+            }
+            IntegrityStage::IsExtensible => {
+                let StoredValue::Boolean(extensible) = completion else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "[[IsExtensible]] did not return a Boolean",
+                    }
+                    .into());
+                };
+                if extensible {
+                    return Ok(finish_integrity_level(state, false));
+                }
+                state.stage = IntegrityStage::OwnKeys;
+                let dispatch = begin_internal_own_keys(
+                    runtime,
+                    state.reference,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                continue_integrity_after(dispatch, state)?
+            }
+            IntegrityStage::OwnKeys => {
+                state.keys = generated_key_list(runtime, completion)?;
+                state.next = 0;
+                begin_integrity_key_operation(runtime, state, return_to, execution_budget)?
+            }
+            IntegrityStage::Descriptor => {
+                let own = internal_complete_own_property(runtime, &completion)?;
+                match state.operation {
+                    IntegrityOperation::Test => {
+                        if own.as_ref().is_some_and(|property| {
+                            property.layout().is_configurable()
+                                || (state.level == IntegrityLevel::Frozen
+                                    && property.layout().writable() == Some(true))
+                        }) {
+                            return Ok(finish_integrity_level(state, false));
+                        }
+                        state.next = state.next.saturating_add(1);
+                        begin_integrity_key_operation(runtime, state, return_to, execution_budget)?
+                    }
+                    IntegrityOperation::Set => {
+                        let Some(own) = own else {
+                            state.next = state.next.saturating_add(1);
+                            let next = begin_integrity_key_operation(
+                                runtime,
+                                state,
+                                return_to,
+                                execution_budget,
+                            )?;
+                            match next {
+                                IntegrityDispatch::Resume(next_state, next_completion) => {
+                                    state = next_state;
+                                    completion = next_completion;
+                                    continue;
+                                }
+                                IntegrityDispatch::Suspend(dispatch) => return Ok(*dispatch),
+                            }
+                        };
+                        let definition = if own.layout().writable().is_some() {
+                            PropertyDefinition::data(Requested::Absent, Requested::Present(false))
+                        } else {
+                            PropertyDefinition::generic()
+                        }
+                        .with_configurable(Requested::Present(false));
+                        state.stage = IntegrityStage::Define;
+                        let dispatch = begin_internal_define_own_property(
+                            runtime,
+                            state.reference,
+                            state.keys[state.next].clone(),
+                            definition,
+                            state.realm,
+                            return_to,
+                            state.origin.clone(),
+                            execution_budget,
+                            DefinePropertyResult::Boolean,
+                        )?;
+                        continue_integrity_after(dispatch, state)?
+                    }
+                }
+            }
+            IntegrityStage::Define => {
+                let StoredValue::Boolean(success) = completion else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "[[DefineOwnProperty]] did not return a Boolean",
+                    }
+                    .into());
+                };
+                if !success {
+                    return Err(integrity_type_error(&state)?);
+                }
+                state.next = state.next.saturating_add(1);
+                begin_integrity_key_operation(runtime, state, return_to, execution_budget)?
+            }
+        };
+        match next {
+            IntegrityDispatch::Resume(next_state, next_completion) => {
+                state = next_state;
+                completion = next_completion;
+            }
+            IntegrityDispatch::Suspend(dispatch) => return Ok(*dispatch),
+        }
+    }
 }
 
 /// `Object.seal(target)` and `Object.freeze(target)`.
@@ -742,7 +1344,9 @@ pub(super) fn set_integrity_level(
     realm: RealmId,
     argument: Option<StoredValue>,
     level: IntegrityLevel,
-    origin: Option<&JsStackFrame>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let target = argument.unwrap_or(StoredValue::Undefined);
     let Some(reference) = reflection_target(
@@ -750,14 +1354,37 @@ pub(super) fn set_integrity_level(
         realm,
         &target,
         PrimitivePolicy::ReturnArgument,
-        origin,
+        Some(&origin),
         "seal",
     )?
     else {
         return Ok(NativeDispatch::Immediate(target));
     };
-    runtime.set_integrity_level(reference, level)?;
-    Ok(NativeDispatch::Immediate(target))
+    let state = IntegrityLevelContinuation {
+        target,
+        reference,
+        keys: Vec::new(),
+        next: 0,
+        level,
+        operation: IntegrityOperation::Set,
+        stage: IntegrityStage::PreventExtensions,
+        realm,
+        origin: origin.clone(),
+    };
+    let dispatch = begin_internal_prevent_extensions(
+        runtime,
+        reference,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_integrity_after(dispatch, state)? {
+        IntegrityDispatch::Resume(state, completion) => {
+            advance_integrity_level(runtime, state, completion, return_to, execution_budget)
+        }
+        IntegrityDispatch::Suspend(dispatch) => Ok(*dispatch),
+    }
 }
 
 /// `Object.isSealed(target)` and `Object.isFrozen(target)`.
@@ -769,7 +1396,9 @@ pub(super) fn test_integrity_level(
     realm: RealmId,
     argument: Option<StoredValue>,
     level: IntegrityLevel,
-    origin: Option<&JsStackFrame>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let target = argument.unwrap_or(StoredValue::Undefined);
     let Some(reference) = reflection_target(
@@ -777,15 +1406,37 @@ pub(super) fn test_integrity_level(
         realm,
         &target,
         PrimitivePolicy::TreatAsSealed,
-        origin,
+        Some(&origin),
         "isSealed",
     )?
     else {
         return Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)));
     };
-    Ok(NativeDispatch::Immediate(StoredValue::Boolean(
-        runtime.tests_integrity_level(reference, level)?,
-    )))
+    let state = IntegrityLevelContinuation {
+        target,
+        reference,
+        keys: Vec::new(),
+        next: 0,
+        level,
+        operation: IntegrityOperation::Test,
+        stage: IntegrityStage::IsExtensible,
+        realm,
+        origin: origin.clone(),
+    };
+    let dispatch = begin_internal_is_extensible(
+        runtime,
+        reference,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_integrity_after(dispatch, state)? {
+        IntegrityDispatch::Resume(state, completion) => {
+            advance_integrity_level(runtime, state, completion, return_to, execution_budget)
+        }
+        IntegrityDispatch::Suspend(dispatch) => Ok(*dispatch),
+    }
 }
 
 /// `Object.preventExtensions(target)`.
@@ -821,6 +1472,7 @@ pub(super) fn prevent_extensions(
         dispatch,
         ObjectMetaContinuation {
             completion: ObjectMetaCompletion::Target(target),
+            failure: ObjectMetaFailure::ProxyTrap,
             realm,
             origin,
         },
@@ -973,6 +1625,40 @@ impl ProxyEnumerableContinuation {
         mark(CollectionRoot::Heap(self.target));
         for value in &self.elements {
             trace_stored_value_root(value, mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GetOwnPropertyDescriptorsStage {
+    Keys,
+    Descriptor,
+}
+
+/// One resumable `Object.getOwnPropertyDescriptors` traversal.
+pub(super) struct GetOwnPropertyDescriptorsContinuation {
+    target: HeapReference,
+    keys: Vec<PropertyKey>,
+    next: usize,
+    current_key: Option<PropertyKey>,
+    result: Option<ObjectId>,
+    realm: RealmId,
+    origin: JsStackFrame,
+    stage: GetOwnPropertyDescriptorsStage,
+}
+
+impl GetOwnPropertyDescriptorsContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64
+            .saturating_add(usize_to_u64(self.keys.len()))
+            .saturating_add(u64::from(self.current_key.is_some()))
+            .saturating_add(u64::from(self.result.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(self.target));
+        if let Some(result) = self.result {
+            mark(CollectionRoot::Heap(HeapReference::Object(result)));
         }
     }
 }
@@ -2313,71 +2999,187 @@ fn take_object_assign_completion(
     })
 }
 
-/// `Object.getOwnPropertyDescriptors(O)`.
-///
-/// The ordinary-object profile has no Proxy `[[OwnPropertyKeys]]` or
-/// `[[GetOwnProperty]]` hooks yet, so the complete admitted operation is
-/// synchronous: snapshot every key, allocate the result, re-read each own
-/// property, and materialize the descriptor when it remains present.
+/// Starts `Object.getOwnPropertyDescriptors(O)`.
 pub(super) fn get_own_property_descriptors(
     runtime: &mut Runtime,
     realm: RealmId,
     argument: Option<StoredValue>,
-    origin: &JsStackFrame,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let target = argument.unwrap_or(StoredValue::Undefined);
     if matches!(target, StoredValue::Undefined | StoredValue::Null) {
         return Err(NativeFailure::Abrupt(type_error(
             realm,
-            Some(origin),
+            Some(&origin),
             "getOwnPropertyDescriptors",
             "cannot convert to object",
         )?));
     }
 
-    let keys = if let Some(reference) = target.heap_reference() {
-        let (snapshot, work) = runtime.try_own_key_snapshot(reference, 0, KeyPhases::ALL)?;
-        execution_budget.charge_instructions(work)?;
-        let mut keys = Vec::new();
-        keys.try_reserve_exact(snapshot.len())
-            .map_err(|_| ExecutionError::AllocationFailed {
-                resource: RuntimeResource::FrameValues,
-                additional: snapshot.len(),
-            })?;
-        for index in 0..snapshot.len() {
-            keys.push(
-                snapshot
-                    .get(index)
-                    .ok_or(EngineFault::RuntimeInvariant {
-                        message: "own-key snapshot shrank during descriptor aggregation",
-                    })?
-                    .key()
-                    .clone(),
-            );
-        }
-        keys
-    } else if let StoredValue::String(value) = &target {
-        let keys = primitive_string_own_keys(runtime, value)?;
-        execution_budget.charge_instructions(usize_to_u64(keys.len()).saturating_add(1))?;
-        keys
-    } else {
-        execution_budget.charge_instructions(1)?;
-        Vec::new()
+    let Some(reference) = target.heap_reference() else {
+        let keys = if let StoredValue::String(value) = &target {
+            let keys = primitive_string_own_keys(runtime, value)?;
+            execution_budget.charge_instructions(usize_to_u64(keys.len()).saturating_add(1))?;
+            keys
+        } else {
+            execution_budget.charge_instructions(1)?;
+            Vec::new()
+        };
+        return materialize_ordinary_own_property_descriptors(
+            runtime, realm, &target, keys, &origin,
+        );
     };
 
+    let state = GetOwnPropertyDescriptorsContinuation {
+        target: reference,
+        keys: Vec::new(),
+        next: 0,
+        current_key: None,
+        result: None,
+        realm,
+        origin: origin.clone(),
+        stage: GetOwnPropertyDescriptorsStage::Keys,
+    };
+    let dispatch = begin_internal_own_keys(
+        runtime,
+        reference,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    continue_get_own_property_descriptors_after(
+        runtime,
+        dispatch,
+        state,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn continue_get_own_property_descriptors_after(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
+    state: GetOwnPropertyDescriptorsContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => {
+            advance_get_own_property_descriptors(runtime, state, value, return_to, execution_budget)
+        }
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::GetOwnPropertyDescriptors(Box::new(
+                    state,
+                ))],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::GetOwnPropertyDescriptors(Box::new(
+                    state,
+                ))],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "getOwnPropertyDescriptors internal method produced a structured result",
+        }
+        .into()),
+    }
+}
+
+pub(super) fn advance_get_own_property_descriptors(
+    runtime: &mut Runtime,
+    mut state: GetOwnPropertyDescriptorsContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        GetOwnPropertyDescriptorsStage::Keys => {
+            state.keys = generated_key_list(runtime, completion)?;
+            state.result = Some(
+                runtime.allocate_ordinary_object(runtime.realm_object_prototype(state.realm)?)?,
+            );
+        }
+        GetOwnPropertyDescriptorsStage::Descriptor => {
+            let key = state
+                .current_key
+                .take()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "getOwnPropertyDescriptors descriptor lost its key",
+                })?;
+            if let Some(own) = internal_complete_own_property(runtime, &completion)? {
+                let descriptor = build_descriptor_object(runtime, state.realm, own)?;
+                runtime.append_data_property(
+                    HeapReference::Object(state.result.ok_or(EngineFault::RuntimeInvariant {
+                        message: "getOwnPropertyDescriptors lost its result object",
+                    })?),
+                    key,
+                    PropertyLayout::data(true, true, true),
+                    StoredValue::Object(descriptor),
+                )?;
+            }
+        }
+    }
+
+    let Some(key) = state.keys.get(state.next).cloned() else {
+        return Ok(NativeDispatch::Immediate(StoredValue::Object(
+            state.result.ok_or(EngineFault::RuntimeInvariant {
+                message: "getOwnPropertyDescriptors completed without a result object",
+            })?,
+        )));
+    };
+    state.next = state.next.saturating_add(1);
+    state.current_key = Some(key.clone());
+    state.stage = GetOwnPropertyDescriptorsStage::Descriptor;
+    let dispatch = begin_internal_get_own_property(
+        runtime,
+        state.target,
+        key,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_own_property_descriptors_after(
+        runtime,
+        dispatch,
+        state,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn materialize_ordinary_own_property_descriptors(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    target: &StoredValue,
+    keys: Vec<PropertyKey>,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
     let result = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
-    let result_reference = HeapReference::Object(result);
-    let result_property = PropertyLayout::data(true, true, true);
     for key in keys {
-        let Some(own) = resolve_own_property(runtime, realm, &target, &key, origin)? else {
+        let Some(own) = resolve_own_property(runtime, realm, target, &key, origin)? else {
             continue;
         };
         let descriptor = build_descriptor_object(runtime, realm, own)?;
         runtime.append_data_property(
-            result_reference,
+            HeapReference::Object(result),
             key,
-            result_property,
+            PropertyLayout::data(true, true, true),
             StoredValue::Object(descriptor),
         )?;
     }

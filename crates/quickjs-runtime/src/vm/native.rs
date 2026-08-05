@@ -145,6 +145,35 @@ pub(super) fn prepend_native_continuations(
     Ok(())
 }
 
+pub(super) fn continue_get_after<State>(
+    dispatch: NativeDispatch,
+    state: State,
+    continuation: fn(State) -> NativeContinuation,
+    complete: impl FnOnce(State, StoredValue) -> Result<NativeDispatch, NativeFailure>,
+    structured_result_message: &'static str,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => complete(state, value),
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(&mut call, vec![continuation(state)])?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(&mut frame, vec![continuation(state)])?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: structured_result_message,
+        }
+        .into()),
+    }
+}
+
 pub(super) fn take_iterator_abrupt_handler(
     continuations: &mut Vec<NativeContinuation>,
 ) -> Option<NativeContinuation> {
@@ -529,6 +558,13 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::IteratorClose(state) => {
                 advance_iterator_close(state, value, return_to)?
             }
+            NativeContinuation::ForIn(state) => advance_for_in(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::CopyDataProperties(state) => {
                 advance_copy_data_properties(runtime, state, &value, return_to, execution_budget)?
             }
@@ -562,6 +598,15 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::GetOwnPropertyDescriptors(state) => {
+                advance_get_own_property_descriptors(
+                    runtime,
+                    *state,
+                    value.duplicate(),
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::DefineProperty(state) => advance_define_property(
                 runtime,
                 *state,
@@ -726,6 +771,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::OrdinarySetReceiver(state) => advance_ordinary_set_receiver(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::ProxyMeta(state) => advance_proxy_meta(
                 runtime,
                 *state,
@@ -748,6 +800,27 @@ pub(super) fn resume_native_continuations(
                 execution_budget,
             )?,
             NativeContinuation::ProxyOwnKeys(state) => advance_proxy_own_keys(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::IntegrityLevel(state) => advance_integrity_level(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::LegacyAccessorLookup(state) => advance_legacy_accessor_lookup(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::IsPrototypeOf(state) => advance_is_prototype_of(
                 runtime,
                 *state,
                 value.duplicate(),
@@ -1799,7 +1872,9 @@ pub(super) fn dispatch_native_call_with_frames(
                 native.realm,
                 arguments.take_first(),
                 level,
-                origin.as_ref(),
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
             )
         }
         NativeFunctionKind::ObjectIsSealed | NativeFunctionKind::ObjectIsFrozen => {
@@ -1814,7 +1889,9 @@ pub(super) fn dispatch_native_call_with_frames(
                 native.realm,
                 arguments.take_first(),
                 level,
-                origin.as_ref(),
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
             )
         }
         NativeFunctionKind::ObjectKeys
@@ -1860,7 +1937,8 @@ pub(super) fn dispatch_native_call_with_frames(
                 runtime,
                 native.realm,
                 arguments.take_first(),
-                &origin.unwrap_or_else(native_function_host_origin),
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
                 execution_budget,
             )
         }
@@ -2033,9 +2111,10 @@ pub(super) fn dispatch_native_call_with_frames(
             object_prototype_is_prototype_of(
                 runtime,
                 native.realm,
-                &inputs.receiver,
+                inputs.receiver,
                 &candidate,
-                &origin,
+                return_to,
+                origin,
                 execution_budget,
             )
         }
@@ -2156,6 +2235,7 @@ pub(super) fn dispatch_native_call_with_frames(
             inputs.receiver,
             return_to,
             origin,
+            execution_budget,
         ),
         NativeFunctionKind::ObjectPrototypeValueOf => match inputs.receiver {
             value @ (StoredValue::Function(_) | StoredValue::Object(_)) => {
@@ -2206,7 +2286,15 @@ pub(super) fn dispatch_native_call_with_frames(
             let Some(new_target) = inputs.new_target else {
                 return Ok(NativeDispatch::Immediate(StoredValue::Boolean(value)));
             };
-            begin_boolean_constructor_wrapper(runtime, new_target, value, return_to, origin)
+            begin_boolean_constructor_wrapper(
+                runtime,
+                native.realm,
+                new_target,
+                value,
+                return_to,
+                origin,
+                execution_budget,
+            )
         }
         NativeFunctionKind::BooleanPrototypeToString => {
             let value =
@@ -2280,7 +2368,13 @@ pub(super) fn dispatch_native_call_with_frames(
                     || Ok(NativeDispatch::Immediate(StoredValue::Number(value))),
                     |new_target| {
                         begin_number_constructor_wrapper(
-                            runtime, new_target, value, return_to, origin,
+                            runtime,
+                            native.realm,
+                            new_target,
+                            value,
+                            return_to,
+                            origin,
+                            execution_budget,
                         )
                     },
                 );
@@ -2414,7 +2508,15 @@ pub(super) fn dispatch_native_call_with_frames(
             let Some(argument) = arguments.take_first() else {
                 let value = JsString::empty();
                 return if let Some(new_target) = inputs.new_target {
-                    begin_string_constructor_wrapper(runtime, new_target, value, return_to, origin)
+                    begin_string_constructor_wrapper(
+                        runtime,
+                        native.realm,
+                        new_target,
+                        value,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    )
                 } else {
                     Ok(NativeDispatch::Immediate(StoredValue::String(value)))
                 };
@@ -2574,10 +2676,12 @@ pub(super) fn dispatch_native_call_with_frames(
         ),
         NativeFunctionKind::ArrayIsArray => {
             let mut arguments = inputs.arguments;
-            let answer = match arguments.take_first_or_undefined() {
-                StoredValue::Object(object) => runtime.is_array_object(object)?,
-                _ => false,
-            };
+            let answer = proxy_aware_is_array(
+                runtime,
+                arguments.take_first_or_undefined(),
+                native.realm,
+                origin.unwrap_or_else(native_function_host_origin),
+            )?;
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(answer)))
         }
         NativeFunctionKind::ArrayStatic(method) => begin_array_static(

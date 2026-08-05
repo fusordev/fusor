@@ -111,6 +111,7 @@ impl KeyPhases {
     ///
     /// `for-in` never visits symbol keys, so the symbol phase is excluded
     /// rather than filtered by the caller.
+    #[cfg(test)]
     pub(crate) const FOR_IN: Self = Self {
         indices: true,
         strings: true,
@@ -197,6 +198,19 @@ impl ForInSnapshot {
 
     pub(crate) const fn sort_work(&self) -> u64 {
         self.sort_work
+    }
+
+    pub(crate) fn try_from_keys(keys: Vec<PropertyKey>) -> Result<Self, TryReserveError> {
+        let mut candidates = Vec::new();
+        candidates.try_reserve_exact(keys.len())?;
+        candidates.extend(keys.into_iter().map(|key| ForInCandidate {
+            key,
+            enumerable: true,
+        }));
+        Ok(Self {
+            candidates,
+            sort_work: 0,
+        })
     }
 }
 
@@ -876,6 +890,7 @@ impl ForInIterator {
         self.visited.contains(key)
     }
 
+    #[cfg(test)]
     pub(crate) fn visited_growth_work(&self) -> u64 {
         if self.visited.len() < self.visited.capacity() {
             return 1;
@@ -1034,45 +1049,6 @@ impl ObjectRecord {
         self.extensible = false;
     }
 
-    /// Returns whether every own property forbids reconfiguration, which is
-    /// the own-property half of `Object.isSealed`.
-    pub(crate) fn own_properties_are_sealed(&self) -> bool {
-        self.shape
-            .iter()
-            .all(|property| !property.layout.is_configurable())
-    }
-
-    /// Returns whether every own property forbids reconfiguration and every
-    /// data property forbids assignment, the own-property half of
-    /// `Object.isFrozen`.
-    pub(crate) fn own_properties_are_frozen(&self) -> bool {
-        self.shape.iter().all(|property| {
-            !property.layout.is_configurable() && property.layout.writable() != Some(true)
-        })
-    }
-
-    /// Applies `Object.seal`'s attribute clamp to every own property.
-    pub(crate) fn seal_own_properties(&mut self) {
-        let shape = Arc::get_mut(&mut self.shape)
-            .expect("object shape Arc is private and uniquely owned before shape interning");
-        for property in shape.iter_mut() {
-            property.layout = property.layout.sealed();
-        }
-    }
-
-    /// Applies `Object.freeze`'s attribute clamp to every own property.
-    ///
-    /// Accessor properties keep their getter and setter; only their
-    /// `configurable` attribute is cleared, matching ECMAScript's
-    /// `SetIntegrityLevel` and `QuickJS`'s `js_object_seal` (`quickjs.c:40549`).
-    pub(crate) fn freeze_own_properties(&mut self) {
-        let shape = Arc::get_mut(&mut self.shape)
-            .expect("object shape Arc is private and uniquely owned before shape interning");
-        for property in shape.iter_mut() {
-            property.layout = property.layout.frozen();
-        }
-    }
-
     /// Removes one own property, compacting the shape and slot vectors in
     /// lockstep so their indices stay aligned.
     ///
@@ -1141,6 +1117,7 @@ impl ObjectRecord {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn has_own_property_with_scan(&self, key: &PropertyKey) -> (bool, usize) {
         let mut scanned = 0_usize;
         for property in self.shape.iter() {
@@ -1647,10 +1624,6 @@ impl ArgumentsState {
         self.parameter_map
             .get_mut(index as usize)
             .and_then(Option::take)
-    }
-
-    pub(crate) fn mapping_len(&self) -> usize {
-        self.parameter_map.len()
     }
 }
 
@@ -2529,31 +2502,6 @@ impl HeapObject {
             | HeapObjectKind::WeakSet(_)
             | HeapObjectKind::WeakRef(_)
             | HeapObjectKind::FinalizationRegistry(_) => None,
-        }
-    }
-
-    pub(crate) fn arguments_mapping_len(&self) -> usize {
-        match &self.kind {
-            HeapObjectKind::Arguments(state) => state.mapping_len(),
-            HeapObjectKind::Ordinary
-            | HeapObjectKind::Proxy(_)
-            | HeapObjectKind::RawJson
-            | HeapObjectKind::Array(_)
-            | HeapObjectKind::Error
-            | HeapObjectKind::Promise(_)
-            | HeapObjectKind::BoxedPrimitive(_)
-            | HeapObjectKind::ForInIterator(_)
-            | HeapObjectKind::ArrayIterator(_)
-            | HeapObjectKind::StringIterator(_)
-            | HeapObjectKind::RegExp(_)
-            | HeapObjectKind::Map(_)
-            | HeapObjectKind::MapIterator(_)
-            | HeapObjectKind::Set(_)
-            | HeapObjectKind::SetIterator(_)
-            | HeapObjectKind::WeakMap(_)
-            | HeapObjectKind::WeakSet(_)
-            | HeapObjectKind::WeakRef(_)
-            | HeapObjectKind::FinalizationRegistry(_) => 0,
         }
     }
 

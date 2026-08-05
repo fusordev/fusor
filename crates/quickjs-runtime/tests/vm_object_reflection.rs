@@ -257,6 +257,22 @@ fn is_prototype_of_walks_the_candidates_chain() {
         ("Object.prototype.isPrototypeOf([])", "true"),
         ("Array.prototype.isPrototypeOf([])", "true"),
         ("Array.prototype.isPrototypeOf({})", "false"),
+        (
+            "(function(){let log='';const p={};const candidate=new Proxy({},\
+                {getPrototypeOf(){log+='g';return p;}});\
+                return p.isPrototypeOf(candidate)+'|'+log;})()",
+            "true|g",
+        ),
+        // The candidate type check precedes ToObject(this).
+        ("Object.prototype.isPrototypeOf.call(null,1)", "false"),
+        (
+            "(function(){let log='';const candidate=new Proxy({},\
+                {getPrototypeOf(){log+='g';return null;}});\
+                try{Object.prototype.isPrototypeOf.call(null,candidate);}\
+                catch(error){return (error instanceof TypeError)+'|'+log;}\
+                return 'missed';})()",
+            "true|",
+        ),
     ]);
 }
 
@@ -286,10 +302,10 @@ fn property_is_enumerable_tests_the_own_attribute() {
     ]);
 }
 
-/// A nullish receiver throws before anything else is inspected.
+/// A nullish receiver is rejected once an operation reaches `ToObject(this)`.
 #[test]
 fn a_nullish_receiver_is_rejected() {
-    for method in ["hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable"] {
+    for method in ["hasOwnProperty", "propertyIsEnumerable"] {
         for receiver in ["null", "undefined"] {
             assert_throws(
                 &format!("return Object.prototype.{method}.call({receiver}, 'a');"),
@@ -297,6 +313,23 @@ fn a_nullish_receiver_is_rejected() {
                 "cannot convert to object",
             );
         }
+    }
+
+    // `isPrototypeOf` first rejects a non-object candidate without coercing
+    // its receiver, but an object candidate reaches `ToObject(this)`.
+    assert_all(&[
+        ("Object.prototype.isPrototypeOf.call(null, 'a')", "false"),
+        (
+            "Object.prototype.isPrototypeOf.call(undefined, 'a')",
+            "false",
+        ),
+    ]);
+    for receiver in ["null", "undefined"] {
+        assert_throws(
+            &format!("return Object.prototype.isPrototypeOf.call({receiver}, {{}});"),
+            ExceptionKind::TypeError,
+            "cannot convert to object",
+        );
     }
 }
 

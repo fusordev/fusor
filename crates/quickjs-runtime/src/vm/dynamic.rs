@@ -197,6 +197,7 @@ pub(super) fn begin_object_prototype_to_string(
     receiver: StoredValue,
     return_to: Option<CallReturn>,
     origin: Option<JsStackFrame>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let (reference, default_tag) = match &receiver {
         StoredValue::Undefined => {
@@ -294,6 +295,7 @@ pub(super) fn begin_object_prototype_to_string(
     let to_string_tag = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag);
     begin_intrinsic_get(
         runtime,
+        realm,
         reference,
         receiver,
         &to_string_tag,
@@ -303,6 +305,7 @@ pub(super) fn begin_object_prototype_to_string(
         },
         return_to,
         origin,
+        execution_budget,
     )
 }
 

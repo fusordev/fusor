@@ -306,20 +306,6 @@ impl Runtime {
         Ok(())
     }
 
-    pub(crate) fn mapped_arguments_mapping_len(
-        &self,
-        object: ObjectId,
-    ) -> Result<usize, crate::EngineFault> {
-        self.objects
-            .get(object)
-            .map(HeapObject::arguments_mapping_len)
-            .ok_or(crate::EngineFault::StaleHeapEdge {
-                edge: "object",
-                index: object.index(),
-                generation: object.generation(),
-            })
-    }
-
     pub(crate) fn array_length(&self, object: ObjectId) -> Result<Option<u32>, crate::EngineFault> {
         self.objects
             .get(object)

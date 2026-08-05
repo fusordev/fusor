@@ -28,11 +28,11 @@
 use super::{
     Arc, Atom, AtomError, BindingCell, BoxedPrimitive, ErrorIntrinsicKind, ExceptionKind,
     FunctionId, FunctionImplementation, HandleError, HandleKind, HeapObject, HeapReference,
-    IntegrityLevel, JsBigInt, JsNumber, JsString, NativeFunction, NativeFunctionKind, ObjectId,
-    ObjectRecord, OwnProperty, PredefinedAtom, PropertyDeletion, PropertyKey, PropertyLayout,
-    PropertyLayoutKind, RealmId, RealmIntrinsics, ReleaseMailbox, Runtime, RuntimeResource,
-    SetPrototypeOutcome, SlotValue, StoredValue, array_length_from_number, check_execution_limit,
-    stale_heap_reference, usize_to_u64,
+    JsBigInt, JsNumber, JsString, NativeFunction, NativeFunctionKind, ObjectId, ObjectRecord,
+    OwnProperty, PredefinedAtom, PropertyDeletion, PropertyKey, PropertyLayout, PropertyLayoutKind,
+    RealmId, RealmIntrinsics, ReleaseMailbox, Runtime, RuntimeResource, SetPrototypeOutcome,
+    SlotValue, StoredValue, array_length_from_number, check_execution_limit, stale_heap_reference,
+    usize_to_u64,
 };
 
 #[derive(Clone, Copy)]
@@ -801,6 +801,10 @@ impl Runtime {
         if record.prototype() == prototype {
             return Ok(SetPrototypeOutcome::Complete);
         }
+        if matches!(target, HeapReference::Object(object) if self.realms.iter().any(|(_, realm)| realm.object_prototype == object))
+        {
+            return Ok(SetPrototypeOutcome::NonExtensible);
+        }
         if !record.is_extensible() {
             return Ok(SetPrototypeOutcome::NonExtensible);
         }
@@ -826,50 +830,6 @@ impl Runtime {
         Ok(self.object_record(target)?.is_extensible())
     }
 
-    /// Applies ECMAScript `SetIntegrityLevel`.
-    ///
-    /// Both levels first prevent extensions, then clamp every own property's
-    /// attributes. Freezing additionally clears `writable` on data properties;
-    /// an accessor has no `writable` attribute, so only its `configurable`
-    /// attribute changes (`quickjs.c:40549`).
-    pub(crate) fn set_integrity_level(
-        &mut self,
-        target: HeapReference,
-        level: IntegrityLevel,
-    ) -> Result<(), crate::EngineFault> {
-        if level == IntegrityLevel::Frozen
-            && let HeapReference::Object(object) = target
-        {
-            self.synchronize_and_detach_mapped_arguments(object)?;
-        }
-        let record = self.object_record_mut(target)?;
-        record.prevent_extensions();
-        match level {
-            IntegrityLevel::Sealed => record.seal_own_properties(),
-            IntegrityLevel::Frozen => record.freeze_own_properties(),
-        }
-        Ok(())
-    }
-
-    /// Applies ECMAScript `TestIntegrityLevel`.
-    ///
-    /// An extensible object is neither sealed nor frozen regardless of its
-    /// properties, so an empty but extensible object reports `false`.
-    pub(crate) fn tests_integrity_level(
-        &self,
-        target: HeapReference,
-        level: IntegrityLevel,
-    ) -> Result<bool, crate::EngineFault> {
-        let record = self.object_record(target)?;
-        if record.is_extensible() {
-            return Ok(false);
-        }
-        Ok(match level {
-            IntegrityLevel::Sealed => record.own_properties_are_sealed(),
-            IntegrityLevel::Frozen => record.own_properties_are_frozen(),
-        })
-    }
-
     /// Applies ECMAScript `[[Delete]]` for an ordinary object, keeping the
     /// runtime's own-property accounting in step with the removal.
     ///
@@ -892,41 +852,6 @@ impl Runtime {
             self.collection_pending = true;
         }
         Ok(deletion)
-    }
-
-    fn synchronize_and_detach_mapped_arguments(
-        &mut self,
-        object: ObjectId,
-    ) -> Result<(), crate::EngineFault> {
-        let mapping_len = self.mapped_arguments_mapping_len(object)?;
-        for index in 0..mapping_len {
-            let index = u32::try_from(index).map_err(|_| crate::EngineFault::RuntimeInvariant {
-                message: "mapped arguments index fits u32",
-            })?;
-            let key = PropertyKey::from_index(crate::ArrayIndex::new(index).ok_or(
-                crate::EngineFault::RuntimeInvariant {
-                    message: "mapped arguments index is an array index",
-                },
-            )?);
-            let _ = self.mapped_arguments_value(object, &key)?;
-        }
-        for index in 0..mapping_len {
-            let index = u32::try_from(index).map_err(|_| crate::EngineFault::RuntimeInvariant {
-                message: "mapped arguments index fits u32",
-            })?;
-            let key = PropertyKey::from_index(crate::ArrayIndex::new(index).ok_or(
-                crate::EngineFault::RuntimeInvariant {
-                    message: "mapped arguments index is an array index",
-                },
-            )?);
-            if self.mapped_arguments_cell(object, &key)?.is_none() {
-                continue;
-            }
-            self.synchronize_mapped_arguments_property(object, &key)?;
-            let detached = self.detach_mapped_arguments_property(object, &key)?;
-            debug_assert!(detached.is_some());
-        }
-        Ok(())
     }
 
     pub(crate) fn object_record(

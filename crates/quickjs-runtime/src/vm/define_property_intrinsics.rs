@@ -93,8 +93,10 @@ pub(super) struct DefinePropertyContinuation {
 /// Which phase of `ObjectDefineProperties` is awaiting re-entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DefinePropertiesStage {
+    AwaitKeys,
     NextKey,
-    AwaitDescriptor,
+    AwaitOwnDescriptor,
+    AwaitDescriptorValue,
     ReadDescriptor,
     Apply,
     AwaitDefinition,
@@ -103,7 +105,6 @@ pub(super) enum DefinePropertiesStage {
 /// One converted descriptor paired with its original property key.
 struct CollectedDefinition {
     key: PropertyKey,
-    name: Option<JsString>,
     fields: CollectedFields,
 }
 
@@ -169,6 +170,14 @@ pub(super) struct DescriptorReadState {
     descriptor: StoredValue,
     fields: CollectedFields,
     next: usize,
+    phase: DescriptorReadPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DescriptorReadPhase {
+    Next,
+    AwaitHas,
+    AwaitGet,
 }
 
 impl DescriptorReadState {
@@ -184,10 +193,7 @@ impl DescriptorReadState {
 
 pub(super) enum DescriptorReadOutcome {
     Complete(CollectedFields),
-    Getter {
-        function: FunctionId,
-        receiver: StoredValue,
-    },
+    Nested(Box<NativeDispatch>),
 }
 
 impl DefinePropertyContinuation {
@@ -209,9 +215,7 @@ impl DefinePropertiesContinuation {
             .iter()
             .flatten()
             .fold(0_u64, |retained, definition| {
-                retained
-                    .saturating_add(1)
-                    .saturating_add(definition.fields.retained_values())
+                retained.saturating_add(definition.fields.retained_values())
             });
         2_u64
             .saturating_add(usize_to_u64(self.keys.len()))
@@ -319,33 +323,42 @@ pub(super) fn advance_define_property(
         completion,
         state.realm,
         &state.origin,
-        Some(&state.name),
+        return_to,
         execution_budget,
     )? {
         DescriptorReadOutcome::Complete(fields) => {
             apply_collected_descriptor(runtime, state, fields, return_to, execution_budget)
         }
-        DescriptorReadOutcome::Getter { function, receiver } => {
-            let mut continuations = Vec::new();
-            continuations
-                .try_reserve_exact(1)
-                .map_err(|_| ExecutionError::AllocationFailed {
-                    resource: RuntimeResource::Frames,
-                    additional: 1,
-                })?;
-            continuations.push(NativeContinuation::DefineProperty(Box::new(state)));
-            Ok(NativeDispatch::Call(NativeCall {
-                function,
-                receiver,
-                arguments: CallArguments::empty(),
-                return_to,
-                origin: origin_of(&continuations),
-                continuations,
-                pre_call: None,
-                new_target: None,
-                native_caller: None,
-            }))
+        DescriptorReadOutcome::Nested(dispatch) => continue_descriptor_nested(
+            *dispatch,
+            NativeContinuation::DefineProperty(Box::new(state)),
+        ),
+    }
+}
+
+pub(super) fn continue_descriptor_nested(
+    dispatch: NativeDispatch,
+    continuation: NativeContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(&mut call, vec![continuation])?;
+            Ok(NativeDispatch::Call(call))
         }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(&mut frame, vec![continuation])?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Immediate(_)
+        | NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "descriptor nested operation returned an invalid dispatch",
+        }
+        .into()),
     }
 }
 
@@ -368,6 +381,7 @@ pub(super) fn begin_descriptor_read(
         descriptor,
         fields: CollectedFields::default(),
         next: 0,
+        phase: DescriptorReadPhase::Next,
     })
 }
 
@@ -377,56 +391,99 @@ pub(super) fn advance_descriptor_read(
     completion: Option<StoredValue>,
     realm: RealmId,
     origin: &JsStackFrame,
-    name: Option<&JsString>,
+    return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<DescriptorReadOutcome, NativeFailure> {
-    if let Some(value) = completion {
-        let field = DescriptorField::ORDER.get(state.next).copied().ok_or(
-            EngineFault::RuntimeInvariant {
-                message: "descriptor reader resumed after its final field",
-            },
-        )?;
-        record_field(&mut state.fields, field, value, realm, origin)?;
-        state.next = state.next.saturating_add(1);
-    }
-
-    while state.next < DescriptorField::ORDER.len() {
-        let field = DescriptorField::ORDER[state.next];
-        let key = runtime.predefined_property_key(field.predefined_atom());
-        if !has_descriptor_field(runtime, &state.descriptor, &key)? {
-            state.next = state.next.saturating_add(1);
-            continue;
-        }
-        charge_heap_property_lookup(runtime, &state.descriptor, execution_budget)?;
-        match read_static_property(runtime, realm, &state.descriptor, &key)? {
-            PropertyReadOutcome::Value(value) => {
-                record_field(&mut state.fields, field, value, realm, origin)?;
-                state.next = state.next.saturating_add(1);
+    let mut completion = completion;
+    loop {
+        match state.phase {
+            DescriptorReadPhase::AwaitHas => {
+                let Some(StoredValue::Boolean(present)) = completion.take() else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "descriptor HasProperty did not return a Boolean",
+                    }
+                    .into());
+                };
+                if !present {
+                    state.next = state.next.saturating_add(1);
+                    state.phase = DescriptorReadPhase::Next;
+                    continue;
+                }
+                state.phase = DescriptorReadPhase::AwaitGet;
             }
-            PropertyReadOutcome::Getter { function, receiver } => {
-                return Ok(DescriptorReadOutcome::Getter { function, receiver });
-            }
-            PropertyReadOutcome::Failed(failure) => {
-                return Err(NativeFailure::Abrupt(property_exception_at(
+            DescriptorReadPhase::AwaitGet => {
+                if let Some(value) = completion.take() {
+                    let field = DescriptorField::ORDER.get(state.next).copied().ok_or(
+                        EngineFault::RuntimeInvariant {
+                            message: "descriptor Get resumed after its final field",
+                        },
+                    )?;
+                    record_field(&mut state.fields, field, value, realm, origin)?;
+                    state.next = state.next.saturating_add(1);
+                    state.phase = DescriptorReadPhase::Next;
+                    continue;
+                }
+                let field = DescriptorField::ORDER.get(state.next).copied().ok_or(
+                    EngineFault::RuntimeInvariant {
+                        message: "descriptor Get started after its final field",
+                    },
+                )?;
+                let reference =
+                    state
+                        .descriptor
+                        .heap_reference()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "descriptor reader lost its object",
+                        })?;
+                execution_budget.charge_instructions(1)?;
+                let dispatch = begin_internal_get(
+                    runtime,
+                    reference,
+                    state.descriptor.duplicate(),
+                    runtime.predefined_property_key(field.predefined_atom()),
                     realm,
+                    return_to,
                     origin.clone(),
-                    name,
-                    failure,
-                )?));
+                    execution_budget,
+                )?;
+                match dispatch {
+                    NativeDispatch::Immediate(value) => {
+                        completion = Some(value);
+                    }
+                    dispatch => return Ok(DescriptorReadOutcome::Nested(Box::new(dispatch))),
+                }
+            }
+            DescriptorReadPhase::Next => {
+                if state.next >= DescriptorField::ORDER.len() {
+                    return Ok(DescriptorReadOutcome::Complete(std::mem::take(
+                        &mut state.fields,
+                    )));
+                }
+                let field = DescriptorField::ORDER[state.next];
+                let reference =
+                    state
+                        .descriptor
+                        .heap_reference()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "descriptor reader lost its object",
+                        })?;
+                state.phase = DescriptorReadPhase::AwaitHas;
+                execution_budget.charge_instructions(1)?;
+                let dispatch = begin_internal_has(
+                    runtime,
+                    reference,
+                    runtime.predefined_property_key(field.predefined_atom()),
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                )?;
+                match dispatch {
+                    NativeDispatch::Immediate(value) => completion = Some(value),
+                    dispatch => return Ok(DescriptorReadOutcome::Nested(Box::new(dispatch))),
+                }
             }
         }
-    }
-
-    Ok(DescriptorReadOutcome::Complete(std::mem::take(
-        &mut state.fields,
-    )))
-}
-
-/// Returns the origin recorded in a pending define-property continuation.
-fn origin_of(continuations: &[NativeContinuation]) -> JsStackFrame {
-    match continuations.first() {
-        Some(NativeContinuation::DefineProperty(state)) => state.origin.clone(),
-        _ => native_function_host_origin(),
     }
 }
 
@@ -453,25 +510,6 @@ fn record_field(
         }
     }
     Ok(())
-}
-
-/// Returns whether the descriptor object has the field, including inherited.
-fn has_descriptor_field(
-    runtime: &Runtime,
-    descriptor: &StoredValue,
-    key: &PropertyKey,
-) -> Result<bool, NativeFailure> {
-    let reference = match descriptor {
-        StoredValue::Function(function) => HeapReference::Function(*function),
-        StoredValue::Object(object) => HeapReference::Object(*object),
-        _ => {
-            return Err(EngineFault::RuntimeInvariant {
-                message: "descriptor field presence test received a non-object",
-            }
-            .into());
-        }
-    };
-    Ok(lookup_heap_property(runtime, Some(reference), key)?.is_some())
 }
 
 /// Validates the collected fields and applies the definition.
@@ -662,7 +700,11 @@ pub(super) fn begin_define_properties(
             "cannot convert to object",
         )?));
     }
-    let keys = define_properties_keys(runtime, &properties, execution_budget)?;
+    let keys = if properties.heap_reference().is_some() {
+        Vec::new()
+    } else {
+        define_properties_keys(runtime, &properties, execution_budget)?
+    };
     let mut definitions = Vec::new();
     definitions
         .try_reserve_exact(keys.len())
@@ -670,25 +712,69 @@ pub(super) fn begin_define_properties(
             resource: RuntimeResource::FrameValues,
             additional: keys.len(),
         })?;
-    advance_define_properties(
+    let mut state = DefinePropertiesContinuation {
+        target,
+        properties,
+        keys,
+        next_key: 0,
+        pending_key: None,
+        reader: None,
+        definitions,
+        next_definition: 0,
+        realm,
+        origin,
+        stage: DefinePropertiesStage::NextKey,
+    };
+    let Some(properties) = state.properties.heap_reference() else {
+        return advance_define_properties(runtime, state, None, return_to, execution_budget);
+    };
+    state.stage = DefinePropertiesStage::AwaitKeys;
+    let dispatch = begin_internal_own_keys(
         runtime,
-        DefinePropertiesContinuation {
-            target,
-            properties,
-            keys,
-            next_key: 0,
-            pending_key: None,
-            reader: None,
-            definitions,
-            next_definition: 0,
-            realm,
-            origin,
-            stage: DefinePropertiesStage::NextKey,
-        },
-        None,
+        properties,
+        realm,
         return_to,
+        state.origin.clone(),
         execution_budget,
-    )
+    )?;
+    continue_define_properties_after(runtime, dispatch, state, return_to, execution_budget)
+}
+
+fn continue_define_properties_after(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
+    state: DefinePropertiesContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => {
+            advance_define_properties(runtime, state, Some(value), return_to, execution_budget)
+        }
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::DefineProperties(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::DefineProperties(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "defineProperties internal method produced a structured result",
+        }
+        .into()),
+    }
 }
 
 /// Resumes descriptor collection or the later ordered definition phase.
@@ -706,9 +792,59 @@ pub(super) fn advance_define_properties(
     let mut completion = completion;
     loop {
         match state.stage {
-            DefinePropertiesStage::AwaitDescriptor => {
+            DefinePropertiesStage::AwaitKeys => {
+                state.keys = generated_key_list(
+                    runtime,
+                    take_define_properties_completion(&mut completion, "ownKeys")?,
+                )?;
+                state.stage = DefinePropertiesStage::NextKey;
+            }
+            DefinePropertiesStage::AwaitOwnDescriptor => {
                 let descriptor =
-                    take_define_properties_completion(&mut completion, "descriptor getter")?;
+                    take_define_properties_completion(&mut completion, "own property descriptor")?;
+                let enumerable = internal_complete_own_property(runtime, &descriptor)?
+                    .is_some_and(|property| property.layout().is_enumerable());
+                if !enumerable {
+                    state.pending_key = None;
+                    state.stage = DefinePropertiesStage::NextKey;
+                    continue;
+                }
+                let key = state
+                    .pending_key
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "defineProperties own descriptor lost its key",
+                    })?
+                    .clone();
+                let properties =
+                    state
+                        .properties
+                        .heap_reference()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "defineProperties object source disappeared",
+                        })?;
+                state.stage = DefinePropertiesStage::AwaitDescriptorValue;
+                let dispatch = begin_internal_get(
+                    runtime,
+                    properties,
+                    state.properties.duplicate(),
+                    key,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_define_properties_after(
+                    runtime,
+                    dispatch,
+                    state,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            DefinePropertiesStage::AwaitDescriptorValue => {
+                let descriptor =
+                    take_define_properties_completion(&mut completion, "descriptor value")?;
                 state.reader = Some(begin_descriptor_read(
                     descriptor,
                     state.realm,
@@ -717,7 +853,6 @@ pub(super) fn advance_define_properties(
                 state.stage = DefinePropertiesStage::ReadDescriptor;
             }
             DefinePropertiesStage::ReadDescriptor => {
-                let name = state.pending_key.as_ref().and_then(property_key_name);
                 let outcome = advance_descriptor_read(
                     runtime,
                     state.reader.as_mut().ok_or(EngineFault::RuntimeInvariant {
@@ -726,7 +861,7 @@ pub(super) fn advance_define_properties(
                     completion.take(),
                     state.realm,
                     &state.origin,
-                    name.as_ref(),
+                    return_to,
                     execution_budget,
                 )?;
                 match outcome {
@@ -737,22 +872,22 @@ pub(super) fn advance_define_properties(
                                 message: "defineProperties converted a descriptor without a key",
                             },
                         )?;
-                        state.definitions.push(Some(CollectedDefinition {
-                            name: property_key_name(&key),
-                            key,
-                            fields,
-                        }));
+                        state
+                            .definitions
+                            .push(Some(CollectedDefinition { key, fields }));
                         state.reader = None;
                         state.stage = DefinePropertiesStage::NextKey;
                     }
-                    DescriptorReadOutcome::Getter { function, receiver } => {
-                        return define_properties_call(function, receiver, state, return_to);
+                    DescriptorReadOutcome::Nested(dispatch) => {
+                        return continue_descriptor_nested(
+                            *dispatch,
+                            NativeContinuation::DefineProperties(Box::new(state)),
+                        );
                     }
                 }
             }
             DefinePropertiesStage::AwaitDefinition => {
-                let _ =
-                    take_define_properties_completion(&mut completion, "Array length definition")?;
+                let _ = take_define_properties_completion(&mut completion, "definition")?;
                 state.stage = DefinePropertiesStage::Apply;
             }
             DefinePropertiesStage::NextKey => {
@@ -764,6 +899,26 @@ pub(super) fn advance_define_properties(
                 };
                 state.next_key = state.next_key.saturating_add(1);
                 execution_budget.charge_instructions(1)?;
+                if let Some(properties) = state.properties.heap_reference() {
+                    state.pending_key = Some(key.clone());
+                    state.stage = DefinePropertiesStage::AwaitOwnDescriptor;
+                    let dispatch = begin_internal_get_own_property(
+                        runtime,
+                        properties,
+                        key,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    return continue_define_properties_after(
+                        runtime,
+                        dispatch,
+                        state,
+                        return_to,
+                        execution_budget,
+                    );
+                }
                 charge_define_properties_lookup(runtime, &state.properties, execution_budget)?;
                 let Some(own) = resolve_own_property(
                     runtime,
@@ -791,7 +946,7 @@ pub(super) fn advance_define_properties(
                     }
                     PropertyReadOutcome::Getter { function, receiver } => {
                         state.pending_key = Some(key);
-                        state.stage = DefinePropertiesStage::AwaitDescriptor;
+                        state.stage = DefinePropertiesStage::AwaitDescriptorValue;
                         return define_properties_call(function, receiver, state, return_to);
                     }
                     PropertyReadOutcome::Failed(failure) => {
@@ -808,93 +963,39 @@ pub(super) fn advance_define_properties(
                 let Some(slot) = state.definitions.get_mut(state.next_definition) else {
                     return Ok(NativeDispatch::Immediate(state.target));
                 };
-                let mut definition = slot.take().ok_or(EngineFault::RuntimeInvariant {
+                let definition = slot.take().ok_or(EngineFault::RuntimeInvariant {
                     message: "defineProperties revisited an applied descriptor",
                 })?;
                 state.next_definition = state.next_definition.saturating_add(1);
 
-                if is_array_length_target(runtime, &state.target, &definition.key)?
-                    && let Some(value) = definition.fields.value.take()
-                {
-                    let conversion = array_length_define_target(
-                        state.target.duplicate(),
-                        definition.name.ok_or(EngineFault::RuntimeInvariant {
-                            message: "Array length descriptor has no String property name",
-                        })?,
-                        &value,
-                        ArrayLengthDefinition {
-                            writable: definition.fields.writable,
-                            enumerable: definition.fields.enumerable,
-                            configurable: definition.fields.configurable,
-                            result: DefinePropertyResult::Target,
-                        },
-                    );
-                    state.stage = DefinePropertiesStage::AwaitDefinition;
-                    let realm = state.realm;
-                    let origin = state.origin.clone();
-                    let dispatch = begin_operator_primitive_conversion(
-                        runtime,
-                        value,
-                        OperatorPrimitiveHint::Number,
-                        conversion,
-                        realm,
-                        return_to,
-                        origin,
-                        execution_budget,
-                    )?;
-                    match dispatch {
-                        NativeDispatch::Immediate(_) => {
-                            state.stage = DefinePropertiesStage::Apply;
-                        }
-                        NativeDispatch::Frame(mut frame) => {
-                            attach_native_continuations(
-                                &mut frame,
-                                define_properties_continuation(state)?,
-                            )?;
-                            return Ok(NativeDispatch::Frame(frame));
-                        }
-                        NativeDispatch::Call(mut call) => {
-                            prepend_native_continuations(
-                                &mut call,
-                                define_properties_continuation(state)?,
-                            )?;
-                            return Ok(NativeDispatch::Call(call));
-                        }
-                        NativeDispatch::Pair(_, _)
-                        | NativeDispatch::ForOfRecord { .. }
-                        | NativeDispatch::ForOfStep { .. }
-                        | NativeDispatch::ForOfClosed
-                        | NativeDispatch::CopyDataPropertiesDone
-                        | NativeDispatch::AsyncAwait { .. } => {
-                            return Err(EngineFault::RuntimeInvariant {
-                                message: "Array length descriptor conversion produced a structured result",
-                            }
-                            .into());
-                        }
-                    }
-                    continue;
-                }
-
-                let name = definition.name;
                 let property =
                     property_definition_from_fields(definition.fields, state.realm, &state.origin)?;
-                match define_own_property(
+                let target =
+                    state
+                        .target
+                        .heap_reference()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "defineProperties target ceased to be an object",
+                        })?;
+                state.stage = DefinePropertiesStage::AwaitDefinition;
+                let dispatch = begin_internal_define_own_property(
                     runtime,
-                    &state.target,
+                    target,
                     definition.key,
-                    &property,
+                    property,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
                     execution_budget,
-                )? {
-                    PropertyDefinitionOutcome::Complete => {}
-                    PropertyDefinitionOutcome::Failed(failure) => {
-                        return Err(NativeFailure::Abrupt(property_exception_at(
-                            state.realm,
-                            state.origin,
-                            name.as_ref(),
-                            failure,
-                        )?));
-                    }
-                }
+                    DefinePropertyResult::Target,
+                )?;
+                return continue_define_properties_after(
+                    runtime,
+                    dispatch,
+                    state,
+                    return_to,
+                    execution_budget,
+                );
             }
         }
     }
@@ -905,28 +1006,6 @@ fn define_properties_keys(
     properties: &StoredValue,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<Vec<PropertyKey>, NativeFailure> {
-    if let Some(reference) = properties.heap_reference() {
-        let (snapshot, work) = runtime.try_own_key_snapshot(reference, 0, KeyPhases::ALL)?;
-        execution_budget.charge_instructions(work)?;
-        let mut keys = Vec::new();
-        keys.try_reserve_exact(snapshot.len())
-            .map_err(|_| ExecutionError::AllocationFailed {
-                resource: RuntimeResource::FrameValues,
-                additional: snapshot.len(),
-            })?;
-        for index in 0..snapshot.len() {
-            keys.push(
-                snapshot
-                    .get(index)
-                    .ok_or(EngineFault::RuntimeInvariant {
-                        message: "defineProperties own-key snapshot shrank",
-                    })?
-                    .key()
-                    .clone(),
-            );
-        }
-        return Ok(keys);
-    }
     if let StoredValue::String(value) = properties {
         let keys = primitive_string_own_keys(runtime, value)?;
         execution_budget.charge_instructions(usize_to_u64(keys.len()).saturating_add(1))?;
@@ -987,10 +1066,14 @@ fn take_define_properties_completion(
     operation: &'static str,
 ) -> Result<StoredValue, NativeFailure> {
     completion.take().ok_or_else(|| {
-        let message = if operation == "descriptor getter" {
-            "defineProperties resumed without a descriptor completion"
-        } else {
-            "defineProperties resumed without an Array length completion"
+        let message = match operation {
+            "ownKeys" => "defineProperties resumed without an own-key completion",
+            "own property descriptor" => {
+                "defineProperties resumed without an own-descriptor completion"
+            }
+            "descriptor value" => "defineProperties resumed without a descriptor-value completion",
+            "definition" => "defineProperties resumed without a definition completion",
+            _ => "defineProperties resumed without an expected completion",
         };
         EngineFault::RuntimeInvariant { message }.into()
     })

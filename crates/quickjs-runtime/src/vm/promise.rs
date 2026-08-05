@@ -13,12 +13,11 @@ use super::{
     PromiseContinuation, PromiseFinallyFunction, PromiseFinallyState, PromiseFinallyThenState,
     PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction, PromiseResolvingKind,
     PromiseStatic, PromiseThenState, PropertyReadOutcome, Rc, RealmId, RefCell, Runtime,
-    RuntimeResource, StoredValue, attach_native_continuations, begin_promise_combinator,
-    charge_heap_property_lookup, check_execution_limit, execute_root_dispatch_with_budget,
-    function_is_constructor, intrinsic_getter_call_with_reserved_continuation,
-    native_function_host_origin, prepend_native_continuations, read_heap_property_for_receiver,
-    read_static_property, reserve_intrinsic_get_continuation, resolve_native_dispatch,
-    trace_stored_value_root, usize_to_u64,
+    RuntimeResource, StoredValue, attach_native_continuations, begin_internal_get,
+    begin_promise_combinator, charge_heap_property_lookup, check_execution_limit,
+    continue_intrinsic_get_after, execute_root_dispatch_with_budget, function_is_constructor,
+    native_function_host_origin, prepend_native_continuations, read_static_property,
+    resolve_native_dispatch, trace_stored_value_root, usize_to_u64,
 };
 use crate::object::{
     HeapObject, PromiseCapability, PromiseReaction, PromiseReactionKind, PromiseReactionTarget,
@@ -47,42 +46,23 @@ pub(super) fn begin_promise_constructor(
     let receiver = StoredValue::Function(new_target);
     charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
     let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
-    match read_heap_property_for_receiver(
+    let continuation = IntrinsicGetContinuation::PromiseConstructor {
+        realm: native.realm,
+        new_target,
+        executor,
+        origin: origin.clone(),
+    };
+    let dispatch = begin_internal_get(
         runtime,
         HeapReference::Function(new_target),
         receiver,
-        &prototype_key,
-    )? {
-        PropertyReadOutcome::Value(value) => finish_promise_constructor_after_prototype_get(
-            runtime,
-            native.realm,
-            new_target,
-            executor,
-            origin,
-            return_to,
-            &value,
-        ),
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let continuations = reserve_intrinsic_get_continuation()?;
-            Ok(intrinsic_getter_call_with_reserved_continuation(
-                function,
-                receiver,
-                IntrinsicGetContinuation::PromiseConstructor {
-                    realm: native.realm,
-                    new_target,
-                    executor,
-                    origin: origin.clone(),
-                },
-                return_to,
-                Some(origin),
-                continuations,
-            ))
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "function-valued Promise newTarget prototype Get failed as a primitive",
-        }
-        .into()),
-    }
+        prototype_key,
+        native.realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    continue_intrinsic_get_after(runtime, dispatch, continuation, return_to, execution_budget)
 }
 
 pub(super) fn finish_promise_constructor_after_prototype_get(

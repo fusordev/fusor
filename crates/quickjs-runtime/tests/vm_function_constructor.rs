@@ -1310,6 +1310,37 @@ fn function_source_rejects_an_object_after_both_ordinary_methods() {
 }
 
 #[test]
+fn function_source_conversion_uses_proxy_get() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let log='';let source=new Proxy({}, {get(target,key,receiver){\
+             log=log+(typeof key==='symbol'?'@':key)+',';\
+             if(typeof key==='symbol'){return undefined;}\
+             if(key==='toString'){return function(){return 'return 9;';};}\
+             return Reflect.get(target,key,receiver);\
+         }});\
+         return Function(source)()+'|'+log;",
+    );
+
+    let value = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Proxy-backed dynamic Function source");
+    assert_eq!(
+        value
+            .as_string()
+            .expect("live value")
+            .expect("String")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "9|@,toString,"
+    );
+}
+
+#[test]
 fn function_source_bytecode_throw_stops_conversion_and_escapes() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

@@ -63,9 +63,9 @@ fn atom_failure_rolls_back_the_complete_installation() {
         "fail",
     );
     let atom_limits = AtomLimits::new(
-        PREDEFINED_ATOM_COUNT + 201,
-        PREDEFINED_DESCRIPTION_CODE_UNITS + 1_590,
-        PREDEFINED_INTERNER_SLOTS + 201,
+        PREDEFINED_ATOM_COUNT + 202,
+        PREDEFINED_DESCRIPTION_CODE_UNITS + 1_599,
+        PREDEFINED_INTERNER_SLOTS + 202,
     );
     let mut runtime =
         Runtime::try_new(RuntimeLimits::default().with_atom_limits(atom_limits)).expect("runtime");
@@ -214,10 +214,10 @@ fn public_root_metadata_preflight_is_failure_atomic() {
             41,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(1_167),
+            RuntimeLimits::default().with_max_object_properties(1_173),
             RuntimeResource::ObjectProperties,
-            1_167,
-            1_171,
+            1_173,
+            1_177,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -273,29 +273,18 @@ fn nested_bigint_literals_install_and_execute() {
 }
 
 #[test]
-fn in_operator_remains_rejected_before_runtime_mutation() {
+fn in_operator_is_admitted_across_the_complete_graph() {
     let authority = compile(
         "function outer(){function child(left,right){return left in right;}return 0;}",
         "outer",
     );
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
-    let before = runtime.usage();
-    let error = {
-        let mut context = runtime.context(&realm).expect("context");
-        context
-            .instantiate(authority)
-            .expect_err("in operator remains deferred")
-    };
-    assert!(matches!(
-        error,
-        InstallError::UnsupportedOpcode {
-            function,
-            opcode: FinalOpcode::In,
-            ..
-        } if function == FunctionTemplateId::new(1)
-    ));
-    assert_eq!(runtime.usage(), before);
+    runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(authority)
+        .expect("in operator is admitted");
 }
 
 #[test]
@@ -357,7 +346,7 @@ fn long_lived_context_drains_dropped_roots_before_installation_limits() {
     let mut runtime = Runtime::try_new(
         RuntimeLimits::default()
             .with_max_public_roots(1)
-            .with_max_heap_functions(343),
+            .with_max_heap_functions(345),
     )
     .expect("runtime");
     let realm = runtime.create_realm().expect("realm");

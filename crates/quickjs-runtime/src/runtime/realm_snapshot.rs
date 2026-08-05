@@ -506,9 +506,9 @@ mod tests {
         assert_eq!(
             first_atoms,
             AtomUsage {
-                live_atoms: PREDEFINED_ATOM_COUNT + 201,
-                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_590,
-                interner_slots: PREDEFINED_INTERNER_SLOTS + 201,
+                live_atoms: PREDEFINED_ATOM_COUNT + 202,
+                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_599,
+                interner_slots: PREDEFINED_INTERNER_SLOTS + 202,
             }
         );
 

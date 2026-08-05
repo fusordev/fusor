@@ -14,6 +14,35 @@
 )]
 use super::*;
 
+pub(super) fn proxy_aware_is_array(
+    runtime: &Runtime,
+    value: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<bool, NativeFailure> {
+    let mut current = value.heap_reference();
+    while let Some(reference) = current {
+        let Some(proxy) = runtime.proxy_state(reference)?.copied() else {
+            return match reference {
+                HeapReference::Object(object) => Ok(runtime.is_array_object(object)?),
+                HeapReference::Function(_) => Ok(false),
+            };
+        };
+        let Some(target) = proxy.target else {
+            return Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: JsString::from_utf8("revoked Proxy")?,
+                },
+                origin,
+            }));
+        };
+        current = Some(target);
+    }
+    Ok(false)
+}
+
 fn proxy_reference_value(reference: HeapReference) -> StoredValue {
     match reference {
         HeapReference::Function(function) => StoredValue::Function(function),
@@ -160,6 +189,43 @@ fn continue_proxy_boolean_after(
         | NativeDispatch::CopyDataPropertiesDone
         | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
             message: "Proxy Boolean trap lookup produced a structured result",
+        }
+        .into()),
+    }
+}
+
+fn continue_ordinary_set_receiver_after(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
+    state: OrdinarySetReceiverContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => {
+            advance_ordinary_set_receiver(runtime, state, value, return_to, execution_budget)
+        }
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::OrdinarySetReceiver(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::OrdinarySetReceiver(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "ordinary [[Set]] receiver operation produced a structured result",
         }
         .into()),
     }
@@ -631,7 +697,7 @@ pub(super) fn advance_proxy_descriptor(
                 completion,
                 state.realm,
                 &state.origin,
-                None,
+                return_to,
                 execution_budget,
             )?;
             match outcome {
@@ -642,19 +708,10 @@ pub(super) fn advance_proxy_descriptor(
                     state.reader = None;
                     begin_proxy_descriptor_target_check(runtime, state, return_to, execution_budget)
                 }
-                DescriptorReadOutcome::Getter { function, receiver } => {
-                    Ok(NativeDispatch::Call(NativeCall {
-                        function,
-                        receiver,
-                        arguments: CallArguments::empty(),
-                        return_to,
-                        origin: state.origin.clone(),
-                        continuations: vec![NativeContinuation::ProxyDescriptor(Box::new(state))],
-                        pre_call: None,
-                        new_target: None,
-                        native_caller: None,
-                    }))
-                }
+                DescriptorReadOutcome::Nested(dispatch) => continue_descriptor_nested(
+                    *dispatch,
+                    NativeContinuation::ProxyDescriptor(Box::new(state)),
+                ),
             }
         }
         ProxyDescriptorStage::TargetDescriptor => {
@@ -687,7 +744,7 @@ pub(super) fn advance_proxy_descriptor(
                 completion,
                 state.realm,
                 &state.origin,
-                None,
+                return_to,
                 execution_budget,
             )?;
             match outcome {
@@ -705,19 +762,10 @@ pub(super) fn advance_proxy_descriptor(
                         execution_budget,
                     )
                 }
-                DescriptorReadOutcome::Getter { function, receiver } => {
-                    Ok(NativeDispatch::Call(NativeCall {
-                        function,
-                        receiver,
-                        arguments: CallArguments::empty(),
-                        return_to,
-                        origin: state.origin.clone(),
-                        continuations: vec![NativeContinuation::ProxyDescriptor(Box::new(state))],
-                        pre_call: None,
-                        new_target: None,
-                        native_caller: None,
-                    }))
-                }
+                DescriptorReadOutcome::Nested(dispatch) => continue_descriptor_nested(
+                    *dispatch,
+                    NativeContinuation::ProxyDescriptor(Box::new(state)),
+                ),
             }
         }
         ProxyDescriptorStage::ExtensibleCheck => {
@@ -984,7 +1032,7 @@ pub(super) fn advance_proxy_define(
                 completion,
                 state.realm,
                 &state.origin,
-                None,
+                return_to,
                 execution_budget,
             )? {
                 DescriptorReadOutcome::Complete(fields) => {
@@ -996,19 +1044,10 @@ pub(super) fn advance_proxy_define(
                     state.reader = None;
                     begin_proxy_define_extensible_check(runtime, state, return_to, execution_budget)
                 }
-                DescriptorReadOutcome::Getter { function, receiver } => {
-                    Ok(NativeDispatch::Call(NativeCall {
-                        function,
-                        receiver,
-                        arguments: CallArguments::empty(),
-                        return_to,
-                        origin: state.origin.clone(),
-                        continuations: vec![NativeContinuation::ProxyDefine(Box::new(state))],
-                        pre_call: None,
-                        new_target: None,
-                        native_caller: None,
-                    }))
-                }
+                DescriptorReadOutcome::Nested(dispatch) => continue_descriptor_nested(
+                    *dispatch,
+                    NativeContinuation::ProxyDefine(Box::new(state)),
+                ),
             }
         }
         ProxyDefineStage::ExtensibleCheck => {
@@ -1939,35 +1978,42 @@ pub(super) fn begin_internal_has(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    if runtime.proxy_state(reference)?.is_some() {
-        return begin_proxy_boolean(
-            runtime,
-            reference,
-            key,
-            None,
-            None,
-            ProxyBooleanKind::Has,
-            ProxyBooleanCompletion::Boolean,
-            realm,
-            return_to,
-            origin,
-            execution_budget,
-        );
-    }
-    if heap_own_property(runtime, reference, &key)?.is_some() {
-        return Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)));
-    }
-    match runtime.object_record(reference)?.prototype() {
-        Some(prototype) => begin_internal_has(
-            runtime,
-            prototype,
-            key,
-            realm,
-            return_to,
-            origin,
-            execution_budget,
-        ),
-        None => Ok(NativeDispatch::Immediate(StoredValue::Boolean(false))),
+    let mut current = reference;
+    let mut remaining = runtime
+        .functions
+        .len()
+        .saturating_add(runtime.objects.len())
+        .saturating_add(1);
+    loop {
+        if remaining == 0 {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "[[HasProperty]] prototype walk exceeded the live heap",
+            }
+            .into());
+        }
+        remaining -= 1;
+        if runtime.proxy_state(current)?.is_some() {
+            return begin_proxy_boolean(
+                runtime,
+                current,
+                key,
+                None,
+                None,
+                ProxyBooleanKind::Has,
+                ProxyBooleanCompletion::Boolean,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        if heap_own_property(runtime, current, &key)?.is_some() {
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)));
+        }
+        let Some(prototype) = runtime.object_record(current)?.prototype() else {
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
+        };
+        current = prototype;
     }
 }
 
@@ -2032,6 +2078,122 @@ pub(super) fn begin_internal_delete(
     )
 }
 
+fn begin_ordinary_set_receiver(
+    runtime: &mut Runtime,
+    target: HeapReference,
+    receiver: HeapReference,
+    key: PropertyKey,
+    name: JsString,
+    value: StoredValue,
+    strict: bool,
+    boolean_result: bool,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let state = OrdinarySetReceiverContinuation {
+        target,
+        receiver,
+        key: key.clone(),
+        name,
+        value,
+        strict,
+        boolean_result,
+        realm,
+        origin: origin.clone(),
+        stage: OrdinarySetReceiverStage::Descriptor,
+    };
+    let dispatch = begin_internal_get_own_property(
+        runtime,
+        receiver,
+        key,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    continue_ordinary_set_receiver_after(runtime, dispatch, state, return_to, execution_budget)
+}
+
+pub(super) fn advance_ordinary_set_receiver(
+    runtime: &mut Runtime,
+    mut state: OrdinarySetReceiverContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        OrdinarySetReceiverStage::Descriptor => {
+            let current = internal_complete_own_property(runtime, &completion)?;
+            let definition = match current {
+                Some(OwnProperty::Accessor { .. }) => {
+                    return finish_ordinary_set_receiver(state, false);
+                }
+                Some(OwnProperty::Data { layout, .. }) if layout.writable() != Some(true) => {
+                    return finish_ordinary_set_receiver(state, false);
+                }
+                Some(OwnProperty::Data { .. }) => PropertyDefinition::data(
+                    Requested::Present(state.value.duplicate()),
+                    Requested::Absent,
+                ),
+                None => PropertyDefinition::data(
+                    Requested::Present(state.value.duplicate()),
+                    Requested::Present(true),
+                )
+                .with_enumerable(Requested::Present(true))
+                .with_configurable(Requested::Present(true)),
+            };
+            state.stage = OrdinarySetReceiverStage::Define;
+            let dispatch = begin_internal_define_own_property(
+                runtime,
+                state.receiver,
+                state.key.clone(),
+                definition,
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+                DefinePropertyResult::Boolean,
+            )?;
+            continue_ordinary_set_receiver_after(
+                runtime,
+                dispatch,
+                state,
+                return_to,
+                execution_budget,
+            )
+        }
+        OrdinarySetReceiverStage::Define => {
+            let StoredValue::Boolean(success) = completion else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "ordinary [[Set]] receiver definition returned a non-Boolean",
+                }
+                .into());
+            };
+            finish_ordinary_set_receiver(state, success)
+        }
+    }
+}
+
+fn finish_ordinary_set_receiver(
+    state: OrdinarySetReceiverContinuation,
+    success: bool,
+) -> Result<NativeDispatch, NativeFailure> {
+    if state.boolean_result {
+        return Ok(NativeDispatch::Immediate(StoredValue::Boolean(success)));
+    }
+    if success || !state.strict {
+        return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+    }
+    Err(NativeFailure::Abrupt(property_exception_at(
+        state.realm,
+        state.origin,
+        Some(&state.name),
+        PropertyFailure::ReadOnly,
+    )?))
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "Proxy [[Set]] keeps target, receiver, key, value, completion mode, and resume authority explicit"
@@ -2055,31 +2217,60 @@ pub(super) fn begin_internal_set(
     } else {
         ProxyBooleanCompletion::Write { strict }
     };
-    if runtime.proxy_state(reference)?.is_some() {
-        return begin_proxy_boolean(
+    let mut current = reference;
+    let mut remaining = runtime
+        .functions
+        .len()
+        .saturating_add(runtime.objects.len())
+        .saturating_add(1);
+    let (reference, target_own) = loop {
+        if remaining == 0 {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ordinary [[Set]] prototype walk exceeded the live heap",
+            }
+            .into());
+        }
+        remaining -= 1;
+        if runtime.proxy_state(current)?.is_some() {
+            return begin_proxy_boolean(
+                runtime,
+                current,
+                key,
+                Some(value),
+                Some(receiver),
+                ProxyBooleanKind::Set,
+                completion,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        let own = heap_own_property(runtime, current, &key)?;
+        if own.is_some() {
+            break (current, own);
+        }
+        let Some(prototype) = runtime.object_record(current)?.prototype() else {
+            break (current, None);
+        };
+        current = prototype;
+    };
+    let receiver_needs_definition = match &target_own {
+        None => true,
+        Some(OwnProperty::Data { layout, .. }) => layout.writable() == Some(true),
+        Some(OwnProperty::Accessor { .. }) => false,
+    };
+    if let Some(receiver_reference) = receiver.heap_reference()
+        && runtime.proxy_state(receiver_reference)?.is_some()
+        && receiver_needs_definition
+    {
+        return begin_ordinary_set_receiver(
             runtime,
             reference,
-            key,
-            Some(value),
-            Some(receiver),
-            ProxyBooleanKind::Set,
-            completion,
-            realm,
-            return_to,
-            origin,
-            execution_budget,
-        );
-    }
-    if heap_own_property(runtime, reference, &key)?.is_none()
-        && let Some(prototype) = runtime.object_record(reference)?.prototype()
-    {
-        return begin_internal_set(
-            runtime,
-            prototype,
+            receiver_reference,
             key,
             name,
             value,
-            receiver,
             strict,
             boolean_result,
             realm,
@@ -2088,6 +2279,9 @@ pub(super) fn begin_internal_set(
             execution_budget,
         );
     }
+    let failure_key = key.clone();
+    let failure_name = name.clone();
+    let failure_receiver = receiver.duplicate();
     let target = proxy_reference_value(reference);
     let dispatch = reflect_set_property(
         runtime,
@@ -2102,23 +2296,22 @@ pub(super) fn begin_internal_set(
         execution_budget,
     )?;
     match dispatch {
-        NativeDispatch::Immediate(StoredValue::Boolean(result)) => finish_proxy_boolean(
-            ProxyBooleanContinuation {
-                proxy: reference,
-                target: reference,
-                handler: reference,
-                key: runtime.predefined_property_key(PredefinedAtom::EmptyString),
-                value: None,
-                receiver: None,
+        NativeDispatch::Immediate(StoredValue::Boolean(result)) => {
+            if boolean_result {
+                return Ok(NativeDispatch::Immediate(StoredValue::Boolean(result)));
+            }
+            if result || !strict {
+                return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+            }
+            let failure =
+                ordinary_set_failure(runtime, reference, &failure_key, &failure_receiver)?;
+            Err(NativeFailure::Abrupt(property_exception_at(
                 realm,
                 origin,
-                kind: ProxyBooleanKind::Set,
-                stage: ProxyBooleanStage::TrapCall,
-                completion,
-                trap_result: None,
-            },
-            result,
-        ),
+                Some(&failure_name),
+                failure,
+            )?))
+        }
         NativeDispatch::Call(mut call) => {
             if !boolean_result {
                 prepend_native_continuations(&mut call, vec![NativeContinuation::ProxyWrite])?;
@@ -2127,6 +2320,45 @@ pub(super) fn begin_internal_set(
         }
         dispatch => Ok(dispatch),
     }
+}
+
+fn ordinary_set_failure(
+    runtime: &Runtime,
+    target: HeapReference,
+    key: &PropertyKey,
+    receiver: &StoredValue,
+) -> Result<PropertyFailure, NativeFailure> {
+    if let Some(own) = heap_own_property(runtime, target, key)? {
+        match own {
+            OwnProperty::Data { layout, .. } if layout.writable() != Some(true) => {
+                return Ok(PropertyFailure::ReadOnly);
+            }
+            OwnProperty::Accessor { setter: None, .. } => {
+                return Ok(PropertyFailure::NoSetter);
+            }
+            OwnProperty::Data { .. }
+            | OwnProperty::Accessor {
+                setter: Some(_), ..
+            } => {}
+        }
+    }
+    let Some(receiver) = receiver.heap_reference() else {
+        return Ok(PropertyFailure::NotObject);
+    };
+    if let Some(own) = heap_own_property(runtime, receiver, key)? {
+        return Ok(match own {
+            OwnProperty::Data { layout, .. } if layout.writable() != Some(true) => {
+                PropertyFailure::ReadOnly
+            }
+            OwnProperty::Data { .. } | OwnProperty::Accessor { .. } => {
+                PropertyFailure::NotConfigurable
+            }
+        });
+    }
+    if !runtime.object_record(receiver)?.is_extensible() {
+        return Ok(PropertyFailure::NonExtensible);
+    }
+    Ok(PropertyFailure::ReadOnly)
 }
 
 pub(super) fn advance_proxy_boolean(
@@ -2270,13 +2502,13 @@ pub(super) fn advance_proxy_boolean(
                     None,
                     state.realm,
                     &state.origin,
-                    None,
+                    return_to,
                     execution_budget,
                 )? {
                     DescriptorReadOutcome::Complete(fields) => Some(
                         complete_own_property_from_fields(fields, state.realm, &state.origin)?,
                     ),
-                    DescriptorReadOutcome::Getter { .. } => {
+                    DescriptorReadOutcome::Nested(_) => {
                         return Err(EngineFault::RuntimeInvariant {
                             message: "generated internal descriptor unexpectedly suspended",
                         }
@@ -2500,11 +2732,83 @@ pub(super) fn begin_internal_get(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    if runtime.proxy_state(reference)?.is_some() {
-        return begin_proxy_get(
+    let mut current = reference;
+    let mut remaining = runtime
+        .functions
+        .len()
+        .saturating_add(runtime.objects.len())
+        .saturating_add(1);
+    loop {
+        if remaining == 0 {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "[[Get]] prototype walk exceeded the live heap",
+            }
+            .into());
+        }
+        remaining -= 1;
+        if runtime.proxy_state(current)?.is_some() {
+            return begin_proxy_get(
+                runtime,
+                current,
+                receiver,
+                key,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        match heap_own_property(runtime, current, &key)? {
+            Some(OwnProperty::Data { value, .. }) => {
+                return Ok(NativeDispatch::Immediate(value));
+            }
+            Some(OwnProperty::Accessor {
+                getter: Some(function),
+                ..
+            }) => {
+                return Ok(NativeDispatch::Call(NativeCall {
+                    function,
+                    receiver,
+                    arguments: CallArguments::empty(),
+                    return_to,
+                    origin,
+                    continuations: Vec::new(),
+                    pre_call: None,
+                    new_target: None,
+                    native_caller: None,
+                }));
+            }
+            Some(OwnProperty::Accessor { getter: None, .. }) => {
+                return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+            }
+            None => {}
+        }
+        let Some(prototype) = runtime.object_record(current)?.prototype() else {
+            return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+        };
+        current = prototype;
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the generic Get boundary keeps the primitive fallback, Proxy-aware heap dispatch, source origin, and execution authority explicit"
+)]
+pub(super) fn begin_value_get(
+    runtime: &mut Runtime,
+    base: &StoredValue,
+    key: PropertyKey,
+    property_name: Option<&JsString>,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(reference) = base.heap_reference() {
+        return begin_internal_get(
             runtime,
             reference,
-            receiver,
+            base.duplicate(),
             key,
             realm,
             return_to,
@@ -2512,38 +2816,27 @@ pub(super) fn begin_internal_get(
             execution_budget,
         );
     }
-    match heap_own_property(runtime, reference, &key)? {
-        Some(OwnProperty::Data { value, .. }) => Ok(NativeDispatch::Immediate(value)),
-        Some(OwnProperty::Accessor {
-            getter: Some(function),
-            ..
-        }) => Ok(NativeDispatch::Call(NativeCall {
-            function,
-            receiver,
-            arguments: CallArguments::empty(),
-            return_to,
-            origin,
-            continuations: Vec::new(),
-            pre_call: None,
-            new_target: None,
-            native_caller: None,
-        })),
-        Some(OwnProperty::Accessor { getter: None, .. }) => {
-            Ok(NativeDispatch::Immediate(StoredValue::Undefined))
-        }
-        None => match runtime.object_record(reference)?.prototype() {
-            Some(prototype) => begin_internal_get(
-                runtime,
-                prototype,
+    match read_static_property(runtime, realm, base, &key)? {
+        PropertyReadOutcome::Value(value) => Ok(NativeDispatch::Immediate(value)),
+        PropertyReadOutcome::Getter { function, receiver } => {
+            Ok(NativeDispatch::Call(NativeCall {
+                function,
                 receiver,
-                key,
-                realm,
+                arguments: CallArguments::empty(),
                 return_to,
                 origin,
-                execution_budget,
-            ),
-            None => Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
-        },
+                continuations: Vec::new(),
+                pre_call: None,
+                new_target: None,
+                native_caller: None,
+            }))
+        }
+        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
+            realm,
+            origin,
+            property_name,
+            failure,
+        )?)),
     }
 }
 

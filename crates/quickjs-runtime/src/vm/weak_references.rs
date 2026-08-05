@@ -49,6 +49,7 @@ pub(super) fn begin_weak_ref_constructor(
     }
     begin_weak_reference_prototype_get(
         runtime,
+        realm,
         new_target,
         IntrinsicGetContinuation::WeakRefConstructor { new_target, target },
         return_to,
@@ -74,6 +75,7 @@ pub(super) fn begin_finalization_registry_constructor(
     };
     begin_weak_reference_prototype_get(
         runtime,
+        realm,
         new_target,
         IntrinsicGetContinuation::FinalizationRegistryConstructor {
             realm,
@@ -88,6 +90,7 @@ pub(super) fn begin_finalization_registry_constructor(
 
 fn begin_weak_reference_prototype_get(
     runtime: &mut Runtime,
+    realm: RealmId,
     new_target: FunctionId,
     continuation: IntrinsicGetContinuation,
     return_to: Option<CallReturn>,
@@ -97,23 +100,17 @@ fn begin_weak_reference_prototype_get(
     let receiver = StoredValue::Function(new_target);
     charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
     let key = runtime.predefined_property_key(PredefinedAtom::Prototype);
-    match read_heap_property_for_receiver(
+    let dispatch = begin_internal_get(
         runtime,
         HeapReference::Function(new_target),
         receiver,
-        &key,
-    )? {
-        PropertyReadOutcome::Value(value) => {
-            finish_weak_reference_constructor_get(runtime, continuation, &value)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            intrinsic_getter_call(function, receiver, continuation, return_to, Some(origin))
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "function-valued weak-reference newTarget prototype Get failed as a primitive",
-        }
-        .into()),
-    }
+        key,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    continue_intrinsic_get_after(runtime, dispatch, continuation, return_to, execution_budget)
 }
 
 pub(super) fn finish_weak_reference_constructor_get(

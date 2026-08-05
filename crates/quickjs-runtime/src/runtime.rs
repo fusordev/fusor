@@ -47,8 +47,8 @@ use crate::{
     interrupt::InterruptState,
     object::{
         ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, ForInIterator, ForInSnapshot,
-        HeapObject, IntegrityLevel, KeyPhases, ObjectRecord, OwnProperty, PromiseCapability,
-        PromiseReaction, PropertyDeletion, ProxyState, RegExpState, StringIterator,
+        HeapObject, KeyPhases, ObjectRecord, OwnProperty, PromiseCapability, PromiseReaction,
+        PropertyDeletion, ProxyState, RegExpState, StringIterator,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
@@ -375,12 +375,14 @@ pub(crate) fn array_length_from_number(value: JsNumber) -> Option<u32> {
     (f64::from(length) == value).then_some(length)
 }
 
+#[cfg(test)]
 pub(crate) enum ForInAdvance {
     Continue { work: u64 },
     Yield { key: PropertyKey, work: u64 },
     Done { work: u64 },
 }
 
+#[cfg(test)]
 impl ForInAdvance {
     pub(crate) const fn work(&self) -> u64 {
         match self {

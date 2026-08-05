@@ -1880,13 +1880,27 @@ pub(super) fn execute_one(
             close_local(runtime, frame, index)?;
         }
         FinalOpcode::ForInStart => {
-            let work = runtime.preview_for_in_iterator_work(peek(frame)?)?;
-            execution_budget.charge_instructions(work)?;
             let value = pop(frame)?;
             let realm = code(runtime, frame.code)?.realm;
-            let (iterator, actual_work) = runtime.allocate_for_in_iterator(realm, value)?;
-            debug_assert!(actual_work <= work);
-            push(frame, StoredValue::Object(iterator));
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_for_in_start(
+                    runtime,
+                    value,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
         }
         FinalOpcode::ForInNext => {
             let iterator = match frame.stack.last() {
@@ -1926,25 +1940,26 @@ pub(super) fn execute_one(
                     .into());
                 }
             };
-            loop {
-                let work = runtime.preview_for_in_advance_work(iterator)?;
-                execution_budget.charge_instructions(work)?;
-                let advance = runtime.advance_for_in_iterator(iterator)?;
-                debug_assert!(advance.work() <= work);
-                match advance {
-                    ForInAdvance::Continue { .. } => {}
-                    ForInAdvance::Yield { key, .. } => {
-                        push(frame, for_in_key_value(&key)?);
-                        push(frame, StoredValue::Boolean(false));
-                        break;
-                    }
-                    ForInAdvance::Done { .. } => {
-                        push(frame, StoredValue::Undefined);
-                        push(frame, StoredValue::Boolean(true));
-                        break;
-                    }
-                }
-            }
+            let realm = code(runtime, frame.code)?.realm;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_for_in_next(
+                    runtime,
+                    iterator,
+                    realm,
+                    Some(return_to),
+                    &origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
         }
         FinalOpcode::ForOfStart | FinalOpcode::ForAwaitOfStart => {
             let iterable = pop(frame)?;

@@ -92,9 +92,11 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [ ] Finish Proxy integration and the remaining exotic-object algorithms. All
   11 Proxy internal methods, revocation, nested-target invariants, `in`,
   Reflect/Object meta and key APIs, values/entries, assign, and object-rest
-  copying are spec-ordered and tested. Remaining gates are Proxy-backed
-  `ToPropertyDescriptor`, integrity-level operations, and legacy prototype
-  walks before this milestone may be checked.
+  copying are spec-ordered and tested. Descriptor conversion, integrity and
+  legacy prototype operations, primitive conversion, constructor prototype
+  selection, Error/RegExp construction, and the shared iterator protocol are
+  Proxy-aware. Remaining gates are the exhaustive built-in `Get`/`HasProperty`
+  audit and Proxy-aware `IsArray` at every abstract-operation call site.
 - [ ] Intern object shapes and transitions without changing descriptor, key
   order, prototype, or GC behavior.
 - [ ] Add dense indexed storage with exact hole, `length`, descriptor, and

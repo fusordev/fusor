@@ -1370,7 +1370,7 @@ fn for_in_next_fuel_exhaustion_preserves_the_unvisited_candidate_for_retry() {
     ));
 
     let mut budget = execution_budget_with_consumed(u64::MAX, 1);
-    execute_one(&mut runtime, &mut frame, &mut budget)
+    execute_one_and_resolve_pair(&mut runtime, &mut frame, &mut budget)
         .expect("the untouched candidate remains available");
     assert_eq!(runtime.usage().for_in_entries(), 2);
     assert!(matches!(
@@ -1472,7 +1472,7 @@ fn for_in_next_precharges_snapshot_release_before_prototype_transition() {
     assert_eq!(runtime.usage().for_in_entries(), usage_before_prototype);
 
     let mut budget = execution_budget_with_consumed(u64::MAX, 1);
-    execute_one(&mut runtime, &mut prototype_frame, &mut budget)
+    execute_one_and_resolve_pair(&mut runtime, &mut prototype_frame, &mut budget)
         .expect("prototype transition retry");
     let state = runtime
         .objects
@@ -1572,7 +1572,8 @@ fn for_in_next_precharges_snapshot_release_before_terminal_transition() {
     assert_eq!(runtime.usage().for_in_entries(), usage_before_terminal);
 
     let mut budget = execution_budget_with_consumed(u64::MAX, 1);
-    execute_one(&mut runtime, &mut terminal_frame, &mut budget).expect("terminal transition retry");
+    execute_one_and_resolve_pair(&mut runtime, &mut terminal_frame, &mut budget)
+        .expect("terminal transition retry");
     let state = runtime
         .objects
         .get(terminal_iterator)
@@ -1600,6 +1601,32 @@ fn execution_budget_with_consumed(limit: u64, consumed: u64) -> ExecutionBudget 
         .charge_instructions(consumed)
         .expect("test setup remains within its instruction budget");
     budget
+}
+
+fn execute_one_and_resolve_pair(
+    runtime: &mut Runtime,
+    frame: &mut Frame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), ExecutionError> {
+    let Step::Native {
+        dispatch,
+        return_to,
+    } = execute_one(runtime, frame, execution_budget)?
+    else {
+        panic!("for-in next must produce a native dispatch");
+    };
+    let dispatch =
+        match resolve_native_dispatch(runtime, dispatch, &[], 0, 0, None, execution_budget) {
+            Ok(dispatch) => dispatch,
+            Err(NativeFailure::Execution(error)) => return Err(error),
+            Err(NativeFailure::Abrupt(_) | NativeFailure::AbruptAfterTransient(_)) => {
+                panic!("ordinary for-in dispatch failed unexpectedly");
+            }
+        };
+    let NativeDispatch::Pair(key, done) = dispatch else {
+        panic!("for-in next must resolve to a key/done pair");
+    };
+    push_operator_pair(frame, key, done, return_to)
 }
 
 fn ordinary_test_frame() -> (Runtime, RealmId, Frame) {
@@ -4933,7 +4960,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(1_173))
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(1_179))
         .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
@@ -4951,14 +4978,17 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         .expect("context")
         .call(&maker, &[define], ExecutionLimits::default())
         .expect_err("target property exceeds limit");
-    assert!(matches!(
-        error,
-        ExecutionError::LimitExceeded {
-            resource: RuntimeResource::ObjectProperties,
-            limit: 1_173,
-            observed: 1_174,
-        }
-    ));
+    assert!(
+        matches!(
+            error,
+            ExecutionError::LimitExceeded {
+                resource: RuntimeResource::ObjectProperties,
+                limit: 1_179,
+                observed: 1_180,
+            }
+        ),
+        "{error:?}"
+    );
     let failed = runtime.usage();
     assert_eq!(failed.heap_functions(), baseline.heap_functions() + 1);
     assert_eq!(failed.heap_objects(), baseline.heap_objects() + 1);
@@ -6873,13 +6903,17 @@ fn immediate_boolean_wrapper(
     new_target: FunctionId,
     value: bool,
 ) -> ObjectId {
+    let realm = runtime.function_realm(new_target).expect("newTarget Realm");
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Ok(NativeDispatch::Immediate(StoredValue::Object(wrapper))) =
         begin_boolean_constructor_wrapper(
             runtime,
+            realm,
             new_target,
             value,
             None,
             Some(native_function_host_origin()),
+            &mut budget,
         )
     else {
         panic!("data-valued newTarget.prototype must construct immediately");
@@ -6892,13 +6926,17 @@ fn immediate_number_wrapper(
     new_target: FunctionId,
     value: JsNumber,
 ) -> ObjectId {
+    let realm = runtime.function_realm(new_target).expect("newTarget Realm");
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Ok(NativeDispatch::Immediate(StoredValue::Object(wrapper))) =
         begin_number_constructor_wrapper(
             runtime,
+            realm,
             new_target,
             value,
             None,
             Some(native_function_host_origin()),
+            &mut budget,
         )
     else {
         panic!("data-valued newTarget.prototype must construct immediately");

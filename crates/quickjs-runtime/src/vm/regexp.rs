@@ -628,24 +628,17 @@ fn read_constructor_prototype(
     let receiver = StoredValue::Function(state.new_target);
     charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
     let key = runtime.predefined_property_key(PredefinedAtom::Prototype);
-    match read_static_property(runtime, state.realm, &receiver, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_regexp_constructor(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => call_regexp_function(
-            function,
-            receiver,
-            CallArguments::empty(),
-            RegExpContinuation::Constructor(Box::new(state)),
-            return_to,
-        ),
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            Some(&JsString::from_utf8("prototype")?),
-            failure,
-        )?)),
-    }
+    let dispatch = begin_internal_get(
+        runtime,
+        HeapReference::Function(state.new_target),
+        receiver,
+        key,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_regexp_constructor_get_after(runtime, dispatch, state, return_to, execution_budget)
 }
 
 fn read_constructor_property(
@@ -656,23 +649,63 @@ fn read_constructor_property(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     charge_heap_property_lookup(runtime, &state.pattern, execution_budget)?;
-    match read_static_property(runtime, state.realm, &state.pattern, key)? {
-        PropertyReadOutcome::Value(value) => {
+    let reference = state
+        .pattern
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "RegExp constructor property read lost its object pattern",
+        })?;
+    let dispatch = begin_internal_get(
+        runtime,
+        reference,
+        state.pattern.duplicate(),
+        key.clone(),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_regexp_constructor_get_after(runtime, dispatch, state, return_to, execution_budget)
+}
+
+fn continue_regexp_constructor_get_after(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
+    state: RegExpConstructorContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => {
             advance_regexp_constructor(runtime, state, value, return_to, execution_budget)
         }
-        PropertyReadOutcome::Getter { function, receiver } => call_regexp_function(
-            function,
-            receiver,
-            CallArguments::empty(),
-            RegExpContinuation::Constructor(Box::new(state)),
-            return_to,
-        ),
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            None,
-            failure,
-        )?)),
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::RegExp(Box::new(
+                    RegExpContinuation::Constructor(Box::new(state)),
+                ))],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::RegExp(Box::new(
+                    RegExpContinuation::Constructor(Box::new(state)),
+                ))],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "RegExp constructor Get produced a structured result",
+        }
+        .into()),
     }
 }
 

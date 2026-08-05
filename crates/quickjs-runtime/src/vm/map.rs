@@ -207,41 +207,24 @@ pub(super) fn begin_map_constructor(
     let receiver = StoredValue::Function(new_target);
     charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
     let key = runtime.predefined_property_key(PredefinedAtom::Prototype);
-    match read_heap_property_for_receiver(
+    let continuation = IntrinsicGetContinuation::MapConstructor {
+        kind,
+        realm,
+        new_target,
+        iterable,
+        origin: origin.clone(),
+    };
+    let dispatch = begin_internal_get(
         runtime,
         HeapReference::Function(new_target),
         receiver,
-        &key,
-    )? {
-        PropertyReadOutcome::Value(value) => finish_map_constructor_after_prototype_get(
-            runtime,
-            kind,
-            realm,
-            new_target,
-            iterable,
-            origin,
-            return_to,
-            &value,
-            execution_budget,
-        ),
-        PropertyReadOutcome::Getter { function, receiver } => intrinsic_getter_call(
-            function,
-            receiver,
-            IntrinsicGetContinuation::MapConstructor {
-                kind,
-                realm,
-                new_target,
-                iterable,
-                origin: origin.clone(),
-            },
-            return_to,
-            Some(origin),
-        ),
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "function-valued Map newTarget prototype Get failed as a primitive",
-        }
-        .into()),
-    }
+        key,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    continue_intrinsic_get_after(runtime, dispatch, continuation, return_to, execution_budget)
 }
 
 #[allow(

@@ -33,6 +33,8 @@ use quickjs_bytecode::{
     Operands, SourceByteSpan, VerifiedBytecodeFunction, VerifiedSuccessorKind,
 };
 
+#[cfg(test)]
+use crate::runtime::ForInAdvance;
 use crate::runtime::StringHtmlMethod;
 use crate::{
     ArrayIndex, BigIntError, Context, DynamicFunctionCompileFailure, DynamicFunctionFamily,
@@ -57,7 +59,7 @@ use crate::{
         ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayFlatten, ArrayLengthWriteOutcome,
         ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayStatic, BindingCell,
         BoundFunction, BytecodeFunction, CollectionRoot, EnvironmentBinding,
-        FinalizationRegistryMethod, ForInAdvance, FrameBindingAddress, FunctionImplementation,
+        FinalizationRegistryMethod, FrameBindingAddress, FunctionImplementation,
         GlobalNumericFunction, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
         InstalledTemplate, LocaleStringMethod, MapMethod, MathMethod, NativeFunction,
         NativeFunctionKind, NumberFormat, NumberPredicate, PreparedIteratorResultPlan,
@@ -94,6 +96,7 @@ mod error_stack;
 mod errors;
 mod exceptions;
 mod execution;
+mod for_in;
 mod from_entries;
 mod generator;
 mod group_by;
@@ -135,11 +138,12 @@ use {
     array_from_async::*, array_join::*, array_mutators::*, array_search::*, array_sort::*,
     array_statics::*, async_from_sync::*, async_generator::*, bigint_intrinsics::*, bindings::*,
     conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*,
-    exceptions::*, execution::*, from_entries::*, generator::*, group_by::*, iterators::*,
-    json_parse::*, json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*,
-    native::*, object_intrinsics::*, promise::*, promise_combinators::*, properties::*, proxy::*,
-    reflect::*, regexp::*, set::*, stack::*, string_methods::*, string_raw::*, string_replace::*,
-    string_split::*, uri::*, weak_collections::*, weak_references::*,
+    exceptions::*, execution::*, for_in::*, from_entries::*, generator::*, group_by::*,
+    iterators::*, json_parse::*, json_stringify::*, locale_string::*, map::*, math::*,
+    math_sum_precise::*, native::*, object_intrinsics::*, promise::*, promise_combinators::*,
+    properties::*, proxy::*, reflect::*, regexp::*, set::*, stack::*, string_methods::*,
+    string_raw::*, string_replace::*, string_split::*, uri::*, weak_collections::*,
+    weak_references::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -487,6 +491,31 @@ impl ProxyBooleanContinuation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OrdinarySetReceiverStage {
+    Descriptor,
+    Define,
+}
+
+struct OrdinarySetReceiverContinuation {
+    target: HeapReference,
+    receiver: HeapReference,
+    key: PropertyKey,
+    name: JsString,
+    value: StoredValue,
+    strict: bool,
+    boolean_result: bool,
+    realm: RealmId,
+    origin: JsStackFrame,
+    stage: OrdinarySetReceiverStage,
+}
+
+impl OrdinarySetReceiverContinuation {
+    const fn retained_values() -> u64 {
+        3
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProxyMetaKind {
     GetPrototypeOf,
     SetPrototypeOf,
@@ -638,8 +667,15 @@ enum ObjectMetaCompletion {
     Undefined,
 }
 
+#[derive(Clone, Copy)]
+enum ObjectMetaFailure {
+    NonExtensible,
+    ProxyTrap,
+}
+
 struct ObjectMetaContinuation {
     completion: ObjectMetaCompletion,
+    failure: ObjectMetaFailure,
     realm: RealmId,
     origin: JsStackFrame,
 }
@@ -703,11 +739,13 @@ enum NativeContinuation {
     YieldStarIteratorCall(YieldStarIteratorCallContinuation),
     IteratorAppend(IteratorAppendContinuation),
     IteratorClose(IteratorCloseContinuation),
+    ForIn(Box<ForInContinuation>),
     CopyDataProperties(CopyDataPropertiesContinuation),
     EnumerableOwnProperties(Box<EnumerableOwnPropertiesContinuation>),
     ObjectKeyListing(Box<ObjectKeyListingContinuation>),
     ProxyEnumerable(Box<ProxyEnumerableContinuation>),
     ObjectAssign(Box<ObjectAssignContinuation>),
+    GetOwnPropertyDescriptors(Box<GetOwnPropertyDescriptorsContinuation>),
     ArrayJoin(Box<ArrayJoinContinuation>),
     ArraySearch(Box<ArraySearchContinuation>),
     ArrayMutator(Box<ArrayMutatorContinuation>),
@@ -732,10 +770,14 @@ enum NativeContinuation {
     ProxyGet(Box<ProxyGetContinuation>),
     ProxyCall(Box<ProxyCallContinuation>),
     ProxyBoolean(Box<ProxyBooleanContinuation>),
+    OrdinarySetReceiver(Box<OrdinarySetReceiverContinuation>),
     ProxyMeta(Box<ProxyMetaContinuation>),
     ProxyDescriptor(Box<ProxyDescriptorContinuation>),
     ProxyDefine(Box<ProxyDefineContinuation>),
     ProxyOwnKeys(Box<ProxyOwnKeysContinuation>),
+    IntegrityLevel(Box<IntegrityLevelContinuation>),
+    LegacyAccessorLookup(Box<LegacyAccessorLookupContinuation>),
+    IsPrototypeOf(Box<IsPrototypeOfContinuation>),
     ObjectMeta(ObjectMetaContinuation),
     OwnDescriptorQuery(OwnDescriptorQueryContinuation),
     AsyncAwait {
@@ -788,11 +830,13 @@ impl NativeContinuation {
             Self::YieldStarIteratorCall(state) => state.retained_values(),
             Self::IteratorAppend(state) => state.retained_values(),
             Self::IteratorClose(state) => state.retained_values(),
+            Self::ForIn(state) => state.retained_values(),
             Self::CopyDataProperties(state) => state.retained_values(),
             Self::EnumerableOwnProperties(state) => state.retained_values(),
             Self::ObjectKeyListing(state) => state.retained_values(),
             Self::ProxyEnumerable(state) => state.retained_values(),
             Self::ObjectAssign(state) => state.retained_values(),
+            Self::GetOwnPropertyDescriptors(state) => state.retained_values(),
             Self::ArrayJoin(_) => ArrayJoinContinuation::retained_values(),
             Self::ArraySearch(_) => ArraySearchContinuation::retained_values(),
             Self::ArrayMutator(state) => state.retained_values(),
@@ -817,10 +861,14 @@ impl NativeContinuation {
             Self::ProxyGet(state) => state.retained_values(),
             Self::ProxyCall(state) => state.retained_values(),
             Self::ProxyBoolean(state) => state.retained_values(),
+            Self::OrdinarySetReceiver(_) => OrdinarySetReceiverContinuation::retained_values(),
             Self::ProxyMeta(state) => state.retained_values(),
             Self::ProxyDescriptor(state) => state.retained_values(),
             Self::ProxyDefine(state) => state.retained_values(),
             Self::ProxyOwnKeys(state) => state.retained_values(),
+            Self::IntegrityLevel(state) => state.retained_values(),
+            Self::LegacyAccessorLookup(_) => LegacyAccessorLookupContinuation::retained_values(),
+            Self::IsPrototypeOf(_) => IsPrototypeOfContinuation::retained_values(),
             Self::ObjectMeta(state) => state.retained_values(),
             Self::OwnDescriptorQuery(_)
             | Self::AsyncAwait { .. }
@@ -1486,11 +1534,6 @@ enum PrimitiveConversionPropertyAction {
     },
 }
 
-enum PrimitiveConversionPropertyLookup {
-    Value(StoredValue),
-    Getter(FunctionId),
-}
-
 struct PropertyKeyContinuation {
     receiver: StoredValue,
     realm: RealmId,
@@ -1565,6 +1608,7 @@ enum PropertyKeyTarget {
     LegacyLookupAccessor {
         target: StoredValue,
         kind: LegacyAccessorKind,
+        realm: RealmId,
     },
     /// The `delete` operator's key, awaiting `ToPropertyKey`.
     Delete {
@@ -1705,11 +1749,14 @@ enum InstanceOfStage {
     MethodRead,
     MethodCall,
     PrototypeRead,
+    PrototypeWalk,
 }
 
 struct InstanceOfContinuation {
     value: StoredValue,
     target: StoredValue,
+    prototype: Option<HeapReference>,
+    current: Option<HeapReference>,
     realm: RealmId,
     stage: InstanceOfStage,
     origin: JsStackFrame,
@@ -1746,12 +1793,10 @@ impl FunctionBindContinuation {
 }
 
 impl InstanceOfContinuation {
-    #[allow(
-        clippy::unused_self,
-        reason = "the continuation keeps one uniform retained-values shape for every suspended value pair"
-    )]
     fn retained_values(&self) -> u64 {
-        2
+        2_u64
+            .saturating_add(u64::from(self.prototype.is_some()))
+            .saturating_add(u64::from(self.current.is_some()))
     }
 }
 
@@ -2245,6 +2290,12 @@ fn trace_function_bind_roots(
 fn trace_instance_of_roots(state: &InstanceOfContinuation, mark: &mut dyn FnMut(CollectionRoot)) {
     trace_stored_value_root(&state.value, mark);
     trace_stored_value_root(&state.target, mark);
+    if let Some(prototype) = state.prototype {
+        mark(CollectionRoot::Heap(prototype));
+    }
+    if let Some(current) = state.current {
+        mark(CollectionRoot::Heap(current));
+    }
 }
 
 #[allow(
@@ -2448,6 +2499,7 @@ fn trace_native_continuation_roots(
                 trace_stored_value_root(value, mark);
             }
         }
+        NativeContinuation::ForIn(state) => state.trace_roots(mark),
         NativeContinuation::CopyDataProperties(state) => {
             trace_stored_value_root(&state.target, mark);
             trace_stored_value_root(&state.source, mark);
@@ -2459,6 +2511,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ObjectKeyListing(state) => state.trace_roots(mark),
         NativeContinuation::ProxyEnumerable(state) => state.trace_roots(mark),
         NativeContinuation::ObjectAssign(state) => state.trace_roots(mark),
+        NativeContinuation::GetOwnPropertyDescriptors(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperties(state) => state.trace_roots(mark),
         NativeContinuation::InstanceOf(state) => {
             trace_instance_of_roots(state, mark);
@@ -2493,6 +2546,11 @@ fn trace_native_continuation_roots(
             if let Some(receiver) = &state.receiver {
                 trace_stored_value_root(receiver, mark);
             }
+        }
+        NativeContinuation::OrdinarySetReceiver(state) => {
+            mark(CollectionRoot::Heap(state.target));
+            mark(CollectionRoot::Heap(state.receiver));
+            trace_stored_value_root(&state.value, mark);
         }
         NativeContinuation::ProxyMeta(state) => {
             mark(CollectionRoot::Heap(state.proxy));
@@ -2578,6 +2636,9 @@ fn trace_native_continuation_roots(
                 mark(CollectionRoot::Heap(result));
             }
         }
+        NativeContinuation::IntegrityLevel(state) => state.trace_roots(mark),
+        NativeContinuation::LegacyAccessorLookup(state) => state.trace_roots(mark),
+        NativeContinuation::IsPrototypeOf(state) => state.trace_roots(mark),
         NativeContinuation::ObjectMeta(state) => {
             if let ObjectMetaCompletion::Target(target) = &state.completion {
                 trace_stored_value_root(target, mark);

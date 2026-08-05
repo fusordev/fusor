@@ -147,6 +147,27 @@ fn regexp_constructor_preserves_identity_and_normative_observation_order() {
 }
 
 #[test]
+fn regexp_constructor_routes_proxy_pattern_and_new_target_gets() {
+    assert_eq!(
+        rendered(
+            "var log='';var pattern=new Proxy({}, {get:function(target,key,receiver){\
+               if(key===Symbol.match){log=log+'m';return true;}\
+               if(key==='source'){log=log+'s';return 'a';}\
+               if(key==='flags'){log=log+'f';return 'g';}\
+               return Reflect.get(target,key,receiver);}});\
+             var prototype=Object.create(RegExp.prototype);\
+             var newTarget=new Proxy(function(){},{get:function(target,key,receiver){\
+               if(key==='prototype'){log=log+'p';return prototype;}\
+               return Reflect.get(target,key,receiver);}});\
+             var value=Reflect.construct(RegExp,[pattern],newTarget);\
+             return value.source+'|'+value.flags+'|'+\
+                    (Object.getPrototypeOf(value)===prototype)+'|'+log;"
+        ),
+        "a|g|true|msfp"
+    );
+}
+
+#[test]
 fn regexp_accessors_preserve_original_source_and_canonical_flags() {
     assert_eq!(
         rendered(

@@ -280,6 +280,21 @@ fn set_prototype_of_permits_a_same_value_write_on_a_non_extensible_object() {
 }
 
 #[test]
+fn object_prototype_has_immutable_prototype_exotic_semantics() {
+    assert_eq!(
+        text(
+            "var same=Object.setPrototypeOf(Object.prototype,null)===Object.prototype;\
+             var reflected=Reflect.setPrototypeOf(Object.prototype,{});\
+             var threw=false;try{Object.setPrototypeOf(Object.prototype,{});}\
+             catch(error){threw=error instanceof TypeError;}\
+             return same+'|'+reflected+'|'+threw+'|'+\
+               (Object.getPrototypeOf(Object.prototype)===null);"
+        ),
+        "true|false|true|true"
+    );
+}
+
+#[test]
 fn legacy_object_prototype_accessors_have_the_pinned_graph() {
     assert_eq!(
         text(
@@ -364,6 +379,36 @@ fn legacy_accessor_definition_and_lookup_preserve_observable_order() {
     ));
 }
 
+#[test]
+fn legacy_accessor_lookup_uses_proxy_internal_methods() {
+    assert_eq!(
+        text(
+            "var log='';var getter=function(){return 1;};var protoTarget={};\
+             Object.defineProperty(protoTarget,'x',{get:getter,configurable:true});\
+             var proto=new Proxy(protoTarget,{\
+               getOwnPropertyDescriptor(t,k){log=log+'d1,';\
+                 return Reflect.getOwnPropertyDescriptor(t,k);}});\
+             var child=new Proxy({},{\
+               getOwnPropertyDescriptor(t,k){log=log+'d0,';return undefined;},\
+               getPrototypeOf(t){log=log+'p0,';return proto;}});\
+             var result=Object.prototype.__lookupGetter__.call(child,'x');\
+             return (result===getter)+'|'+log;"
+        ),
+        "true|d0,p0,d1,"
+    );
+    assert_eq!(
+        text(
+            "var log='';var child=new Proxy({x:1},{\
+               getOwnPropertyDescriptor(t,k){log=log+'d,';\
+                 return Reflect.getOwnPropertyDescriptor(t,k);},\
+               getPrototypeOf(t){log=log+'p,';return Reflect.getPrototypeOf(t);}});\
+             return (Object.prototype.__lookupGetter__.call(child,'x')===undefined)+\
+               '|'+log;"
+        ),
+        "true|d,"
+    );
+}
+
 /// Oracle: `preventExtensions returns => [true]`,
 /// `isExtensible fresh => [true]`, `isExtensible prevented => [false]`,
 /// `isExtensible primitive => [false]`,
@@ -426,6 +471,92 @@ fn integrity_level_tests_require_non_extensibility_first() {
     assert!(!boolean("return Object.isFrozen(Object.seal({x:1}));"));
     assert!(boolean("return Object.isFrozen(Object.freeze({x:1}));"));
     assert!(boolean("return Object.isSealed(Object.freeze({x:1}));"));
+}
+
+#[test]
+fn proxy_integrity_levels_follow_internal_method_order() {
+    assert_eq!(
+        text(
+            "var log='';var target={x:1};var proxy=new Proxy(target,{\
+               preventExtensions(t){log=log+'p,';return Reflect.preventExtensions(t);},\
+               ownKeys(t){log=log+'k,';return Reflect.ownKeys(t);},\
+               defineProperty(t,k,d){log=log+'d:'+k+':'+d.configurable+':'+\
+                 ('writable' in d)+',';return Reflect.defineProperty(t,k,d);}});\
+             var result=Object.seal(proxy);return (result===proxy)+'|'+log+'|'+\
+               Object.isSealed(target)+'|'+target.x;"
+        ),
+        "true|p,k,d:x:false:false,|true|1"
+    );
+    assert_eq!(
+        text(
+            "var log='';var target={x:1};var proxy=new Proxy(target,{\
+               preventExtensions(t){log=log+'p,';return Reflect.preventExtensions(t);},\
+               ownKeys(t){log=log+'k,';return Reflect.ownKeys(t);},\
+               getOwnPropertyDescriptor(t,k){log=log+'g:'+k+',';\
+                 return Reflect.getOwnPropertyDescriptor(t,k);},\
+               defineProperty(t,k,d){log=log+'d:'+k+':'+d.configurable+':'+\
+                 d.writable+',';return Reflect.defineProperty(t,k,d);}});\
+             Object.freeze(proxy);return log+'|'+Object.isFrozen(target);"
+        ),
+        "p,k,g:x,d:x:false:false,|true"
+    );
+    assert_eq!(
+        text(
+            "var log='';var target=Object.freeze({x:1});var proxy=new Proxy(target,{\
+               isExtensible(t){log=log+'e,';return Reflect.isExtensible(t);},\
+               ownKeys(t){log=log+'k,';return Reflect.ownKeys(t);},\
+               getOwnPropertyDescriptor(t,k){log=log+'g:'+k+',';\
+                 return Reflect.getOwnPropertyDescriptor(t,k);}});\
+             return Object.isFrozen(proxy)+'|'+log;"
+        ),
+        "true|e,k,g:x,"
+    );
+    assert_eq!(
+        text(
+            "var log='';var proxy=new Proxy({},{\
+               preventExtensions(){log=log+'p,';return false;},\
+               ownKeys(){log=log+'k,';return [];}});\
+             try{Object.freeze(proxy);}catch(error){\
+               return (error instanceof TypeError)+'|'+log;}return 'missed';"
+        ),
+        "true|p,"
+    );
+    assert_eq!(
+        text(
+            "var log='';var proxy=new Proxy({},{\
+               isExtensible(t){log=log+'e,';return Reflect.isExtensible(t);},\
+               ownKeys(){log=log+'k,';return [];}});\
+             return Object.isFrozen(proxy)+'|'+log;"
+        ),
+        "false|e,"
+    );
+}
+
+#[test]
+fn for_in_uses_proxy_enumeration_internal_methods() {
+    assert_eq!(
+        text(
+            "var log='';var proto=new Proxy({p:1},{\
+               ownKeys(t){log+='P';return ['p'];},\
+               getOwnPropertyDescriptor(t,k){log+='Q'+k;\
+                 return {value:1,writable:true,enumerable:true,configurable:true};},\
+               getPrototypeOf(){log+='H';return null;}});\
+             var target={a:1,b:2};var source=new Proxy(target,{\
+               ownKeys(t){log+='K';return ['a','b'];},\
+               getOwnPropertyDescriptor(t,k){log+='D'+k;\
+                 if(k==='a'){delete t.b;return {value:1,writable:true,\
+                   enumerable:true,configurable:true};}return;},\
+               getPrototypeOf(){log+='G';return proto;}});\
+             var keys='';for(var key in source)keys+=key;\
+             var hidden=new Proxy({x:1},{\
+               getOwnPropertyDescriptor(){return {value:1,writable:true,\
+                 enumerable:false,configurable:true};},\
+               getPrototypeOf(){return {x:2};}});\
+             var suppressed='';for(var hiddenKey in hidden)suppressed+=hiddenKey;\
+             return keys+'|'+log+'|'+suppressed;"
+        ),
+        "ap|KDaDbGPQpH|"
+    );
 }
 
 /// Oracle: `isFrozen primitive => [true]`, `isSealed primitive => [true]`.
@@ -635,6 +766,32 @@ fn object_define_properties_applies_in_order_with_partial_completion() {
              return array.length+'|'+Object.getOwnPropertyDescriptor(array,'length').writable+'|'+log;"
         ),
         "2|false|vv"
+    );
+}
+
+/// `ObjectDefineProperties` uses the source and target internal methods in the
+/// normative collect-then-apply order, including when either side is a Proxy.
+#[test]
+fn object_define_properties_routes_proxy_internal_methods() {
+    assert_eq!(
+        text(
+            "var log='';var sourceTarget={a:{value:1},b:{value:2}};\
+             var source=new Proxy(sourceTarget,{\
+               ownKeys(t){log=log+'K';return ['a','b'];},\
+               getOwnPropertyDescriptor(t,k){log=log+'D'+k;return {\
+                 value:t[k],writable:true,enumerable:true,configurable:true};},\
+               get(t,k,r){log=log+'G'+k;return Reflect.get(t,k,r);}});\
+             var targetValue={};var target=new Proxy(targetValue,{\
+               defineProperty(t,k,d){log=log+'F'+k+d.value;return Reflect.defineProperty(t,k,d);}});\
+             var result=Object.defineProperties(target,source);\
+             return (result===target)+'|'+targetValue.a+'|'+targetValue.b+'|'+log;"
+        ),
+        "true|1|2|KDaGaDbGbFa1Fb2"
+    );
+    assert_exception_kind(
+        "return Object.defineProperties(new Proxy({},{defineProperty(){return false;}}),\
+           {x:{value:1}});",
+        ExceptionKind::TypeError,
     );
 }
 
@@ -953,6 +1110,27 @@ fn get_own_property_descriptors_observes_primitive_string_exotics() {
     assert_eq!(
         type_error_message("return Object.getOwnPropertyDescriptors(null);"),
         "cannot convert to object"
+    );
+}
+
+/// The key list is captured through `[[OwnPropertyKeys]]`, then each current
+/// descriptor is obtained through `[[GetOwnProperty]]` in list order.
+#[test]
+fn get_own_property_descriptors_routes_proxy_internal_methods() {
+    assert_eq!(
+        text(
+            "var log='';var target={a:1,b:2};var proxy=new Proxy(target,{\
+               ownKeys(){log=log+'K';return ['a','b'];},\
+               getOwnPropertyDescriptor(t,k){log=log+'D'+k;\
+                 if(k==='a'){delete t.b;return {value:1,writable:false,\
+                   enumerable:true,configurable:true};}return undefined;}});\
+             var descriptors=Object.getOwnPropertyDescriptors(proxy);\
+             var descriptor=descriptors.a;\
+             return Reflect.ownKeys(descriptors).join(',')+'|'+descriptor.value+'|'+\
+               descriptor.writable+'|'+descriptor.enumerable+'|'+\
+               descriptor.configurable+'|'+log;"
+        ),
+        "a|1|false|true|true|KDaDb"
     );
 }
 
@@ -1434,6 +1612,75 @@ fn proxy_get_is_resumable_and_shared_by_language_and_reflect_access() {
     );
 }
 
+#[test]
+fn proxy_get_drives_operator_and_property_key_conversion() {
+    assert_eq!(
+        text(
+            "var log='';function label(key){return typeof key==='symbol'?'@':key;}\
+             var value=new Proxy({}, {get(target,key,receiver){\
+               log=log+label(key)+',';if(typeof key==='symbol')return undefined;\
+               if(key==='valueOf')return function(){return 4;};\
+               return Reflect.get(target,key,receiver);}});\
+             var sum=value+1;var propertyKey=new Proxy({}, {get(target,key,receiver){\
+               log=log+label(key)+',';if(typeof key==='symbol')return undefined;\
+               if(key==='toString')return function(){return 'x';};\
+               return Reflect.get(target,key,receiver);}});\
+             var target={};target[propertyKey]=7;return sum+'|'+target.x+'|'+log;"
+        ),
+        "5|7|@,valueOf,@,toString,"
+    );
+}
+
+#[test]
+fn proxy_get_drives_intrinsic_tags_and_wrapper_new_target_prototypes() {
+    assert_eq!(
+        text(
+            "var log='';var value=new Proxy({}, {get(target,key,receiver){\
+               if(key===Symbol.toStringTag){log=log+'t';return 'Tagged';}\
+               return Reflect.get(target,key,receiver);}});\
+             return Object.prototype.toString.call(value)+'|'+log;"
+        ),
+        "[object Tagged]|t"
+    );
+    assert_eq!(
+        text(
+            "var log='';var proto={marker:1};\
+             var newTarget=new Proxy(function(){},{get(target,key,receiver){\
+               if(key==='prototype'){log=log+'p';return proto;}\
+               return Reflect.get(target,key,receiver);}});\
+             var boolean=Reflect.construct(Boolean,[true],newTarget);\
+             var number=Reflect.construct(Number,[7],newTarget);\
+             var string=Reflect.construct(String,['x'],newTarget);\
+             return Boolean.prototype.valueOf.call(boolean)+'|'+\
+                    Number.prototype.valueOf.call(number)+'|'+\
+                    String.prototype.valueOf.call(string)+'|'+\
+                    (Object.getPrototypeOf(boolean)===proto)+'|'+\
+                    (Object.getPrototypeOf(number)===proto)+'|'+\
+                    (Object.getPrototypeOf(string)===proto)+'|'+log;"
+        ),
+        "true|7|x|true|true|true|ppp"
+    );
+    assert_eq!(
+        text(
+            "var log='';function construct(Target,args){\
+               var proto={};var newTarget=new Proxy(function(){},{\
+                 get:function(target,key,receiver){\
+                   if(key==='prototype'){log=log+'p';return proto;}\
+                   return Reflect.get(target,key,receiver);}});\
+               var value=Reflect.construct(Target,args,newTarget);\
+               return Object.getPrototypeOf(value)===proto;}\
+             var target={};\
+             return construct(Array,[])+'|'+construct(Map,[])+'|'+\
+                    construct(WeakMap,[])+'|'+construct(Set,[])+'|'+\
+                    construct(WeakSet,[])+'|'+\
+                    construct(Promise,[function(){}])+'|'+\
+                    construct(WeakRef,[target])+'|'+\
+                    construct(FinalizationRegistry,[function(){}])+'|'+log;"
+        ),
+        "true|true|true|true|true|true|true|true|pppppppp"
+    );
+}
+
 /// A `get` trap cannot lie about frozen data or getterless accessor properties.
 #[test]
 fn proxy_get_enforces_non_configurable_target_invariants() {
@@ -1525,6 +1772,18 @@ fn proxy_revocation_affects_objects_and_callable_proxies() {
     );
 }
 
+#[test]
+fn array_is_array_unwraps_proxies_and_rejects_revoked_proxies() {
+    assert!(boolean(
+        "var array=[];var proxy=new Proxy(new Proxy(array,{}),{});\
+         return Array.isArray(proxy)&&!Array.isArray(new Proxy({},{}));"
+    ));
+    assert_exception_kind(
+        "var pair=Proxy.revocable([],{});pair.revoke();return Array.isArray(pair.proxy);",
+        ExceptionKind::TypeError,
+    );
+}
+
 /// `[[Set]]`, `[[HasProperty]]`, and `[[Delete]]` share resumable trap lookup,
 /// exact argument tuples, and their operation-specific Boolean completions.
 #[test]
@@ -1561,6 +1820,41 @@ fn proxy_boolean_internal_methods_cover_language_and_reflect_paths() {
          proxy.x=2;return 0;",
         ExceptionKind::TypeError,
     );
+}
+
+#[test]
+fn ordinary_set_routes_receiver_proxy_internal_methods() {
+    assert_eq!(
+        text(
+            "var log='';var backing={};var receiver=new Proxy(backing,{\
+               getOwnPropertyDescriptor(t,k){log=log+'G'+k;\
+                 return Reflect.getOwnPropertyDescriptor(t,k);},\
+               defineProperty(t,k,d){log=log+'D'+k+d.value;\
+                 return Reflect.defineProperty(t,k,d);}});\
+             var target={};var reflected=Reflect.set(target,'x',5,receiver);\
+             return reflected+'|'+backing.x+'|'+Object.hasOwn(target,'x')+'|'+log;"
+        ),
+        "true|5|false|GxDx5"
+    );
+    assert_eq!(
+        text(
+            "var log='';var backing={};var proxy=new Proxy(backing,{\
+               getOwnPropertyDescriptor(t,k){log=log+'G';\
+                 return Reflect.getOwnPropertyDescriptor(t,k);},\
+               defineProperty(t,k,d){log=log+'D';return Reflect.defineProperty(t,k,d);}});\
+             proxy.x=1;return backing.x+'|'+log;"
+        ),
+        "1|GD"
+    );
+}
+
+#[test]
+fn core_internal_method_prototype_walks_are_iterative() {
+    assert!(boolean(
+        "var root={x:1};for(var i=0;i<4096;i=i+1)root=Object.create(root);\
+         var read=root.x===1;var has='x' in root;root.y=2;\
+         return read&&has&&root.y===2;"
+    ));
 }
 
 /// Boolean traps cannot hide protected properties, delete non-configurable
@@ -1705,6 +1999,43 @@ fn proxy_get_own_property_descriptor_is_resumable_and_complete() {
                     Object.prototype.propertyIsEnumerable.call(proxy,'x')+'|'+log;"
         ),
         "true|true|true|xxx"
+    );
+}
+
+#[test]
+fn proxy_backed_property_descriptors_use_resumable_has_and_get() {
+    assert_eq!(
+        text(
+            "var log='';var descriptorTarget={enumerable:true,configurable:true,\
+               value:5,writable:true};var descriptor=new Proxy(descriptorTarget,{\
+               has(t,k){log=log+'h:'+k+',';return k in t;},\
+               get(t,k,r){log=log+'g:'+k+',';return Reflect.get(t,k,r);}});\
+             var target={};Reflect.defineProperty(target,'x',descriptor);\
+             return target.x+'|'+log;"
+        ),
+        "5|h:enumerable,g:enumerable,h:configurable,g:configurable,h:value,g:value,h:writable,g:writable,h:get,h:set,"
+    );
+    assert_eq!(
+        text(
+            "var log='';var target={x:1};var descriptor=new Proxy(\
+               {value:2,writable:true,enumerable:true,configurable:true},{\
+                 has(t,k){log=log+'h'+k[0];return k in t;},\
+                 get(t,k,r){log=log+'g'+k[0];return Reflect.get(t,k,r);}});\
+             var proxy=new Proxy(target,{getOwnPropertyDescriptor(){return descriptor;}});\
+             var result=Reflect.getOwnPropertyDescriptor(proxy,'x');\
+             return result.value+'|'+log;"
+        ),
+        "2|hegehcgchvgvhwgwhghs"
+    );
+    assert_eq!(
+        text(
+            "var log='';var marker={};var descriptor=new Proxy({enumerable:true},{\
+               has(t,k){log=log+'h:'+k+',';if(k==='configurable')throw marker;return k in t;},\
+               get(t,k,r){log=log+'g:'+k+',';return Reflect.get(t,k,r);}});\
+             try{Reflect.defineProperty({},'x',descriptor);}catch(error){\
+               return (error===marker)+'|'+log;}return 'missed';"
+        ),
+        "true|h:enumerable,g:enumerable,h:configurable,"
     );
 }
 

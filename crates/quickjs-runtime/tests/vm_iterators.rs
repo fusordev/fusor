@@ -397,6 +397,33 @@ fn iterator_method_nonobject_result_uses_the_pinned_type_error() {
 }
 
 #[test]
+fn iterator_protocol_routes_proxy_gets_through_start_step_and_close() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        "let log='';let result=new Proxy({},{get(target,key,receiver){\
+           if(key==='done'){log+='d';return false;}\
+           if(key==='value'){log+='v';return 7;}\
+           return Reflect.get(target,key,receiver);}});\
+         let iterator=new Proxy({},{get(target,key,receiver){\
+           if(key==='next'){log+='n';return function(){log+='c';return result;};}\
+           if(key==='return'){log+='r';return function(){log+='x';return {};};}\
+           return Reflect.get(target,key,receiver);}});\
+         let iterable=new Proxy({},{get(target,key,receiver){\
+           if(key===Symbol.iterator){log+='i';return function(){log+='m';return iterator;};}\
+           return Reflect.get(target,key,receiver);}});\
+         let value;for(value of iterable){log+='b';break;}return value+'|'+log;",
+    );
+
+    let value = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("Proxy iterator protocol");
+    assert_eq!(string_value(&value), "7|imncdvbrx");
+}
+
+#[test]
 fn infinite_custom_iterator_is_stopped_by_uncatchable_fuel() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

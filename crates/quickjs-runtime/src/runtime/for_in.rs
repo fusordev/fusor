@@ -26,12 +26,212 @@
 //! Bounded for-in iterator snapshots, prototype scans, and primitive boxing.
 
 use super::{
-    ForInAdvance, ForInIterator, ForInSnapshot, HeapObject, HeapReference, JsString, KeyPhases,
-    ObjectId, PropertyKey, RealmId, Runtime, RuntimeResource, StoredValue, check_execution_limit,
+    ForInIterator, ForInSnapshot, HeapObject, HeapReference, JsString, KeyPhases, ObjectId,
+    PropertyKey, RealmId, Runtime, RuntimeResource, StoredValue, check_execution_limit,
     for_in_snapshot_work_upper_bound, usize_to_u64,
 };
 
+#[cfg(test)]
+use super::ForInAdvance;
+
 impl Runtime {
+    pub(crate) fn allocate_for_in_cursor(
+        &mut self,
+        realm: RealmId,
+        value: StoredValue,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let needs_wrapper = matches!(
+            value,
+            StoredValue::Boolean(_)
+                | StoredValue::Number(_)
+                | StoredValue::BigInt(_)
+                | StoredValue::String(_)
+                | StoredValue::Symbol(_)
+        );
+        let additional_objects = 1_u64.saturating_add(u64::from(needs_wrapper));
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(additional_objects),
+        )?;
+        self.objects
+            .try_reserve(usize::try_from(additional_objects).unwrap_or(usize::MAX))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: usize::try_from(additional_objects).unwrap_or(usize::MAX),
+            })?;
+        let collection_pending = self.collection_pending;
+        let (current, temporary_wrapper) = match value {
+            StoredValue::Undefined | StoredValue::Null => (None, None),
+            StoredValue::Boolean(value) => {
+                let wrapper = self.allocate_boxed_boolean(realm, value)?;
+                (Some(HeapReference::Object(wrapper)), Some(wrapper))
+            }
+            StoredValue::BigInt(value) => {
+                let wrapper = self.allocate_boxed_bigint(realm, value)?;
+                (Some(HeapReference::Object(wrapper)), Some(wrapper))
+            }
+            StoredValue::Number(value) => {
+                let wrapper = self.allocate_boxed_number(realm, value)?;
+                (Some(HeapReference::Object(wrapper)), Some(wrapper))
+            }
+            StoredValue::String(value) => {
+                let wrapper = self.allocate_boxed_string(realm, value)?;
+                (Some(HeapReference::Object(wrapper)), Some(wrapper))
+            }
+            StoredValue::Symbol(value) => {
+                let wrapper = self.allocate_boxed_symbol(realm, value)?;
+                (Some(HeapReference::Object(wrapper)), Some(wrapper))
+            }
+            StoredValue::Function(function) => (Some(HeapReference::Function(function)), None),
+            StoredValue::Object(object) => (Some(HeapReference::Object(object)), None),
+        };
+        let Ok(iterator) =
+            self.objects
+                .try_insert(HeapObject::for_in_iterator(ForInIterator::new(
+                    current,
+                    ForInSnapshot::empty(),
+                )))
+        else {
+            self.rollback_for_in_wrapper(temporary_wrapper, collection_pending);
+            return Err(crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            });
+        };
+        self.collection_pending = true;
+        Ok(iterator)
+    }
+
+    pub(crate) fn for_in_cursor_current(
+        &self,
+        iterator: ObjectId,
+    ) -> Result<Option<HeapReference>, crate::EngineFault> {
+        Ok(self.for_in_state(iterator)?.current())
+    }
+
+    pub(crate) fn for_in_cursor_candidate(
+        &self,
+        iterator: ObjectId,
+    ) -> Result<Option<PropertyKey>, crate::EngineFault> {
+        Ok(self
+            .for_in_state(iterator)?
+            .candidate()
+            .map(|candidate| candidate.key().clone()))
+    }
+
+    pub(crate) fn for_in_cursor_snapshot_len(
+        &self,
+        iterator: ObjectId,
+    ) -> Result<usize, crate::EngineFault> {
+        Ok(self.for_in_state(iterator)?.snapshot_len())
+    }
+
+    pub(crate) fn for_in_cursor_has_visited(
+        &self,
+        iterator: ObjectId,
+        key: &PropertyKey,
+    ) -> Result<bool, crate::EngineFault> {
+        Ok(self.for_in_state(iterator)?.has_visited(key))
+    }
+
+    pub(crate) fn advance_for_in_cursor_candidate(
+        &mut self,
+        iterator: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        self.for_in_state_mut(iterator)?.advance_candidate();
+        Ok(())
+    }
+
+    pub(crate) fn visit_for_in_cursor_candidate(
+        &mut self,
+        iterator: ObjectId,
+        key: PropertyKey,
+    ) -> Result<(), crate::ExecutionError> {
+        check_execution_limit(
+            RuntimeResource::ForInEntries,
+            self.limits.max_for_in_entries,
+            self.for_in_entries.saturating_add(1),
+        )?;
+        let inserted = self
+            .for_in_state_mut(iterator)?
+            .try_mark_visited(key)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ForInEntries,
+                additional: 1,
+            })?;
+        if !inserted {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "for-in candidate was visited between its check and insertion",
+            }
+            .into());
+        }
+        self.for_in_entries = self.for_in_entries.saturating_add(1);
+        self.for_in_state_mut(iterator)?.advance_candidate();
+        Ok(())
+    }
+
+    pub(crate) fn replace_for_in_cursor_keys(
+        &mut self,
+        iterator: ObjectId,
+        current: HeapReference,
+        keys: Vec<PropertyKey>,
+    ) -> Result<(), crate::ExecutionError> {
+        let previous = self.for_in_state(iterator)?.snapshot_len();
+        let additional = keys.len();
+        let observed = self
+            .for_in_entries
+            .saturating_sub(usize_to_u64(previous))
+            .saturating_add(usize_to_u64(additional));
+        check_execution_limit(
+            RuntimeResource::ForInEntries,
+            self.limits.max_for_in_entries,
+            observed,
+        )?;
+        let snapshot = ForInSnapshot::try_from_keys(keys).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ForInEntries,
+                additional,
+            }
+        })?;
+        let next = snapshot.len();
+        let released = self
+            .for_in_state_mut(iterator)?
+            .replace_current(Some(current), snapshot);
+        debug_assert_eq!(released, previous);
+        self.for_in_entries = self
+            .for_in_entries
+            .saturating_sub(usize_to_u64(released))
+            .saturating_add(usize_to_u64(next));
+        Ok(())
+    }
+
+    pub(crate) fn finish_for_in_cursor(
+        &mut self,
+        iterator: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        let released = self
+            .for_in_state_mut(iterator)?
+            .replace_current(None, ForInSnapshot::empty());
+        self.for_in_entries = self.for_in_entries.saturating_sub(usize_to_u64(released));
+        Ok(())
+    }
+
+    fn for_in_state(&self, iterator: ObjectId) -> Result<&ForInIterator, crate::EngineFault> {
+        self.objects
+            .get(iterator)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "for-in iterator",
+                index: iterator.index(),
+                generation: iterator.generation(),
+            })?
+            .for_in_state()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "for-in cursor is not a for-in iterator",
+            })
+    }
+
+    #[cfg(test)]
     pub(crate) fn allocate_for_in_iterator(
         &mut self,
         realm: RealmId,
@@ -119,7 +319,8 @@ impl Runtime {
     }
 
     /// Returns an O(1) upper bound for the work performed by
-    /// [`Self::allocate_for_in_iterator`].
+    /// the initial ordinary-object key snapshot used by
+    /// [`Self::allocate_for_in_cursor`].
     ///
     /// The VM charges this preview before it removes the source value from the
     /// operand stack or permits snapshot construction to scan and sort keys.
@@ -174,6 +375,7 @@ impl Runtime {
     /// [`Self::advance_for_in_iterator`].
     ///
     /// No snapshot, cursor, or visited-key state is changed by this preview.
+    #[cfg(test)]
     pub(crate) fn preview_for_in_advance_work(
         &self,
         iterator: ObjectId,
@@ -221,6 +423,7 @@ impl Runtime {
             .saturating_add(usize_to_u64(state.snapshot_len())))
     }
 
+    #[cfg(test)]
     pub(crate) fn advance_for_in_iterator(
         &mut self,
         iterator: ObjectId,
@@ -343,6 +546,7 @@ impl Runtime {
         ))
     }
 
+    #[cfg(test)]
     fn preview_for_in_property_scan_work(
         &self,
         reference: HeapReference,
@@ -387,6 +591,7 @@ impl Runtime {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn try_for_in_snapshot(
         &self,
         reference: HeapReference,
@@ -438,6 +643,7 @@ impl Runtime {
         Ok((snapshot, work))
     }
 
+    #[cfg(test)]
     fn for_in_own_property_exists(
         &self,
         reference: HeapReference,

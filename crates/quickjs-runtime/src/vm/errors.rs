@@ -33,8 +33,9 @@ use super::*;
 
 #[derive(Clone, Copy)]
 pub(super) enum ErrorConstructorStage {
-    AwaitPrototype,
-    AwaitCause,
+    Prototype,
+    CausePresence,
+    Cause,
 }
 
 pub(super) struct ErrorConstructorContinuation {
@@ -142,7 +143,7 @@ pub(super) fn begin_error_constructor(
         object: None,
         stack,
         realm,
-        stage: ErrorConstructorStage::AwaitPrototype,
+        stage: ErrorConstructorStage::Prototype,
         origin,
     };
     read_error_constructor_prototype(runtime, state, return_to, execution_budget)
@@ -157,23 +158,17 @@ fn read_error_constructor_prototype(
     let receiver = StoredValue::Function(state.new_target);
     charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
     let key = runtime.predefined_property_key(PredefinedAtom::Prototype);
-    match read_heap_property_for_receiver(
+    let dispatch = begin_internal_get(
         runtime,
         HeapReference::Function(state.new_target),
         receiver,
-        &key,
-    )? {
-        PropertyReadOutcome::Value(value) => {
-            advance_error_constructor(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            error_constructor_getter_call(state, function, receiver, return_to)
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "Error newTarget prototype Get failed as a primitive",
-        }
-        .into()),
-    }
+        key,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_error_constructor_after(runtime, dispatch, state, return_to, execution_budget)
 }
 
 pub(super) fn advance_error_constructor(
@@ -184,7 +179,7 @@ pub(super) fn advance_error_constructor(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match state.stage {
-        ErrorConstructorStage::AwaitPrototype => {
+        ErrorConstructorStage::Prototype => {
             let prototype = completion.heap_reference().map_or_else(
                 || {
                     let target_realm = runtime.function_realm(state.new_target)?;
@@ -197,7 +192,14 @@ pub(super) fn advance_error_constructor(
             state.object = Some(runtime.allocate_error_with_prototype(prototype)?);
             begin_error_message(runtime, state, return_to, execution_budget)
         }
-        ErrorConstructorStage::AwaitCause => {
+        ErrorConstructorStage::CausePresence => {
+            if !completion.is_truthy() {
+                state.options = None;
+                return finish_error_constructor(runtime, state, return_to, execution_budget);
+            }
+            begin_error_cause_get(runtime, state, return_to, execution_budget)
+        }
+        ErrorConstructorStage::Cause => {
             define_error_property(runtime, &state, PredefinedAtom::Cause, completion)?;
             finish_error_constructor(runtime, state, return_to, execution_budget)
         }
@@ -258,23 +260,52 @@ fn begin_error_cause(
     };
     let key = runtime.predefined_property_key(PredefinedAtom::Cause);
     charge_heap_property_lookup(runtime, &options, execution_budget)?;
-    if lookup_heap_property(runtime, Some(reference), &key)?.is_none() {
-        return finish_error_constructor(runtime, state, return_to, execution_budget);
-    }
+    state.options = Some(options);
+    state.stage = ErrorConstructorStage::CausePresence;
+    let dispatch = begin_internal_has(
+        runtime,
+        reference,
+        key,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_error_constructor_after(runtime, dispatch, state, return_to, execution_budget)
+}
+
+fn begin_error_cause_get(
+    runtime: &mut Runtime,
+    mut state: ErrorConstructorContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let options = state
+        .options
+        .as_ref()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Error cause presence completed without options",
+        })?
+        .duplicate();
+    let reference = options
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Error cause presence completed with primitive options",
+        })?;
+    let key = runtime.predefined_property_key(PredefinedAtom::Cause);
     charge_heap_property_lookup(runtime, &options, execution_budget)?;
-    state.stage = ErrorConstructorStage::AwaitCause;
-    match read_heap_property_for_receiver(runtime, reference, options, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_error_constructor(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            error_constructor_getter_call(state, function, receiver, return_to)
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "object-valued Error options produced a primitive property failure",
-        }
-        .into()),
-    }
+    state.stage = ErrorConstructorStage::Cause;
+    let dispatch = begin_internal_get(
+        runtime,
+        reference,
+        options,
+        key,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_error_constructor_after(runtime, dispatch, state, return_to, execution_budget)
 }
 
 fn finish_error_constructor(
@@ -320,20 +351,41 @@ fn define_error_property(
     Ok(())
 }
 
-fn error_constructor_getter_call(
+fn continue_error_constructor_after(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
     state: ErrorConstructorContinuation,
-    function: FunctionId,
-    receiver: StoredValue,
     return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let origin = state.origin.clone();
-    native_getter_call(
-        function,
-        receiver,
-        NativeContinuation::ErrorConstructor(state),
-        return_to,
-        origin,
-    )
+    match dispatch {
+        NativeDispatch::Immediate(value) => {
+            advance_error_constructor(runtime, state, value, return_to, execution_budget)
+        }
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::ErrorConstructor(state)],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::ErrorConstructor(state)],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Error constructor internal method produced a structured result",
+        }
+        .into()),
+    }
 }
 
 pub(super) fn begin_error_to_string(

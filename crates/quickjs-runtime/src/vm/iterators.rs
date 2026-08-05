@@ -267,29 +267,31 @@ pub(super) fn begin_array_iterator_next(
     };
     let key = runtime.predefined_property_key(PredefinedAtom::Length);
     charge_iterator_property_lookup(runtime, &state.iterated, execution_budget)?;
-    match read_static_property(runtime, realm, &state.iterated, &key)? {
-        PropertyReadOutcome::Value(value) => begin_array_iterator_length_conversion(
-            runtime,
-            state,
-            value,
-            return_to,
-            execution_budget,
-        ),
-        PropertyReadOutcome::Getter { function, receiver } => iterator_getter_call(
-            function,
-            receiver,
-            NativeContinuation::ArrayIteratorNext(state),
-            return_to,
-            native_function_host_origin(),
-            None,
-        ),
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            realm,
-            state.origin,
-            None,
-            failure,
-        )?)),
-    }
+    let dispatch = begin_value_get(
+        runtime,
+        &state.iterated,
+        key,
+        None,
+        realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::ArrayIteratorNext,
+        |state, value| {
+            begin_array_iterator_length_conversion(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        },
+        "Array iterator length Get produced a structured result",
+    )
 }
 
 pub(super) fn advance_array_iterator_next(
@@ -334,6 +336,10 @@ fn begin_array_iterator_length_conversion(
     )
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Array iterator index advancement, prepared-result admission, and Proxy-aware element Get remain one failure-atomic step"
+)]
 pub(super) fn finish_array_iterator_length(
     runtime: &mut Runtime,
     mut state: ArrayIteratorNextContinuation,
@@ -388,37 +394,61 @@ pub(super) fn finish_array_iterator_length(
     };
     let key = PropertyKey::from_index(index);
     charge_iterator_property_lookup(runtime, &state.iterated, execution_budget)?;
-    match read_static_property(runtime, state.realm, &state.iterated, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            let iterator = state.iterator;
-            let result = finish_array_iterator_value(runtime, state, value)?;
+    state.stage = ArrayIteratorNextStage::AwaitValue;
+    state
+        .prepared_result
+        .as_mut()
+        .expect("Array iterator result preparation was just installed")
+        .mark_callback_boundary();
+    let iterator = state.iterator;
+    let dispatch = match begin_value_get(
+        runtime,
+        &state.iterated,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(error @ (NativeFailure::Abrupt(_) | NativeFailure::AbruptAfterTransient(_))) => {
             runtime.advance_array_iterator(iterator)?;
-            Ok(result)
+            return Err(error);
         }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            state.stage = ArrayIteratorNextStage::AwaitValue;
-            state
-                .prepared_result
-                .as_mut()
-                .expect("Array iterator result preparation was just installed")
-                .mark_callback_boundary();
-            let origin = state.origin.clone();
-            let iterator = state.iterator;
-            iterator_getter_call(
-                function,
-                receiver,
-                NativeContinuation::ArrayIteratorNext(state),
-                return_to,
-                origin,
-                Some(NativePreCall::AdvanceArrayIterator(iterator)),
-            )
+        Err(error) => return Err(error),
+    };
+    match dispatch {
+        NativeDispatch::Immediate(value) => {
+            runtime.advance_array_iterator(iterator)?;
+            finish_array_iterator_value(runtime, state, value)
         }
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            None,
-            failure,
-        )?)),
+        NativeDispatch::Call(mut call) => {
+            debug_assert!(call.pre_call.is_none());
+            call.pre_call = Some(NativePreCall::AdvanceArrayIterator(iterator));
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::ArrayIteratorNext(state)],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            runtime.advance_array_iterator(iterator)?;
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::ArrayIteratorNext(state)],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Array iterator value Get produced a structured result",
+        }
+        .into()),
     }
 }
 
@@ -643,31 +673,24 @@ fn read_for_of_start_property(
         }
     };
     charge_iterator_property_lookup(runtime, base, execution_budget)?;
-    match read_static_property(runtime, state.realm, base, key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_for_of_start(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            iterator_getter_call(
-                function,
-                receiver,
-                NativeContinuation::ForOfStart(state),
-                return_to,
-                origin,
-                None,
-            )
-        }
-        PropertyReadOutcome::Failed(failure) => {
-            let property_name = JsString::from_utf8(property_name)?;
-            Err(NativeFailure::Abrupt(property_exception_at(
-                state.realm,
-                state.origin,
-                Some(&property_name),
-                failure,
-            )?))
-        }
-    }
+    let property_name = JsString::from_utf8(property_name)?;
+    let dispatch = begin_value_get(
+        runtime,
+        base,
+        key.clone(),
+        Some(&property_name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::ForOfStart,
+        |state, value| advance_for_of_start(runtime, state, value, return_to, execution_budget),
+        "for-of start Get produced a structured result",
+    )
 }
 
 pub(super) fn begin_for_of_next(
@@ -783,28 +806,23 @@ fn read_for_of_next_property(
         message: "for-of result property lookup has no result object",
     })?;
     charge_iterator_property_lookup(runtime, result, execution_budget)?;
-    match read_static_property(runtime, state.realm, result, key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_for_of_next(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            iterator_getter_call(
-                function,
-                receiver,
-                NativeContinuation::ForOfNext(state),
-                return_to,
-                origin,
-                None,
-            )
-        }
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            None,
-            failure,
-        )?)),
-    }
+    let dispatch = begin_value_get(
+        runtime,
+        result,
+        key.clone(),
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::ForOfNext,
+        |state, value| advance_for_of_next(runtime, state, value, return_to, execution_budget),
+        "for-of result Get produced a structured result",
+    )
 }
 
 pub(super) fn begin_for_of_close(
@@ -835,26 +853,23 @@ fn read_for_of_return(
 ) -> Result<NativeDispatch, NativeFailure> {
     let key = runtime.predefined_property_key(PredefinedAtom::Return);
     charge_iterator_property_lookup(runtime, &state.iterator, execution_budget)?;
-    match read_static_property(runtime, state.realm, &state.iterator, &key)? {
-        PropertyReadOutcome::Value(value) => advance_for_of_close(state, &value, return_to),
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            iterator_getter_call(
-                function,
-                receiver,
-                NativeContinuation::ForOfClose(state),
-                return_to,
-                origin,
-                None,
-            )
-        }
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            None,
-            failure,
-        )?)),
-    }
+    let dispatch = begin_value_get(
+        runtime,
+        &state.iterator,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::ForOfClose,
+        |state, value| advance_for_of_close(state, &value, return_to),
+        "for-of return Get produced a structured result",
+    )
 }
 
 pub(super) fn advance_for_of_close(
@@ -1147,30 +1162,31 @@ fn read_append_property(
         }
     };
     charge_iterator_property_lookup(runtime, base, execution_budget)?;
-    match read_static_property(runtime, state.realm, base, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_iterator_append(runtime, state, value, return_to, execution_budget)
+    let dispatch = match begin_value_get(
+        runtime,
+        base,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending))
+            if state.next_acquired =>
+        {
+            return begin_iterator_close(runtime, state, pending, return_to, execution_budget);
         }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            iterator_getter_call(
-                function,
-                receiver,
-                NativeContinuation::IteratorAppend(state),
-                return_to,
-                origin,
-                None,
-            )
-        }
-        PropertyReadOutcome::Failed(failure) => {
-            let pending = property_exception_at(state.realm, state.origin.clone(), None, failure)?;
-            if state.next_acquired {
-                begin_iterator_close(runtime, state, pending, return_to, execution_budget)
-            } else {
-                Err(NativeFailure::Abrupt(pending))
-            }
-        }
-    }
+        Err(error) => return Err(error),
+    };
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::IteratorAppend,
+        |state, value| advance_iterator_append(runtime, state, value, return_to, execution_budget),
+        "iterator append Get produced a structured result",
+    )
 }
 
 fn call_append_next(
@@ -1259,21 +1275,29 @@ fn read_iterator_return(
 ) -> Result<NativeDispatch, NativeFailure> {
     let key = runtime.predefined_property_key(PredefinedAtom::Return);
     charge_iterator_property_lookup(runtime, &close.iterator, execution_budget)?;
-    match read_static_property(runtime, close.original.realm, &close.iterator, &key)? {
-        PropertyReadOutcome::Value(value) => advance_iterator_close(close, value, return_to),
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = close.original.origin.clone();
-            iterator_getter_call(
-                function,
-                receiver,
-                NativeContinuation::IteratorClose(close),
-                return_to,
-                origin,
-                None,
-            )
+    let dispatch = match begin_value_get(
+        runtime,
+        &close.iterator,
+        key,
+        None,
+        close.original.realm,
+        return_to,
+        close.original.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(_) | NativeFailure::AbruptAfterTransient(_)) => {
+            return Err(NativeFailure::Abrupt(close.original));
         }
-        PropertyReadOutcome::Failed(_) => Err(NativeFailure::Abrupt(close.original)),
-    }
+        Err(error) => return Err(error),
+    };
+    continue_get_after(
+        dispatch,
+        close,
+        NativeContinuation::IteratorClose,
+        |close, value| advance_iterator_close(close, value, return_to),
+        "iterator close return Get produced a structured result",
+    )
 }
 
 #[allow(
