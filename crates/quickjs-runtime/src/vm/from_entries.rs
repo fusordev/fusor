@@ -362,25 +362,36 @@ fn read_from_entries_property(
             .into());
         }
     };
-    charge_iterator_property_lookup(runtime, base, execution_budget)?;
-    match read_static_property(runtime, state.realm, base, key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_from_entries(runtime, state, value, return_to, execution_budget)
+    let base = base.duplicate();
+    charge_iterator_property_lookup(runtime, &base, execution_budget)?;
+    let name = JsString::from_utf8(property_name)?;
+    let dispatch = match begin_value_get(
+        runtime,
+        &base,
+        key.clone(),
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(pending)) if state.closes_on_abrupt() => {
+            return begin_from_entries_close(runtime, state, pending, return_to, execution_budget);
         }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            call_from_entries_function(function, receiver, state, return_to)
-        }
-        PropertyReadOutcome::Failed(failure) => {
-            let name = JsString::from_utf8(property_name)?;
-            let pending =
-                property_exception_at(state.realm, state.origin.clone(), Some(&name), failure)?;
-            if state.closes_on_abrupt() {
-                begin_from_entries_close(runtime, state, pending, return_to, execution_budget)
-            } else {
-                Err(NativeFailure::Abrupt(pending))
-            }
-        }
-    }
+        Err(failure) => return Err(failure),
+    };
+    continue_get_after(
+        dispatch,
+        state,
+        from_entries_native_continuation,
+        |state, value| advance_from_entries(runtime, state, value, return_to, execution_budget),
+        "Object.fromEntries Get produced a structured result",
+    )
+}
+
+fn from_entries_native_continuation(state: FromEntriesContinuation) -> NativeContinuation {
+    NativeContinuation::FromEntries(Box::new(state))
 }
 
 fn call_from_entries_next(

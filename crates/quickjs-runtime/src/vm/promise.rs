@@ -12,12 +12,12 @@ use super::{
     PromiseCapabilityExecutor, PromiseCapabilityPurpose, PromiseCombinatorKind,
     PromiseContinuation, PromiseFinallyFunction, PromiseFinallyState, PromiseFinallyThenState,
     PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction, PromiseResolvingKind,
-    PromiseStatic, PromiseThenState, PropertyReadOutcome, Rc, RealmId, RefCell, Runtime,
-    RuntimeResource, StoredValue, attach_native_continuations, begin_internal_get,
-    begin_promise_combinator, charge_heap_property_lookup, check_execution_limit,
+    PromiseStatic, PromiseThenState, PropertyKey, Rc, RealmId, RefCell, Runtime, RuntimeResource,
+    StoredValue, attach_native_continuations, begin_internal_get, begin_promise_combinator,
+    begin_value_get, charge_heap_property_lookup, check_execution_limit, continue_get_after,
     continue_intrinsic_get_after, execute_root_dispatch_with_budget, function_is_constructor,
-    native_function_host_origin, prepend_native_continuations, read_static_property,
-    resolve_native_dispatch, trace_stored_value_root, usize_to_u64,
+    native_function_host_origin, prepend_native_continuations, resolve_native_dispatch,
+    trace_stored_value_root, usize_to_u64,
 };
 use crate::object::{
     HeapObject, PromiseCapability, PromiseReaction, PromiseReactionKind, PromiseReactionTarget,
@@ -59,7 +59,7 @@ pub(super) fn begin_promise_constructor(
         prototype_key,
         native.realm,
         return_to,
-        origin,
+        origin.clone(),
         execution_budget,
     )?;
     continue_intrinsic_get_after(runtime, dispatch, continuation, return_to, execution_budget)
@@ -218,48 +218,24 @@ pub(super) fn begin_promise_resolve_with_constructor(
             .get(object)
             .is_some_and(HeapObject::is_promise)
     {
-        charge_heap_property_lookup(runtime, &StoredValue::Object(object), execution_budget)?;
+        let promise = StoredValue::Object(object);
         let constructor_key = runtime.predefined_property_key(PredefinedAtom::Constructor);
-        return match read_static_property(
+        return begin_promise_get(
             runtime,
             realm,
-            &StoredValue::Object(object),
-            &constructor_key,
-        )? {
-            PropertyReadOutcome::Value(value) => finish_promise_resolve_after_constructor_get(
-                runtime,
+            &promise,
+            constructor_key,
+            Some("constructor"),
+            PromiseContinuation::ResolveConstructorGet {
                 realm,
                 constructor,
-                object,
-                &value,
-                return_to,
-                origin,
-            ),
-            PropertyReadOutcome::Getter { function, receiver } => {
-                Ok(NativeDispatch::Call(NativeCall {
-                    function,
-                    receiver,
-                    arguments: CallArguments::empty(),
-                    return_to,
-                    origin: origin.clone(),
-                    continuations: one_promise_continuation(
-                        PromiseContinuation::ResolveConstructorGet {
-                            realm,
-                            constructor,
-                            promise: object,
-                            origin,
-                        },
-                    )?,
-                    pre_call: None,
-                    new_target: None,
-                    native_caller: None,
-                }))
-            }
-            PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-                message: "Promise constructor Get produced a primitive property failure",
-            }
-            .into()),
-        };
+                promise: object,
+                origin: origin.clone(),
+            },
+            return_to,
+            origin,
+            execution_budget,
+        );
     }
     begin_new_promise_capability(
         runtime,
@@ -573,44 +549,20 @@ pub(super) fn begin_promise_then(
         realm: native.realm,
         on_fulfilled,
         on_rejected,
-        origin,
+        origin: origin.clone(),
     };
     let constructor_key = runtime.predefined_property_key(PredefinedAtom::Constructor);
-    charge_heap_property_lookup(runtime, &StoredValue::Object(promise), execution_budget)?;
-    match read_static_property(
+    begin_promise_get(
         runtime,
         native.realm,
         &StoredValue::Object(promise),
-        &constructor_key,
-    )? {
-        PropertyReadOutcome::Value(constructor) => finish_promise_then_constructor_get(
-            runtime,
-            state,
-            &constructor,
-            return_to,
-            execution_budget,
-        ),
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            Ok(NativeDispatch::Call(NativeCall {
-                function,
-                receiver,
-                arguments: CallArguments::empty(),
-                return_to,
-                origin,
-                continuations: one_promise_continuation(PromiseContinuation::ThenConstructorGet(
-                    state,
-                ))?,
-                pre_call: None,
-                new_target: None,
-                native_caller: None,
-            }))
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "Promise constructor Get failed for an object receiver",
-        }
-        .into()),
-    }
+        constructor_key,
+        Some("constructor"),
+        PromiseContinuation::ThenConstructorGet(state),
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 fn finish_promise_then_constructor_get(
@@ -634,32 +586,19 @@ fn finish_promise_then_constructor_get(
         );
     }
     let species_key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies);
-    charge_heap_property_lookup(runtime, constructor, execution_budget)?;
-    match read_static_property(runtime, state.realm, constructor, &species_key)? {
-        PropertyReadOutcome::Value(species) => {
-            finish_promise_then_species_get(runtime, state, &species, return_to)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            Ok(NativeDispatch::Call(NativeCall {
-                function,
-                receiver,
-                arguments: CallArguments::empty(),
-                return_to,
-                origin,
-                continuations: one_promise_continuation(PromiseContinuation::ThenSpeciesGet(
-                    state,
-                ))?,
-                pre_call: None,
-                new_target: None,
-                native_caller: None,
-            }))
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "Promise species Get failed for an object receiver",
-        }
-        .into()),
-    }
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_promise_get(
+        runtime,
+        realm,
+        constructor,
+        species_key,
+        Some("Symbol.species"),
+        PromiseContinuation::ThenSpeciesGet(state),
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 fn finish_promise_then_species_get(
@@ -720,44 +659,23 @@ pub(super) fn begin_promise_catch(
     let origin = origin.unwrap_or_else(native_function_host_origin);
     let receiver = inputs.receiver;
     let on_rejected = inputs.arguments.take_first_or_undefined();
-    if receiver.heap_reference().is_some() {
-        charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
-    }
     let then_key = runtime.predefined_property_key(PredefinedAtom::Then);
-    match read_static_property(runtime, native.realm, &receiver, &then_key)? {
-        PropertyReadOutcome::Value(then) => finish_promise_catch_get(
-            native.realm,
-            &then,
-            receiver,
+    begin_promise_get(
+        runtime,
+        native.realm,
+        &receiver,
+        then_key,
+        Some("then"),
+        PromiseContinuation::CatchThenGet {
+            realm: native.realm,
+            receiver: receiver.duplicate(),
             on_rejected,
-            return_to,
-            origin,
-        ),
-        PropertyReadOutcome::Getter {
-            function,
-            receiver: getter_receiver,
-        } => Ok(NativeDispatch::Call(NativeCall {
-            function,
-            receiver: getter_receiver,
-            arguments: CallArguments::empty(),
-            return_to,
             origin: origin.clone(),
-            continuations: one_promise_continuation(PromiseContinuation::CatchThenGet {
-                realm: native.realm,
-                receiver,
-                on_rejected,
-                origin,
-            })?,
-            pre_call: None,
-            new_target: None,
-            native_caller: None,
-        })),
-        PropertyReadOutcome::Failed(_) => promise_type_error(
-            native.realm,
-            "Promise.prototype.catch receiver has no callable then",
-            origin,
-        ),
-    }
+        },
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 pub(super) fn begin_promise_finally(
@@ -781,39 +699,22 @@ pub(super) fn begin_promise_finally(
         receiver,
         realm: native.realm,
         on_finally: inputs.arguments.take_first_or_undefined(),
-        origin,
+        origin: origin.clone(),
     };
-    charge_heap_property_lookup(runtime, &state.receiver, execution_budget)?;
     let constructor_key = runtime.predefined_property_key(PredefinedAtom::Constructor);
-    match read_static_property(runtime, state.realm, &state.receiver, &constructor_key)? {
-        PropertyReadOutcome::Value(constructor) => finish_promise_finally_constructor_get(
-            runtime,
-            state,
-            &constructor,
-            return_to,
-            execution_budget,
-        ),
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            Ok(NativeDispatch::Call(NativeCall {
-                function,
-                receiver,
-                arguments: CallArguments::empty(),
-                return_to,
-                origin,
-                continuations: one_promise_continuation(
-                    PromiseContinuation::FinallyConstructorGet(state),
-                )?,
-                pre_call: None,
-                new_target: None,
-                native_caller: None,
-            }))
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "Promise finally constructor Get failed for an object receiver",
-        }
-        .into()),
-    }
+    let realm = state.realm;
+    let receiver = state.receiver.duplicate();
+    begin_promise_get(
+        runtime,
+        realm,
+        &receiver,
+        constructor_key,
+        Some("constructor"),
+        PromiseContinuation::FinallyConstructorGet(state),
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 fn finish_promise_finally_constructor_get(
@@ -842,37 +743,20 @@ fn finish_promise_finally_constructor_get(
             state.origin,
         );
     }
-    charge_heap_property_lookup(runtime, constructor, execution_budget)?;
     let species_key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies);
-    match read_static_property(runtime, state.realm, constructor, &species_key)? {
-        PropertyReadOutcome::Value(species) => finish_promise_finally_species_get(
-            runtime,
-            state,
-            Some(&species),
-            return_to,
-            execution_budget,
-        ),
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            Ok(NativeDispatch::Call(NativeCall {
-                function,
-                receiver,
-                arguments: CallArguments::empty(),
-                return_to,
-                origin,
-                continuations: one_promise_continuation(PromiseContinuation::FinallySpeciesGet(
-                    state,
-                ))?,
-                pre_call: None,
-                new_target: None,
-                native_caller: None,
-            }))
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "Promise finally species Get failed for an object receiver",
-        }
-        .into()),
-    }
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_promise_get(
+        runtime,
+        realm,
+        constructor,
+        species_key,
+        Some("Symbol.species"),
+        PromiseContinuation::FinallySpeciesGet(state),
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 fn finish_promise_finally_species_get(
@@ -930,33 +814,21 @@ fn begin_promise_finally_then_get(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    charge_heap_property_lookup(runtime, &state.receiver, execution_budget)?;
     let then_key = runtime.predefined_property_key(PredefinedAtom::Then);
-    match read_static_property(runtime, state.realm, &state.receiver, &then_key)? {
-        PropertyReadOutcome::Value(then) => {
-            finish_promise_finally_then_get(state, &then, return_to)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            Ok(NativeDispatch::Call(NativeCall {
-                function,
-                receiver,
-                arguments: CallArguments::empty(),
-                return_to,
-                origin,
-                continuations: one_promise_continuation(PromiseContinuation::FinallyThenGet(
-                    state,
-                ))?,
-                pre_call: None,
-                new_target: None,
-                native_caller: None,
-            }))
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "Promise finally then Get failed for an object receiver",
-        }
-        .into()),
-    }
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    let receiver = state.receiver.duplicate();
+    begin_promise_get(
+        runtime,
+        realm,
+        &receiver,
+        then_key,
+        Some("then"),
+        PromiseContinuation::FinallyThenGet(state),
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 fn finish_promise_finally_then_get(
@@ -1163,8 +1035,9 @@ fn finish_promise_finally_callback(
 }
 
 #[allow(
+    clippy::needless_pass_by_value,
     clippy::too_many_arguments,
-    reason = "the finally PromiseResolve continuation carries the captured completion, Realm, source origin, and execution authority"
+    reason = "the finally PromiseResolve continuation owns the resolved promise beside the captured completion and execution authority"
 )]
 fn finish_promise_finally_resolved(
     runtime: &mut Runtime,
@@ -1183,37 +1056,23 @@ fn finish_promise_finally_resolved(
         .into());
     }
     let thunk = runtime.allocate_promise_finally_thunk(realm, completion, kind)?;
-    charge_heap_property_lookup(runtime, &promise, execution_budget)?;
     let then_key = runtime.predefined_property_key(PredefinedAtom::Then);
-    match read_static_property(runtime, realm, &promise, &then_key)? {
-        PropertyReadOutcome::Value(then) => finish_promise_finally_resolved_then_get(
-            realm, promise, thunk, origin, &then, return_to,
-        ),
-        PropertyReadOutcome::Getter { function, receiver } => {
-            Ok(NativeDispatch::Call(NativeCall {
-                function,
-                receiver,
-                arguments: CallArguments::empty(),
-                return_to,
-                origin: origin.clone(),
-                continuations: one_promise_continuation(
-                    PromiseContinuation::FinallyResolvedThenGet {
-                        realm,
-                        promise,
-                        thunk,
-                        origin,
-                    },
-                )?,
-                pre_call: None,
-                new_target: None,
-                native_caller: None,
-            }))
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "PromiseResolve result then Get failed for an object receiver",
-        }
-        .into()),
-    }
+    begin_promise_get(
+        runtime,
+        realm,
+        &promise,
+        then_key,
+        Some("then"),
+        PromiseContinuation::FinallyResolvedThenGet {
+            realm,
+            promise: promise.duplicate(),
+            thunk,
+            origin: origin.clone(),
+        },
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 fn finish_promise_finally_resolved_then_get(
@@ -1272,35 +1131,23 @@ fn begin_promise_resolution(
         return Ok(NativeDispatch::Immediate(completion));
     }
 
-    charge_heap_property_lookup(runtime, &resolution, execution_budget)?;
     let then_key = runtime.predefined_property_key(PredefinedAtom::Then);
-    match read_static_property(runtime, realm, &resolution, &then_key)? {
-        PropertyReadOutcome::Value(then) => finish_promise_resolution_after_then_get(
-            runtime, promise, realm, resolution, &then, completion,
-        ),
-        PropertyReadOutcome::Getter { function, receiver } => {
-            Ok(NativeDispatch::Call(NativeCall {
-                function,
-                receiver,
-                arguments: CallArguments::empty(),
-                return_to,
-                origin,
-                continuations: one_promise_continuation(PromiseContinuation::ResolveThenGet {
-                    promise,
-                    realm,
-                    resolution,
-                    completion,
-                })?,
-                pre_call: None,
-                new_target: None,
-                native_caller: None,
-            }))
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "Promise resolution object Get produced a primitive property failure",
-        }
-        .into()),
-    }
+    begin_promise_get(
+        runtime,
+        realm,
+        &resolution,
+        then_key,
+        Some("then"),
+        PromiseContinuation::ResolveThenGet {
+            promise,
+            realm,
+            resolution: resolution.duplicate(),
+            completion,
+        },
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 fn finish_promise_resolution_after_then_get(
@@ -1986,6 +1833,58 @@ fn promise_type_error<T>(
         },
         origin,
     }))
+}
+
+fn promise_native_continuation(state: PromiseContinuation) -> NativeContinuation {
+    NativeContinuation::Promise(state)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared Promise Get boundary carries its typed continuation, diagnostic, caller completion, and execution authority"
+)]
+fn begin_promise_get(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    base: &StoredValue,
+    key: PropertyKey,
+    diagnostic_name: Option<&str>,
+    state: PromiseContinuation,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if base.heap_reference().is_some() {
+        charge_heap_property_lookup(runtime, base, execution_budget)?;
+    } else {
+        execution_budget.charge_instructions(1)?;
+    }
+    let name = diagnostic_name.map(JsString::from_utf8).transpose()?;
+    let dispatch = match begin_value_get(
+        runtime,
+        base,
+        key,
+        name.as_ref(),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(pending)) if state.handles_abrupt() => {
+            return resume_promise_abrupt(runtime, state, pending, return_to, execution_budget);
+        }
+        Err(failure) => return Err(failure),
+    };
+    continue_get_after(
+        dispatch,
+        state,
+        promise_native_continuation,
+        |state, value| {
+            advance_promise_continuation(runtime, state, value, return_to, execution_budget)
+        },
+        "Promise Get produced a structured result",
+    )
 }
 
 fn one_promise_continuation(

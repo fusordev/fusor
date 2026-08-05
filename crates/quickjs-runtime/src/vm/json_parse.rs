@@ -839,15 +839,23 @@ impl JsonParseTextContinuation {
 #[derive(Clone, Copy)]
 enum JsonInternalizeStage {
     AwaitGet,
+    GetArrayLength,
+    AwaitArrayLength,
+    AwaitArrayLengthConversion,
+    GetObjectKeys,
+    AwaitObjectKeys,
     Walk,
+    CommitChild,
+    AwaitDelete,
+    AwaitDefine,
     AwaitReviver,
 }
 
 enum JsonTraversal {
     None,
     Array {
-        next: u32,
-        length: u32,
+        next: u64,
+        length: u64,
         record: Option<JsonNodeId>,
     },
     Object {
@@ -871,6 +879,7 @@ struct JsonInternalizeFrame {
     context: Option<ObjectId>,
     traversal: JsonTraversal,
     pending_child: Option<PropertyKey>,
+    pending_value: Option<StoredValue>,
     stage: JsonInternalizeStage,
 }
 
@@ -894,6 +903,7 @@ impl JsonParseContinuation {
                 .saturating_add(1)
                 .saturating_add(u64::from(frame.value.is_some()))
                 .saturating_add(u64::from(frame.context.is_some()))
+                .saturating_add(u64::from(frame.pending_value.is_some()))
                 .saturating_add(keys)
         });
         1_u64
@@ -907,6 +917,9 @@ impl JsonParseContinuation {
         for frame in &self.frames {
             trace_stored_value_root(&frame.holder, mark);
             if let Some(value) = &frame.value {
+                trace_stored_value_root(value, mark);
+            }
+            if let Some(value) = &frame.pending_value {
                 trace_stored_value_root(value, mark);
             }
             if let Some(context) = frame.context {
@@ -1108,6 +1121,7 @@ pub(super) fn finish_json_parse_text(
         context: None,
         traversal: JsonTraversal::None,
         pending_child: None,
+        pending_value: None,
         stage: JsonInternalizeStage::AwaitGet,
     });
     drive_json_parse(
@@ -1165,6 +1179,49 @@ fn drive_json_parse(
                 JsonInternalizeStage::AwaitGet => {
                     initialize_json_frame(runtime, &mut state, value, execution_budget)?;
                 }
+                JsonInternalizeStage::AwaitArrayLength => {
+                    if value.heap_reference().is_none() {
+                        let number = operator_to_number(value, state.realm, &state.origin)?;
+                        finish_json_parse_array_length_inline(
+                            &mut state,
+                            number_to_length(number),
+                        )?;
+                    } else {
+                        state
+                            .frames
+                            .last_mut()
+                            .ok_or(EngineFault::RuntimeInvariant {
+                                message: "JSON Array length conversion lost its frame",
+                            })?
+                            .stage = JsonInternalizeStage::AwaitArrayLengthConversion;
+                        let realm = state.realm;
+                        let origin = state.origin.clone();
+                        return begin_operator_primitive_conversion(
+                            runtime,
+                            value,
+                            OperatorPrimitiveHint::Number,
+                            OperatorPrimitiveTarget::JsonParseArrayLength(Box::new(state)),
+                            realm,
+                            return_to,
+                            origin,
+                            execution_budget,
+                        );
+                    }
+                }
+                JsonInternalizeStage::AwaitObjectKeys => {
+                    finish_json_parse_object_keys(runtime, &mut state, value)?;
+                }
+                JsonInternalizeStage::AwaitDelete | JsonInternalizeStage::AwaitDefine => {
+                    let parent = state
+                        .frames
+                        .last_mut()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "JSON child mutation completion lost its parent frame",
+                        })?;
+                    parent.pending_child = None;
+                    parent.pending_value = None;
+                    parent.stage = JsonInternalizeStage::Walk;
+                }
                 JsonInternalizeStage::AwaitReviver => {
                     let _completed = state.frames.pop().ok_or(EngineFault::RuntimeInvariant {
                         message: "JSON reviver completion lost its frame",
@@ -1172,24 +1229,20 @@ fn drive_json_parse(
                     let Some(parent) = state.frames.last_mut() else {
                         return Ok(NativeDispatch::Immediate(value));
                     };
-                    let key = parent
-                        .pending_child
-                        .take()
-                        .ok_or(EngineFault::RuntimeInvariant {
+                    if parent.pending_child.is_none() {
+                        return Err(EngineFault::RuntimeInvariant {
                             message: "JSON child reviver completed without a parent key",
-                        })?;
-                    let target = parent.value.as_ref().ok_or(EngineFault::RuntimeInvariant {
-                        message: "JSON child reviver parent has no traversed value",
-                    })?;
-                    if matches!(value, StoredValue::Undefined) {
-                        charge_heap_property_lookup(runtime, target, execution_budget)?;
-                        let _ = delete_static_property(runtime, target, &key)?;
-                    } else {
-                        let _ =
-                            define_static_property(runtime, target, key, value, execution_budget)?;
+                        }
+                        .into());
                     }
+                    parent.pending_value = Some(value);
+                    parent.stage = JsonInternalizeStage::CommitChild;
                 }
-                JsonInternalizeStage::Walk => {
+                JsonInternalizeStage::GetArrayLength
+                | JsonInternalizeStage::AwaitArrayLengthConversion
+                | JsonInternalizeStage::GetObjectKeys
+                | JsonInternalizeStage::Walk
+                | JsonInternalizeStage::CommitChild => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "JSON internalize walk received an external completion",
                     }
@@ -1209,33 +1262,148 @@ fn drive_json_parse(
                 })?;
         match phase {
             JsonInternalizeStage::AwaitGet => {
-                let frame = state.frames.last().ok_or(EngineFault::RuntimeInvariant {
-                    message: "JSON property read has no frame",
-                })?;
-                charge_heap_property_lookup(runtime, &frame.holder, execution_budget)?;
-                match read_static_property(runtime, state.realm, &frame.holder, &frame.key)? {
-                    PropertyReadOutcome::Value(value) => completion = Some(value),
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        return call_json_function(
-                            function,
-                            receiver,
-                            Vec::new(),
-                            state,
-                            return_to,
-                        );
+                let (holder, key) = {
+                    let frame = state.frames.last().ok_or(EngineFault::RuntimeInvariant {
+                        message: "JSON property read has no frame",
+                    })?;
+                    (frame.holder.duplicate(), frame.key.clone())
+                };
+                charge_heap_property_lookup(runtime, &holder, execution_budget)?;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &holder,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match continue_get_state_after(
+                    dispatch,
+                    state,
+                    |state| NativeContinuation::JsonParse(Box::new(state)),
+                    "JSON.parse holder Get produced a structured result",
+                )? {
+                    GetContinuationDispatch::Ready {
+                        state: ready,
+                        value,
+                    } => {
+                        state = ready;
+                        completion = Some(value);
                     }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(NativeFailure::Abrupt(property_exception_at(
-                            state.realm,
-                            state.origin,
-                            None,
-                            failure,
-                        )?));
+                    GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+                }
+            }
+            JsonInternalizeStage::GetArrayLength => {
+                let value = state
+                    .frames
+                    .last()
+                    .and_then(|frame| frame.value.as_ref())
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "JSON Array length Get lost its value",
+                    })?
+                    .duplicate();
+                let key = runtime.predefined_property_key(PredefinedAtom::Length);
+                charge_heap_property_lookup(runtime, &value, execution_budget)?;
+                state
+                    .frames
+                    .last_mut()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "JSON Array length Get lost its frame",
+                    })?
+                    .stage = JsonInternalizeStage::AwaitArrayLength;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &value,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match continue_get_state_after(
+                    dispatch,
+                    state,
+                    |state| NativeContinuation::JsonParse(Box::new(state)),
+                    "JSON.parse Array length Get produced a structured result",
+                )? {
+                    GetContinuationDispatch::Ready {
+                        state: ready,
+                        value,
+                    } => {
+                        state = ready;
+                        completion = Some(value);
+                    }
+                    GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+                }
+            }
+            JsonInternalizeStage::GetObjectKeys => {
+                let value = state
+                    .frames
+                    .last()
+                    .and_then(|frame| frame.value.as_ref())
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "JSON Object key listing lost its value",
+                    })?
+                    .duplicate();
+                state
+                    .frames
+                    .last_mut()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "JSON Object key listing lost its frame",
+                    })?
+                    .stage = JsonInternalizeStage::AwaitObjectKeys;
+                let dispatch = own_property_keys(
+                    runtime,
+                    state.realm,
+                    Some(value),
+                    KeyListing::EnumerableOnly,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match continue_get_state_after(
+                    dispatch,
+                    state,
+                    |state| NativeContinuation::JsonParse(Box::new(state)),
+                    "JSON.parse Object key listing produced a structured result",
+                )? {
+                    GetContinuationDispatch::Ready {
+                        state: ready,
+                        value,
+                    } => {
+                        state = ready;
+                        completion = Some(value);
+                    }
+                    GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+                }
+            }
+            JsonInternalizeStage::CommitChild => {
+                if let Some(dispatch) =
+                    commit_json_child(runtime, &mut state, return_to, execution_budget)?
+                {
+                    match continue_get_state_after(
+                        dispatch,
+                        state,
+                        |state| NativeContinuation::JsonParse(Box::new(state)),
+                        "JSON.parse child mutation produced a structured result",
+                    )? {
+                        GetContinuationDispatch::Ready {
+                            state: ready,
+                            value: _,
+                        } => {
+                            state = ready;
+                            finish_json_child_mutation(&mut state)?;
+                        }
+                        GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
                     }
                 }
             }
             JsonInternalizeStage::Walk => {
                 if let Some(child) = next_json_child(
+                    runtime,
                     &state.snapshot,
                     state
                         .frames
@@ -1263,6 +1431,7 @@ fn drive_json_parse(
                         context: None,
                         traversal: JsonTraversal::None,
                         pending_child: None,
+                        pending_value: None,
                         stage: JsonInternalizeStage::AwaitGet,
                     };
                     state
@@ -1302,7 +1471,12 @@ fn drive_json_parse(
                 frame.stage = JsonInternalizeStage::AwaitReviver;
                 return call_json_function(state.reviver, receiver, arguments, state, return_to);
             }
-            JsonInternalizeStage::AwaitReviver => {
+            JsonInternalizeStage::AwaitArrayLength
+            | JsonInternalizeStage::AwaitArrayLengthConversion
+            | JsonInternalizeStage::AwaitObjectKeys
+            | JsonInternalizeStage::AwaitDelete
+            | JsonInternalizeStage::AwaitDefine
+            | JsonInternalizeStage::AwaitReviver => {
                 return Err(EngineFault::RuntimeInvariant {
                     message: "JSON reviver frame resumed without a callback completion",
                 }
@@ -1312,6 +1486,10 @@ fn drive_json_parse(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "frame initialization keeps parse-record context and Proxy-aware traversal selection in one auditable operation"
+)]
 fn initialize_json_frame(
     runtime: &mut Runtime,
     state: &mut JsonParseContinuation,
@@ -1358,57 +1536,250 @@ fn initialize_json_frame(
         )?;
     }
 
-    let traversal = if let StoredValue::Object(object) = value
-        && runtime.is_array_object(object)?
-    {
-        JsonTraversal::Array {
-            next: 0,
-            length: runtime
-                .array_length(object)?
-                .ok_or(EngineFault::RuntimeInvariant {
-                    message: "JSON array lost its cached length",
-                })?,
-            record: state.frames[frame_index].record,
-        }
-    } else if let Some(reference) = value.heap_reference() {
-        let (snapshot, work) =
-            runtime.try_own_key_snapshot(reference, 0, KeyPhases::STRING_KEYS)?;
-        execution_budget.charge_instructions(work)?;
-        let mut children = Vec::new();
-        children.try_reserve_exact(snapshot.len()).map_err(|_| {
-            ExecutionError::AllocationFailed {
-                resource: RuntimeResource::FrameValues,
-                additional: snapshot.len(),
-            }
+    let reference = value.heap_reference();
+    let is_array = proxy_aware_is_array(
+        runtime,
+        value.duplicate(),
+        state.realm,
+        state.origin.clone(),
+    )?;
+    let (traversal, next_stage) = if is_array {
+        let reference = reference.ok_or(EngineFault::RuntimeInvariant {
+            message: "JSON IsArray accepted a non-object",
         })?;
-        for index in 0..snapshot.len() {
-            let candidate = snapshot.get(index).ok_or(EngineFault::RuntimeInvariant {
-                message: "JSON own-key snapshot shrank during traversal",
-            })?;
-            if !candidate.enumerable() {
-                continue;
-            }
-            let key = candidate.key().clone();
-            let name = json_property_key_string(&key)?;
-            let record = state.frames[frame_index]
-                .record
-                .and_then(|record| state.snapshot.record_for_object_key(record, &name));
-            children.push(JsonChild { key, name, record });
+        if runtime.proxy_state(reference)?.is_some() {
+            (JsonTraversal::None, JsonInternalizeStage::GetArrayLength)
+        } else {
+            let HeapReference::Object(object) = reference else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "JSON ordinary Array is function-valued",
+                }
+                .into());
+            };
+            (
+                JsonTraversal::Array {
+                    next: 0,
+                    length: u64::from(runtime.array_length(object)?.ok_or(
+                        EngineFault::RuntimeInvariant {
+                            message: "JSON array lost its cached length",
+                        },
+                    )?),
+                    record: state.frames[frame_index].record,
+                },
+                JsonInternalizeStage::Walk,
+            )
         }
-        JsonTraversal::Object { children, next: 0 }
+    } else if let Some(reference) = reference {
+        if runtime.proxy_state(reference)?.is_some() {
+            (JsonTraversal::None, JsonInternalizeStage::GetObjectKeys)
+        } else {
+            let (snapshot, work) =
+                runtime.try_own_key_snapshot(reference, 0, KeyPhases::STRING_KEYS)?;
+            execution_budget.charge_instructions(work)?;
+            let mut children = Vec::new();
+            children.try_reserve_exact(snapshot.len()).map_err(|_| {
+                ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::FrameValues,
+                    additional: snapshot.len(),
+                }
+            })?;
+            for index in 0..snapshot.len() {
+                let candidate = snapshot.get(index).ok_or(EngineFault::RuntimeInvariant {
+                    message: "JSON own-key snapshot shrank during traversal",
+                })?;
+                if !candidate.enumerable() {
+                    continue;
+                }
+                let key = candidate.key().clone();
+                let name = json_property_key_string(&key)?;
+                let record = state.frames[frame_index]
+                    .record
+                    .and_then(|record| state.snapshot.record_for_object_key(record, &name));
+                children.push(JsonChild { key, name, record });
+            }
+            (
+                JsonTraversal::Object { children, next: 0 },
+                JsonInternalizeStage::Walk,
+            )
+        }
     } else {
-        JsonTraversal::None
+        (JsonTraversal::None, JsonInternalizeStage::Walk)
     };
 
     let frame = &mut state.frames[frame_index];
     frame.value = Some(value);
     frame.context = Some(context);
     frame.traversal = traversal;
+    frame.stage = next_stage;
+    Ok(())
+}
+
+pub(super) fn finish_json_parse_array_length(
+    runtime: &mut Runtime,
+    mut state: JsonParseContinuation,
+    number: JsNumber,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    finish_json_parse_array_length_inline(&mut state, number_to_length(number))?;
+    drive_json_parse(runtime, state, None, return_to, execution_budget)
+}
+
+fn finish_json_parse_array_length_inline(
+    state: &mut JsonParseContinuation,
+    length: u64,
+) -> Result<(), NativeFailure> {
+    let frame = state
+        .frames
+        .last_mut()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "JSON Array length completion lost its frame",
+        })?;
+    frame.traversal = JsonTraversal::Array {
+        next: 0,
+        length,
+        record: frame.record,
+    };
     frame.stage = JsonInternalizeStage::Walk;
     Ok(())
 }
 
+fn finish_json_parse_object_keys(
+    runtime: &mut Runtime,
+    state: &mut JsonParseContinuation,
+    completion: StoredValue,
+) -> Result<(), NativeFailure> {
+    let keys = generated_key_list(runtime, completion)?;
+    let frame = state
+        .frames
+        .last_mut()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "JSON Object key completion lost its frame",
+        })?;
+    let mut children = Vec::new();
+    children
+        .try_reserve_exact(keys.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: keys.len(),
+        })?;
+    for key in keys {
+        let name = json_property_key_string(&key)?;
+        let record = frame
+            .record
+            .and_then(|record| state.snapshot.record_for_object_key(record, &name));
+        children.push(JsonChild { key, name, record });
+    }
+    frame.traversal = JsonTraversal::Object { children, next: 0 };
+    frame.stage = JsonInternalizeStage::Walk;
+    Ok(())
+}
+
+fn commit_json_child(
+    runtime: &mut Runtime,
+    state: &mut JsonParseContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<Option<NativeDispatch>, NativeFailure> {
+    let (target, key, value) = {
+        let parent = state.frames.last().ok_or(EngineFault::RuntimeInvariant {
+            message: "JSON child mutation has no parent frame",
+        })?;
+        (
+            parent
+                .value
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "JSON child mutation parent has no traversed value",
+                })?
+                .duplicate(),
+            parent
+                .pending_child
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "JSON child mutation has no property key",
+                })?
+                .clone(),
+            parent
+                .pending_value
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "JSON child mutation has no reviver result",
+                })?
+                .duplicate(),
+        )
+    };
+    charge_heap_property_lookup(runtime, &target, execution_budget)?;
+    let reference = target
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "JSON child mutation target is not an object",
+        })?;
+    if runtime.proxy_state(reference)?.is_none() {
+        if matches!(value, StoredValue::Undefined) {
+            let _ = delete_static_property(runtime, &target, &key)?;
+        } else {
+            let _ = define_static_property(runtime, &target, key, value, execution_budget)?;
+        }
+        finish_json_child_mutation(state)?;
+        return Ok(None);
+    }
+
+    let parent = state
+        .frames
+        .last_mut()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "JSON Proxy child mutation lost its parent frame",
+        })?;
+    let dispatch = if matches!(value, StoredValue::Undefined) {
+        parent.stage = JsonInternalizeStage::AwaitDelete;
+        begin_internal_delete(
+            runtime,
+            reference,
+            key,
+            false,
+            true,
+            state.realm,
+            return_to,
+            state.origin.clone(),
+            execution_budget,
+        )?
+    } else {
+        parent.stage = JsonInternalizeStage::AwaitDefine;
+        let definition =
+            PropertyDefinition::data(Requested::Present(value), Requested::Present(true))
+                .with_enumerable(Requested::Present(true))
+                .with_configurable(Requested::Present(true));
+        begin_internal_define_own_property(
+            runtime,
+            reference,
+            key,
+            definition,
+            state.realm,
+            return_to,
+            state.origin.clone(),
+            execution_budget,
+            DefinePropertyResult::Boolean,
+        )?
+    };
+    Ok(Some(dispatch))
+}
+
+fn finish_json_child_mutation(state: &mut JsonParseContinuation) -> Result<(), NativeFailure> {
+    let parent = state
+        .frames
+        .last_mut()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "JSON child mutation completion lost its parent frame",
+        })?;
+    parent.pending_child = None;
+    parent.pending_value = None;
+    parent.stage = JsonInternalizeStage::Walk;
+    Ok(())
+}
+
 fn next_json_child(
+    runtime: &mut Runtime,
     snapshot: &JsonSnapshot,
     frame: &mut JsonInternalizeFrame,
 ) -> Result<Option<JsonChild>, NativeFailure> {
@@ -1424,13 +1795,11 @@ fn next_json_child(
             }
             let index = *next;
             *next = next.saturating_add(1);
-            let key = PropertyKey::from_index(ArrayIndex::new(index).ok_or(
-                EngineFault::RuntimeInvariant {
-                    message: "JSON reviver index reached the non-index u32 maximum",
-                },
-            )?);
-            let name = json_index_name(index)?;
-            let record = record.and_then(|record| snapshot.record_for_array_index(record, index));
+            let key = array_static_index_key(runtime, index)?;
+            let name = json_element_name(index)?;
+            let record = u32::try_from(index).ok().and_then(|index| {
+                record.and_then(|record| snapshot.record_for_array_index(record, index))
+            });
             Ok(Some(JsonChild { key, name, record }))
         }
         JsonTraversal::Object { children, next } => {
@@ -1445,6 +1814,12 @@ fn next_json_child(
             }))
         }
     }
+}
+
+fn json_element_name(index: u64) -> Result<JsString, NativeFailure> {
+    JsNumber::from_f64(array_static_index_as_f64(index))
+        .to_javascript_string()
+        .map_err(NativeFailure::from)
 }
 
 fn call_json_function(

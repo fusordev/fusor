@@ -48,7 +48,7 @@ use crate::{
     object::{
         ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, ForInIterator, ForInSnapshot,
         HeapObject, KeyPhases, ObjectRecord, OwnProperty, PromiseCapability, PromiseReaction,
-        PropertyDeletion, ProxyState, RegExpState, StringIterator,
+        PropertyDeletion, ProxyState, RegExpState, ShapeInterner, StringIterator,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
@@ -2343,6 +2343,7 @@ pub struct Runtime {
     pub(crate) code: Arena<crate::ids::InstalledCodeMarker, InstalledCode>,
     pub(crate) functions: Arena<crate::ids::FunctionMarker, HeapFunction>,
     pub(crate) objects: Arena<crate::ids::ObjectMarker, HeapObject>,
+    pub(crate) shape_interner: Rc<RefCell<ShapeInterner>>,
     pub(crate) cells: Arena<crate::ids::BindingCellMarker, BindingCell>,
     pub(crate) global_bindings: Arena<crate::ids::RealmGlobalBindingMarker, RealmGlobalBinding>,
     pub(crate) limits: RuntimeLimits,

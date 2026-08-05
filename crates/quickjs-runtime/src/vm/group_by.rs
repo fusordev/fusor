@@ -377,21 +377,30 @@ fn read_group_by_property(
             .into());
         }
     };
-    charge_iterator_property_lookup(runtime, base, execution_budget)?;
-    match read_static_property(runtime, state.realm, base, key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_group_by(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            call_group_by_function(function, receiver, Vec::new(), state, return_to)
-        }
-        PropertyReadOutcome::Failed(failure) => {
-            let name = JsString::from_utf8(property_name)?;
-            let pending =
-                property_exception_at(state.realm, state.origin.clone(), Some(&name), failure)?;
-            Err(NativeFailure::Abrupt(pending))
-        }
-    }
+    let base = base.duplicate();
+    charge_iterator_property_lookup(runtime, &base, execution_budget)?;
+    let name = JsString::from_utf8(property_name)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &base,
+        key.clone(),
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        group_by_native_continuation,
+        |state, value| advance_group_by(runtime, state, value, return_to, execution_budget),
+        "groupBy Get produced a structured result",
+    )
+}
+
+fn group_by_native_continuation(state: GroupByContinuation) -> NativeContinuation {
+    NativeContinuation::GroupBy(Box::new(state))
 }
 
 fn call_group_by_next(

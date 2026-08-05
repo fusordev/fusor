@@ -225,25 +225,14 @@ fn read_match_property(
     state.stage = StringReplaceStage::AwaitMatchProperty;
     charge_replace_property_lookup(runtime, state.realm, &state.search_value, execution_budget)?;
     let key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolMatch);
-    match read_static_property(runtime, state.realm, &state.search_value, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            decide_regexp_like(runtime, state, &value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => call_replace_function(
-            function,
-            receiver,
-            CallArguments::empty(),
-            state.origin.clone(),
-            Some(state),
-            return_to,
-        ),
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            Some(&JsString::from_utf8("Symbol.match")?),
-            failure,
-        )?)),
-    }
+    begin_string_replace_get(
+        runtime,
+        state,
+        key,
+        "Symbol.match",
+        return_to,
+        execution_budget,
+    )
 }
 
 fn decide_regexp_like(
@@ -279,25 +268,7 @@ fn read_flags_property(
     state.stage = StringReplaceStage::AwaitFlagsProperty;
     charge_replace_property_lookup(runtime, state.realm, &state.search_value, execution_budget)?;
     let key = runtime.predefined_property_key(PredefinedAtom::Flags);
-    match read_static_property(runtime, state.realm, &state.search_value, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            begin_flags_conversion(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => call_replace_function(
-            function,
-            receiver,
-            CallArguments::empty(),
-            state.origin.clone(),
-            Some(state),
-            return_to,
-        ),
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            Some(&JsString::from_utf8("flags")?),
-            failure,
-        )?)),
-    }
+    begin_string_replace_get(runtime, state, key, "flags", return_to, execution_budget)
 }
 
 fn begin_flags_conversion(
@@ -323,25 +294,46 @@ fn read_replace_method(
     state.stage = StringReplaceStage::AwaitReplaceMethod;
     charge_replace_property_lookup(runtime, state.realm, &state.search_value, execution_budget)?;
     let key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolReplace);
-    match read_static_property(runtime, state.realm, &state.search_value, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            decide_replace_method(runtime, state, &value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => call_replace_function(
-            function,
-            receiver,
-            CallArguments::empty(),
-            state.origin.clone(),
-            Some(state),
-            return_to,
-        ),
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            Some(&JsString::from_utf8("Symbol.replace")?),
-            failure,
-        )?)),
-    }
+    begin_string_replace_get(
+        runtime,
+        state,
+        key,
+        "Symbol.replace",
+        return_to,
+        execution_budget,
+    )
+}
+
+fn begin_string_replace_get(
+    runtime: &mut Runtime,
+    state: StringReplaceContinuation,
+    key: PropertyKey,
+    diagnostic_name: &str,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let name = JsString::from_utf8(diagnostic_name)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &state.search_value,
+        key,
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        string_replace_continuation,
+        |state, value| advance_string_replace(runtime, state, value, return_to, execution_budget),
+        "String replace Get produced a structured result",
+    )
+}
+
+fn string_replace_continuation(state: StringReplaceContinuation) -> NativeContinuation {
+    NativeContinuation::StringReplace(Box::new(state))
 }
 
 fn decide_replace_method(

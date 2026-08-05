@@ -191,32 +191,8 @@ fn read_sync_method(
             .into());
         }
     });
-    charge_iterator_property_lookup(runtime, &state.iterator, execution_budget)?;
-    match read_static_property(runtime, state.realm, &state.iterator, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_async_from_sync(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            Ok(NativeDispatch::Call(NativeCall {
-                function,
-                receiver,
-                arguments: CallArguments::empty(),
-                return_to,
-                origin,
-                continuations: one_continuation(NativeContinuation::AsyncFromSync(state))?,
-                pre_call: None,
-                new_target: None,
-                native_caller: None,
-            }))
-        }
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            None,
-            failure,
-        )?)),
-    }
+    let iterator = state.iterator.duplicate();
+    begin_async_from_sync_get(runtime, state, &iterator, key, return_to, execution_budget)
 }
 
 fn read_result_property(
@@ -226,36 +202,59 @@ fn read_result_property(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let result = state.result.as_ref().ok_or(EngineFault::RuntimeInvariant {
-        message: "AsyncFromSyncIterator result lookup has no result object",
-    })?;
-    charge_iterator_property_lookup(runtime, result, execution_budget)?;
+    let result = state
+        .result
+        .as_ref()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "AsyncFromSyncIterator result lookup has no result object",
+        })?
+        .duplicate();
     let key = runtime.predefined_property_key(key);
-    match read_static_property(runtime, state.realm, result, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_async_from_sync(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            Ok(NativeDispatch::Call(NativeCall {
-                function,
-                receiver,
-                arguments: CallArguments::empty(),
+    begin_async_from_sync_get(runtime, state, &result, key, return_to, execution_budget)
+}
+
+fn async_from_sync_continuation(state: AsyncFromSyncContinuation) -> NativeContinuation {
+    NativeContinuation::AsyncFromSync(state)
+}
+
+fn begin_async_from_sync_get(
+    runtime: &mut Runtime,
+    state: AsyncFromSyncContinuation,
+    base: &StoredValue,
+    key: PropertyKey,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    charge_iterator_property_lookup(runtime, base, execution_budget)?;
+    let dispatch = match begin_value_get(
+        runtime,
+        base,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(pending)) => {
+            return resume_async_from_sync_abrupt(
+                runtime,
+                state,
+                pending,
                 return_to,
-                origin,
-                continuations: one_continuation(NativeContinuation::AsyncFromSync(state))?,
-                pre_call: None,
-                new_target: None,
-                native_caller: None,
-            }))
+                execution_budget,
+            );
         }
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            None,
-            failure,
-        )?)),
-    }
+        Err(failure) => return Err(failure),
+    };
+    continue_get_after(
+        dispatch,
+        state,
+        async_from_sync_continuation,
+        |state, value| advance_async_from_sync(runtime, state, value, return_to, execution_budget),
+        "AsyncFromSyncIterator Get produced a structured result",
+    )
 }
 
 fn continue_promise_resolve(
@@ -351,31 +350,15 @@ pub(super) fn advance_async_from_sync(
             StoredValue::Undefined | StoredValue::Null => {
                 state.stage = AsyncFromSyncStage::MissingThrowReturnMethod;
                 let key = runtime.predefined_property_key(PredefinedAtom::Return);
-                charge_iterator_property_lookup(runtime, &state.iterator, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.iterator, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        advance_async_from_sync(runtime, state, value, return_to, execution_budget)
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        let origin = state.origin.clone();
-                        Ok(NativeDispatch::Call(NativeCall {
-                            function,
-                            receiver,
-                            arguments: CallArguments::empty(),
-                            return_to,
-                            origin,
-                            continuations: one_continuation(NativeContinuation::AsyncFromSync(
-                                state,
-                            ))?,
-                            pre_call: None,
-                            new_target: None,
-                            native_caller: None,
-                        }))
-                    }
-                    PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
-                        property_exception_at(state.realm, state.origin, None, failure)?,
-                    )),
-                }
+                let iterator = state.iterator.duplicate();
+                begin_async_from_sync_get(
+                    runtime,
+                    state,
+                    &iterator,
+                    key,
+                    return_to,
+                    execution_budget,
+                )
             }
             StoredValue::Function(function) => {
                 state.stage = AsyncFromSyncStage::Call;
@@ -614,26 +597,27 @@ fn read_async_from_sync_close_return(
 ) -> Result<NativeDispatch, NativeFailure> {
     let key = runtime.predefined_property_key(PredefinedAtom::Return);
     charge_iterator_property_lookup(runtime, &state.iterator, execution_budget)?;
-    match read_static_property(runtime, state.realm, &state.iterator, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_async_from_sync_close(runtime, state, value, return_to)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            Ok(NativeDispatch::Call(NativeCall {
-                function,
-                receiver,
-                arguments: CallArguments::empty(),
-                return_to,
-                origin,
-                continuations: one_continuation(NativeContinuation::AsyncFromSyncClose(state))?,
-                pre_call: None,
-                new_target: None,
-                native_caller: None,
-            }))
-        }
-        PropertyReadOutcome::Failed(_) => finish_async_from_sync_close(runtime, state),
-    }
+    let dispatch = match begin_value_get(
+        runtime,
+        &state.iterator,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(_)) => return finish_async_from_sync_close(runtime, state),
+        Err(failure) => return Err(failure),
+    };
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::AsyncFromSyncClose,
+        |state, value| advance_async_from_sync_close(runtime, state, value, return_to),
+        "AsyncFromSyncIterator close Get produced a structured result",
+    )
 }
 
 #[allow(

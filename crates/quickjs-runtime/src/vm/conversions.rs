@@ -1858,6 +1858,10 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::JsonParseArrayLength(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            finish_json_parse_array_length(runtime, *state, number, return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::JsonRawJsonText => {
             let text = operator_primitive_to_string(value, realm, origin)?;
             finish_json_raw_json_text(runtime, text, realm, origin.clone(), execution_budget)
@@ -1866,6 +1870,16 @@ fn finish_operator_primitive_target(
             let item = operator_primitive_to_string(value, realm, origin)?;
             finish_json_stringify_replacer_item(runtime, *state, item, return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::JsonStringifyReplacerLength(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            finish_json_stringify_replacer_length(
+                runtime,
+                *state,
+                number,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::JsonStringifySpaceNumber(state) => {
             let number = operator_to_number(value, realm, origin)?;
             finish_json_stringify_space_number(runtime, *state, number, return_to, execution_budget)
@@ -1873,6 +1887,16 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::JsonStringifySpaceString(state) => {
             let string = operator_primitive_to_string(value, realm, origin)?;
             finish_json_stringify_space_string(runtime, *state, string, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::JsonStringifyContainerLength(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            finish_json_stringify_container_length(
+                runtime,
+                *state,
+                number,
+                return_to,
+                execution_budget,
+            )
         }
         OperatorPrimitiveTarget::JsonStringifyBoxedNumber(state) => {
             let number = operator_to_number(value, realm, origin)?;

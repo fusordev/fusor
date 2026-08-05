@@ -24,9 +24,12 @@
  */
 
 use std::{
+    cell::RefCell,
+    collections::hash_map::DefaultHasher,
     collections::{HashMap, HashSet, TryReserveError},
     hash::{Hash, Hasher},
-    sync::Arc,
+    rc::Rc,
+    sync::{Arc, Weak},
 };
 
 use crate::ids::ObjectId;
@@ -81,10 +84,124 @@ impl WeakKey {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 struct ShapeProperty {
     key: PropertyKey,
     layout: PropertyLayout,
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+enum ShapeTransition {
+    Append(ShapeProperty),
+    ReplaceLayout {
+        index: usize,
+        layout: PropertyLayout,
+    },
+    Delete {
+        index: usize,
+    },
+}
+
+#[derive(Eq, Hash, PartialEq)]
+struct ShapeTransitionKey {
+    source: usize,
+    transition: ShapeTransition,
+}
+
+struct ShapeTransitionEntry {
+    source: Weak<Vec<ShapeProperty>>,
+    target: Weak<Vec<ShapeProperty>>,
+}
+
+/// Runtime-local weak shape and transition interner.
+///
+/// Shape metadata never contains JavaScript values or accessor functions, so
+/// sharing it cannot add GC edges. Weak canonical buckets let unused dynamic
+/// shapes disappear with their last object while transition keys retain only
+/// property-key metadata for the lifetime of their owning runtime.
+#[derive(Default)]
+pub(crate) struct ShapeInterner {
+    canonical: HashMap<u64, Vec<Weak<Vec<ShapeProperty>>>>,
+    transitions: HashMap<ShapeTransitionKey, ShapeTransitionEntry>,
+}
+
+impl ShapeInterner {
+    fn shape_hash(shape: &[ShapeProperty]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        shape.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn intern(&mut self, candidate: Arc<Vec<ShapeProperty>>) -> Arc<Vec<ShapeProperty>> {
+        let hash = Self::shape_hash(&candidate);
+        let bucket = self.canonical.entry(hash).or_default();
+        bucket.retain(|shape| shape.strong_count() != 0);
+        for existing in bucket.iter().filter_map(Weak::upgrade) {
+            if *existing == *candidate {
+                return existing;
+            }
+        }
+        bucket.push(Arc::downgrade(&candidate));
+        candidate
+    }
+
+    #[allow(
+        clippy::arc_with_non_send_sync,
+        reason = "object shapes are Arc-owned by project contract but remain runtime-local"
+    )]
+    fn transition(
+        &mut self,
+        source: &Arc<Vec<ShapeProperty>>,
+        transition: ShapeTransition,
+    ) -> Arc<Vec<ShapeProperty>> {
+        let source = self.intern(Arc::clone(source));
+        let key = ShapeTransitionKey {
+            source: Arc::as_ptr(&source) as usize,
+            transition: transition.clone(),
+        };
+        if let Some(entry) = self.transitions.get(&key)
+            && entry
+                .source
+                .upgrade()
+                .is_some_and(|existing| Arc::ptr_eq(&existing, &source))
+            && let Some(target) = entry.target.upgrade()
+        {
+            return target;
+        }
+        let mut properties = (*source).clone();
+        match transition {
+            ShapeTransition::Append(property) => properties.push(property),
+            ShapeTransition::ReplaceLayout { index, layout } => {
+                properties[index].layout = layout;
+            }
+            ShapeTransition::Delete { index } => {
+                properties.remove(index);
+            }
+        }
+        let target = self.intern(Arc::new(properties));
+        self.transitions.insert(
+            key,
+            ShapeTransitionEntry {
+                source: Arc::downgrade(&source),
+                target: Arc::downgrade(&target),
+            },
+        );
+        target
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_shape_count(&mut self) -> usize {
+        self.transitions.retain(|_, entry| {
+            entry.source.strong_count() != 0 && entry.target.strong_count() != 0
+        });
+        self.canonical
+            .values_mut()
+            .map(|bucket| {
+                bucket.retain(|shape| shape.strong_count() != 0);
+                bucket.len()
+            })
+            .sum()
+    }
 }
 
 /// The outcome of removing one own property.
@@ -989,6 +1106,7 @@ pub(crate) struct ObjectRecord {
     prototype: Option<HeapReference>,
     extensible: bool,
     shape: Arc<Vec<ShapeProperty>>,
+    shape_interner: Option<Rc<RefCell<ShapeInterner>>>,
     slots: Vec<PropertySlot>,
 }
 
@@ -1023,8 +1141,49 @@ impl ObjectRecord {
             prototype,
             extensible: true,
             shape: Arc::new(Vec::new()),
+            shape_interner: None,
             slots: Vec::new(),
         }
+    }
+
+    pub(crate) fn adopt_shape_interner(&mut self, interner: Rc<RefCell<ShapeInterner>>) {
+        if self
+            .shape_interner
+            .as_ref()
+            .is_some_and(|current| Rc::ptr_eq(current, &interner))
+        {
+            return;
+        }
+        self.shape = interner.borrow_mut().intern(Arc::clone(&self.shape));
+        self.shape_interner = Some(interner);
+    }
+
+    fn transition_shape(&mut self, transition: ShapeTransition) {
+        if let Some(interner) = self.shape_interner.clone() {
+            self.shape = interner.borrow_mut().transition(&self.shape, transition);
+            return;
+        }
+        let shape = Arc::make_mut(&mut self.shape);
+        match transition {
+            ShapeTransition::Append(property) => shape.push(property),
+            ShapeTransition::ReplaceLayout { index, layout } => {
+                shape[index].layout = layout;
+            }
+            ShapeTransition::Delete { index } => {
+                shape.remove(index);
+            }
+        }
+    }
+
+    fn intern_current_shape(&mut self) {
+        if let Some(interner) = &self.shape_interner {
+            self.shape = interner.borrow_mut().intern(Arc::clone(&self.shape));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shape_identity(&self) -> usize {
+        Arc::as_ptr(&self.shape) as usize
     }
 
     pub(crate) const fn prototype(&self) -> Option<HeapReference> {
@@ -1064,9 +1223,7 @@ impl ObjectRecord {
         if !self.shape[index].layout.is_configurable() {
             return PropertyDeletion::NotConfigurable;
         }
-        let shape = Arc::get_mut(&mut self.shape)
-            .expect("object shape Arc is private and uniquely owned before shape interning");
-        shape.remove(index);
+        self.transition_shape(ShapeTransition::Delete { index });
         self.slots.remove(index);
         PropertyDeletion::Deleted
     }
@@ -1135,8 +1292,22 @@ impl ObjectRecord {
         string_length: Option<u32>,
         phases: KeyPhases,
     ) -> usize {
+        self.own_key_candidate_count_with_array(string_length, phases, None)
+    }
+
+    fn own_key_candidate_count_with_array(
+        &self,
+        string_length: Option<u32>,
+        phases: KeyPhases,
+        array: Option<&ArrayState>,
+    ) -> usize {
         let virtual_indices = if phases.indices {
             string_length.unwrap_or(0)
+        } else {
+            0
+        };
+        let dense_indices = if phases.indices {
+            array.map_or(0, ArrayState::dense_property_count)
         } else {
             0
         };
@@ -1157,6 +1328,7 @@ impl ObjectRecord {
         });
         usize::try_from(virtual_indices)
             .unwrap_or(usize::MAX)
+            .saturating_add(dense_indices)
             .saturating_add(ordinary.count())
     }
 
@@ -1173,12 +1345,37 @@ impl ObjectRecord {
         string_length: Option<u32>,
         phases: KeyPhases,
     ) -> Result<ForInSnapshot, TryReserveError> {
+        self.try_own_key_snapshot_with_array(string_length, phases, None)
+    }
+
+    pub(crate) fn try_array_own_key_snapshot(
+        &self,
+        array: &ArrayState,
+        phases: KeyPhases,
+    ) -> Result<ForInSnapshot, TryReserveError> {
+        self.try_own_key_snapshot_with_array(None, phases, Some(array))
+    }
+
+    pub(crate) fn array_own_key_candidate_count(
+        &self,
+        array: &ArrayState,
+        phases: KeyPhases,
+    ) -> usize {
+        self.own_key_candidate_count_with_array(None, phases, Some(array))
+    }
+
+    fn try_own_key_snapshot_with_array(
+        &self,
+        string_length: Option<u32>,
+        phases: KeyPhases,
+        array: Option<&ArrayState>,
+    ) -> Result<ForInSnapshot, TryReserveError> {
         let virtual_indices = if phases.indices {
             string_length.unwrap_or(0)
         } else {
             0
         };
-        let capacity = self.own_key_candidate_count(string_length, phases);
+        let capacity = self.own_key_candidate_count_with_array(string_length, phases, array);
         let mut candidates = Vec::new();
         candidates.try_reserve_exact(capacity)?;
 
@@ -1193,6 +1390,12 @@ impl ObjectRecord {
                     ),
                     enumerable: true,
                 });
+            }
+            if let Some(array) = array {
+                candidates.extend(array.dense_indices().map(|index| ForInCandidate {
+                    key: PropertyKey::from_index(index),
+                    enumerable: true,
+                }));
             }
             for property in self.shape.iter() {
                 if let Some(index) = property.key.as_index()
@@ -1287,10 +1490,10 @@ impl ObjectRecord {
         if !matches!(self.slots[index], PropertySlot::Data(_)) {
             return None;
         }
-        let shape = Arc::get_mut(&mut self.shape)
-            .expect("object shape Arc is private and uniquely owned before shape interning");
-        debug_assert_eq!(shape[index].layout.kind(), PropertyLayoutKind::Data);
-        Some(std::mem::replace(&mut shape[index].layout, layout))
+        let previous = self.shape[index].layout;
+        debug_assert_eq!(previous.kind(), PropertyLayoutKind::Data);
+        self.transition_shape(ShapeTransition::ReplaceLayout { index, layout });
+        Some(previous)
     }
 
     pub(crate) fn replace_existing_with_data(
@@ -1357,9 +1560,7 @@ impl ObjectRecord {
                 PropertySlot::Accessor { .. } => PropertyLayoutKind::Accessor,
             }
         );
-        let shape = Arc::get_mut(&mut self.shape)
-            .expect("object shape Arc is private and uniquely owned before shape interning");
-        shape[index].layout = layout;
+        self.transition_shape(ShapeTransition::ReplaceLayout { index, layout });
         self.slots[index] = slot;
         Some(previous)
     }
@@ -1374,11 +1575,8 @@ impl ObjectRecord {
         debug_assert!(self.shape.iter().all(|property| property.key != key));
 
         self.slots.try_reserve(1)?;
-        let shape = Arc::get_mut(&mut self.shape)
-            .expect("object shape Arc is private and uniquely owned before shape interning");
-        shape.try_reserve(1)?;
-
-        shape.push(ShapeProperty { key, layout });
+        Arc::make_mut(&mut self.shape).try_reserve(1)?;
+        self.transition_shape(ShapeTransition::Append(ShapeProperty { key, layout }));
         self.slots.push(PropertySlot::Data(value));
         Ok(())
     }
@@ -1394,20 +1592,15 @@ impl ObjectRecord {
         debug_assert!(self.shape.iter().all(|property| property.key != key));
 
         self.slots.try_reserve(1)?;
-        let shape = Arc::get_mut(&mut self.shape)
-            .expect("object shape Arc is private and uniquely owned before shape interning");
-        shape.try_reserve(1)?;
-
-        shape.push(ShapeProperty { key, layout });
+        Arc::make_mut(&mut self.shape).try_reserve(1)?;
+        self.transition_shape(ShapeTransition::Append(ShapeProperty { key, layout }));
         self.slots.push(PropertySlot::Accessor { getter, setter });
         Ok(())
     }
 
     pub(crate) fn try_reserve_data(&mut self, additional: usize) -> Result<(), TryReserveError> {
         self.slots.try_reserve(additional)?;
-        Arc::get_mut(&mut self.shape)
-            .expect("object shape Arc is private and uniquely owned before shape interning")
-            .try_reserve(additional)
+        Arc::make_mut(&mut self.shape).try_reserve(additional)
     }
 
     pub(crate) fn append_dense_array_data(
@@ -1415,8 +1608,7 @@ impl ObjectRecord {
         elements: Vec<StoredValue>,
     ) -> Result<(), TryReserveError> {
         self.try_reserve_data(elements.len())?;
-        let shape = Arc::get_mut(&mut self.shape)
-            .expect("object shape Arc is private and uniquely owned before shape interning");
+        let shape = Arc::make_mut(&mut self.shape);
         let start = shape
             .iter()
             .filter_map(|property| property.key.as_index())
@@ -1436,7 +1628,28 @@ impl ObjectRecord {
             });
             self.slots.push(PropertySlot::Data(value));
         }
+        self.intern_current_shape();
         Ok(())
+    }
+
+    fn append_dense_storage_as_sparse(&mut self, elements: &mut [Option<StoredValue>]) {
+        let shape = Arc::make_mut(&mut self.shape);
+        for (offset, element) in elements.iter_mut().enumerate() {
+            let Some(value) = element.take() else {
+                continue;
+            };
+            let index = u32::try_from(offset)
+                .expect("dense array storage never contains the non-index u32 maximum");
+            shape.push(ShapeProperty {
+                key: PropertyKey::from_index(
+                    ArrayIndex::new(index)
+                        .expect("dense array storage never contains the length sentinel"),
+                ),
+                layout: PropertyLayout::data(true, true, true),
+            });
+            self.slots.push(PropertySlot::Data(value));
+        }
+        self.intern_current_shape();
     }
 
     pub(crate) fn pop_last_data(&mut self, key: &PropertyKey) -> Option<StoredValue> {
@@ -1450,16 +1663,17 @@ impl ObjectRecord {
         if !matches!(self.slots.last(), Some(PropertySlot::Data(_))) {
             return None;
         }
-        let shape = Arc::get_mut(&mut self.shape)
-            .expect("object shape Arc is private and uniquely owned before shape interning");
+        let shape = Arc::make_mut(&mut self.shape);
         let property = shape.pop()?;
         debug_assert_eq!(property.layout.kind(), PropertyLayoutKind::Data);
-        match self.slots.pop()? {
+        let result = match self.slots.pop()? {
             PropertySlot::Data(value) => Some(value),
             PropertySlot::Accessor { .. } => {
                 unreachable!("the last slot was checked as a data slot")
             }
-        }
+        };
+        self.intern_current_shape();
+        result
     }
 
     pub(crate) fn truncate_array_indices(&mut self, requested_length: u32) -> ArrayTruncation {
@@ -1474,8 +1688,7 @@ impl ObjectRecord {
             .max();
         let final_length =
             blocked_index.map_or(requested_length, |index| index.get().saturating_add(1));
-        let shape = Arc::get_mut(&mut self.shape)
-            .expect("object shape Arc is private and uniquely owned before shape interning");
+        let shape = Arc::make_mut(&mut self.shape);
         let original_length = shape.len();
         let mut retained = 0_usize;
         for current in 0..original_length {
@@ -1495,6 +1708,7 @@ impl ObjectRecord {
         }
         shape.truncate(retained);
         self.slots.truncate(retained);
+        self.intern_current_shape();
         let removed = original_length.saturating_sub(retained);
         ArrayTruncation {
             final_length,
@@ -1578,22 +1792,172 @@ impl BoxedPrimitive {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+const MAX_DENSE_ARRAY_GAP: usize = 1_024;
+
+#[derive(Debug)]
+enum ArrayStorage {
+    Dense {
+        elements: Vec<Option<StoredValue>>,
+        present: usize,
+    },
+    Sparse,
+}
+
+#[derive(Debug)]
 pub(crate) struct ArrayState {
     length: u32,
+    storage: ArrayStorage,
 }
 
 impl ArrayState {
     pub(crate) const fn new(length: u32) -> Self {
-        Self { length }
+        Self {
+            length,
+            storage: ArrayStorage::Dense {
+                elements: Vec::new(),
+                present: 0,
+            },
+        }
     }
 
-    pub(crate) const fn length(self) -> u32 {
+    pub(crate) const fn sparse(length: u32) -> Self {
+        Self {
+            length,
+            storage: ArrayStorage::Sparse,
+        }
+    }
+
+    pub(crate) fn dense(length: u32, elements: Vec<StoredValue>) -> Self {
+        debug_assert_eq!(usize::try_from(length).ok(), Some(elements.len()));
+        let present = elements.len();
+        Self {
+            length,
+            storage: ArrayStorage::Dense {
+                elements: elements.into_iter().map(Some).collect(),
+                present,
+            },
+        }
+    }
+
+    pub(crate) const fn length(&self) -> u32 {
         self.length
     }
 
     pub(crate) fn replace_length(&mut self, length: u32) -> u32 {
         std::mem::replace(&mut self.length, length)
+    }
+
+    pub(crate) const fn is_dense(&self) -> bool {
+        matches!(self.storage, ArrayStorage::Dense { .. })
+    }
+
+    pub(crate) const fn dense_property_count(&self) -> usize {
+        match &self.storage {
+            ArrayStorage::Dense { present, .. } => *present,
+            ArrayStorage::Sparse => 0,
+        }
+    }
+
+    pub(crate) fn dense_indices(&self) -> impl Iterator<Item = ArrayIndex> + '_ {
+        match &self.storage {
+            ArrayStorage::Dense { elements, .. } => Some(elements.as_slice()),
+            ArrayStorage::Sparse => None,
+        }
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            value.as_ref()?;
+            ArrayIndex::new(u32::try_from(index).ok()?)
+        })
+    }
+
+    pub(crate) fn dense_values(&self) -> impl Iterator<Item = &StoredValue> {
+        match &self.storage {
+            ArrayStorage::Dense { elements, .. } => Some(elements.as_slice()),
+            ArrayStorage::Sparse => None,
+        }
+        .into_iter()
+        .flatten()
+        .filter_map(Option::as_ref)
+    }
+
+    pub(crate) fn dense_value(&self, index: ArrayIndex) -> Option<StoredValue> {
+        let ArrayStorage::Dense { elements, .. } = &self.storage else {
+            return None;
+        };
+        elements
+            .get(index.get() as usize)
+            .and_then(Option::as_ref)
+            .map(StoredValue::duplicate)
+    }
+
+    pub(crate) fn can_store_dense(&self, index: ArrayIndex) -> bool {
+        let ArrayStorage::Dense { elements, .. } = &self.storage else {
+            return false;
+        };
+        (index.get() as usize) <= elements.len().saturating_add(MAX_DENSE_ARRAY_GAP)
+    }
+
+    pub(crate) fn try_store_dense(
+        &mut self,
+        index: ArrayIndex,
+        value: StoredValue,
+    ) -> Result<bool, TryReserveError> {
+        let ArrayStorage::Dense { elements, present } = &mut self.storage else {
+            unreachable!("dense storage was checked before mutation");
+        };
+        let index = index.get() as usize;
+        if index >= elements.len() {
+            let additional = index.saturating_add(1).saturating_sub(elements.len());
+            elements.try_reserve(additional)?;
+            elements.resize_with(index.saturating_add(1), || None);
+        }
+        let created = elements[index].is_none();
+        elements[index] = Some(value);
+        if created {
+            *present = present.saturating_add(1);
+        }
+        Ok(created)
+    }
+
+    pub(crate) fn delete_dense(&mut self, index: ArrayIndex) -> bool {
+        let ArrayStorage::Dense { elements, present } = &mut self.storage else {
+            return false;
+        };
+        let Some(element) = elements.get_mut(index.get() as usize) else {
+            return false;
+        };
+        if element.take().is_none() {
+            return false;
+        }
+        *present = present.saturating_sub(1);
+        true
+    }
+
+    pub(crate) fn truncate_dense(&mut self, length: u32) -> usize {
+        let ArrayStorage::Dense { elements, present } = &mut self.storage else {
+            return 0;
+        };
+        let length = length as usize;
+        if length >= elements.len() {
+            return 0;
+        }
+        let removed = elements[length..]
+            .iter()
+            .filter(|element| element.is_some())
+            .count();
+        elements.truncate(length);
+        *present = present.saturating_sub(removed);
+        removed
+    }
+
+    fn take_dense_elements(&mut self) -> Option<Vec<Option<StoredValue>>> {
+        let previous = std::mem::replace(&mut self.storage, ArrayStorage::Sparse);
+        match previous {
+            ArrayStorage::Dense { elements, .. } => Some(elements),
+            ArrayStorage::Sparse => None,
+        }
     }
 }
 
@@ -2525,6 +2889,49 @@ impl HeapObject {
         self.kind.array_mut()
     }
 
+    pub(crate) fn property_count(&self) -> usize {
+        self.record.property_count().saturating_add(
+            self.array_state()
+                .map_or(0, ArrayState::dense_property_count),
+        )
+    }
+
+    pub(crate) fn array_dense_values(&self) -> impl Iterator<Item = &StoredValue> {
+        self.array_state()
+            .into_iter()
+            .flat_map(ArrayState::dense_values)
+    }
+
+    pub(crate) fn array_own_property(&self, key: &PropertyKey) -> Option<OwnProperty> {
+        if let Some(index) = key.as_index()
+            && let Some(value) = self.array_state()?.dense_value(index)
+        {
+            return Some(OwnProperty::Data {
+                layout: PropertyLayout::data(true, true, true),
+                value,
+            });
+        }
+        self.record.own_property(key)
+    }
+
+    pub(crate) fn transition_array_to_sparse(&mut self) -> Result<bool, TryReserveError> {
+        let Some(additional) = self
+            .array_state()
+            .filter(|state| state.is_dense())
+            .map(ArrayState::dense_property_count)
+        else {
+            return Ok(false);
+        };
+        self.record.try_reserve_data(additional)?;
+        let mut elements = self
+            .array_state_mut()
+            .expect("the checked array state remains present")
+            .take_dense_elements()
+            .expect("the checked array remains dense");
+        self.record.append_dense_storage_as_sparse(&mut elements);
+        Ok(true)
+    }
+
     #[must_use]
     pub(crate) const fn map_state(&self) -> Option<&MapState> {
         self.kind.map()
@@ -2718,7 +3125,7 @@ impl HeapObject {
 mod tests {
     use super::{
         ArrayState, BoxedPrimitive, HeapObject, HeapObjectKind, KeyPhases, ObjectRecord,
-        OwnProperty,
+        OwnProperty, ShapeInterner,
     };
     use crate::{
         ArrayIndex, AtomLimits, AtomTable, JsNumber, JsString, PredefinedAtom, PropertyKey,
@@ -2727,6 +3134,7 @@ mod tests {
         ids::FunctionMarker,
         value::StoredValue,
     };
+    use std::{cell::RefCell, rc::Rc};
 
     #[test]
     fn for_in_snapshot_orders_indices_before_inserted_strings_and_excludes_symbols() {
@@ -2840,6 +3248,67 @@ mod tests {
             record.own_data_property(&key).expect("restored property").0,
             original
         );
+    }
+
+    #[test]
+    fn shape_interner_shares_transitions_without_sharing_slots_or_object_state() {
+        let interner = Rc::new(RefCell::new(ShapeInterner::default()));
+        let key = PropertyKey::from_index(ArrayIndex::new(7).expect("array index"));
+        let original = PropertyLayout::data(true, true, true);
+        let replacement = PropertyLayout::data(false, true, true);
+        let mut first = ObjectRecord::empty(None);
+        let mut second = ObjectRecord::empty(None);
+        first.adopt_shape_interner(Rc::clone(&interner));
+        second.adopt_shape_interner(Rc::clone(&interner));
+
+        let root_shape = first.shape_identity();
+        assert_eq!(second.shape_identity(), root_shape);
+        first
+            .append_data(key.clone(), original, StoredValue::Boolean(false))
+            .expect("first property");
+        second
+            .append_data(key.clone(), original, StoredValue::Boolean(true))
+            .expect("second property");
+        assert_eq!(first.shape_identity(), second.shape_identity());
+        assert!(matches!(
+            first.own_data_property(&key),
+            Some((layout, StoredValue::Boolean(false))) if layout == original
+        ));
+        assert!(matches!(
+            second.own_data_property(&key),
+            Some((layout, StoredValue::Boolean(true))) if layout == original
+        ));
+
+        first.prevent_extensions();
+        assert!(!first.is_extensible());
+        assert!(second.is_extensible());
+        assert_eq!(first.shape_identity(), second.shape_identity());
+
+        first
+            .replace_existing_data_layout(&key, replacement)
+            .expect("first layout");
+        assert_ne!(first.shape_identity(), second.shape_identity());
+        assert_eq!(interner.borrow_mut().live_shape_count(), 2);
+        second
+            .replace_existing_data_layout(&key, replacement)
+            .expect("second layout");
+        assert_eq!(first.shape_identity(), second.shape_identity());
+        assert_eq!(interner.borrow_mut().live_shape_count(), 1);
+
+        assert_eq!(
+            first.delete_own_property(&key),
+            super::PropertyDeletion::Deleted
+        );
+        assert_eq!(
+            second.delete_own_property(&key),
+            super::PropertyDeletion::Deleted
+        );
+        assert_eq!(first.shape_identity(), second.shape_identity());
+        assert_eq!(interner.borrow_mut().live_shape_count(), 1);
+
+        drop(first);
+        drop(second);
+        assert_eq!(interner.borrow_mut().live_shape_count(), 0);
     }
 
     #[test]
@@ -2988,18 +3457,12 @@ mod tests {
         let mut object = HeapObject::array(ObjectRecord::empty(None), ArrayState::new(7));
 
         assert!(matches!(object.kind(), HeapObjectKind::Array(_)));
-        assert_eq!(
-            object.array_state().copied().map(ArrayState::length),
-            Some(7)
-        );
+        assert_eq!(object.array_state().map(ArrayState::length), Some(7));
         object
             .array_state_mut()
             .expect("array state")
             .replace_length(11);
-        assert_eq!(
-            object.array_state().copied().map(ArrayState::length),
-            Some(11)
-        );
+        assert_eq!(object.array_state().map(ArrayState::length), Some(11));
         assert!(object.boxed_primitive().is_none());
         assert!(object.for_in_state().is_none());
         assert_eq!(object.public_roots, 0);

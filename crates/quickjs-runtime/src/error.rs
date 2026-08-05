@@ -691,11 +691,6 @@ pub enum EngineFault {
         /// Internal operation that has not yet been made resumable.
         operation: &'static str,
     },
-    /// A write reached an accessor outside the iterative setter path.
-    UnsupportedAccessorWrite {
-        /// Internal operation that has not yet been made resumable.
-        operation: &'static str,
-    },
     /// A runtime-only operation produced an impossible error family.
     RuntimeInvariant {
         /// Concise invariant description.
@@ -759,10 +754,6 @@ impl fmt::Display for EngineFault {
             Self::UnsupportedAccessorRead { operation } => write!(
                 formatter,
                 "{operation} reached an accessor outside the iterative getter path"
-            ),
-            Self::UnsupportedAccessorWrite { operation } => write!(
-                formatter,
-                "{operation} reached an accessor outside the iterative setter path"
             ),
             Self::RuntimeInvariant { message } => {
                 write!(formatter, "runtime invariant failed: {message}")

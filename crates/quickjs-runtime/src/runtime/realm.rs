@@ -44,12 +44,12 @@ use super::{
     IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, MapIntrinsics, MapMethod,
     MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberIntrinsics,
     NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PromiseIntrinsics,
-    PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId,
-    RealmIntrinsics, RealmState, ReflectMethod, RegExpIntrinsics, ReleaseMailbox, Runtime,
-    RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, SetIntrinsics, SetMethod,
-    StoredValue, StringHtmlMethod, StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction,
-    VecDeque, WeakMapIntrinsics, WeakRefIntrinsics, WeakSetIntrinsics, check_limit,
-    predefined_string, usize_to_u64,
+    PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Rc, Realm, RealmHandle,
+    RealmId, RealmIntrinsics, RealmState, RefCell, ReflectMethod, RegExpIntrinsics, ReleaseMailbox,
+    Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, SetIntrinsics,
+    SetMethod, ShapeInterner, StoredValue, StringHtmlMethod, StringIntrinsics, StringMethod,
+    SymbolIntrinsics, UriFunction, VecDeque, WeakMapIntrinsics, WeakRefIntrinsics,
+    WeakSetIntrinsics, check_limit, predefined_string, usize_to_u64,
 };
 
 use allocation::IntrinsicRecords;
@@ -381,10 +381,9 @@ const ARRAY_SEARCH_METHODS: [(&str, ArraySearch); 3] = [
 /// Each entry pairs the property name with the native implementation and its
 /// reported `length`. A name that already has a predefined atom reuses it; the
 /// rest are interned during realm construction like the `Symbol` statics. The
-/// set is deliberately narrower than the pinned oracle's: only reflection
-/// operations the current profile can honor completely are installed, so an
-/// absent method fails closed as a missing property rather than behaving
-/// incorrectly.
+/// set is the complete ECMA-262 2025 static surface, including `groupBy` and
+/// `fromEntries`; every method routes through the shared exotic internal-method
+/// layer rather than an ordinary-object-only shortcut.
 const OBJECT_STATIC_METHODS: [ObjectStaticMethod; 23] = [
     ObjectStaticMethod::interned("create", NativeFunctionKind::ObjectCreate, 2),
     ObjectStaticMethod::predefined(
@@ -547,6 +546,7 @@ impl Runtime {
             code: Arena::new(runtime_identity),
             functions: Arena::new(runtime_identity),
             objects: Arena::new(runtime_identity),
+            shape_interner: Rc::new(RefCell::new(ShapeInterner::default())),
             cells: Arena::new(runtime_identity),
             global_bindings: Arena::new(runtime_identity),
             limits,
@@ -609,6 +609,7 @@ impl Runtime {
             .expect("new realm remains live");
         state.intrinsics = intrinsics;
         transaction.commit();
+        transaction.canonicalize_all_shapes();
         let math_random_seed = transaction.next_math_random_seed;
         transaction.next_math_random_seed =
             transaction.next_math_random_seed.wrapping_add(1).max(1);
@@ -789,8 +790,7 @@ impl RealmBuildTransaction<'_> {
     ) -> FunctionId {
         object.replace_prototype(Some(prototype));
         let function = self
-            .functions
-            .try_insert(HeapFunction {
+            .insert_heap_function(HeapFunction {
                 implementation: FunctionImplementation::Native(NativeFunction { realm, kind }),
                 object,
                 public_roots: 0,
@@ -802,8 +802,7 @@ impl RealmBuildTransaction<'_> {
 
     fn insert_reserved_object(&mut self, id: IntrinsicObjectId, object: HeapObject) -> ObjectId {
         let object = self
-            .objects
-            .try_insert(object)
+            .insert_heap_object(object)
             .expect("the realm transaction reserved all intrinsic object slots");
         self.record_object(id, object);
         object

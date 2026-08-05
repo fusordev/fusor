@@ -903,26 +903,17 @@ fn read_next_regexp_flag(
     let Some(flag) = CANONICAL_FLAG_ACCESSORS.get(state.next).copied() else {
         return Ok(NativeDispatch::Immediate(StoredValue::String(state.result)));
     };
-    charge_heap_property_lookup(runtime, &state.receiver, execution_budget)?;
     let key = runtime.predefined_property_key(flag.atom());
-    match read_static_property(runtime, state.realm, &state.receiver, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_regexp_flags(runtime, state, &value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => call_regexp_function(
-            function,
-            receiver,
-            CallArguments::empty(),
-            RegExpContinuation::Flags(Box::new(state)),
-            return_to,
-        ),
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            None,
-            failure,
-        )?)),
-    }
+    let receiver = state.receiver.duplicate();
+    read_regexp_property(
+        runtime,
+        receiver,
+        key,
+        flag.atom().text(),
+        RegExpContinuation::Flags(Box::new(state)),
+        return_to,
+        execution_budget,
+    )
 }
 
 pub(super) fn begin_regexp_to_string(
@@ -1018,26 +1009,17 @@ fn read_regexp_to_string_property(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    charge_heap_property_lookup(runtime, &state.receiver, execution_budget)?;
     let key = runtime.predefined_property_key(atom);
-    match read_static_property(runtime, state.realm, &state.receiver, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_regexp_to_string(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => call_regexp_function(
-            function,
-            receiver,
-            CallArguments::empty(),
-            RegExpContinuation::ToString(Box::new(state)),
-            return_to,
-        ),
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            None,
-            failure,
-        )?)),
-    }
+    let receiver = state.receiver.duplicate();
+    read_regexp_property(
+        runtime,
+        receiver,
+        key,
+        atom.text(),
+        RegExpContinuation::ToString(Box::new(state)),
+        return_to,
+        execution_budget,
+    )
 }
 
 pub(super) fn begin_regexp_escape(
@@ -1262,28 +1244,16 @@ fn advance_regexp_exec(
             )?);
             state.stage = RegExpExecStage::AwaitLastIndex;
             let receiver = StoredValue::Object(state.object);
-            charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
             let key = runtime.predefined_property_key(PredefinedAtom::LastIndex);
-            match read_static_property(runtime, state.realm, &receiver, &key)? {
-                PropertyReadOutcome::Value(value) => {
-                    advance_regexp_exec(runtime, state, value, return_to, execution_budget)
-                }
-                PropertyReadOutcome::Getter { function, receiver } => call_regexp_function(
-                    function,
-                    receiver,
-                    CallArguments::empty(),
-                    RegExpContinuation::Exec(Box::new(state)),
-                    return_to,
-                ),
-                PropertyReadOutcome::Failed(failure) => {
-                    Err(NativeFailure::Abrupt(property_exception_at(
-                        state.realm,
-                        state.origin,
-                        Some(&JsString::from_utf8("lastIndex")?),
-                        failure,
-                    )?))
-                }
-            }
+            read_regexp_property(
+                runtime,
+                receiver,
+                key,
+                "lastIndex",
+                RegExpContinuation::Exec(Box::new(state)),
+                return_to,
+                execution_budget,
+            )
         }
         RegExpExecStage::AwaitLastIndex => {
             state.stage = RegExpExecStage::AwaitLastIndexConversion;
@@ -1326,26 +1296,17 @@ fn begin_regexp_exec_protocol(
         stage: RegExpExecProtocolStage::AwaitExec,
         origin,
     };
-    charge_heap_property_lookup(runtime, &state.receiver, execution_budget)?;
     let key = runtime.predefined_property_key(PredefinedAtom::Exec);
-    match read_static_property(runtime, state.realm, &state.receiver, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_regexp_exec_protocol(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => call_regexp_function(
-            function,
-            receiver,
-            CallArguments::empty(),
-            RegExpContinuation::ExecProtocol(Box::new(state)),
-            return_to,
-        ),
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            Some(&JsString::from_utf8("exec")?),
-            failure,
-        )?)),
-    }
+    let receiver = state.receiver.duplicate();
+    read_regexp_property(
+        runtime,
+        receiver,
+        key,
+        "exec",
+        RegExpContinuation::ExecProtocol(Box::new(state)),
+        return_to,
+        execution_budget,
+    )
 }
 
 fn advance_regexp_exec_protocol(
@@ -1442,26 +1403,16 @@ fn begin_regexp_builtin_exec_for_consumer(
         origin,
     };
     let receiver = StoredValue::Object(object);
-    charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
     let key = runtime.predefined_property_key(PredefinedAtom::LastIndex);
-    match read_static_property(runtime, realm, &receiver, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_regexp_exec(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => call_regexp_function(
-            function,
-            receiver,
-            CallArguments::empty(),
-            RegExpContinuation::Exec(Box::new(state)),
-            return_to,
-        ),
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            realm,
-            state.origin,
-            Some(&JsString::from_utf8("lastIndex")?),
-            failure,
-        )?)),
-    }
+    read_regexp_property(
+        runtime,
+        receiver,
+        key,
+        "lastIndex",
+        RegExpContinuation::Exec(Box::new(state)),
+        return_to,
+        execution_budget,
+    )
 }
 
 fn finish_regexp_builtin_exec(
@@ -2428,24 +2379,30 @@ fn read_regexp_property(
 ) -> Result<NativeDispatch, NativeFailure> {
     let (realm, origin) = regexp_continuation_context(&continuation);
     charge_regexp_property_lookup(runtime, realm, &base, execution_budget)?;
-    match read_static_property(runtime, realm, &base, &key)? {
-        PropertyReadOutcome::Value(value) => {
+    let name = JsString::from_utf8(diagnostic_name)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &base,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        continuation,
+        regexp_native_continuation,
+        |continuation, value| {
             advance_regexp_continuation(runtime, continuation, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => call_regexp_function(
-            function,
-            receiver,
-            CallArguments::empty(),
-            continuation,
-            return_to,
-        ),
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            realm,
-            origin,
-            Some(&JsString::from_utf8(diagnostic_name)?),
-            failure,
-        )?)),
-    }
+        },
+        "RegExp Get produced a structured result",
+    )
+}
+
+fn regexp_native_continuation(state: RegExpContinuation) -> NativeContinuation {
+    NativeContinuation::RegExp(Box::new(state))
 }
 
 #[allow(

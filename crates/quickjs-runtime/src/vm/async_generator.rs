@@ -236,8 +236,7 @@ pub(super) fn create_async_generator(
         }
     })?;
     let object = runtime
-        .objects
-        .try_insert(crate::object::HeapObject::ordinary(
+        .insert_heap_object(crate::object::HeapObject::ordinary(
             crate::object::ObjectRecord::empty(Some(prototype)),
         ))
         .map_err(|_| ExecutionError::AllocationFailed {

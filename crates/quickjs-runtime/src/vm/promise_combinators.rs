@@ -608,21 +608,44 @@ fn read_combinator_property(
             .into());
         }
     };
-    charge_iterator_property_lookup(runtime, base, execution_budget)?;
-    match read_static_property(runtime, state.realm, base, &key)? {
-        PropertyReadOutcome::Value(value) => {
+    let base = base.duplicate();
+    charge_iterator_property_lookup(runtime, &base, execution_budget)?;
+    let name = JsString::from_utf8(property_name)?;
+    let dispatch = match begin_value_get(
+        runtime,
+        &base,
+        key,
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(pending)) => {
+            return resume_promise_combinator_abrupt(
+                runtime,
+                state,
+                pending,
+                return_to,
+                execution_budget,
+            );
+        }
+        Err(failure) => return Err(failure),
+    };
+    continue_get_after(
+        dispatch,
+        state,
+        promise_combinator_continuation,
+        |state, value| {
             advance_promise_combinator(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            call_combinator_function(function, receiver, CallArguments::empty(), state, return_to)
-        }
-        PropertyReadOutcome::Failed(failure) => {
-            let name = JsString::from_utf8(property_name)?;
-            let pending =
-                property_exception_at(state.realm, state.origin.clone(), Some(&name), failure)?;
-            resume_promise_combinator_abrupt(runtime, state, pending, return_to, execution_budget)
-        }
-    }
+        },
+        "Promise combinator Get produced a structured result",
+    )
+}
+
+fn promise_combinator_continuation(state: PromiseCombinatorContinuation) -> NativeContinuation {
+    NativeContinuation::PromiseCombinator(Box::new(state))
 }
 
 pub(super) fn resume_promise_combinator_abrupt(
@@ -661,15 +684,31 @@ fn begin_combinator_close(
     state.stage = PromiseCombinatorStage::AwaitCloseReturn;
     charge_iterator_property_lookup(runtime, &iterator, execution_budget)?;
     let key = runtime.predefined_property_key(PredefinedAtom::Return);
-    match read_static_property(runtime, state.realm, &iterator, &key)? {
-        PropertyReadOutcome::Value(value) => {
+    let dispatch = match begin_value_get(
+        runtime,
+        &iterator,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(_)) => {
+            return reject_stored_combinator_reason(state, return_to);
+        }
+        Err(failure) => return Err(failure),
+    };
+    continue_get_after(
+        dispatch,
+        state,
+        promise_combinator_continuation,
+        |state, value| {
             advance_promise_combinator(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            call_combinator_function(function, receiver, CallArguments::empty(), state, return_to)
-        }
-        PropertyReadOutcome::Failed(_) => reject_stored_combinator_reason(state, return_to),
-    }
+        },
+        "Promise combinator IteratorClose Get produced a structured result",
+    )
 }
 
 fn reject_stored_combinator_reason(

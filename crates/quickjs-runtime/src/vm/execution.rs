@@ -1711,6 +1711,25 @@ pub(super) fn execute_one(
             let global = global_reference_operand(runtime, frame, index)?;
             match read_realm_global(runtime, &global)? {
                 RealmGlobalReadOutcome::Value(value) => push(frame, value),
+                RealmGlobalReadOutcome::Getter { function, receiver } => {
+                    let return_to =
+                        CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                            EngineFault::InvalidSuccessor {
+                                function: frame.template,
+                                pc: source_pc,
+                            },
+                        )?);
+                    return Ok(Step::Call {
+                        function,
+                        inputs: CallInputSource::Prepared(CallInputs {
+                            receiver,
+                            arguments: CallArguments::empty(),
+                            new_target: None,
+                        }),
+                        return_to,
+                        source_pc,
+                    });
+                }
                 RealmGlobalReadOutcome::Missing if opcode == FinalOpcode::GetVarUndef => {
                     push(frame, StoredValue::Undefined);
                 }
@@ -1731,6 +1750,38 @@ pub(super) fn execute_one(
             let value = pop(frame)?;
             match write_realm_global(runtime, global, value, frame.strict, execution_budget)? {
                 RealmGlobalWriteOutcome::Complete => {}
+                RealmGlobalWriteOutcome::Setter {
+                    function,
+                    receiver,
+                    value,
+                } => {
+                    let mut arguments = Vec::new();
+                    arguments.try_reserve_exact(1).map_err(|_| {
+                        ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::FrameValues,
+                            additional: 1,
+                        }
+                    })?;
+                    arguments.push(value);
+                    let return_to = CallReturn::discard(
+                        verified_instruction.successors().fallthrough().ok_or(
+                            EngineFault::InvalidSuccessor {
+                                function: frame.template,
+                                pc: source_pc,
+                            },
+                        )?,
+                    );
+                    return Ok(Step::Call {
+                        function,
+                        inputs: CallInputSource::Prepared(CallInputs {
+                            receiver,
+                            arguments: CallArguments::from_values(arguments),
+                            new_target: None,
+                        }),
+                        return_to,
+                        source_pc,
+                    });
+                }
                 RealmGlobalWriteOutcome::Missing => {
                     return Ok(Step::Abrupt(global_not_defined_exception(
                         runtime, frame, &name, source_pc,

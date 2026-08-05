@@ -570,8 +570,7 @@ impl Context<'_> {
         let prototype_object = if let Some(record) = root_records.prototype.take() {
             let Ok(object) = self
                 .runtime
-                .objects
-                .try_insert(HeapObject::ordinary(record))
+                .insert_heap_object(HeapObject::ordinary(record))
             else {
                 self.runtime
                     .rollback_root_environment(self.realm, &root_environment);
@@ -631,7 +630,7 @@ impl Context<'_> {
             });
         };
         let root_bindings = std::mem::take(&mut root_environment.bindings);
-        let Ok(root) = self.runtime.functions.try_insert(HeapFunction {
+        let Ok(root) = self.runtime.insert_heap_function(HeapFunction {
             implementation: FunctionImplementation::Bytecode(BytecodeFunction {
                 code,
                 template: root_template,

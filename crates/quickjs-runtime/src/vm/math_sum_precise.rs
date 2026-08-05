@@ -449,21 +449,30 @@ fn read_sum_precise_property(
             .into());
         }
     };
-    charge_iterator_property_lookup(runtime, base, execution_budget)?;
-    match read_static_property(runtime, state.realm, base, key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_math_sum_precise(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            call_sum_precise_function(function, receiver, state, return_to)
-        }
-        PropertyReadOutcome::Failed(failure) => {
-            let name = JsString::from_utf8(property_name)?;
-            let pending =
-                property_exception_at(state.realm, state.origin.clone(), Some(&name), failure)?;
-            Err(NativeFailure::Abrupt(pending))
-        }
-    }
+    let base = base.duplicate();
+    charge_iterator_property_lookup(runtime, &base, execution_budget)?;
+    let name = JsString::from_utf8(property_name)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &base,
+        key.clone(),
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        math_sum_precise_continuation,
+        |state, value| advance_math_sum_precise(runtime, state, value, return_to, execution_budget),
+        "Math.sumPrecise Get produced a structured result",
+    )
+}
+
+fn math_sum_precise_continuation(state: MathSumPreciseContinuation) -> NativeContinuation {
+    NativeContinuation::MathSumPrecise(Box::new(state))
 }
 
 fn call_sum_precise_next(

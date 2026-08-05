@@ -265,25 +265,44 @@ fn read_aggregate_property(
             .into());
         }
     };
-    charge_iterator_property_lookup(runtime, base, execution_budget)?;
-    match read_static_property(runtime, state.realm, base, &key)? {
-        PropertyReadOutcome::Value(value) => {
+    let base = base.duplicate();
+    charge_iterator_property_lookup(runtime, &base, execution_budget)?;
+    let name = JsString::from_utf8(property_name)?;
+    let dispatch = match begin_value_get(
+        runtime,
+        &base,
+        key,
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(pending)) if state.next_acquired() => {
+            return begin_aggregate_error_close(
+                runtime,
+                state,
+                pending,
+                return_to,
+                execution_budget,
+            );
+        }
+        Err(failure) => return Err(failure),
+    };
+    continue_get_after(
+        dispatch,
+        state,
+        aggregate_error_continuation,
+        |state, value| {
             advance_aggregate_error_collection(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            call_aggregate_function(function, receiver, state, return_to)
-        }
-        PropertyReadOutcome::Failed(failure) => {
-            let name = JsString::from_utf8(property_name)?;
-            let pending =
-                property_exception_at(state.realm, state.origin.clone(), Some(&name), failure)?;
-            if state.next_acquired() {
-                begin_aggregate_error_close(runtime, state, pending, return_to, execution_budget)
-            } else {
-                Err(NativeFailure::Abrupt(pending))
-            }
-        }
-    }
+        },
+        "AggregateError iterator Get produced a structured result",
+    )
+}
+
+fn aggregate_error_continuation(state: AggregateErrorContinuation) -> NativeContinuation {
+    NativeContinuation::AggregateError(state)
 }
 
 fn call_aggregate_next(

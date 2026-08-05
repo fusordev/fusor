@@ -116,8 +116,7 @@ impl Runtime {
                 additional: 2,
             })?;
         let wrapper = self
-            .objects
-            .try_insert(HeapObject::ordinary(record))
+            .insert_heap_object(HeapObject::ordinary(record))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -286,8 +285,7 @@ impl Runtime {
             );
             assert!(pair.replace_existing_data(&value_key, value));
             let object = self
-                .objects
-                .try_insert(HeapObject::array(pair, ArrayState::new(2)))
+                .insert_heap_object(HeapObject::array(pair, ArrayState::sparse(2)))
                 .map_err(|_| crate::ExecutionError::AllocationFailed {
                     resource: RuntimeResource::HeapObjects,
                     additional: 2,
@@ -306,10 +304,7 @@ impl Runtime {
             StoredValue::Boolean(done),
         ));
         let additional_objects = if pair_id.is_some() { 2 } else { 1 };
-        let Ok(result) = self
-            .objects
-            .try_insert(HeapObject::ordinary(prepared.result))
-        else {
+        let Ok(result) = self.insert_heap_object(HeapObject::ordinary(prepared.result)) else {
             if let Some(pair) = pair_id {
                 debug_assert!(self.objects.remove(pair).is_some());
             }
@@ -482,7 +477,7 @@ impl Runtime {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
             })?;
-        let object = self.objects.try_insert(iterator).map_err(|_| {
+        let object = self.insert_heap_object(iterator).map_err(|_| {
             crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,

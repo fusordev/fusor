@@ -102,8 +102,7 @@ pub(super) fn create_generator(
             additional: 1,
         })?;
     let object = runtime
-        .objects
-        .try_insert(crate::object::HeapObject::ordinary(
+        .insert_heap_object(crate::object::HeapObject::ordinary(
             crate::object::ObjectRecord::empty(Some(prototype)),
         ))
         .map_err(|_| ExecutionError::AllocationFailed {
@@ -452,31 +451,24 @@ fn read_yield_star_iterator_method(
         ),
     };
     charge_iterator_property_lookup(runtime, &state.iterator, execution_budget)?;
-    match read_static_property(runtime, state.realm, &state.iterator, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_yield_star_iterator_call(runtime, state, value, return_to)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            iterator_getter_call(
-                function,
-                receiver,
-                NativeContinuation::YieldStarIteratorCall(state),
-                return_to,
-                origin,
-                None,
-            )
-        }
-        PropertyReadOutcome::Failed(failure) => {
-            let property_name = JsString::from_utf8(property_name)?;
-            Err(NativeFailure::Abrupt(property_exception_at(
-                state.realm,
-                state.origin,
-                Some(&property_name),
-                failure,
-            )?))
-        }
-    }
+    let name = JsString::from_utf8(property_name)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &state.iterator,
+        key,
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::YieldStarIteratorCall,
+        |state, value| advance_yield_star_iterator_call(runtime, state, value, return_to),
+        "yield-star iterator method Get produced a structured result",
+    )
 }
 
 pub(super) fn advance_yield_star_iterator_call(

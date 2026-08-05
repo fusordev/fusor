@@ -488,9 +488,7 @@ pub(super) fn create_closure(
     }
 
     let prototype_object = if let Some(record) = prototype_record {
-        let Ok(object) = runtime
-            .objects
-            .try_insert(crate::object::HeapObject::ordinary(record))
+        let Ok(object) = runtime.insert_heap_object(crate::object::HeapObject::ordinary(record))
         else {
             rollback_new_cells(runtime, frame, &pending_cells, &new_cells);
             return Err(ExecutionError::AllocationFailed {
@@ -519,7 +517,7 @@ pub(super) fn create_closure(
         None
     };
 
-    let Ok(function) = runtime.functions.try_insert(HeapFunction {
+    let Ok(function) = runtime.insert_heap_function(HeapFunction {
         implementation: FunctionImplementation::Bytecode(BytecodeFunction {
             code: frame.code,
             template: child,

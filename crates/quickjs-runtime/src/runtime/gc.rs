@@ -1084,6 +1084,14 @@ impl Runtime {
                                 &mut marked_objects,
                                 &mut work,
                             );
+                            for value in object.array_dense_values() {
+                                mark_stored_value(
+                                    value,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
                         }
                     }
                     GraphNode::Cell(id) => {
@@ -1357,7 +1365,7 @@ impl Runtime {
             if let Some(object) = self.objects.remove(id) {
                 self.object_properties = self
                     .object_properties
-                    .saturating_sub(usize_to_u64(object.record.property_count()));
+                    .saturating_sub(usize_to_u64(object.property_count()));
                 self.for_in_entries = self
                     .for_in_entries
                     .saturating_sub(usize_to_u64(object.for_in_entry_count()));

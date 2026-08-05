@@ -346,6 +346,39 @@ fn json_stringify_propagates_abrupt_completions() {
 }
 
 #[test]
+fn json_stringify_routes_container_protocols_through_proxy_internals() {
+    assert_eq!(
+        text(
+            "const log=[];\
+             const array=new Proxy([1,2],{get(target,key,receiver){\
+               log.push('g'+String(key));return Reflect.get(target,key,receiver);\
+             }});\
+             const arrayText=JSON.stringify(array);\
+             const object=new Proxy({a:1,b:2},{\
+               get(target,key,receiver){log.push('g'+String(key));return Reflect.get(target,key,receiver);},\
+               ownKeys(target){log.push('keys');return Reflect.ownKeys(target);},\
+               getOwnPropertyDescriptor(target,key){log.push('d'+String(key));\
+                 return Reflect.getOwnPropertyDescriptor(target,key);}\
+             });\
+             const objectText=JSON.stringify(object);\
+             return arrayText+'|'+objectText+'|'+log.join(',');"
+        ),
+        "[1,2]|{\"a\":1,\"b\":2}|gtoJSON,glength,g0,g1,gtoJSON,keys,da,db,ga,gb"
+    );
+
+    assert_eq!(
+        text(
+            "const log=[];\
+             const list=new Proxy(['b'],{get(target,key,receiver){\
+               log.push('g'+String(key));return Reflect.get(target,key,receiver);\
+             }});\
+             return JSON.stringify({a:1,b:2},list)+'|'+log.join(',');"
+        ),
+        "{\"b\":2}|glength,g0"
+    );
+}
+
+#[test]
 fn deeply_nested_json_stringify_uses_a_worklist() {
     assert!(boolean(
         "let value=0;for(let i=0;i<2000;i++){value=[value];}\
@@ -525,6 +558,55 @@ fn reviver_rechecks_values_and_observes_prior_mutation() {
              return seen+'|'+value.b;"
         ),
         "7:false|8"
+    );
+}
+
+#[test]
+fn reviver_routes_replaced_containers_through_proxy_internals() {
+    assert_eq!(
+        text(
+            "const log=[];let proxy,target;\
+             const result=JSON.parse('{\"a\":0,\"b\":{\"x\":1,\"y\":2}}',function(key,value){\
+               if(key==='a'){\
+                 target={x:3,y:4};\
+                 proxy=new Proxy(target,{\
+                   ownKeys(object){log.push('keys');return Reflect.ownKeys(object);},\
+                   getOwnPropertyDescriptor(object,name){log.push('d'+String(name));\
+                     return Reflect.getOwnPropertyDescriptor(object,name);},\
+                   get(object,name,receiver){log.push('g'+String(name));\
+                     return Reflect.get(object,name,receiver);},\
+                   deleteProperty(object,name){log.push('del'+String(name));\
+                     return Reflect.deleteProperty(object,name);},\
+                   defineProperty(object,name,descriptor){\
+                     log.push('def'+String(name)+'='+descriptor.value);\
+                     return Reflect.defineProperty(object,name,descriptor);}\
+                 });\
+                 this.b=proxy;\
+               }\
+               if(key==='x')return undefined;\
+               if(key==='y')return 9;\
+               return value;\
+             });\
+             return (result.b===proxy)+'|'+String(target.x)+'|'+target.y+'|'+log.join(',');"
+        ),
+        "true|undefined|9|keys,dx,dy,gx,delx,gy,defy=9"
+    );
+
+    assert_eq!(
+        text(
+            "const log=[];let proxy,target;\
+             const result=JSON.parse('{\"a\":0,\"b\":[]}',function(key,value){\
+               if(key==='a'){target=[3,4];proxy=new Proxy(target,{\
+                 get(object,name,receiver){log.push('g'+String(name));\
+                   return Reflect.get(object,name,receiver);},\
+                 defineProperty(object,name,descriptor){log.push('d'+String(name));\
+                   return Reflect.defineProperty(object,name,descriptor);}\
+               });this.b=proxy;}\
+               return value;\
+             });\
+             return (result.b===proxy)+'|'+target.join(',')+'|'+log.join(',');"
+        ),
+        "true|3,4|glength,g0,d0,g1,d1"
     );
 }
 

@@ -254,10 +254,6 @@ fn convert_string_raw_value(
     )
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "dynamic index keys and predefined keys share one ownership shape across immediate and suspended reads"
-)]
 fn read_string_raw_property(
     runtime: &mut Runtime,
     state: StringRawContinuation,
@@ -283,49 +279,30 @@ fn read_string_raw_property(
             .into());
         }
     };
-    charge_string_raw_lookup(runtime, base, execution_budget)?;
-    match read_static_property(runtime, state.realm, base, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_string_raw(runtime, state, Some(value), return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            call_string_raw_function(state, function, receiver, return_to)
-        }
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            Some(&JsString::from_utf8(diagnostic_name)?),
-            failure,
-        )?)),
-    }
+    let base = base.duplicate();
+    charge_string_raw_lookup(runtime, &base, execution_budget)?;
+    let name = JsString::from_utf8(diagnostic_name)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &base,
+        key,
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        string_raw_continuation,
+        |state, value| advance_string_raw(runtime, state, Some(value), return_to, execution_budget),
+        "String.raw Get produced a structured result",
+    )
 }
 
-fn call_string_raw_function(
-    state: StringRawContinuation,
-    function: FunctionId,
-    receiver: StoredValue,
-    return_to: Option<CallReturn>,
-) -> Result<NativeDispatch, NativeFailure> {
-    let origin = state.origin.clone();
-    let mut continuations = Vec::new();
-    continuations
-        .try_reserve_exact(1)
-        .map_err(|_| ExecutionError::AllocationFailed {
-            resource: RuntimeResource::Frames,
-            additional: 1,
-        })?;
-    continuations.push(NativeContinuation::StringRaw(Box::new(state)));
-    Ok(NativeDispatch::Call(NativeCall {
-        function,
-        receiver,
-        arguments: CallArguments::empty(),
-        return_to,
-        origin,
-        continuations,
-        pre_call: None,
-        new_target: None,
-        native_caller: None,
-    }))
+fn string_raw_continuation(state: StringRawContinuation) -> NativeContinuation {
+    NativeContinuation::StringRaw(Box::new(state))
 }
 
 fn string_raw_index_key(runtime: &mut Runtime, index: u64) -> Result<PropertyKey, NativeFailure> {

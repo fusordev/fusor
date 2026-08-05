@@ -34,15 +34,17 @@ use super::*;
 #[derive(Clone, Copy)]
 enum JsonStringifySetupStage {
     ReplacerList,
+    AwaitReplacerLength,
+    AwaitReplacerLengthConversion,
     AwaitReplacerGet,
     Space,
     Serialize,
 }
 
 struct JsonReplacerArray {
-    object: ObjectId,
-    next: u32,
-    length: u32,
+    value: StoredValue,
+    next: u64,
+    length: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -56,6 +58,10 @@ enum JsonPropertyStage {
     Replacer,
     AwaitReplacerCall,
     Normalize,
+    AwaitContainerLength,
+    ConvertContainerLength,
+    AwaitContainerLengthConversion,
+    AwaitContainerKeys,
     AwaitBoxedNumber,
     AwaitBoxedString,
 }
@@ -65,20 +71,21 @@ struct JsonPropertyFrame {
     key: PropertyKey,
     name: JsString,
     value: Option<StoredValue>,
+    pending: Option<StoredValue>,
     stage: JsonPropertyStage,
 }
 
 struct JsonArrayFrame {
-    object: ObjectId,
-    next: u32,
-    length: u32,
+    value: StoredValue,
+    next: u64,
+    length: u64,
     partial: Vec<JsString>,
     step_back: JsString,
     pending: bool,
 }
 
 struct JsonObjectFrame {
-    object: ObjectId,
+    value: StoredValue,
     keys: Vec<JsString>,
     next: usize,
     partial: Vec<JsString>,
@@ -102,7 +109,7 @@ pub(super) struct JsonStringifyContinuation {
     property_list: Option<Vec<JsString>>,
     gap: JsString,
     indent: JsString,
-    stack: Vec<ObjectId>,
+    stack: Vec<StoredValue>,
     frames: Vec<JsonStringifyFrame>,
     setup: JsonStringifySetupStage,
     realm: RealmId,
@@ -125,9 +132,9 @@ impl JsonStringifyContinuation {
             inputs.saturating_add(usize_to_u64(self.stack.len())),
             |count, frame| {
                 count.saturating_add(match frame {
-                    JsonStringifyFrame::Property(frame) => {
-                        1_u64.saturating_add(u64::from(frame.value.is_some()))
-                    }
+                    JsonStringifyFrame::Property(frame) => 1_u64
+                        .saturating_add(u64::from(frame.value.is_some()))
+                        .saturating_add(u64::from(frame.pending.is_some())),
                     JsonStringifyFrame::Array(frame) => {
                         1_u64.saturating_add(usize_to_u64(frame.partial.len()))
                     }
@@ -151,10 +158,10 @@ impl JsonStringifyContinuation {
             mark(CollectionRoot::Heap(HeapReference::Function(function)));
         }
         if let Some(replacer) = &self.replacer_array {
-            mark(CollectionRoot::Heap(HeapReference::Object(replacer.object)));
+            trace_stored_value_root(&replacer.value, mark);
         }
-        for object in &self.stack {
-            mark(CollectionRoot::Heap(HeapReference::Object(*object)));
+        for value in &self.stack {
+            trace_stored_value_root(value, mark);
         }
         for frame in &self.frames {
             match frame {
@@ -163,12 +170,15 @@ impl JsonStringifyContinuation {
                     if let Some(value) = &frame.value {
                         trace_stored_value_root(value, mark);
                     }
+                    if let Some(value) = &frame.pending {
+                        trace_stored_value_root(value, mark);
+                    }
                 }
                 JsonStringifyFrame::Array(frame) => {
-                    mark(CollectionRoot::Heap(HeapReference::Object(frame.object)));
+                    trace_stored_value_root(&frame.value, mark);
                 }
                 JsonStringifyFrame::Object(frame) => {
-                    mark(CollectionRoot::Heap(HeapReference::Object(frame.object)));
+                    trace_stored_value_root(&frame.value, mark);
                 }
             }
         }
@@ -208,16 +218,14 @@ pub(super) fn begin_json_stringify(
 
     match state.replacer.take().unwrap_or(StoredValue::Undefined) {
         StoredValue::Function(function) => state.replacer_function = Some(function),
-        StoredValue::Object(object) if runtime.is_array_object(object)? => {
+        value @ StoredValue::Object(_)
+            if proxy_aware_is_array(runtime, value.duplicate(), realm, state.origin.clone())? =>
+        {
             state.property_list = Some(Vec::new());
             state.replacer_array = Some(JsonReplacerArray {
-                object,
+                value,
                 next: 0,
-                length: runtime
-                    .array_length(object)?
-                    .ok_or(EngineFault::RuntimeInvariant {
-                        message: "JSON replacer Array lost its cached length",
-                    })?,
+                length: None,
             });
         }
         StoredValue::Undefined
@@ -258,6 +266,45 @@ pub(super) fn finish_json_stringify_replacer_item(
 ) -> Result<NativeDispatch, NativeFailure> {
     append_unique_property_list_item(&mut state, item, execution_budget)?;
     state.setup = JsonStringifySetupStage::ReplacerList;
+    drive_json_stringify(runtime, state, None, return_to, execution_budget)
+}
+
+pub(super) fn finish_json_stringify_replacer_length(
+    runtime: &mut Runtime,
+    mut state: JsonStringifyContinuation,
+    number: JsNumber,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let replacer = state
+        .replacer_array
+        .as_mut()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "JSON replacer length conversion lost its Array",
+        })?;
+    replacer.length = Some(number_to_length(number));
+    state.setup = JsonStringifySetupStage::ReplacerList;
+    drive_json_stringify(runtime, state, None, return_to, execution_budget)
+}
+
+pub(super) fn finish_json_stringify_container_length(
+    runtime: &mut Runtime,
+    mut state: JsonStringifyContinuation,
+    number: JsNumber,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = current_json_property_mut(&mut state)?.value.take().ok_or(
+        EngineFault::RuntimeInvariant {
+            message: "JSON Array length conversion lost its container",
+        },
+    )?;
+    enter_json_array(
+        &mut state,
+        value,
+        number_to_length(number),
+        execution_budget,
+    )?;
     drive_json_stringify(runtime, state, None, return_to, execution_budget)
 }
 
@@ -324,6 +371,21 @@ fn drive_json_stringify(
 ) -> Result<NativeDispatch, NativeFailure> {
     if let Some(completion) = completion {
         match state.setup {
+            JsonStringifySetupStage::AwaitReplacerLength => {
+                state.setup = JsonStringifySetupStage::AwaitReplacerLengthConversion;
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    completion,
+                    OperatorPrimitiveHint::Number,
+                    OperatorPrimitiveTarget::JsonStringifyReplacerLength(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
             JsonStringifySetupStage::AwaitReplacerGet => {
                 if let Some(dispatch) = process_json_replacer_item(
                     runtime,
@@ -336,9 +398,11 @@ fn drive_json_stringify(
                 }
             }
             JsonStringifySetupStage::Serialize => {
-                resume_json_property(&mut state, completion)?;
+                resume_json_property(runtime, &mut state, completion, execution_budget)?;
             }
-            JsonStringifySetupStage::ReplacerList | JsonStringifySetupStage::Space => {
+            JsonStringifySetupStage::ReplacerList
+            | JsonStringifySetupStage::AwaitReplacerLengthConversion
+            | JsonStringifySetupStage::Space => {
                 return Err(EngineFault::RuntimeInvariant {
                     message: "JSON stringify received a completion outside an awaiting stage",
                 }
@@ -351,27 +415,98 @@ fn drive_json_stringify(
         execution_budget.charge_instructions(1)?;
         match state.setup {
             JsonStringifySetupStage::ReplacerList => {
-                let Some(replacer) = state.replacer_array.as_mut() else {
+                let Some(replacer) = state.replacer_array.as_ref() else {
                     state.setup = JsonStringifySetupStage::Space;
                     continue;
                 };
-                if replacer.next >= replacer.length {
+                let holder = replacer.value.duplicate();
+                let Some(length) = replacer.length else {
+                    let key = runtime.predefined_property_key(PredefinedAtom::Length);
+                    charge_heap_property_lookup(runtime, &holder, execution_budget)?;
+                    state.setup = JsonStringifySetupStage::AwaitReplacerLength;
+                    let dispatch = begin_value_get(
+                        runtime,
+                        &holder,
+                        key,
+                        None,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    match continue_get_state_after(
+                        dispatch,
+                        state,
+                        |state| NativeContinuation::JsonStringify(Box::new(state)),
+                        "JSON replacer length Get produced a structured result",
+                    )? {
+                        GetContinuationDispatch::Ready {
+                            state: ready,
+                            value,
+                        } => {
+                            state = ready;
+                            state.setup = JsonStringifySetupStage::AwaitReplacerLengthConversion;
+                            let realm = state.realm;
+                            let origin = state.origin.clone();
+                            return begin_operator_primitive_conversion(
+                                runtime,
+                                value,
+                                OperatorPrimitiveHint::Number,
+                                OperatorPrimitiveTarget::JsonStringifyReplacerLength(Box::new(
+                                    state,
+                                )),
+                                realm,
+                                return_to,
+                                origin,
+                                execution_budget,
+                            );
+                        }
+                        GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+                    }
+                };
+                if replacer.next >= length {
                     state.replacer_array = None;
                     state.setup = JsonStringifySetupStage::Space;
                     continue;
                 }
-                let index = replacer.next;
-                replacer.next = replacer.next.saturating_add(1);
-                let key = PropertyKey::from_index(ArrayIndex::new(index).ok_or(
-                    EngineFault::RuntimeInvariant {
-                        message: "JSON replacer index reached the non-index u32 maximum",
-                    },
-                )?);
-                let holder = StoredValue::Object(replacer.object);
+                let index = state
+                    .replacer_array
+                    .as_mut()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "JSON replacer Array disappeared during traversal",
+                    })?
+                    .next;
+                state
+                    .replacer_array
+                    .as_mut()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "JSON replacer Array disappeared during traversal",
+                    })?
+                    .next = index.saturating_add(1);
+                let key = array_static_index_key(runtime, index)?;
                 charge_heap_property_lookup(runtime, &holder, execution_budget)?;
                 state.setup = JsonStringifySetupStage::AwaitReplacerGet;
-                match read_static_property(runtime, state.realm, &holder, &key)? {
-                    PropertyReadOutcome::Value(value) => {
+                let dispatch = begin_value_get(
+                    runtime,
+                    &holder,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match continue_get_state_after(
+                    dispatch,
+                    state,
+                    |state| NativeContinuation::JsonStringify(Box::new(state)),
+                    "JSON replacer element Get produced a structured result",
+                )? {
+                    GetContinuationDispatch::Ready {
+                        state: ready,
+                        value,
+                    } => {
+                        state = ready;
                         if let Some(dispatch) = process_json_replacer_item(
                             runtime,
                             &mut state,
@@ -382,26 +517,12 @@ fn drive_json_stringify(
                             return Ok(dispatch);
                         }
                     }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        return call_json_stringify_function(
-                            function,
-                            receiver,
-                            Vec::new(),
-                            state,
-                            return_to,
-                        );
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(NativeFailure::Abrupt(property_exception_at(
-                            state.realm,
-                            state.origin,
-                            None,
-                            failure,
-                        )?));
-                    }
+                    GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
                 }
             }
-            JsonStringifySetupStage::AwaitReplacerGet => {
+            JsonStringifySetupStage::AwaitReplacerLength
+            | JsonStringifySetupStage::AwaitReplacerLengthConversion
+            | JsonStringifySetupStage::AwaitReplacerGet => {
                 return Err(EngineFault::RuntimeInvariant {
                     message: "JSON replacer getter resumed without a completion",
                 }
@@ -601,6 +722,7 @@ fn begin_json_stringify_serialization(
             key,
             name: JsString::empty(),
             value: None,
+            pending: None,
             stage: JsonPropertyStage::Get,
         }));
     state.setup = JsonStringifySetupStage::Serialize;
@@ -632,26 +754,31 @@ fn drive_json_serialization(
                     let key = property.key.clone();
                     charge_heap_property_lookup(runtime, &holder, execution_budget)?;
                     current_json_property_mut(state)?.stage = JsonPropertyStage::AwaitGet;
-                    match read_static_property(runtime, state.realm, &holder, &key)? {
-                        PropertyReadOutcome::Value(value) => {
-                            resume_json_property(state, value)?;
+                    let dispatch = begin_value_get(
+                        runtime,
+                        &holder,
+                        key,
+                        None,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    match continue_get_state_after(
+                        dispatch,
+                        take_json_stringify_state(state),
+                        |state| NativeContinuation::JsonStringify(Box::new(state)),
+                        "JSON property Get produced a structured result",
+                    )? {
+                        GetContinuationDispatch::Ready {
+                            state: ready,
+                            value,
+                        } => {
+                            *state = ready;
+                            resume_json_property(runtime, state, value, execution_budget)?;
                         }
-                        PropertyReadOutcome::Getter { function, receiver } => {
-                            return Ok(Some(call_json_stringify_function(
-                                function,
-                                receiver,
-                                Vec::new(),
-                                take_json_stringify_state(state),
-                                return_to,
-                            )?));
-                        }
-                        PropertyReadOutcome::Failed(failure) => {
-                            return Err(NativeFailure::Abrupt(property_exception_at(
-                                state.realm,
-                                state.origin.clone(),
-                                None,
-                                failure,
-                            )?));
+                        GetContinuationDispatch::Suspended(dispatch) => {
+                            return Ok(Some(dispatch));
                         }
                     }
                 }
@@ -681,24 +808,31 @@ fn drive_json_serialization(
                         charge_heap_property_lookup(runtime, &value, execution_budget)?;
                     }
                     current_json_property_mut(state)?.stage = JsonPropertyStage::AwaitToJsonGet;
-                    match read_static_property(runtime, state.realm, &value, &key)? {
-                        PropertyReadOutcome::Value(method) => resume_json_property(state, method)?,
-                        PropertyReadOutcome::Getter { function, receiver } => {
-                            return Ok(Some(call_json_stringify_function(
-                                function,
-                                receiver,
-                                Vec::new(),
-                                take_json_stringify_state(state),
-                                return_to,
-                            )?));
+                    let dispatch = begin_value_get(
+                        runtime,
+                        &value,
+                        key,
+                        None,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    match continue_get_state_after(
+                        dispatch,
+                        take_json_stringify_state(state),
+                        |state| NativeContinuation::JsonStringify(Box::new(state)),
+                        "JSON toJSON Get produced a structured result",
+                    )? {
+                        GetContinuationDispatch::Ready {
+                            state: ready,
+                            value,
+                        } => {
+                            *state = ready;
+                            resume_json_property(runtime, state, value, execution_budget)?;
                         }
-                        PropertyReadOutcome::Failed(failure) => {
-                            return Err(NativeFailure::Abrupt(property_exception_at(
-                                state.realm,
-                                state.origin.clone(),
-                                None,
-                                failure,
-                            )?));
+                        GetContinuationDispatch::Suspended(dispatch) => {
+                            return Ok(Some(dispatch));
                         }
                     }
                 }
@@ -768,10 +902,50 @@ fn drive_json_serialization(
                         return Ok(Some(dispatch));
                     }
                 }
+                JsonPropertyStage::ConvertContainerLength => {
+                    let value = current_json_property_mut(state)?.pending.take().ok_or(
+                        EngineFault::RuntimeInvariant {
+                            message: "JSON Array length conversion has no input",
+                        },
+                    )?;
+                    if value.heap_reference().is_none() {
+                        let number = operator_to_number(value, state.realm, &state.origin)?;
+                        let container = current_json_property_mut(state)?.value.take().ok_or(
+                            EngineFault::RuntimeInvariant {
+                                message: "JSON Array length conversion lost its container",
+                            },
+                        )?;
+                        enter_json_array(
+                            state,
+                            container,
+                            number_to_length(number),
+                            execution_budget,
+                        )?;
+                        continue;
+                    }
+                    current_json_property_mut(state)?.stage =
+                        JsonPropertyStage::AwaitContainerLengthConversion;
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    let owned = take_json_stringify_state(state);
+                    return Ok(Some(begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::Number,
+                        OperatorPrimitiveTarget::JsonStringifyContainerLength(Box::new(owned)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    )?));
+                }
                 JsonPropertyStage::AwaitGet
                 | JsonPropertyStage::AwaitToJsonGet
                 | JsonPropertyStage::AwaitToJsonCall
                 | JsonPropertyStage::AwaitReplacerCall
+                | JsonPropertyStage::AwaitContainerLength
+                | JsonPropertyStage::AwaitContainerLengthConversion
+                | JsonPropertyStage::AwaitContainerKeys
                 | JsonPropertyStage::AwaitBoxedNumber
                 | JsonPropertyStage::AwaitBoxedString => {
                     return Err(EngineFault::RuntimeInvariant {
@@ -789,13 +963,9 @@ fn drive_json_serialization(
                 }
                 if array.next < array.length {
                     let index = array.next;
-                    let object = array.object;
-                    let key = PropertyKey::from_index(ArrayIndex::new(index).ok_or(
-                        EngineFault::RuntimeInvariant {
-                            message: "JSON Array serialization reached the non-index u32 maximum",
-                        },
-                    )?);
-                    let name = json_stringify_index_name(index)?;
+                    let value = array.value.duplicate();
+                    let key = array_static_index_key(runtime, index)?;
+                    let name = json_stringify_element_name(index)?;
                     let JsonStringifyFrame::Array(array) =
                         state
                             .frames
@@ -811,7 +981,7 @@ fn drive_json_serialization(
                     };
                     array.next = array.next.saturating_add(1);
                     array.pending = true;
-                    push_json_property_frame(state, StoredValue::Object(object), key, name)?;
+                    push_json_property_frame(state, value, key, name)?;
                     continue;
                 }
                 if let Some(dispatch) = finish_json_container(state, true, execution_budget)? {
@@ -826,7 +996,7 @@ fn drive_json_serialization(
                     .into());
                 }
                 if object.next < object.keys.len() {
-                    let object_id = object.object;
+                    let value = object.value.duplicate();
                     let name = object.keys[object.next].clone();
                     let key = runtime.property_key_from_string(&name)?;
                     let JsonStringifyFrame::Object(object) =
@@ -844,7 +1014,7 @@ fn drive_json_serialization(
                     };
                     object.next = object.next.saturating_add(1);
                     object.pending = Some(name.clone());
-                    push_json_property_frame(state, StoredValue::Object(object_id), key, name)?;
+                    push_json_property_frame(state, value, key, name)?;
                     continue;
                 }
                 if let Some(dispatch) = finish_json_container(state, false, execution_budget)? {
@@ -856,16 +1026,20 @@ fn drive_json_serialization(
 }
 
 fn resume_json_property(
+    runtime: &mut Runtime,
     state: &mut JsonStringifyContinuation,
     completion: StoredValue,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<(), NativeFailure> {
-    let property = current_json_property_mut(state)?;
-    match property.stage {
+    let property_stage = current_json_property(state)?.stage;
+    match property_stage {
         JsonPropertyStage::AwaitGet => {
+            let property = current_json_property_mut(state)?;
             property.value = Some(completion);
             property.stage = JsonPropertyStage::ToJson;
         }
         JsonPropertyStage::AwaitToJsonGet => {
+            let property = current_json_property_mut(state)?;
             if let StoredValue::Function(function) = completion {
                 property.stage = JsonPropertyStage::CallToJson(function);
             } else {
@@ -873,18 +1047,36 @@ fn resume_json_property(
             }
         }
         JsonPropertyStage::AwaitToJsonCall => {
+            let property = current_json_property_mut(state)?;
             property.value = Some(completion);
             property.stage = JsonPropertyStage::Replacer;
         }
         JsonPropertyStage::AwaitReplacerCall => {
+            let property = current_json_property_mut(state)?;
             property.value = Some(completion);
             property.stage = JsonPropertyStage::Normalize;
+        }
+        JsonPropertyStage::AwaitContainerLength => {
+            let property = current_json_property_mut(state)?;
+            property.pending = Some(completion);
+            property.stage = JsonPropertyStage::ConvertContainerLength;
+        }
+        JsonPropertyStage::AwaitContainerKeys => {
+            let keys = json_object_keys_from_completion(runtime, completion)?;
+            let value = current_json_property_mut(state)?.value.take().ok_or(
+                EngineFault::RuntimeInvariant {
+                    message: "JSON Object key listing lost its container",
+                },
+            )?;
+            enter_json_object(state, value, keys, execution_budget)?;
         }
         JsonPropertyStage::Get
         | JsonPropertyStage::ToJson
         | JsonPropertyStage::CallToJson(_)
         | JsonPropertyStage::Replacer
         | JsonPropertyStage::Normalize
+        | JsonPropertyStage::ConvertContainerLength
+        | JsonPropertyStage::AwaitContainerLengthConversion
         | JsonPropertyStage::AwaitBoxedNumber
         | JsonPropertyStage::AwaitBoxedString => {
             return Err(EngineFault::RuntimeInvariant {
@@ -896,6 +1088,10 @@ fn resume_json_property(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "normalization keeps boxed primitives, raw JSON, and Proxy-aware container entry in specification order"
+)]
 fn normalize_json_property(
     runtime: &mut Runtime,
     state: &mut JsonStringifyContinuation,
@@ -954,8 +1150,82 @@ fn normalize_json_property(
                 current_json_property_mut(state)?.value = Some(StoredValue::BigInt(bigint));
                 return Ok(None);
             }
-            enter_json_container(runtime, state, object, execution_budget)?;
-            Ok(None)
+            let value = StoredValue::Object(object);
+            if proxy_aware_is_array(
+                runtime,
+                value.duplicate(),
+                state.realm,
+                state.origin.clone(),
+            )? {
+                current_json_property_mut(state)?.value = Some(value.duplicate());
+                current_json_property_mut(state)?.stage = JsonPropertyStage::AwaitContainerLength;
+                let key = runtime.predefined_property_key(PredefinedAtom::Length);
+                charge_heap_property_lookup(runtime, &value, execution_budget)?;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &value,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                return match continue_get_state_after(
+                    dispatch,
+                    take_json_stringify_state(state),
+                    |state| NativeContinuation::JsonStringify(Box::new(state)),
+                    "JSON Array length Get produced a structured result",
+                )? {
+                    GetContinuationDispatch::Ready {
+                        state: ready,
+                        value,
+                    } => {
+                        *state = ready;
+                        resume_json_property(runtime, state, value, execution_budget)?;
+                        Ok(None)
+                    }
+                    GetContinuationDispatch::Suspended(dispatch) => Ok(Some(dispatch)),
+                };
+            }
+
+            current_json_property_mut(state)?.value = Some(value.duplicate());
+            if let Some(property_list) = &state.property_list {
+                let keys = clone_json_property_list(property_list, execution_budget)?;
+                let value = current_json_property_mut(state)?.value.take().ok_or(
+                    EngineFault::RuntimeInvariant {
+                        message: "JSON Object property list lost its container",
+                    },
+                )?;
+                enter_json_object(state, value, keys, execution_budget)?;
+                return Ok(None);
+            }
+            current_json_property_mut(state)?.stage = JsonPropertyStage::AwaitContainerKeys;
+            let dispatch = own_property_keys(
+                runtime,
+                state.realm,
+                Some(value),
+                KeyListing::EnumerableOnly,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            match continue_get_state_after(
+                dispatch,
+                take_json_stringify_state(state),
+                |state| NativeContinuation::JsonStringify(Box::new(state)),
+                "JSON Object key listing produced a structured result",
+            )? {
+                GetContinuationDispatch::Ready {
+                    state: ready,
+                    value,
+                } => {
+                    *state = ready;
+                    resume_json_property(runtime, state, value, execution_budget)?;
+                    Ok(None)
+                }
+                GetContinuationDispatch::Suspended(dispatch) => Ok(Some(dispatch)),
+            }
         }
         StoredValue::Null => {
             complete_json_property(state, Some(JsString::from_utf8("null")?), execution_budget)
@@ -989,14 +1259,17 @@ fn normalize_json_property(
     }
 }
 
-fn enter_json_container(
-    runtime: &mut Runtime,
+fn begin_json_container(
     state: &mut JsonStringifyContinuation,
-    object: ObjectId,
+    value: &StoredValue,
     execution_budget: &mut ExecutionBudget,
-) -> Result<(), NativeFailure> {
+) -> Result<JsString, NativeFailure> {
     execution_budget.charge_instructions(usize_to_u64(state.stack.len()).saturating_add(1))?;
-    if state.stack.contains(&object) {
+    if state
+        .stack
+        .iter()
+        .any(|candidate| candidate.same_value(value))
+    {
         return Err(json_stringify_type_error(
             state.realm,
             state.origin.clone(),
@@ -1010,34 +1283,56 @@ fn enter_json_container(
             resource: RuntimeResource::FrameValues,
             additional: 1,
         })?;
-    state.stack.push(object);
+    state.stack.push(value.duplicate());
     let step_back = state.indent.clone();
     state.indent = state.indent.concat(&state.gap)?;
+    Ok(step_back)
+}
 
-    let replacement = if runtime.is_array_object(object)? {
+fn enter_json_array(
+    state: &mut JsonStringifyContinuation,
+    value: StoredValue,
+    length: u64,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    let step_back = begin_json_container(state, &value, execution_budget)?;
+    replace_json_property_frame(
+        state,
         JsonStringifyFrame::Array(JsonArrayFrame {
-            object,
+            value,
             next: 0,
-            length: runtime
-                .array_length(object)?
-                .ok_or(EngineFault::RuntimeInvariant {
-                    message: "JSON Array lost its cached length",
-                })?,
+            length,
             partial: Vec::new(),
             step_back,
             pending: false,
-        })
-    } else {
-        let keys = json_object_keys(runtime, state, object, execution_budget)?;
+        }),
+    )
+}
+
+fn enter_json_object(
+    state: &mut JsonStringifyContinuation,
+    value: StoredValue,
+    keys: Vec<JsString>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    let step_back = begin_json_container(state, &value, execution_budget)?;
+    replace_json_property_frame(
+        state,
         JsonStringifyFrame::Object(JsonObjectFrame {
-            object,
+            value,
             keys,
             next: 0,
             partial: Vec::new(),
             step_back,
             pending: None,
-        })
-    };
+        }),
+    )
+}
+
+fn replace_json_property_frame(
+    state: &mut JsonStringifyContinuation,
+    replacement: JsonStringifyFrame,
+) -> Result<(), NativeFailure> {
     let frame = state
         .frames
         .last_mut()
@@ -1048,42 +1343,29 @@ fn enter_json_container(
     Ok(())
 }
 
-fn json_object_keys(
-    runtime: &mut Runtime,
-    state: &JsonStringifyContinuation,
-    object: ObjectId,
+fn clone_json_property_list(
+    property_list: &[JsString],
     execution_budget: &mut ExecutionBudget,
 ) -> Result<Vec<JsString>, NativeFailure> {
-    if let Some(property_list) = &state.property_list {
-        execution_budget.charge_instructions(usize_to_u64(property_list.len()))?;
-        let mut keys = Vec::new();
-        keys.try_reserve_exact(property_list.len()).map_err(|_| {
-            ExecutionError::AllocationFailed {
-                resource: RuntimeResource::FrameValues,
-                additional: property_list.len(),
-            }
-        })?;
-        keys.extend(property_list.iter().cloned());
-        return Ok(keys);
-    }
-    let (snapshot, work) =
-        runtime.try_own_key_snapshot(HeapReference::Object(object), 0, KeyPhases::STRING_KEYS)?;
-    execution_budget.charge_instructions(work)?;
+    execution_budget.charge_instructions(usize_to_u64(property_list.len()))?;
     let mut keys = Vec::new();
-    keys.try_reserve_exact(snapshot.len())
+    keys.try_reserve_exact(property_list.len())
         .map_err(|_| ExecutionError::AllocationFailed {
             resource: RuntimeResource::FrameValues,
-            additional: snapshot.len(),
+            additional: property_list.len(),
         })?;
-    for index in 0..snapshot.len() {
-        let candidate = snapshot.get(index).ok_or(EngineFault::RuntimeInvariant {
-            message: "JSON own-key snapshot shrank during enumeration",
-        })?;
-        if candidate.enumerable() {
-            keys.push(json_stringify_property_name(candidate.key())?);
-        }
-    }
+    keys.extend(property_list.iter().cloned());
     Ok(keys)
+}
+
+fn json_object_keys_from_completion(
+    runtime: &mut Runtime,
+    completion: StoredValue,
+) -> Result<Vec<JsString>, NativeFailure> {
+    generated_key_list(runtime, completion)?
+        .iter()
+        .map(json_stringify_property_name)
+        .collect()
 }
 
 fn complete_json_property(
@@ -1164,10 +1446,10 @@ fn finish_json_container(
     let frame = state.frames.pop().ok_or(EngineFault::RuntimeInvariant {
         message: "JSON container completion lost its frame",
     })?;
-    let (object, partial, step_back) = match frame {
-        JsonStringifyFrame::Array(frame) if array => (frame.object, frame.partial, frame.step_back),
+    let (value, partial, step_back) = match frame {
+        JsonStringifyFrame::Array(frame) if array => (frame.value, frame.partial, frame.step_back),
         JsonStringifyFrame::Object(frame) if !array => {
-            (frame.object, frame.partial, frame.step_back)
+            (frame.value, frame.partial, frame.step_back)
         }
         JsonStringifyFrame::Property(_)
         | JsonStringifyFrame::Array(_)
@@ -1181,7 +1463,7 @@ fn finish_json_container(
     let popped = state.stack.pop().ok_or(EngineFault::RuntimeInvariant {
         message: "JSON container stack became empty during completion",
     })?;
-    if popped != object {
+    if !popped.same_value(&value) {
         return Err(EngineFault::RuntimeInvariant {
             message: "JSON container stack order diverged from the worklist",
         }
@@ -1213,6 +1495,7 @@ fn push_json_property_frame(
             key,
             name,
             value: None,
+            pending: None,
             stage: JsonPropertyStage::Get,
         }));
     Ok(())
@@ -1325,6 +1608,12 @@ fn json_stringify_property_name(key: &PropertyKey) -> Result<JsString, NativeFai
 fn json_stringify_index_name(index: u32) -> Result<JsString, NativeFailure> {
     JsNumber::from_u32(index)
         .to_radix_string(10)
+        .map_err(NativeFailure::from)
+}
+
+fn json_stringify_element_name(index: u64) -> Result<JsString, NativeFailure> {
+    JsNumber::from_f64(array_static_index_as_f64(index))
+        .to_javascript_string()
         .map_err(NativeFailure::from)
 }
 

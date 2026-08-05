@@ -1729,7 +1729,12 @@ struct FunctionApplyContinuation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "the Await prefix marks every observable Function bind suspension boundary"
+)]
 enum FunctionBindStage {
+    AwaitLengthDescriptor,
     AwaitLengthValue,
     AwaitNameValue,
 }
@@ -1867,11 +1872,14 @@ enum OperatorPrimitiveTarget {
     StringIteratorIntrinsic,
     /// `JSON.parse`'s source text, awaiting `ToString`.
     JsonParseText(JsonParseTextContinuation),
+    JsonParseArrayLength(Box<JsonParseContinuation>),
     /// `JSON.rawJSON`'s source text, awaiting `ToString`.
     JsonRawJsonText,
     JsonStringifyReplacerItem(Box<JsonStringifyContinuation>),
+    JsonStringifyReplacerLength(Box<JsonStringifyContinuation>),
     JsonStringifySpaceNumber(Box<JsonStringifyContinuation>),
     JsonStringifySpaceString(Box<JsonStringifyContinuation>),
+    JsonStringifyContainerLength(Box<JsonStringifyContinuation>),
     JsonStringifyBoxedNumber(Box<JsonStringifyContinuation>),
     JsonStringifyBoxedString(Box<JsonStringifyContinuation>),
     ErrorConstructorMessage(ErrorConstructorContinuation),
@@ -1971,9 +1979,12 @@ impl OperatorPrimitiveTarget {
             Self::SetRecordSize(state) => state.retained_values(),
             Self::ErrorConstructorMessage(state) => state.retained_values(),
             Self::JsonParseText(state) => state.retained_values(),
+            Self::JsonParseArrayLength(state) => state.retained_values(),
             Self::JsonStringifyReplacerItem(state)
+            | Self::JsonStringifyReplacerLength(state)
             | Self::JsonStringifySpaceNumber(state)
             | Self::JsonStringifySpaceString(state)
+            | Self::JsonStringifyContainerLength(state)
             | Self::JsonStringifyBoxedNumber(state)
             | Self::JsonStringifyBoxedString(state) => state.retained_values(),
             Self::ErrorToStringName(state) | Self::ErrorToStringMessage(state) => {
@@ -2182,9 +2193,12 @@ fn trace_operator_primitive_target_roots(
         // The converted left Number carries no heap edge.
         | OperatorPrimitiveTarget::MathBinaryFinish { .. } => {}
         OperatorPrimitiveTarget::JsonParseText(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::JsonParseArrayLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonStringifyReplacerItem(state)
+        | OperatorPrimitiveTarget::JsonStringifyReplacerLength(state)
         | OperatorPrimitiveTarget::JsonStringifySpaceNumber(state)
         | OperatorPrimitiveTarget::JsonStringifySpaceString(state)
+        | OperatorPrimitiveTarget::JsonStringifyContainerLength(state)
         | OperatorPrimitiveTarget::JsonStringifyBoxedNumber(state)
         | OperatorPrimitiveTarget::JsonStringifyBoxedString(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::BinaryRight { right, .. }

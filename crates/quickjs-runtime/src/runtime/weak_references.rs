@@ -65,8 +65,7 @@ impl Runtime {
         }
         self.preflight_weak_reference_object(prototype)?;
         let object = self
-            .objects
-            .try_insert(HeapObject::weak_ref(
+            .insert_heap_object(HeapObject::weak_ref(
                 ObjectRecord::empty(Some(prototype)),
                 WeakRefState::new(target),
             ))
@@ -94,8 +93,7 @@ impl Runtime {
         }
         self.preflight_weak_reference_object(prototype)?;
         let object = self
-            .objects
-            .try_insert(HeapObject::finalization_registry(
+            .insert_heap_object(HeapObject::finalization_registry(
                 ObjectRecord::empty(Some(prototype)),
                 FinalizationRegistryState::new(realm, cleanup_callback),
             ))

@@ -136,8 +136,7 @@ impl Runtime {
                     additional: 1,
                 })?;
             let function = self
-                .functions
-                .try_insert(HeapFunction {
+                .insert_heap_function(HeapFunction {
                     implementation: FunctionImplementation::Proxy(state),
                     object: ObjectRecord::empty(None),
                     public_roots: 0,
@@ -160,8 +159,7 @@ impl Runtime {
                     additional: 1,
                 })?;
             let object = self
-                .objects
-                .try_insert(HeapObject::proxy(ObjectRecord::empty(None), state))
+                .insert_heap_object(HeapObject::proxy(ObjectRecord::empty(None), state))
                 .map_err(|_| crate::ExecutionError::AllocationFailed {
                     resource: RuntimeResource::HeapObjects,
                     additional: 1,
@@ -205,8 +203,7 @@ impl Runtime {
             self.predefined_property_key(PredefinedAtom::Name),
         )?;
         let revoker = self
-            .functions
-            .try_insert(HeapFunction {
+            .insert_heap_function(HeapFunction {
                 implementation: FunctionImplementation::ProxyRevoker(ProxyRevokerFunction {
                     proxy,
                     realm,
@@ -281,8 +278,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let result = self
-            .objects
-            .try_insert(HeapObject::ordinary(record))
+            .insert_heap_object(HeapObject::ordinary(record))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,

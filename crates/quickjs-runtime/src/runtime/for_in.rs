@@ -86,13 +86,9 @@ impl Runtime {
             StoredValue::Function(function) => (Some(HeapReference::Function(function)), None),
             StoredValue::Object(object) => (Some(HeapReference::Object(object)), None),
         };
-        let Ok(iterator) =
-            self.objects
-                .try_insert(HeapObject::for_in_iterator(ForInIterator::new(
-                    current,
-                    ForInSnapshot::empty(),
-                )))
-        else {
+        let Ok(iterator) = self.insert_heap_object(HeapObject::for_in_iterator(
+            ForInIterator::new(current, ForInSnapshot::empty()),
+        )) else {
             self.rollback_for_in_wrapper(temporary_wrapper, collection_pending);
             return Err(crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
@@ -299,12 +295,9 @@ impl Runtime {
             None => (ForInSnapshot::empty(), 1),
         };
         let snapshot_len = snapshot.len();
-        let Ok(iterator) =
-            self.objects
-                .try_insert(HeapObject::for_in_iterator(ForInIterator::new(
-                    current, snapshot,
-                )))
-        else {
+        let Ok(iterator) = self.insert_heap_object(HeapObject::for_in_iterator(
+            ForInIterator::new(current, snapshot),
+        )) else {
             self.rollback_for_in_wrapper(temporary_wrapper, collection_pending);
             return Err(crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
@@ -616,8 +609,38 @@ impl Runtime {
             HeapReference::Function(_) => None,
             HeapReference::Object(object) => self.boxed_string(object)?.map(JsString::len),
         };
-        let record = self.object_record(reference)?;
-        let count = record.own_key_candidate_count(string_length, phases);
+        let (record, array, property_count) = match reference {
+            HeapReference::Function(function) => {
+                let function =
+                    self.functions
+                        .get(function)
+                        .ok_or(crate::EngineFault::StaleHeapEdge {
+                            edge: "function",
+                            index: function.index(),
+                            generation: function.generation(),
+                        })?;
+                (&function.object, None, function.object.property_count())
+            }
+            HeapReference::Object(object) => {
+                let object = self
+                    .objects
+                    .get(object)
+                    .ok_or(crate::EngineFault::StaleHeapEdge {
+                        edge: "object",
+                        index: object.index(),
+                        generation: object.generation(),
+                    })?;
+                (
+                    &object.record,
+                    object.array_state(),
+                    object.property_count(),
+                )
+            }
+        };
+        let count = array.map_or_else(
+            || record.own_key_candidate_count(string_length, phases),
+            |array| record.array_own_key_candidate_count(array, phases),
+        );
         let observed = self
             .for_in_entries
             .saturating_sub(usize_to_u64(replacing))
@@ -627,15 +650,18 @@ impl Runtime {
             self.limits.max_for_in_entries,
             observed,
         )?;
-        let snapshot = record
-            .try_own_key_snapshot(string_length, phases)
+        let snapshot = array
+            .map_or_else(
+                || record.try_own_key_snapshot(string_length, phases),
+                |array| record.try_array_own_key_snapshot(array, phases),
+            )
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::ForInEntries,
                 additional: count,
             })?;
         // Snapshot construction performs two count passes and separate numeric
         // and atom-key passes before its conservatively charged sort.
-        let work = usize_to_u64(record.property_count())
+        let work = usize_to_u64(property_count)
             .saturating_mul(4)
             .saturating_add(usize_to_u64(snapshot.len()))
             .saturating_add(snapshot.sort_work())
@@ -656,6 +682,11 @@ impl Runtime {
                 .is_some_and(|index| index.get() < string.len())
         {
             return Ok((true, 1));
+        }
+        if let HeapReference::Object(object) = reference
+            && self.is_array_object(object)?
+        {
+            return Ok((self.array_own_property(object, key)?.is_some(), 1));
         }
         Ok(self
             .object_record(reference)?

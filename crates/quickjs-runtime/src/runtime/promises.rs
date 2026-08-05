@@ -149,8 +149,7 @@ impl Runtime {
             })
             .transpose()?;
         let unwrap = self
-            .functions
-            .try_insert(HeapFunction {
+            .insert_heap_function(HeapFunction {
                 implementation: FunctionImplementation::Native(NativeFunction {
                     realm,
                     kind: NativeFunctionKind::AsyncFromSyncIteratorUnwrap,
@@ -165,7 +164,7 @@ impl Runtime {
         let close = match close_record {
             None => None,
             Some(close_record) => {
-                let Ok(close) = self.functions.try_insert(HeapFunction {
+                let Ok(close) = self.insert_heap_function(HeapFunction {
                     implementation: FunctionImplementation::Native(NativeFunction {
                         realm,
                         kind: NativeFunctionKind::AsyncFromSyncIteratorClose,
@@ -236,24 +235,23 @@ impl Runtime {
         let already_called = Rc::new(Cell::new(false));
         let mut insert = |element_kind| -> Result<FunctionId, crate::ExecutionError> {
             let object = promise_builtin_function_record(prototype, 1, &length_key, &name_key)?;
-            self.functions
-                .try_insert(HeapFunction {
-                    implementation: FunctionImplementation::PromiseCombinatorElement(
-                        PromiseCombinatorElementFunction {
-                            realm,
-                            kind: element_kind,
-                            index,
-                            shared: Rc::clone(shared),
-                            already_called: Rc::clone(&already_called),
-                        },
-                    ),
-                    object,
-                    public_roots: 0,
-                })
-                .map_err(|_| crate::ExecutionError::AllocationFailed {
-                    resource: RuntimeResource::HeapFunctions,
-                    additional: 1,
-                })
+            self.insert_heap_function(HeapFunction {
+                implementation: FunctionImplementation::PromiseCombinatorElement(
+                    PromiseCombinatorElementFunction {
+                        realm,
+                        kind: element_kind,
+                        index,
+                        shared: Rc::clone(shared),
+                        already_called: Rc::clone(&already_called),
+                    },
+                ),
+                object,
+                public_roots: 0,
+            })
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: 1,
+            })
         };
         let resolve = resolve_kind.map(&mut insert).transpose()?;
         let reject = match reject_kind.map(&mut insert).transpose() {
@@ -333,8 +331,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::ordinary(record))
+            .insert_heap_object(HeapObject::ordinary(record))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -402,8 +399,7 @@ impl Runtime {
         )?;
 
         let errors = self
-            .objects
-            .try_insert(HeapObject::array(array_record, ArrayState::new(length)))
+            .insert_heap_object(HeapObject::array(array_record, ArrayState::sparse(length)))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -423,7 +419,7 @@ impl Runtime {
                 additional: 1,
             });
         }
-        let Ok(error) = self.objects.try_insert(HeapObject::error(error_record)) else {
+        let Ok(error) = self.insert_heap_object(HeapObject::error(error_record)) else {
             let removed = self.objects.remove(errors);
             debug_assert!(removed.is_some());
             return Err(crate::ExecutionError::AllocationFailed {
@@ -488,8 +484,7 @@ impl Runtime {
                 })?;
         }
         let object = self
-            .objects
-            .try_insert(HeapObject::ordinary(record))
+            .insert_heap_object(HeapObject::ordinary(record))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -567,8 +562,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let promise = self
-            .objects
-            .try_insert(HeapObject::promise(ObjectRecord::empty(Some(prototype))))
+            .insert_heap_object(HeapObject::promise(ObjectRecord::empty(Some(prototype))))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -618,8 +612,7 @@ impl Runtime {
         let reject_record = promise_builtin_function_record(prototype, 1, &length_key, &name_key)?;
         let already_resolved = Rc::new(Cell::new(false));
         let resolve = self
-            .functions
-            .try_insert(HeapFunction {
+            .insert_heap_function(HeapFunction {
                 implementation: FunctionImplementation::PromiseResolving(
                     PromiseResolvingFunction {
                         promise,
@@ -635,7 +628,7 @@ impl Runtime {
                 resource: RuntimeResource::HeapFunctions,
                 additional: 1,
             })?;
-        let Ok(reject) = self.functions.try_insert(HeapFunction {
+        let Ok(reject) = self.insert_heap_function(HeapFunction {
             implementation: FunctionImplementation::PromiseResolving(PromiseResolvingFunction {
                 promise,
                 realm,
@@ -683,8 +676,7 @@ impl Runtime {
         let object = promise_builtin_function_record(prototype, 2, &length_key, &name_key)?;
         let capture = Rc::new(RefCell::new(PromiseCapabilityCapture::default()));
         let function = self
-            .functions
-            .try_insert(HeapFunction {
+            .insert_heap_function(HeapFunction {
                 implementation: FunctionImplementation::PromiseCapabilityExecutor(
                     PromiseCapabilityExecutor {
                         realm,
@@ -742,8 +734,7 @@ impl Runtime {
         let then_record = promise_builtin_function_record(prototype, 1, &length_key, &name_key)?;
         let catch_record = promise_builtin_function_record(prototype, 1, &length_key, &name_key)?;
         let then_finally = self
-            .functions
-            .try_insert(HeapFunction {
+            .insert_heap_function(HeapFunction {
                 implementation: FunctionImplementation::PromiseFinally(
                     PromiseFinallyFunction::Handler {
                         realm,
@@ -759,7 +750,7 @@ impl Runtime {
                 resource: RuntimeResource::HeapFunctions,
                 additional: 1,
             })?;
-        let Ok(catch_finally) = self.functions.try_insert(HeapFunction {
+        let Ok(catch_finally) = self.insert_heap_function(HeapFunction {
             implementation: FunctionImplementation::PromiseFinally(
                 PromiseFinallyFunction::Handler {
                     realm,
@@ -810,8 +801,7 @@ impl Runtime {
         let name_key = self.predefined_property_key(PredefinedAtom::Name);
         let object = promise_builtin_function_record(prototype, 0, &length_key, &name_key)?;
         let function = self
-            .functions
-            .try_insert(HeapFunction {
+            .insert_heap_function(HeapFunction {
                 implementation: FunctionImplementation::PromiseFinally(
                     PromiseFinallyFunction::Thunk {
                         realm,

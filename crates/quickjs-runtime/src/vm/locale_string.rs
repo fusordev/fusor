@@ -138,6 +138,7 @@ pub(super) fn begin_locale_string(
 /// Advances Object invocation or Array's locale-aware element loop.
 #[allow(
     clippy::too_many_lines,
+    clippy::needless_continue,
     reason = "the explicit stages preserve every getter, call, conversion, and separator boundary in specification order"
 )]
 pub(super) fn advance_locale_string(
@@ -148,24 +149,35 @@ pub(super) fn advance_locale_string(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut completion = completion;
+    macro_rules! await_get {
+        ($operation:expr) => {
+            match $operation? {
+                GetContinuationDispatch::Ready {
+                    state: resumed,
+                    value,
+                } => {
+                    state = resumed;
+                    completion = Some(value);
+                    continue;
+                }
+                GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+            }
+        };
+    }
     loop {
         match state.stage {
             LocaleStringStage::AwaitLength => {
                 let key = runtime.predefined_property_key(PredefinedAtom::Length);
-                charge_locale_lookup(runtime, &state.target, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = LocaleStringStage::AwaitLengthConversion;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = LocaleStringStage::AwaitLengthConversion;
-                        return suspend_locale_string(state, function, receiver, return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(locale_property_failure(&state, failure));
-                    }
-                }
+                let target = state.target.duplicate();
+                await_get!(begin_locale_get(
+                    runtime,
+                    state,
+                    &target,
+                    key,
+                    LocaleStringStage::AwaitLengthConversion,
+                    return_to,
+                    execution_budget,
+                ));
             }
             LocaleStringStage::AwaitLengthConversion => {
                 let value = take_locale_completion(&mut completion)?;
@@ -195,20 +207,16 @@ pub(super) fn advance_locale_string(
                 }
                 let key = locale_element_key(runtime, state.next)?;
                 state.next = state.next.saturating_add(1);
-                charge_locale_lookup(runtime, &state.target, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        state.element = Some(value);
-                        state.stage = LocaleStringStage::AwaitElement;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = LocaleStringStage::AwaitElement;
-                        return suspend_locale_string(state, function, receiver, return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(locale_property_failure(&state, failure));
-                    }
-                }
+                let target = state.target.duplicate();
+                await_get!(begin_locale_get(
+                    runtime,
+                    state,
+                    &target,
+                    key,
+                    LocaleStringStage::AwaitElement,
+                    return_to,
+                    execution_budget,
+                ));
             }
             LocaleStringStage::AwaitElement => {
                 if state.element.is_none() {
@@ -239,20 +247,15 @@ pub(super) fn advance_locale_string(
                         PredefinedAtom::ToLocaleString
                     },
                 );
-                charge_locale_lookup(runtime, &element, execution_budget)?;
-                match read_static_property(runtime, state.realm, &element, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = LocaleStringStage::AwaitMethod;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = LocaleStringStage::AwaitMethod;
-                        return suspend_locale_string(state, function, receiver, return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(locale_property_failure(&state, failure));
-                    }
-                }
+                await_get!(begin_locale_get(
+                    runtime,
+                    state,
+                    &element,
+                    key,
+                    LocaleStringStage::AwaitMethod,
+                    return_to,
+                    execution_budget,
+                ));
             }
             LocaleStringStage::AwaitMethod => {
                 let method = take_locale_completion(&mut completion)?;
@@ -302,6 +305,43 @@ pub(super) fn advance_locale_string(
             }
         }
     }
+}
+
+fn locale_string_continuation(state: LocaleStringContinuation) -> NativeContinuation {
+    NativeContinuation::LocaleString(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the locale Get boundary keeps its receiver, next stage, caller continuation, and execution authority explicit"
+)]
+fn begin_locale_get(
+    runtime: &mut Runtime,
+    mut state: LocaleStringContinuation,
+    base: &StoredValue,
+    key: PropertyKey,
+    next_stage: LocaleStringStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<GetContinuationDispatch<LocaleStringContinuation>, NativeFailure> {
+    charge_locale_lookup(runtime, base, execution_budget)?;
+    state.stage = next_stage;
+    let dispatch = begin_value_get(
+        runtime,
+        base,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_state_after(
+        dispatch,
+        state,
+        locale_string_continuation,
+        "locale-string Get produced a structured result",
+    )
 }
 
 fn convert_locale_value(
@@ -397,16 +437,6 @@ fn take_locale_completion(
         }
         .into()
     })
-}
-
-fn locale_property_failure(
-    state: &LocaleStringContinuation,
-    failure: PropertyFailure,
-) -> NativeFailure {
-    match property_exception_at(state.realm, state.origin.clone(), None, failure) {
-        Ok(exception) => NativeFailure::Abrupt(exception),
-        Err(error) => error.into(),
-    }
 }
 
 fn locale_type_error(realm: RealmId, origin: &JsStackFrame, message: &str) -> NativeFailure {

@@ -89,20 +89,19 @@ does not imply complete ECMAScript or QuickJS compatibility.
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
   snapshot pins 384 Realm-local identities and 1,173 ordered properties.
-- [ ] Finish Proxy integration and the remaining exotic-object algorithms. All
-  11 Proxy internal methods, revocation, nested-target invariants, `in`,
-  Reflect/Object meta and key APIs, values/entries, assign, and object-rest
-  copying are spec-ordered and tested. Descriptor conversion, integrity and
-  legacy prototype operations, primitive conversion, constructor prototype
-  selection, Error/RegExp construction, and the shared iterator protocol are
-  Proxy-aware. Remaining gates are the exhaustive built-in `Get`/`HasProperty`
-  audit and Proxy-aware `IsArray` at every abstract-operation call site.
-- [ ] Intern object shapes and transitions without changing descriptor, key
-  order, prototype, or GC behavior.
-- [ ] Add dense indexed storage with exact hole, `length`, descriptor, and
-  sparse-transition semantics.
-- [ ] Complete reflection and public diagnostics after the object model can
-  express every required internal method.
+- [x] Proxy and exotic-object integration covers all 11 internal methods,
+  revocation/invariants, reflection, descriptors/integrity, constructors,
+  iterators, Arrays, strings, RegExp, Promise, and JSON. Audited built-in
+  `Get`/`HasProperty` and abstract `IsArray` sites are Proxy-aware; remaining
+  direct object/Array checks are guarded ordinary or physical-storage paths.
+- [x] Runtime-local weak shape and transition interning shares value-independent
+  key/layout metadata while slots, key order, prototypes, extensibility, and GC
+  edges remain per object.
+- [x] Dense Array storage keeps default indexed values and holes outside shapes,
+  transitions atomically to sparse properties for exceptional descriptors or
+  far writes, and preserves exact length, key order, accounting, and GC edges.
+- [x] The complete ES2025 Object/Reflect surface shares exotic internal methods,
+  stable exception diagnostics, and resumable global accessor Get/Set paths.
 
 ### Built-ins
 

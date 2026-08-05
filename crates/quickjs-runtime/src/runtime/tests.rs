@@ -26,10 +26,10 @@
 //! Runtime unit tests kept in the runtime module's private visibility boundary.
 
 use super::{
-    ArrayDefineOutcome, ArrayLengthWriteOutcome, CollectionRoot, ErrorIntrinsicKind, ForInAdvance,
-    FunctionImplementation, HeapFunction, KeyPhases, NativeFunction, NativeFunctionKind,
+    ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayState, CollectionRoot, ErrorIntrinsicKind,
+    ForInAdvance, FunctionImplementation, HeapFunction, NativeFunction, NativeFunctionKind,
     PromiseCombinatorKind, PromiseCombinatorShared, PromiseFinallyThunkKind, PromiseJob,
-    RealmIntrinsics, RootEnvironment, Runtime, RuntimeLimits, RuntimeUsage,
+    RealmIntrinsics, RootEnvironment, Runtime, RuntimeLimits, RuntimeUsage, SetPrototypeOutcome,
     array_length_from_number, dynamic_function_declaration_property_layout,
     global_function_replacement_layout, is_supported_instruction, is_supported_opcode,
     usize_to_u64,
@@ -1297,7 +1297,7 @@ fn live_property_slots(runtime: &Runtime) -> u64 {
     let object_slots = runtime
         .objects
         .iter()
-        .map(|(_, object)| object.record.property_count())
+        .map(|(_, object)| object.property_count())
         .sum::<usize>();
     let function_slots = runtime
         .functions
@@ -1371,7 +1371,7 @@ fn realm_installs_a_rooted_branded_array_prototype_with_exact_length() {
     let state = runtime.realms.get(realm_id).expect("realm state");
     let object = runtime.objects.get(prototype).expect("Array.prototype");
 
-    assert_eq!(object.array_state().map(|array| array.length()), Some(0));
+    assert_eq!(object.array_state().map(ArrayState::length), Some(0));
     assert_eq!(
         object.record.prototype(),
         Some(HeapReference::Object(state.object_prototype))
@@ -1641,6 +1641,27 @@ fn dense_array_allocation_is_exactly_charged_and_traces_elements() {
         .expect("array");
 
     assert_eq!(runtime.array_length(array).expect("array length"), Some(2));
+    {
+        let object = runtime.objects.get(array).expect("array");
+        assert!(object.array_state().is_some_and(ArrayState::is_dense));
+        assert_eq!(
+            object.record.property_count(),
+            1,
+            "only length uses a shape slot"
+        );
+        assert_eq!(
+            object.property_count(),
+            3,
+            "dense indices remain own properties"
+        );
+        assert!(
+            object
+                .record
+                .own_property(&PropertyKey::from_index(ArrayIndex::new(0).expect("index")))
+                .is_none(),
+            "dense indices are not duplicated in the sparse record"
+        );
+    }
     assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 1);
     assert_eq!(
         runtime.usage().object_properties(),
@@ -1659,12 +1680,8 @@ fn dense_array_allocation_is_exactly_charged_and_traces_elements() {
                 if layout == PropertyLayout::data(true, true, true)
         ));
     }
-    let snapshot = runtime
-        .objects
-        .get(array)
-        .expect("array")
-        .record
-        .try_own_key_snapshot(None, KeyPhases::FOR_IN)
+    let (snapshot, _) = runtime
+        .try_for_in_snapshot(HeapReference::Object(array), 0)
         .expect("for-in snapshot");
     let enumerable_indices = (0..snapshot.len())
         .filter_map(|position| {
@@ -1694,6 +1711,148 @@ fn dense_array_allocation_is_exactly_charged_and_traces_elements() {
         2,
         "the array and child are reclaimed together"
     );
+}
+
+#[test]
+fn dense_array_holes_preserve_length_and_can_be_filled_without_sparse_transition() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let array = runtime
+        .allocate_array(
+            realm.0.id,
+            vec![
+                StoredValue::Boolean(false),
+                StoredValue::Boolean(true),
+                StoredValue::Undefined,
+            ],
+        )
+        .expect("array");
+    let one = PropertyKey::from_index(ArrayIndex::new(1).expect("index"));
+    let before = runtime.usage();
+
+    assert_eq!(
+        runtime
+            .delete_own_property(HeapReference::Object(array), &one)
+            .expect("delete"),
+        crate::object::PropertyDeletion::Deleted
+    );
+    assert_eq!(runtime.array_length(array).expect("length"), Some(3));
+    assert!(
+        runtime
+            .array_own_property(array, &one)
+            .expect("property")
+            .is_none()
+    );
+    assert_eq!(
+        runtime.usage().object_properties(),
+        before.object_properties() - 1
+    );
+    assert!(
+        runtime
+            .objects
+            .get(array)
+            .and_then(crate::object::HeapObject::array_state)
+            .is_some_and(ArrayState::is_dense)
+    );
+
+    assert_eq!(
+        runtime
+            .define_array_data_property(
+                array,
+                one.clone(),
+                PropertyLayout::data(true, true, true),
+                StoredValue::Number(JsNumber::from_i32(7)),
+            )
+            .expect("fill hole"),
+        ArrayDefineOutcome::Complete
+    );
+    assert_eq!(runtime.usage(), before);
+    assert!(
+        runtime
+            .objects
+            .get(array)
+            .and_then(crate::object::HeapObject::array_state)
+            .is_some_and(ArrayState::is_dense)
+    );
+
+    assert_eq!(
+        runtime.set_array_length(array, 1).expect("shrink"),
+        ArrayLengthWriteOutcome::Complete
+    );
+    assert_eq!(runtime.array_length(array).expect("length"), Some(1));
+    assert!(
+        runtime
+            .array_own_property(array, &one)
+            .expect("property")
+            .is_none()
+    );
+    assert_eq!(
+        runtime.usage().object_properties(),
+        before.object_properties() - 2
+    );
+}
+
+#[test]
+fn exceptional_descriptors_and_far_writes_transition_dense_arrays_to_sparse_storage() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let array = runtime
+        .allocate_array(
+            realm_id,
+            vec![StoredValue::Boolean(false), StoredValue::Boolean(true)],
+        )
+        .expect("dense array");
+    let one = PropertyKey::from_index(ArrayIndex::new(1).expect("index"));
+    let before = runtime.usage();
+
+    assert_eq!(
+        runtime
+            .define_array_data_property(
+                array,
+                one.clone(),
+                PropertyLayout::data(false, true, true),
+                StoredValue::Boolean(true),
+            )
+            .expect("descriptor transition"),
+        ArrayDefineOutcome::Complete
+    );
+    let object = runtime.objects.get(array).expect("array");
+    assert!(object.array_state().is_some_and(|state| !state.is_dense()));
+    assert_eq!(
+        object.record.property_count(),
+        3,
+        "length plus two sparse indices"
+    );
+    assert_eq!(object.property_count(), 3);
+    assert_eq!(
+        runtime.usage(),
+        before,
+        "representation changes are not properties"
+    );
+    assert!(matches!(
+        runtime.array_own_property(array, &one).expect("property"),
+        Some(OwnProperty::Data { layout, value: StoredValue::Boolean(true) })
+            if layout == PropertyLayout::data(false, true, true)
+    ));
+
+    let far = runtime.allocate_array(realm_id, Vec::new()).expect("array");
+    let far_key = PropertyKey::from_index(ArrayIndex::new(4_096).expect("index"));
+    assert_eq!(
+        runtime
+            .define_array_data_property(
+                far,
+                far_key.clone(),
+                PropertyLayout::data(true, true, true),
+                StoredValue::Undefined,
+            )
+            .expect("far property"),
+        ArrayDefineOutcome::Complete
+    );
+    let object = runtime.objects.get(far).expect("far array");
+    assert!(object.array_state().is_some_and(|state| !state.is_dense()));
+    assert!(object.record.own_property(&far_key).is_some());
+    assert_eq!(runtime.array_length(far).expect("length"), Some(4_097));
 }
 
 #[test]
@@ -4386,6 +4545,130 @@ fn for_in_visited_growth_is_precharged_for_non_enumerable_candidates() {
             .and_then(crate::object::HeapObject::for_in_state)
             .is_some_and(|state| state.candidate().is_some())
     );
+}
+
+#[test]
+fn runtime_allocations_adopt_shared_shapes_without_merging_values() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let object_prototype = runtime
+        .realm_object_prototype(realm.0.id)
+        .expect("Object.prototype");
+    let first = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("first object");
+    let second = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("second object");
+    let first_reference = HeapReference::Object(first);
+    let second_reference = HeapReference::Object(second);
+    let key = string_property_key(&mut runtime, "shared-layout");
+    let layout = PropertyLayout::data(true, true, true);
+
+    assert_eq!(
+        runtime
+            .object_record(first_reference)
+            .expect("first record")
+            .shape_identity(),
+        runtime
+            .object_record(second_reference)
+            .expect("second record")
+            .shape_identity()
+    );
+    runtime
+        .append_data_property(
+            first_reference,
+            key.clone(),
+            layout,
+            StoredValue::Boolean(false),
+        )
+        .expect("first property");
+    runtime
+        .append_data_property(
+            second_reference,
+            key.clone(),
+            layout,
+            StoredValue::Boolean(true),
+        )
+        .expect("second property");
+    assert_eq!(
+        runtime
+            .object_record(first_reference)
+            .expect("first record")
+            .shape_identity(),
+        runtime
+            .object_record(second_reference)
+            .expect("second record")
+            .shape_identity()
+    );
+    assert!(matches!(
+        runtime
+            .object_record(first_reference)
+            .expect("first record")
+            .own_data_property(&key),
+        Some((actual, StoredValue::Boolean(false))) if actual == layout
+    ));
+    assert!(matches!(
+        runtime
+            .object_record(second_reference)
+            .expect("second record")
+            .own_data_property(&key),
+        Some((actual, StoredValue::Boolean(true))) if actual == layout
+    ));
+}
+
+#[test]
+fn shared_shapes_do_not_merge_prototype_or_extensibility_state() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let object_prototype = runtime
+        .realm_object_prototype(realm.0.id)
+        .expect("Object.prototype");
+    let first = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("first object");
+    let second = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("second object");
+    let alternate_prototype = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("alternate prototype");
+    let first_reference = HeapReference::Object(first);
+    let second_reference = HeapReference::Object(second);
+
+    assert_eq!(
+        runtime
+            .set_prototype_of(
+                first_reference,
+                Some(HeapReference::Object(alternate_prototype)),
+            )
+            .expect("set prototype"),
+        SetPrototypeOutcome::Complete
+    );
+    runtime
+        .prevent_extensions(first_reference)
+        .expect("prevent extensions");
+
+    let first_record = runtime
+        .object_record(first_reference)
+        .expect("first record");
+    let second_record = runtime
+        .object_record(second_reference)
+        .expect("second record");
+    assert_eq!(
+        first_record.shape_identity(),
+        second_record.shape_identity()
+    );
+    assert_eq!(
+        first_record.prototype(),
+        Some(HeapReference::Object(alternate_prototype))
+    );
+    assert_eq!(
+        second_record.prototype(),
+        Some(HeapReference::Object(object_prototype))
+    );
+    assert!(!first_record.is_extensible());
+    assert!(second_record.is_extensible());
 }
 
 fn string_property_key(runtime: &mut Runtime, name: &str) -> PropertyKey {

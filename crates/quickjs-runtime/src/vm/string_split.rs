@@ -152,25 +152,28 @@ fn read_split_method(
     state.stage = StringSplitStage::AwaitSplitMethod;
     charge_split_property_lookup(runtime, state.realm, &state.separator, execution_budget)?;
     let key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSplit);
-    match read_static_property(runtime, state.realm, &state.separator, &key)? {
-        PropertyReadOutcome::Value(value) => {
-            decide_split_method(runtime, state, &value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => call_split_function(
-            function,
-            receiver,
-            CallArguments::empty(),
-            state.origin.clone(),
-            Some(state),
-            return_to,
-        ),
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            Some(&JsString::from_utf8("Symbol.split")?),
-            failure,
-        )?)),
-    }
+    let name = JsString::from_utf8("Symbol.split")?;
+    let dispatch = begin_value_get(
+        runtime,
+        &state.separator,
+        key,
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        string_split_continuation,
+        |state, value| advance_string_split(runtime, state, value, return_to, execution_budget),
+        "String split Get produced a structured result",
+    )
+}
+
+fn string_split_continuation(state: StringSplitContinuation) -> NativeContinuation {
+    NativeContinuation::StringSplit(Box::new(state))
 }
 
 fn decide_split_method(

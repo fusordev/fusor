@@ -66,8 +66,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::map(
+            .insert_heap_object(HeapObject::map(
                 ObjectRecord::empty(Some(prototype)),
                 MapState::empty(),
             ))
@@ -98,8 +97,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::map_iterator(
+            .insert_heap_object(HeapObject::map_iterator(
                 ObjectRecord::empty(Some(HeapReference::Object(prototype))),
                 MapIterator::new(map, kind),
             ))

@@ -572,6 +572,26 @@ fn a_nullish_receiver_is_rejected() {
     }
 }
 
+/// Generic mutators preserve the full Proxy internal-method sequence instead
+/// of reading or writing the handler object as ordinary storage.
+#[test]
+fn reverse_uses_proxy_internal_methods() {
+    assert_all(&[(
+        "(function(){\
+            let log='';const target=[1,2];\
+            const proxy=new Proxy(target,{\
+                get:function(t,k){log+='g'+k+';';return t[k];},\
+                has:function(t,k){log+='h'+k+';';return k in t;},\
+                set:function(t,k,v){log+='s'+k+'='+v+';';t[k]=v;return true;},\
+                deleteProperty:function(t,k){log+='d'+k+';';return delete t[k];}\
+            });\
+            Array.prototype.reverse.call(proxy);\
+            return log+'|'+target.join();\
+        })()",
+        "glength;h0;g0;h1;g1;s1=1;s0=2;|2,1",
+    )]);
+}
+
 /// The installed mutators carry the pinned `name`, `length`, and descriptors.
 #[test]
 fn the_mutators_have_the_pinned_shape() {

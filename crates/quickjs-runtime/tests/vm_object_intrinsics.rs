@@ -672,7 +672,7 @@ fn object_keys_returns_an_independent_array() {
 
 /// ECMA-262 20.1.2 installs these `Object` statics with ordinary built-in
 /// identities. Their relative own-property order follows the pinned `QuickJS`
-/// constructor table while methods outside the admitted profile remain absent.
+/// constructor table and the complete ECMA-262 2025 static surface is present.
 #[test]
 fn the_extended_object_reflection_statics_have_the_specification_shape() {
     assert!(boolean(
@@ -1568,6 +1568,50 @@ fn array_length_descriptor_blockers_preserve_the_partial_specification_result() 
              return defined+'|'+array.length+'|'+descriptor.writable+'|'+array[2];"
         ),
         "false|3|false|3"
+    );
+}
+
+/// Dense storage is unobservable: holes remain absent, exceptional indexed
+/// descriptors extend `length`, `[[OwnPropertyKeys]]` stays ordered, and
+/// freezing applies the ordinary descriptor transitions to every element.
+/// The expected transcript also matches the independent Node oracle.
+#[test]
+fn dense_array_storage_preserves_reflection_and_integrity_semantics() {
+    assert_eq!(
+        text(
+            "var array=[1,2,3];delete array[1];\
+             Object.defineProperty(array,'0',{writable:false});\
+             Object.defineProperty(array,'4',{\
+               get(){return 9;},enumerable:true,configurable:true});\
+             var zero=Object.getOwnPropertyDescriptor(array,'0');\
+             var four=Object.getOwnPropertyDescriptor(array,'4');\
+             var frozen=Object.freeze([4,5]);\
+             return array.length+'|'+Reflect.ownKeys(array).join(',')+'|'+\
+                    (1 in array)+'|'+zero.writable+'|'+typeof four.get+'|'+\
+                    array[4]+'|'+Object.isFrozen(frozen)+'|'+\
+                    Reflect.set(frozen,'0',7)+'|'+frozen[0];"
+        ),
+        "5|0,2,4,length|false|false|function|9|true|false|4"
+    );
+}
+
+/// Realm-global references use ordinary `[[Get]]` and `[[Set]]`; accessors on
+/// the global object therefore suspend into user code instead of surfacing an
+/// engine-only diagnostic.
+#[test]
+fn realm_global_accessor_reads_and_writes_are_resumable() {
+    assert_eq!(
+        text(
+            "var log='';\
+             Object.defineProperty(globalThis,'realmAccessor',{\
+               configurable:true,\
+               get(){log=log+'g';return 4;},\
+               set(value){log=log+'s'+value;}\
+             });\
+             realmAccessor=7;\
+             return realmAccessor+'|'+log;"
+        ),
+        "4|s7g"
     );
 }
 

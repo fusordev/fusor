@@ -86,7 +86,7 @@ impl Runtime {
         } else {
             HeapObject::weak_set(record, WeakSetState::empty())
         };
-        let object = self.objects.try_insert(object).map_err(|_| {
+        let object = self.insert_heap_object(object).map_err(|_| {
             crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,

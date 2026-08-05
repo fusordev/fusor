@@ -98,11 +98,20 @@ pub(super) enum PropertyDefinitionOutcome {
 
 pub(super) enum RealmGlobalReadOutcome {
     Value(StoredValue),
+    Getter {
+        function: FunctionId,
+        receiver: StoredValue,
+    },
     Missing,
 }
 
 pub(super) enum RealmGlobalWriteOutcome {
     Complete,
+    Setter {
+        function: FunctionId,
+        receiver: StoredValue,
+        value: StoredValue,
+    },
     Missing,
     Property(PropertyFailure),
 }
@@ -288,19 +297,26 @@ pub(super) fn read_realm_global(
                 generation: global.binding.generation(),
             })?;
     match binding.state {
-        RealmGlobalBindingState::Unresolved | RealmGlobalBindingState::Object => {
-            read_heap_property_if_present(
+        RealmGlobalBindingState::Unresolved | RealmGlobalBindingState::Object => Ok(
+            match lookup_heap_property(
                 runtime,
-                HeapReference::Object(global.object),
+                Some(HeapReference::Object(global.object)),
                 &global.key,
-            )
-            .map(|value| {
-                value.map_or(
-                    RealmGlobalReadOutcome::Missing,
-                    RealmGlobalReadOutcome::Value,
-                )
-            })
-        }
+            )? {
+                None => RealmGlobalReadOutcome::Missing,
+                Some(OwnProperty::Data { value, .. }) => RealmGlobalReadOutcome::Value(value),
+                Some(OwnProperty::Accessor {
+                    getter: Some(function),
+                    ..
+                }) => RealmGlobalReadOutcome::Getter {
+                    function,
+                    receiver: StoredValue::Object(global.object),
+                },
+                Some(OwnProperty::Accessor { getter: None, .. }) => {
+                    RealmGlobalReadOutcome::Value(StoredValue::Undefined)
+                }
+            },
+        ),
     }
 }
 
@@ -322,9 +338,9 @@ pub(super) fn write_realm_global(
         .state;
     match state {
         RealmGlobalBindingState::Unresolved => {
-            let present = read_heap_property_if_present(
+            let present = lookup_heap_property(
                 runtime,
-                HeapReference::Object(global.object),
+                Some(HeapReference::Object(global.object)),
                 &global.key,
             )?
             .is_some();
@@ -343,12 +359,15 @@ pub(super) fn write_realm_global(
                     execution_budget,
                 )? {
                     PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
-                    PropertyWriteOutcome::Setter { .. } => {
-                        return Err(EngineFault::UnsupportedAccessorWrite {
-                            operation: "realm-global property write",
-                        }
-                        .into());
-                    }
+                    PropertyWriteOutcome::Setter {
+                        function,
+                        receiver,
+                        value,
+                    } => RealmGlobalWriteOutcome::Setter {
+                        function,
+                        receiver,
+                        value,
+                    },
                     PropertyWriteOutcome::Failed(failure) => {
                         RealmGlobalWriteOutcome::Property(failure)
                     }
@@ -368,12 +387,15 @@ pub(super) fn write_realm_global(
                     execution_budget,
                 )? {
                     PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
-                    PropertyWriteOutcome::Setter { .. } => {
-                        return Err(EngineFault::UnsupportedAccessorWrite {
-                            operation: "realm-global property write",
-                        }
-                        .into());
-                    }
+                    PropertyWriteOutcome::Setter {
+                        function,
+                        receiver,
+                        value,
+                    } => RealmGlobalWriteOutcome::Setter {
+                        function,
+                        receiver,
+                        value,
+                    },
                     PropertyWriteOutcome::Failed(failure) => {
                         RealmGlobalWriteOutcome::Property(failure)
                     }
@@ -495,44 +517,6 @@ fn read_heap_property_if_present(
     }
 }
 
-/// Applies ECMAScript `HasProperty`, walking the prototype chain.
-///
-/// This is what lets `Array.prototype.indexOf` skip a hole: a missing index is
-/// not merely `undefined`, so `[1,,3].indexOf(undefined)` is `-1` while
-/// `includes`, which reads instead of testing, answers `true`.
-pub(super) fn has_property(
-    runtime: &Runtime,
-    realm: RealmId,
-    base: &StoredValue,
-    key: &PropertyKey,
-) -> Result<bool, ExecutionError> {
-    let reference = match base {
-        // A primitive receiver tests against its wrapper prototype, matching the
-        // read path; `undefined` and `null` never reach here because the caller
-        // rejects them first.
-        StoredValue::Undefined | StoredValue::Null => return Ok(false),
-        StoredValue::Boolean(_) => HeapReference::Object(runtime.realm_boolean_prototype(realm)?),
-        StoredValue::Number(_) => HeapReference::Object(runtime.realm_number_prototype(realm)?),
-        StoredValue::BigInt(_) => HeapReference::Object(runtime.realm_bigint_prototype(realm)?),
-        StoredValue::Symbol(_) => HeapReference::Object(runtime.realm_symbol_prototype(realm)?),
-        StoredValue::String(text) => {
-            // A String's own index and `length` properties are exotic rather
-            // than stored, so they are answered before the prototype walk.
-            if let Some(index) = key.as_index() {
-                return Ok(u64::from(index.get()) < u64::from(text.len()));
-            }
-            if key.as_atom().and_then(crate::Atom::predefined_atom) == Some(PredefinedAtom::Length)
-            {
-                return Ok(true);
-            }
-            HeapReference::Object(runtime.realm_string_prototype(realm)?)
-        }
-        StoredValue::Function(function) => HeapReference::Function(*function),
-        StoredValue::Object(object) => HeapReference::Object(*object),
-    };
-    Ok(lookup_heap_property(runtime, Some(reference), key)?.is_some())
-}
-
 pub(super) fn lookup_heap_property(
     runtime: &Runtime,
     mut current: Option<HeapReference>,
@@ -567,7 +551,15 @@ pub(super) fn heap_own_property(
     if let Some(property) = string_exotic_index_property(runtime, reference, key)? {
         return Ok(Some(property));
     }
-    let Some(mut property) = runtime.object_record(reference)?.own_property(key) else {
+    let property = match reference {
+        HeapReference::Object(object) if runtime.is_array_object(object)? => {
+            runtime.array_own_property(object, key)?
+        }
+        HeapReference::Function(_) | HeapReference::Object(_) => {
+            runtime.object_record(reference)?.own_property(key)
+        }
+    };
+    let Some(mut property) = property else {
         return Ok(None);
     };
     if let HeapReference::Object(object) = reference
@@ -766,6 +758,18 @@ fn array_define_write_outcome(outcome: ArrayDefineOutcome, strict: bool) -> Prop
         }
         ArrayDefineOutcome::ReadOnlyLength | ArrayDefineOutcome::NonExtensible => {
             PropertyWriteOutcome::Complete
+        }
+    }
+}
+
+fn array_property_definition_outcome(outcome: ArrayDefineOutcome) -> PropertyDefinitionOutcome {
+    match outcome {
+        ArrayDefineOutcome::Complete => PropertyDefinitionOutcome::Complete,
+        ArrayDefineOutcome::ReadOnlyLength => {
+            PropertyDefinitionOutcome::Failed(PropertyFailure::ReadOnly)
+        }
+        ArrayDefineOutcome::NonExtensible => {
+            PropertyDefinitionOutcome::Failed(PropertyFailure::NonExtensible)
         }
     }
 }
@@ -1815,6 +1819,15 @@ pub(super) fn define_own_property(
             PropertyFailure::NonExtensible,
         )),
         DefinitionDecision::Replace(property) => {
+            if let HeapReference::Object(object) = reference
+                && runtime.is_array_object(object)?
+                && key.as_index().is_some()
+            {
+                let work = runtime.preview_array_define_data_property_work(object)?;
+                execution_budget.charge_instructions(work)?;
+                let outcome = runtime.define_array_own_property(object, key, property)?;
+                return Ok(array_property_definition_outcome(outcome));
+            }
             if runtime
                 .object_record_mut(reference)?
                 .restore_existing_property(&key, property)
@@ -1834,31 +1847,12 @@ pub(super) fn define_own_property(
             // define owns.
             if let HeapReference::Object(object) = reference
                 && runtime.is_array_object(object)?
-                && let Some(index) = key.as_index()
+                && key.as_index().is_some()
             {
                 let work = runtime.preview_array_define_data_property_work(object)?;
                 execution_budget.charge_instructions(work)?;
-                let _ = index;
-                return Ok(match property {
-                    OwnProperty::Data { layout, value } => {
-                        match runtime.define_array_data_property(object, key, layout, value)? {
-                            ArrayDefineOutcome::Complete => PropertyDefinitionOutcome::Complete,
-                            ArrayDefineOutcome::ReadOnlyLength => {
-                                PropertyDefinitionOutcome::Failed(PropertyFailure::ReadOnly)
-                            }
-                            ArrayDefineOutcome::NonExtensible => {
-                                PropertyDefinitionOutcome::Failed(PropertyFailure::NonExtensible)
-                            }
-                        }
-                    }
-                    // An accessor at an array index leaves the dense range, so
-                    // it is stored as an ordinary property while the length is
-                    // still extended by the data path above.
-                    property @ OwnProperty::Accessor { .. } => {
-                        runtime.append_own_property(reference, key, property)?;
-                        PropertyDefinitionOutcome::Complete
-                    }
-                });
+                let outcome = runtime.define_array_own_property(object, key, property)?;
+                return Ok(array_property_definition_outcome(outcome));
             }
             runtime.append_own_property(reference, key.clone(), property)?;
             apply_mapped_arguments_definition(runtime, mapped_object, &key, definition)?;

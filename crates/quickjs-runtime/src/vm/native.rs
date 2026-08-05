@@ -885,6 +885,13 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::ProxyWrite => NativeDispatch::Immediate(StoredValue::Undefined),
             NativeContinuation::FunctionCall => NativeDispatch::Immediate(value),
         };
+        let suspended_native_caller = continuations.iter().rev().find_map(|continuation| {
+            if let NativeContinuation::FunctionApply(state) = continuation {
+                state.native_caller
+            } else {
+                None
+            }
+        });
         match dispatch {
             NativeDispatch::Immediate(next) => value = next,
             dispatch @ (NativeDispatch::Pair(_, _)
@@ -902,10 +909,16 @@ pub(super) fn resume_native_continuations(
                 .into());
             }
             NativeDispatch::Frame(mut frame) => {
+                if frame.native_caller.is_none() {
+                    frame.native_caller = suspended_native_caller;
+                }
                 attach_native_continuations(&mut frame, continuations)?;
                 return Ok(NativeDispatch::Frame(frame));
             }
             NativeDispatch::Call(mut call) => {
+                if call.native_caller.is_none() {
+                    call.native_caller = suspended_native_caller;
+                }
                 prepend_native_continuations(&mut call, continuations)?;
                 return Ok(NativeDispatch::Call(call));
             }
@@ -3564,22 +3577,34 @@ pub(super) fn begin_array_like_call(
     };
     let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
     charge_heap_property_lookup(runtime, &state.array_like, execution_budget)?;
-    match read_static_property(runtime, realm, &state.array_like, &length_key)? {
-        PropertyReadOutcome::Value(value) => begin_function_apply_length_conversion(
+    let dispatch = stamp_function_apply_native_caller(
+        begin_value_get(
             runtime,
-            state,
-            value,
+            &state.array_like,
+            length_key,
+            Some(&JsString::from_utf8("length")?),
+            realm,
             return_to,
+            state.origin.clone(),
             execution_budget,
-        ),
-        PropertyReadOutcome::Getter { function, receiver } => {
-            function_apply_getter_call(state, function, receiver, return_to)
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "object-valued apply argument list failed its length read",
-        }
-        .into()),
-    }
+        )?,
+        state.native_caller,
+    );
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::FunctionApply,
+        |state, value| {
+            begin_function_apply_length_conversion(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        },
+        "CreateListFromArrayLike length Get produced a structured result",
+    )
 }
 
 fn advance_function_apply(
@@ -3712,21 +3737,34 @@ fn advance_function_apply_indices(
         })?;
         let key = PropertyKey::from_index(index);
         charge_heap_property_lookup(runtime, &state.array_like, execution_budget)?;
-        match read_static_property(runtime, state.realm, &state.array_like, &key)? {
-            PropertyReadOutcome::Value(value) => {
+        let dispatch = stamp_function_apply_native_caller(
+            begin_value_get(
+                runtime,
+                &state.array_like,
+                key,
+                None,
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?,
+            state.native_caller,
+        );
+        match continue_get_state_after(
+            dispatch,
+            state,
+            NativeContinuation::FunctionApply,
+            "CreateListFromArrayLike indexed Get produced a structured result",
+        )? {
+            GetContinuationDispatch::Ready {
+                state: resumed,
+                value,
+            } => {
+                state = resumed;
                 state.arguments.push(value);
                 state.next_index = state.next_index.saturating_add(1);
             }
-            PropertyReadOutcome::Getter { function, receiver } => {
-                state.stage = FunctionApplyStage::AwaitIndex;
-                return function_apply_getter_call(state, function, receiver, return_to);
-            }
-            PropertyReadOutcome::Failed(_) => {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "object-valued apply argument list failed an indexed read",
-                }
-                .into());
-            }
+            GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
         }
     }
     function_apply_target_call(
@@ -3738,6 +3776,30 @@ fn advance_function_apply_indices(
         state.new_target,
         state.native_caller,
     )
+}
+
+fn stamp_function_apply_native_caller(
+    mut dispatch: NativeDispatch,
+    native_caller: Option<SyntheticNativeFrame>,
+) -> NativeDispatch {
+    match &mut dispatch {
+        NativeDispatch::Call(call) if call.native_caller.is_none() => {
+            call.native_caller = native_caller;
+        }
+        NativeDispatch::Frame(frame) if frame.native_caller.is_none() => {
+            frame.native_caller = native_caller;
+        }
+        NativeDispatch::Immediate(_)
+        | NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. }
+        | NativeDispatch::Call(_)
+        | NativeDispatch::Frame(_) => {}
+    }
+    dispatch
 }
 
 pub(super) fn charge_heap_property_lookup(
@@ -3771,35 +3833,6 @@ pub(super) fn charge_heap_property_lookup(
         current = record.prototype();
     }
     Ok(())
-}
-
-fn function_apply_getter_call(
-    state: FunctionApplyContinuation,
-    function: FunctionId,
-    receiver: StoredValue,
-    return_to: Option<CallReturn>,
-) -> Result<NativeDispatch, NativeFailure> {
-    let origin = state.origin.clone();
-    let native_caller = state.native_caller;
-    let mut continuations = Vec::new();
-    continuations
-        .try_reserve_exact(1)
-        .map_err(|_| ExecutionError::AllocationFailed {
-            resource: RuntimeResource::Frames,
-            additional: 1,
-        })?;
-    continuations.push(NativeContinuation::FunctionApply(state));
-    Ok(NativeDispatch::Call(NativeCall {
-        function,
-        receiver,
-        arguments: CallArguments::empty(),
-        return_to,
-        origin,
-        continuations,
-        pre_call: None,
-        new_target: None,
-        native_caller,
-    }))
 }
 
 fn function_apply_target_call(
@@ -3882,6 +3915,31 @@ fn begin_function_bind(
     };
     let target_value = StoredValue::Function(target);
     let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
+    if runtime
+        .proxy_state(HeapReference::Function(target))?
+        .is_some()
+    {
+        let mut state = state;
+        state.stage = FunctionBindStage::AwaitLengthDescriptor;
+        let dispatch = begin_internal_get_own_property(
+            runtime,
+            HeapReference::Function(target),
+            length_key,
+            realm,
+            return_to,
+            state.origin.clone(),
+            execution_budget,
+        )?;
+        return continue_get_after(
+            dispatch,
+            state,
+            NativeContinuation::FunctionBind,
+            |state, value| {
+                advance_function_bind(runtime, state, Some(value), return_to, execution_budget)
+            },
+            "Function bind length descriptor lookup produced a structured result",
+        );
+    }
     let has_length = runtime
         .object_record(HeapReference::Function(target))
         .map_err(NativeFailure::from)?
@@ -3890,27 +3948,15 @@ fn begin_function_bind(
     if !has_length {
         return bind_name_read(runtime, state, return_to, execution_budget);
     }
-    charge_heap_property_lookup(runtime, &target_value, execution_budget)?;
-    match read_static_property(runtime, realm, &target_value, &length_key)? {
-        PropertyReadOutcome::Value(value) => {
-            bind_length_value(runtime, state, &value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            iterator_getter_call(
-                function,
-                receiver,
-                NativeContinuation::FunctionBind(state),
-                return_to,
-                origin,
-                None,
-            )
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "bind target length read failed",
-        }
-        .into()),
-    }
+    begin_function_bind_get(
+        runtime,
+        state,
+        target_value,
+        length_key,
+        "length",
+        return_to,
+        execution_budget,
+    )
 }
 
 #[allow(
@@ -3931,6 +3977,24 @@ fn advance_function_bind(
         .into());
     };
     match state.stage {
+        FunctionBindStage::AwaitLengthDescriptor => {
+            if matches!(value, StoredValue::Undefined) {
+                return bind_name_read(runtime, state, return_to, execution_budget);
+            }
+            let target_value = StoredValue::Function(state.target);
+            let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
+            let mut state = state;
+            state.stage = FunctionBindStage::AwaitLengthValue;
+            begin_function_bind_get(
+                runtime,
+                state,
+                target_value,
+                length_key,
+                "length",
+                return_to,
+                execution_budget,
+            )
+        }
         FunctionBindStage::AwaitLengthValue => {
             bind_length_value(runtime, state, &value, return_to, execution_budget)
         }
@@ -3979,25 +4043,52 @@ fn bind_name_read(
     state.stage = FunctionBindStage::AwaitNameValue;
     let target_value = StoredValue::Function(state.target);
     let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
-    charge_heap_property_lookup(runtime, &target_value, execution_budget)?;
-    match read_static_property(runtime, state.realm, &target_value, &name_key)? {
-        PropertyReadOutcome::Value(value) => bind_name_value(runtime, state, value, return_to),
-        PropertyReadOutcome::Getter { function, receiver } => {
-            let origin = state.origin.clone();
-            iterator_getter_call(
-                function,
-                receiver,
-                NativeContinuation::FunctionBind(state),
-                return_to,
-                origin,
-                None,
-            )
-        }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "bind target name read failed",
-        }
-        .into()),
-    }
+    begin_function_bind_get(
+        runtime,
+        state,
+        target_value,
+        name_key,
+        "name",
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "the bind Get boundary owns the short-lived target beside its continuation and execution authority"
+)]
+fn begin_function_bind_get(
+    runtime: &mut Runtime,
+    state: FunctionBindContinuation,
+    target: StoredValue,
+    key: PropertyKey,
+    diagnostic_name: &str,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    charge_heap_property_lookup(runtime, &target, execution_budget)?;
+    let name = JsString::from_utf8(diagnostic_name)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &target,
+        key,
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::FunctionBind,
+        |state, value| {
+            advance_function_bind(runtime, state, Some(value), return_to, execution_budget)
+        },
+        "Function bind Get produced a structured result",
+    )
 }
 
 #[allow(
@@ -4072,8 +4163,7 @@ fn bind_name_value(
             additional: 1,
         })?;
     let function = runtime
-        .functions
-        .try_insert(HeapFunction {
+        .insert_heap_function(HeapFunction {
             implementation: FunctionImplementation::Bound(BoundFunction {
                 target: state.target,
                 bound_this: state.bound_this,

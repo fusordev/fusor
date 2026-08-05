@@ -282,7 +282,6 @@ impl<K, T> Arena<K, T> {
             })
     }
 
-    #[cfg(test)]
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (Id<K>, &mut T)> {
         self.slots
             .iter_mut()

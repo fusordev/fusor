@@ -90,8 +90,12 @@ enum ArrayMutatorStage {
     AwaitCopyEnd,
     /// Ready to perform the next planned step.
     NextStep,
+    /// Awaiting `HasProperty` for the first source index.
+    AwaitFirstPresence,
     /// Awaiting the first element read of the current step.
     AwaitFirstRead,
+    /// Awaiting `HasProperty` for the second source index of a swap.
+    AwaitSecondPresence,
     /// Awaiting the second element read, which only `Swap` performs.
     AwaitSecondRead,
     /// Awaiting the first element write of the current step.
@@ -227,6 +231,7 @@ pub(super) fn begin_array_mutator(
 /// Resumes a mutator after an awaited read, write, or conversion.
 #[allow(
     clippy::too_many_lines,
+    clippy::needless_continue,
     reason = "the length, planning, element-move, and length-write stages form one traced continuation shared by every mutator"
 )]
 pub(super) fn advance_array_mutator(
@@ -237,37 +242,33 @@ pub(super) fn advance_array_mutator(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut completion = completion;
+    macro_rules! await_get {
+        ($operation:expr) => {
+            match $operation? {
+                GetContinuationDispatch::Ready {
+                    state: resumed,
+                    value,
+                } => {
+                    state = resumed;
+                    completion = Some(value);
+                    continue;
+                }
+                GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+            }
+        };
+    }
     loop {
         match state.stage {
             ArrayMutatorStage::AwaitLength => {
                 let key = runtime.predefined_property_key(PredefinedAtom::Length);
-                charge_mutator_lookup(runtime, &state.target, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArrayMutatorStage::AwaitLengthConversion;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayMutatorStage::AwaitLengthConversion;
-                        return suspend(
-                            state,
-                            SuspendedCall {
-                                function,
-                                receiver,
-                                argument: None,
-                            },
-                            return_to,
-                        );
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(NativeFailure::Abrupt(property_exception_at(
-                            state.realm,
-                            state.origin.clone(),
-                            None,
-                            failure,
-                        )?));
-                    }
-                }
+                await_get!(begin_array_mutator_get(
+                    runtime,
+                    state,
+                    key,
+                    ArrayMutatorStage::AwaitLengthConversion,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArrayMutatorStage::AwaitLengthConversion => {
                 let value = take_completion(&mut completion)?;
@@ -491,38 +492,79 @@ pub(super) fn advance_array_mutator(
                         state.stage = ArrayMutatorStage::AwaitFirstWrite;
                     }
                     ElementStep::Take { index } | ElementStep::Move { from: index, .. } => {
-                        match read_element(runtime, &mut state, index, execution_budget)? {
-                            ElementRead::Absent => {
-                                state.first_absent = true;
-                                state.stage = ArrayMutatorStage::AwaitFirstWrite;
-                            }
-                            ElementRead::Value(value) => {
-                                completion = Some(value);
-                                state.stage = ArrayMutatorStage::AwaitFirstRead;
-                            }
-                            ElementRead::Suspend(call) => {
-                                state.stage = ArrayMutatorStage::AwaitFirstRead;
-                                return suspend(state, call, return_to);
-                            }
-                        }
+                        let key = element_key(runtime, index)?;
+                        charge_mutator_lookup(runtime, &state.target, execution_budget)?;
+                        state.stage = ArrayMutatorStage::AwaitFirstPresence;
+                        let target = state.target.duplicate();
+                        let dispatch = begin_value_has(
+                            runtime,
+                            &target,
+                            key,
+                            state.realm,
+                            return_to,
+                            state.origin.clone(),
+                            execution_budget,
+                        )?;
+                        await_get!(continue_get_state_after(
+                            dispatch,
+                            state,
+                            array_mutator_continuation,
+                            "Array mutator HasProperty produced a structured result",
+                        ));
                     }
                     ElementStep::Swap { left, .. } => {
-                        match read_element(runtime, &mut state, left, execution_budget)? {
-                            ElementRead::Absent => {
-                                state.first_absent = true;
-                                state.stage = ArrayMutatorStage::AwaitSecondRead;
-                            }
-                            ElementRead::Value(value) => {
-                                completion = Some(value);
-                                state.stage = ArrayMutatorStage::AwaitFirstRead;
-                            }
-                            ElementRead::Suspend(call) => {
-                                state.stage = ArrayMutatorStage::AwaitFirstRead;
-                                return suspend(state, call, return_to);
-                            }
-                        }
+                        let key = element_key(runtime, left)?;
+                        charge_mutator_lookup(runtime, &state.target, execution_budget)?;
+                        state.stage = ArrayMutatorStage::AwaitFirstPresence;
+                        let target = state.target.duplicate();
+                        let dispatch = begin_value_has(
+                            runtime,
+                            &target,
+                            key,
+                            state.realm,
+                            return_to,
+                            state.origin.clone(),
+                            execution_budget,
+                        )?;
+                        await_get!(continue_get_state_after(
+                            dispatch,
+                            state,
+                            array_mutator_continuation,
+                            "Array reverse HasProperty produced a structured result",
+                        ));
                     }
                 }
+            }
+            ArrayMutatorStage::AwaitFirstPresence => {
+                let step = current_step(&state)?;
+                if !take_completion(&mut completion)?.is_truthy() {
+                    state.first_absent = true;
+                    state.stage = if matches!(step, ElementStep::Swap { .. }) {
+                        ArrayMutatorStage::AwaitSecondRead
+                    } else {
+                        ArrayMutatorStage::AwaitFirstWrite
+                    };
+                    continue;
+                }
+                let index = match step {
+                    ElementStep::Take { index } | ElementStep::Move { from: index, .. } => index,
+                    ElementStep::Swap { left, .. } => left,
+                    ElementStep::Drop { .. } | ElementStep::Store { .. } => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "a write-only mutator step awaited source presence",
+                        }
+                        .into());
+                    }
+                };
+                let key = element_key(runtime, index)?;
+                await_get!(begin_array_mutator_get(
+                    runtime,
+                    state,
+                    key,
+                    ArrayMutatorStage::AwaitFirstRead,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArrayMutatorStage::AwaitFirstRead => {
                 let value = take_completion(&mut completion)?;
@@ -555,16 +597,47 @@ pub(super) fn advance_array_mutator(
                 };
                 // Both ends are read before either is written, so neither value
                 // is lost when the two writes land.
-                match read_element(runtime, &mut state, right, execution_budget)? {
-                    ElementRead::Absent => {
-                        state.second_absent = true;
-                        state.stage = ArrayMutatorStage::AwaitFirstWrite;
-                    }
-                    ElementRead::Value(value) => {
-                        completion = Some(value);
-                    }
-                    ElementRead::Suspend(call) => return suspend(state, call, return_to),
+                let key = element_key(runtime, right)?;
+                charge_mutator_lookup(runtime, &state.target, execution_budget)?;
+                state.stage = ArrayMutatorStage::AwaitSecondPresence;
+                let target = state.target.duplicate();
+                let dispatch = begin_value_has(
+                    runtime,
+                    &target,
+                    key,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_mutator_continuation,
+                    "Array reverse second HasProperty produced a structured result",
+                ));
+            }
+            ArrayMutatorStage::AwaitSecondPresence => {
+                if !take_completion(&mut completion)?.is_truthy() {
+                    state.second_absent = true;
+                    state.stage = ArrayMutatorStage::AwaitFirstWrite;
+                    continue;
                 }
+                let ElementStep::Swap { right, .. } = current_step(&state)? else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "a non-swap step awaited second source presence",
+                    }
+                    .into());
+                };
+                let key = element_key(runtime, right)?;
+                await_get!(begin_array_mutator_get(
+                    runtime,
+                    state,
+                    key,
+                    ArrayMutatorStage::AwaitSecondRead,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArrayMutatorStage::AwaitFirstWrite => {
                 if completion.take().is_some() {
@@ -583,6 +656,53 @@ pub(super) fn advance_array_mutator(
                         (right, state.first.take(), state.first_absent)
                     }
                 };
+                if let Some(reference) = state.target.heap_reference()
+                    && runtime.proxy_state(reference)?.is_some()
+                {
+                    let key = element_key(runtime, index)?;
+                    charge_mutator_lookup(runtime, &state.target, execution_budget)?;
+                    let dispatch = if absent {
+                        begin_internal_delete(
+                            runtime,
+                            reference,
+                            key,
+                            true,
+                            false,
+                            state.realm,
+                            return_to,
+                            state.origin.clone(),
+                            execution_budget,
+                        )?
+                    } else {
+                        let value = value.ok_or(EngineFault::RuntimeInvariant {
+                            message: "an array mutator Proxy write lost its value",
+                        })?;
+                        let name =
+                            property_key_name(&key).ok_or(EngineFault::RuntimeInvariant {
+                                message: "an array mutator index has no diagnostic name",
+                            })?;
+                        begin_internal_set(
+                            runtime,
+                            reference,
+                            key,
+                            name,
+                            value,
+                            state.target.duplicate(),
+                            true,
+                            false,
+                            state.realm,
+                            return_to,
+                            state.origin.clone(),
+                            execution_budget,
+                        )?
+                    };
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_mutator_continuation,
+                        "Array mutator Proxy write produced a structured result",
+                    ));
+                }
                 match write_element(runtime, &mut state, index, value, absent, execution_budget)? {
                     ElementWrite::Complete => state.stage = finish_first_write(&mut state)?,
                     ElementWrite::Suspend(call) => return suspend(state, call, return_to),
@@ -602,6 +722,53 @@ pub(super) fn advance_array_mutator(
                 };
                 let value = state.second.take();
                 let absent = state.second_absent;
+                if let Some(reference) = state.target.heap_reference()
+                    && runtime.proxy_state(reference)?.is_some()
+                {
+                    let key = element_key(runtime, left)?;
+                    charge_mutator_lookup(runtime, &state.target, execution_budget)?;
+                    let dispatch = if absent {
+                        begin_internal_delete(
+                            runtime,
+                            reference,
+                            key,
+                            true,
+                            false,
+                            state.realm,
+                            return_to,
+                            state.origin.clone(),
+                            execution_budget,
+                        )?
+                    } else {
+                        let value = value.ok_or(EngineFault::RuntimeInvariant {
+                            message: "an array reverse Proxy write lost its value",
+                        })?;
+                        let name =
+                            property_key_name(&key).ok_or(EngineFault::RuntimeInvariant {
+                                message: "an array reverse index has no diagnostic name",
+                            })?;
+                        begin_internal_set(
+                            runtime,
+                            reference,
+                            key,
+                            name,
+                            value,
+                            state.target.duplicate(),
+                            true,
+                            false,
+                            state.realm,
+                            return_to,
+                            state.origin.clone(),
+                            execution_budget,
+                        )?
+                    };
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_mutator_continuation,
+                        "Array reverse Proxy write produced a structured result",
+                    ));
+                }
                 match write_element(runtime, &mut state, left, value, absent, execution_budget)? {
                     ElementWrite::Complete => {
                         state.next_move = state.next_move.saturating_add(1);
@@ -653,6 +820,30 @@ pub(super) fn advance_array_mutator(
                 let length =
                     StoredValue::Number(JsNumber::from_f64(length_as_f64(state.final_length)));
                 charge_mutator_lookup(runtime, &state.target, execution_budget)?;
+                if let Some(reference) = state.target.heap_reference()
+                    && runtime.proxy_state(reference)?.is_some()
+                {
+                    let dispatch = begin_internal_set(
+                        runtime,
+                        reference,
+                        key,
+                        JsString::from_utf8("length")?,
+                        length,
+                        state.target.duplicate(),
+                        true,
+                        false,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_mutator_continuation,
+                        "Array mutator Proxy length write produced a structured result",
+                    ));
+                }
                 match write_static_property(
                     runtime,
                     state.realm,
@@ -1039,18 +1230,46 @@ fn take_completion(completion: &mut Option<StoredValue>) -> Result<StoredValue, 
     })
 }
 
-/// The outcome of one element read.
-enum ElementRead {
-    /// The index has no property, so a hole must be preserved.
-    Absent,
-    Value(StoredValue),
-    Suspend(SuspendedCall),
-}
-
 /// The outcome of one element write.
 enum ElementWrite {
     Complete,
     Suspend(SuspendedCall),
+}
+
+fn array_mutator_continuation(state: ArrayMutatorContinuation) -> NativeContinuation {
+    NativeContinuation::ArrayMutator(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the mutator Get boundary carries its next stage, caller continuation, and execution authority"
+)]
+fn begin_array_mutator_get(
+    runtime: &mut Runtime,
+    mut state: ArrayMutatorContinuation,
+    key: PropertyKey,
+    next_stage: ArrayMutatorStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<GetContinuationDispatch<ArrayMutatorContinuation>, NativeFailure> {
+    charge_mutator_lookup(runtime, &state.target, execution_budget)?;
+    state.stage = next_stage;
+    let dispatch = begin_value_get(
+        runtime,
+        &state.target,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_state_after(
+        dispatch,
+        state,
+        array_mutator_continuation,
+        "Array mutator Get produced a structured result",
+    )
 }
 
 /// Returns the step currently being performed.
@@ -1076,38 +1295,6 @@ fn finish_first_write(
     }
     state.next_move = state.next_move.saturating_add(1);
     Ok(ArrayMutatorStage::NextStep)
-}
-
-/// Reads one element, distinguishing an absent index from an `undefined` value.
-fn read_element(
-    runtime: &mut Runtime,
-    state: &mut ArrayMutatorContinuation,
-    index: u64,
-    execution_budget: &mut ExecutionBudget,
-) -> Result<ElementRead, NativeFailure> {
-    let key = element_key(runtime, index)?;
-    charge_mutator_lookup(runtime, &state.target, execution_budget)?;
-    // A missing index is a hole, not `undefined`, so the destination is deleted
-    // rather than written. This is what keeps `[1,,3].reverse()` sparse.
-    if !has_property(runtime, state.realm, &state.target, &key)? {
-        return Ok(ElementRead::Absent);
-    }
-    match read_static_property(runtime, state.realm, &state.target, &key)? {
-        PropertyReadOutcome::Value(value) => Ok(ElementRead::Value(value)),
-        PropertyReadOutcome::Getter { function, receiver } => {
-            Ok(ElementRead::Suspend(SuspendedCall {
-                function,
-                receiver,
-                argument: None,
-            }))
-        }
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin.clone(),
-            None,
-            failure,
-        )?)),
-    }
 }
 
 /// Writes or deletes one element.
@@ -1188,10 +1375,14 @@ enum ArraySpliceStage {
     AwaitDeleteCount,
     /// Ready to extract the next removed element.
     NextExtract,
+    /// Awaiting `HasProperty` for the next removed element.
+    AwaitExtractPresence,
     /// Awaiting an extracted element's read.
     AwaitExtract,
     /// Ready to perform the next planned step of the shift.
     NextStep,
+    /// Awaiting `HasProperty` for the next shifted source.
+    AwaitShiftPresence,
     /// Awaiting a shifted element's read.
     AwaitShiftRead,
     /// Awaiting a shifted element's write.
@@ -1327,6 +1518,7 @@ pub(super) fn begin_array_splice(
 /// Resumes a splice after an awaited read, write, or conversion.
 #[allow(
     clippy::too_many_lines,
+    clippy::needless_continue,
     reason = "the length, argument, extraction, shift, and length-write phases form one traced continuation"
 )]
 pub(super) fn advance_array_splice(
@@ -1337,24 +1529,33 @@ pub(super) fn advance_array_splice(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut completion = completion;
+    macro_rules! await_get {
+        ($operation:expr) => {
+            match $operation? {
+                GetContinuationDispatch::Ready {
+                    state: resumed,
+                    value,
+                } => {
+                    state = resumed;
+                    completion = Some(value);
+                    continue;
+                }
+                GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+            }
+        };
+    }
     loop {
         match state.stage {
             ArraySpliceStage::AwaitLength => {
                 let key = runtime.predefined_property_key(PredefinedAtom::Length);
-                charge_splice_lookup(runtime, &state.target, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArraySpliceStage::AwaitLengthConversion;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArraySpliceStage::AwaitLengthConversion;
-                        return suspend_splice(state, function, receiver, None, return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(splice_failure(&state, failure));
-                    }
-                }
+                await_get!(begin_array_splice_get(
+                    runtime,
+                    state,
+                    key,
+                    ArraySpliceStage::AwaitLengthConversion,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArraySpliceStage::AwaitLengthConversion => {
                 let value = take_completion(&mut completion)?;
@@ -1447,22 +1648,40 @@ pub(super) fn advance_array_splice(
                 let key = element_key(runtime, index)?;
                 charge_splice_lookup(runtime, &state.target, execution_budget)?;
                 // A removed hole stays a hole in the result.
-                if !has_property(runtime, state.realm, &state.target, &key)? {
+                state.stage = ArraySpliceStage::AwaitExtractPresence;
+                let target = state.target.duplicate();
+                let dispatch = begin_value_has(
+                    runtime,
+                    &target,
+                    key,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_splice_continuation,
+                    "Array splice extraction HasProperty produced a structured result",
+                ));
+            }
+            ArraySpliceStage::AwaitExtractPresence => {
+                if !take_completion(&mut completion)?.is_truthy() {
+                    state.stage = ArraySpliceStage::NextExtract;
                     continue;
                 }
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArraySpliceStage::AwaitExtract;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArraySpliceStage::AwaitExtract;
-                        return suspend_splice(state, function, receiver, None, return_to);
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(splice_failure(&state, failure));
-                    }
-                }
+                let offset = state.next_extract.saturating_sub(1);
+                let index = state.start.saturating_add(offset);
+                let key = element_key(runtime, index)?;
+                await_get!(begin_array_splice_get(
+                    runtime,
+                    state,
+                    key,
+                    ArraySpliceStage::AwaitExtract,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArraySpliceStage::AwaitExtract => {
                 let value = take_completion(&mut completion)?;
@@ -1505,24 +1724,23 @@ pub(super) fn advance_array_splice(
                     ElementStep::Move { from, .. } => {
                         let key = element_key(runtime, from)?;
                         charge_splice_lookup(runtime, &state.target, execution_budget)?;
-                        if !has_property(runtime, state.realm, &state.target, &key)? {
-                            state.pending_absent = true;
-                            state.stage = ArraySpliceStage::AwaitShiftWrite;
-                            continue;
-                        }
-                        match read_static_property(runtime, state.realm, &state.target, &key)? {
-                            PropertyReadOutcome::Value(value) => {
-                                completion = Some(value);
-                                state.stage = ArraySpliceStage::AwaitShiftRead;
-                            }
-                            PropertyReadOutcome::Getter { function, receiver } => {
-                                state.stage = ArraySpliceStage::AwaitShiftRead;
-                                return suspend_splice(state, function, receiver, None, return_to);
-                            }
-                            PropertyReadOutcome::Failed(failure) => {
-                                return Err(splice_failure(&state, failure));
-                            }
-                        }
+                        state.stage = ArraySpliceStage::AwaitShiftPresence;
+                        let target = state.target.duplicate();
+                        let dispatch = begin_value_has(
+                            runtime,
+                            &target,
+                            key,
+                            state.realm,
+                            return_to,
+                            state.origin.clone(),
+                            execution_budget,
+                        )?;
+                        await_get!(continue_get_state_after(
+                            dispatch,
+                            state,
+                            array_splice_continuation,
+                            "Array splice shift HasProperty produced a structured result",
+                        ));
                     }
                     ElementStep::Take { .. } | ElementStep::Swap { .. } => {
                         return Err(EngineFault::RuntimeInvariant {
@@ -1531,6 +1749,34 @@ pub(super) fn advance_array_splice(
                         .into());
                     }
                 }
+            }
+            ArraySpliceStage::AwaitShiftPresence => {
+                if !take_completion(&mut completion)?.is_truthy() {
+                    state.pending_absent = true;
+                    state.stage = ArraySpliceStage::AwaitShiftWrite;
+                    continue;
+                }
+                let ElementStep::Move { from, .. } =
+                    state.moves.get(state.next_move).copied().ok_or(
+                        EngineFault::RuntimeInvariant {
+                            message: "a splice presence stage ran with no planned move",
+                        },
+                    )?
+                else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "a non-move splice step awaited source presence",
+                    }
+                    .into());
+                };
+                let key = element_key(runtime, from)?;
+                await_get!(begin_array_splice_get(
+                    runtime,
+                    state,
+                    key,
+                    ArraySpliceStage::AwaitShiftRead,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArraySpliceStage::AwaitShiftRead => {
                 state.pending = Some(take_completion(&mut completion)?);
@@ -1559,6 +1805,51 @@ pub(super) fn advance_array_splice(
                 };
                 let key = element_key(runtime, index)?;
                 charge_splice_lookup(runtime, &state.target, execution_budget)?;
+                if let Some(reference) = state.target.heap_reference()
+                    && runtime.proxy_state(reference)?.is_some()
+                {
+                    let dispatch = if state.pending_absent {
+                        begin_internal_delete(
+                            runtime,
+                            reference,
+                            key,
+                            true,
+                            false,
+                            state.realm,
+                            return_to,
+                            state.origin.clone(),
+                            execution_budget,
+                        )?
+                    } else {
+                        let value = state.pending.take().ok_or(EngineFault::RuntimeInvariant {
+                            message: "a splice Proxy write lost its value",
+                        })?;
+                        let name =
+                            property_key_name(&key).ok_or(EngineFault::RuntimeInvariant {
+                                message: "a splice index has no diagnostic name",
+                            })?;
+                        begin_internal_set(
+                            runtime,
+                            reference,
+                            key,
+                            name,
+                            value,
+                            state.target.duplicate(),
+                            true,
+                            false,
+                            state.realm,
+                            return_to,
+                            state.origin.clone(),
+                            execution_budget,
+                        )?
+                    };
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_splice_continuation,
+                        "Array splice Proxy write produced a structured result",
+                    ));
+                }
                 if state.pending_absent {
                     match delete_static_property(runtime, &state.target, &key)? {
                         PropertyDeleteOutcome::Deleted | PropertyDeleteOutcome::Refused => {}
@@ -1625,6 +1916,30 @@ pub(super) fn advance_array_splice(
                 let length =
                     StoredValue::Number(JsNumber::from_f64(length_as_f64(state.final_length)));
                 charge_splice_lookup(runtime, &state.target, execution_budget)?;
+                if let Some(reference) = state.target.heap_reference()
+                    && runtime.proxy_state(reference)?.is_some()
+                {
+                    let dispatch = begin_internal_set(
+                        runtime,
+                        reference,
+                        key,
+                        JsString::from_utf8("length")?,
+                        length,
+                        state.target.duplicate(),
+                        true,
+                        false,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_splice_continuation,
+                        "Array splice Proxy length write produced a structured result",
+                    ));
+                }
                 match write_static_property(
                     runtime,
                     state.realm,
@@ -1654,6 +1969,42 @@ pub(super) fn advance_array_splice(
             }
         }
     }
+}
+
+fn array_splice_continuation(state: ArraySpliceContinuation) -> NativeContinuation {
+    NativeContinuation::ArraySplice(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the splice Get boundary carries its next stage, caller continuation, and execution authority"
+)]
+fn begin_array_splice_get(
+    runtime: &mut Runtime,
+    mut state: ArraySpliceContinuation,
+    key: PropertyKey,
+    next_stage: ArraySpliceStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<GetContinuationDispatch<ArraySpliceContinuation>, NativeFailure> {
+    charge_splice_lookup(runtime, &state.target, execution_budget)?;
+    state.stage = next_stage;
+    let dispatch = begin_value_get(
+        runtime,
+        &state.target,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_state_after(
+        dispatch,
+        state,
+        array_splice_continuation,
+        "Array splice Get produced a structured result",
+    )
 }
 
 /// Plans the shift that follows a splice's extraction.

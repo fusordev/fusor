@@ -80,8 +80,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::set(ObjectRecord::empty(Some(prototype)), state))
+            .insert_heap_object(HeapObject::set(ObjectRecord::empty(Some(prototype)), state))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -110,8 +109,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::set_iterator(
+            .insert_heap_object(HeapObject::set_iterator(
                 ObjectRecord::empty(Some(HeapReference::Object(prototype))),
                 SetIterator::new(set, kind),
             ))

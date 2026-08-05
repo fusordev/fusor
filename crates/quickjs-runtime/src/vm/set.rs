@@ -464,20 +464,28 @@ fn read_set_constructor_property(
         }
     };
     charge_iterator_property_lookup(runtime, &base, execution_budget)?;
-    match read_static_property(runtime, state.realm, &base, key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_set_constructor(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            call_set_constructor_function(function, receiver, Vec::new(), state, return_to)
-        }
-        PropertyReadOutcome::Failed(failure) => {
-            let name = JsString::from_utf8(property_name)?;
-            let pending =
-                property_exception_at(state.realm, state.origin.clone(), Some(&name), failure)?;
-            Err(NativeFailure::Abrupt(pending))
-        }
-    }
+    let name = JsString::from_utf8(property_name)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &base,
+        key.clone(),
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        set_constructor_continuation,
+        |state, value| advance_set_constructor(runtime, state, value, return_to, execution_budget),
+        "Set constructor Get produced a structured result",
+    )
+}
+
+fn set_constructor_continuation(state: SetConstructorContinuation) -> NativeContinuation {
+    NativeContinuation::SetConstructor(Box::new(state))
 }
 
 fn call_set_constructor_next(
@@ -1190,23 +1198,28 @@ fn read_set_operation_property(
         }
     };
     charge_iterator_property_lookup(runtime, &base, execution_budget)?;
-    match read_static_property(runtime, state.realm, &base, key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_set_operation(runtime, state, value, return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            call_set_operation_function(function, receiver, Vec::new(), state, return_to)
-        }
-        PropertyReadOutcome::Failed(failure) => {
-            let name = JsString::from_utf8(property_name)?;
-            Err(NativeFailure::Abrupt(property_exception_at(
-                state.realm,
-                state.origin,
-                Some(&name),
-                failure,
-            )?))
-        }
-    }
+    let name = JsString::from_utf8(property_name)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &base,
+        key.clone(),
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        set_operation_continuation,
+        |state, value| advance_set_operation(runtime, state, value, return_to, execution_budget),
+        "Set operation Get produced a structured result",
+    )
+}
+
+fn set_operation_continuation(state: SetOperationContinuation) -> NativeContinuation {
+    NativeContinuation::SetOperation(Box::new(state))
 }
 
 fn call_set_operation_function(

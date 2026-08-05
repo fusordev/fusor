@@ -27,12 +27,12 @@
 
 use super::{
     Arc, Atom, AtomError, BindingCell, BoxedPrimitive, ErrorIntrinsicKind, ExceptionKind,
-    FunctionId, FunctionImplementation, HandleError, HandleKind, HeapObject, HeapReference,
-    JsBigInt, JsNumber, JsString, NativeFunction, NativeFunctionKind, ObjectId, ObjectRecord,
-    OwnProperty, PredefinedAtom, PropertyDeletion, PropertyKey, PropertyLayout, PropertyLayoutKind,
-    RealmId, RealmIntrinsics, ReleaseMailbox, Runtime, RuntimeResource, SetPrototypeOutcome,
-    SlotValue, StoredValue, array_length_from_number, check_execution_limit, stale_heap_reference,
-    usize_to_u64,
+    FunctionId, FunctionImplementation, HandleError, HandleKind, HeapFunction, HeapObject,
+    HeapReference, JsBigInt, JsNumber, JsString, NativeFunction, NativeFunctionKind, ObjectId,
+    ObjectRecord, OwnProperty, PredefinedAtom, PropertyDeletion, PropertyKey, PropertyLayout,
+    PropertyLayoutKind, Rc, RealmId, RealmIntrinsics, ReleaseMailbox, Runtime, RuntimeResource,
+    SetPrototypeOutcome, SlotValue, StoredValue, array_length_from_number, check_execution_limit,
+    stale_heap_reference, usize_to_u64,
 };
 
 #[derive(Clone, Copy)]
@@ -572,8 +572,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::error(ObjectRecord::empty(Some(prototype))))
+            .insert_heap_object(HeapObject::error(ObjectRecord::empty(Some(prototype))))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -691,8 +690,7 @@ impl Runtime {
                 })?;
         }
         let object = self
-            .objects
-            .try_insert(HeapObject::error(record))
+            .insert_heap_object(HeapObject::error(record))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -843,7 +841,24 @@ impl Runtime {
         target: HeapReference,
         key: &PropertyKey,
     ) -> Result<PropertyDeletion, crate::EngineFault> {
-        let deletion = self.object_record_mut(target)?.delete_own_property(key);
+        let dense_deleted = match (target, key.as_index()) {
+            (HeapReference::Object(object), Some(index)) => self
+                .objects
+                .get_mut(object)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "object",
+                    index: object.index(),
+                    generation: object.generation(),
+                })?
+                .array_state_mut()
+                .is_some_and(|state| state.delete_dense(index)),
+            (HeapReference::Function(_), _) | (HeapReference::Object(_), None) => false,
+        };
+        let deletion = if dense_deleted {
+            PropertyDeletion::Deleted
+        } else {
+            self.object_record_mut(target)?.delete_own_property(key)
+        };
         if deletion == PropertyDeletion::Deleted {
             if let HeapReference::Object(object) = target {
                 self.detach_mapped_arguments_property(object, key)?;
@@ -876,7 +891,8 @@ impl Runtime {
         &mut self,
         reference: HeapReference,
     ) -> Result<&mut ObjectRecord, crate::EngineFault> {
-        match reference {
+        let interner = Rc::clone(&self.shape_interner);
+        let record = match reference {
             HeapReference::Function(function) => self
                 .functions
                 .get_mut(function)
@@ -887,6 +903,38 @@ impl Runtime {
                 .get_mut(object)
                 .map(|object| &mut object.record)
                 .ok_or_else(|| stale_heap_reference(reference)),
+        }?;
+        record.adopt_shape_interner(interner);
+        Ok(record)
+    }
+
+    pub(crate) fn insert_heap_object(
+        &mut self,
+        mut object: HeapObject,
+    ) -> Result<ObjectId, std::collections::TryReserveError> {
+        object
+            .record
+            .adopt_shape_interner(Rc::clone(&self.shape_interner));
+        self.objects.try_insert(object)
+    }
+
+    pub(crate) fn insert_heap_function(
+        &mut self,
+        mut function: HeapFunction,
+    ) -> Result<FunctionId, std::collections::TryReserveError> {
+        function
+            .object
+            .adopt_shape_interner(Rc::clone(&self.shape_interner));
+        self.functions.try_insert(function)
+    }
+
+    pub(crate) fn canonicalize_all_shapes(&mut self) {
+        let interner = Rc::clone(&self.shape_interner);
+        for (_, function) in self.functions.iter_mut() {
+            function.object.adopt_shape_interner(Rc::clone(&interner));
+        }
+        for (_, object) in self.objects.iter_mut() {
+            object.record.adopt_shape_interner(Rc::clone(&interner));
         }
     }
 
@@ -916,8 +964,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::ordinary(ObjectRecord::empty(Some(prototype))))
+            .insert_heap_object(HeapObject::ordinary(ObjectRecord::empty(Some(prototype))))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -950,8 +997,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::ordinary(ObjectRecord::empty(None)))
+            .insert_heap_object(HeapObject::ordinary(ObjectRecord::empty(None)))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -999,8 +1045,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::raw_json(record))
+            .insert_heap_object(HeapObject::raw_json(record))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -1071,8 +1116,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::with_boxed_primitive(
+            .insert_heap_object(HeapObject::with_boxed_primitive(
                 ObjectRecord::empty(Some(prototype)),
                 BoxedPrimitive::Boolean(value),
             ))
@@ -1131,8 +1175,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::with_boxed_primitive(
+            .insert_heap_object(HeapObject::with_boxed_primitive(
                 ObjectRecord::empty(Some(prototype)),
                 BoxedPrimitive::Number(value),
             ))
@@ -1188,8 +1231,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::with_boxed_primitive(
+            .insert_heap_object(HeapObject::with_boxed_primitive(
                 ObjectRecord::empty(Some(prototype)),
                 BoxedPrimitive::BigInt(value),
             ))
@@ -1276,8 +1318,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::with_boxed_primitive(
+            .insert_heap_object(HeapObject::with_boxed_primitive(
                 record,
                 BoxedPrimitive::String(value),
             ))
@@ -1402,8 +1443,7 @@ impl Runtime {
             self.build_unmapped_arguments_record(intrinsics, values, length, property_count)?;
 
         let object = self
-            .objects
-            .try_insert(HeapObject::arguments(record))
+            .insert_heap_object(HeapObject::arguments(record))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -1568,9 +1608,8 @@ impl Runtime {
             }
         }
 
-        let Ok(object) = self
-            .objects
-            .try_insert(HeapObject::mapped_arguments(record, parameter_map))
+        let Ok(object) =
+            self.insert_heap_object(HeapObject::mapped_arguments(record, parameter_map))
         else {
             for cell in rollback_cells {
                 let removed = self.cells.remove(cell);

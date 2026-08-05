@@ -97,8 +97,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::with_boxed_primitive(
+            .insert_heap_object(HeapObject::with_boxed_primitive(
                 ObjectRecord::empty(Some(HeapReference::Object(prototype))),
                 BoxedPrimitive::Symbol(value),
             ))

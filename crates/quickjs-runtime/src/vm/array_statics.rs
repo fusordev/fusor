@@ -679,10 +679,6 @@ fn finish_array_static_length(
     }
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "dynamic index keys and predefined keys share one ownership shape across immediate and suspended property reads"
-)]
 fn read_array_static_property(
     runtime: &mut Runtime,
     state: ArrayStaticContinuation,
@@ -715,21 +711,44 @@ fn read_array_static_property(
             .into());
         }
     };
-    charge_array_static_lookup(runtime, base, execution_budget)?;
-    match read_static_property(runtime, state.realm, base, &key)? {
-        PropertyReadOutcome::Value(value) => {
+    let base = base.duplicate();
+    charge_array_static_lookup(runtime, &base, execution_budget)?;
+    let name = JsString::from_utf8(diagnostic_name)?;
+    let dispatch = match begin_value_get(
+        runtime,
+        &base,
+        key,
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(pending)) => {
+            return resume_array_static_abrupt(
+                runtime,
+                state,
+                pending,
+                return_to,
+                execution_budget,
+            );
+        }
+        Err(failure) => return Err(failure),
+    };
+    continue_get_after(
+        dispatch,
+        state,
+        array_static_continuation,
+        |state, value| {
             advance_array_static(runtime, state, Some(value), return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            call_array_static_function(state, function, receiver, Vec::new(), None, return_to)
-        }
-        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
-            state.realm,
-            state.origin,
-            Some(&JsString::from_utf8(diagnostic_name)?),
-            failure,
-        )?)),
-    }
+        },
+        "Array.from Get produced a structured result",
+    )
+}
+
+fn array_static_continuation(state: ArrayStaticContinuation) -> NativeContinuation {
+    NativeContinuation::ArrayStatic(Box::new(state))
 }
 
 fn call_array_static_function(

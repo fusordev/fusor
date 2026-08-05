@@ -1187,10 +1187,6 @@ fn take_array_from_async_record(
     Ok(state)
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "dynamic index keys and predefined keys share one ownership shape across suspended reads"
-)]
 fn read_array_from_async_property(
     runtime: &mut Runtime,
     state: ArrayFromAsyncRecord,
@@ -1222,24 +1218,44 @@ fn read_array_from_async_property(
             .into());
         }
     };
-    charge_array_from_async_lookup(runtime, base, execution_budget)?;
-    match read_static_property(runtime, state.realm, base, &key)? {
-        PropertyReadOutcome::Value(value) => {
+    let base = base.duplicate();
+    charge_array_from_async_lookup(runtime, &base, execution_budget)?;
+    let name = JsString::from_utf8(diagnostic_name)?;
+    let dispatch = match begin_value_get(
+        runtime,
+        &base,
+        key,
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(pending)) => {
+            return resume_array_from_async_abrupt(
+                runtime,
+                state,
+                pending,
+                return_to,
+                execution_budget,
+            );
+        }
+        Err(failure) => return Err(failure),
+    };
+    continue_get_after(
+        dispatch,
+        state,
+        array_from_async_continuation,
+        |state, value| {
             advance_array_from_async(runtime, state, Some(value), return_to, execution_budget)
-        }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            call_array_from_async_function(state, function, receiver, Vec::new(), None, return_to)
-        }
-        PropertyReadOutcome::Failed(failure) => {
-            let pending = property_exception_at(
-                state.realm,
-                state.origin.clone(),
-                Some(&JsString::from_utf8(diagnostic_name)?),
-                failure,
-            )?;
-            resume_array_from_async_abrupt(runtime, state, pending, return_to, execution_budget)
-        }
-    }
+        },
+        "Array.fromAsync Get produced a structured result",
+    )
+}
+
+fn array_from_async_continuation(state: ArrayFromAsyncRecord) -> NativeContinuation {
+    NativeContinuation::ArrayFromAsync(Box::new(state))
 }
 
 fn call_array_from_async_function(

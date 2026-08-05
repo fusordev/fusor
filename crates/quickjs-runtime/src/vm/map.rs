@@ -499,24 +499,40 @@ fn read_map_constructor_property(
         }
     };
     charge_iterator_property_lookup(runtime, &base, execution_budget)?;
-    match read_static_property(runtime, state.realm, &base, key)? {
-        PropertyReadOutcome::Value(value) => {
-            advance_map_constructor(runtime, state, value, return_to, execution_budget)
+    let name = JsString::from_utf8(property_name)?;
+    let dispatch = match begin_value_get(
+        runtime,
+        &base,
+        key.clone(),
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(pending)) if state.closes_on_abrupt() => {
+            return begin_map_constructor_close(
+                runtime,
+                state,
+                pending,
+                return_to,
+                execution_budget,
+            );
         }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            call_map_constructor_function(function, receiver, Vec::new(), state, return_to)
-        }
-        PropertyReadOutcome::Failed(failure) => {
-            let name = JsString::from_utf8(property_name)?;
-            let pending =
-                property_exception_at(state.realm, state.origin.clone(), Some(&name), failure)?;
-            if state.closes_on_abrupt() {
-                begin_map_constructor_close(runtime, state, pending, return_to, execution_budget)
-            } else {
-                Err(NativeFailure::Abrupt(pending))
-            }
-        }
-    }
+        Err(failure) => return Err(failure),
+    };
+    continue_get_after(
+        dispatch,
+        state,
+        map_constructor_continuation,
+        |state, value| advance_map_constructor(runtime, state, value, return_to, execution_budget),
+        "Map constructor Get produced a structured result",
+    )
+}
+
+fn map_constructor_continuation(state: MapConstructorContinuation) -> NativeContinuation {
+    NativeContinuation::MapConstructor(Box::new(state))
 }
 
 fn call_map_constructor_next(

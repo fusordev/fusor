@@ -53,8 +53,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::regexp(
+            .insert_heap_object(HeapObject::regexp(
                 record,
                 RegExpState::new(source, flags, matcher),
             ))
