@@ -19,7 +19,7 @@ quickjs-compiler ─────────→ quickjs-bytecode
                                  ↑
 qjs-dtoa ─┐                     │
 qjs-unicode ─→ quickjs-runtime ─┘
-qjs-regexp ┘          ↑
+quickjs-regexp ┘      ↑
                       │
                quickjs-tokio
                       ↑
@@ -220,10 +220,10 @@ cycle, reachability, nesting-depth, and capture-source checks. Capture work
 remains bounded across shared parent edges. A selected
 nested root with imported cells fails closed until an explicit verified root
 environment exists. `compile_leaf` remains the explicit nested-function-free
-API and rejects a selection with children. BigInt and RegExp runtime values,
-non-string atom namespaces, raw class/function stack entries, and inferred
-anonymous-function names stay rejected until their owned records and semantics
-exist.
+API and rejects a selection with children. BigInt and RegExp literals now own
+verified runtime records; non-string atom namespaces, raw class/function stack
+entries, and remaining inferred anonymous-function cases stay rejected until
+their owned records and semantics exist.
 
 Synchronous `for-in` is an ordinary-profile exception to the otherwise empty
 statement-stack rule. Lowering keeps one private cursor beneath the statement
@@ -369,8 +369,8 @@ QuickJS acceptance and rejection coverage wherever both are meaningful. Any
 Oxc/QuickJS mismatch must carry a unique direction, rationale, and regression
 fixture, and that record becomes invalid if the expectations converge. The
 current RegExp pattern difference is deliberate: Oxc recognizes the literal
-boundary and flags, while the future QuickJS-derived RegExp layer owns pattern
-grammar. The claim set remains an expanding review contract and does not by
+boundary and flags, while `quickjs-regexp` owns pattern grammar, early errors,
+and execution. The claim set remains an expanding review contract and does not by
 itself certify that every pinned QuickJS parser production has a fixture.
 
 Dynamic Function constructors use a dedicated adapter rather than parsing a
@@ -839,8 +839,9 @@ until zombie-state and resurrection rules are complete.
   eval-visible bindings use heap binding cells.
 - Suspended generators and async functions own their arguments, locals,
   operand stack, and captured-cell IDs.
-- Number parsing/printing, BigInt, Unicode, and RegExp behavior are direct
-  QuickJS-derived ports rather than substitutes from another engine.
+- Number parsing/printing, BigInt, Unicode, and RegExp behavior are project-owned
+  implementations characterized against the pinned QuickJS and specification
+  oracles rather than delegated to another engine at runtime.
 
 ## Exceptions and failures
 

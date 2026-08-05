@@ -1654,6 +1654,45 @@ impl ArgumentsState {
     }
 }
 
+/// Internal slots of an ECMAScript `RegExp` instance.
+pub(crate) struct RegExpState {
+    source: JsString,
+    flags: JsString,
+    matcher: quickjs_regexp::CompiledRegExp,
+    last_index: u64,
+}
+
+impl RegExpState {
+    pub(crate) const fn new(
+        source: JsString,
+        flags: JsString,
+        matcher: quickjs_regexp::CompiledRegExp,
+    ) -> Self {
+        Self {
+            source,
+            flags,
+            matcher,
+            last_index: 0,
+        }
+    }
+
+    pub(crate) const fn source(&self) -> &JsString {
+        &self.source
+    }
+
+    pub(crate) const fn flags(&self) -> &JsString {
+        &self.flags
+    }
+
+    pub(crate) const fn matcher(&self) -> &quickjs_regexp::CompiledRegExp {
+        &self.matcher
+    }
+
+    pub(crate) const fn last_index(&self) -> u64 {
+        self.last_index
+    }
+}
+
 pub(crate) enum HeapObjectKind {
     Ordinary,
     /// An ordinary or exotic arguments object with `[[ParameterMap]]` state.
@@ -1668,6 +1707,8 @@ pub(crate) enum HeapObjectKind {
     ForInIterator(ForInIterator),
     ArrayIterator(ArrayIterator),
     StringIterator(StringIterator),
+    /// An ECMAScript `RegExp` object with compiled `[[RegExpMatcher]]` state.
+    RegExp(RegExpState),
     /// An ECMAScript Map object with ordered `[[MapData]]`.
     Map(MapState),
     MapIterator(MapIterator),
@@ -1766,6 +1807,7 @@ impl HeapObjectKind {
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -1790,6 +1832,7 @@ impl HeapObjectKind {
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -1813,6 +1856,7 @@ impl HeapObjectKind {
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -1836,6 +1880,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -1859,6 +1904,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -1882,6 +1928,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -1905,6 +1952,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -1928,6 +1976,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -1951,6 +2000,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -1965,6 +2015,13 @@ impl HeapObjectKind {
     pub(crate) const fn map(&self) -> Option<&MapState> {
         match self {
             Self::Map(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn regexp(&self) -> Option<&RegExpState> {
+        match self {
+            Self::RegExp(state) => Some(state),
             _ => None,
         }
     }
@@ -2187,6 +2244,15 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn regexp(record: ObjectRecord, state: RegExpState) -> Self {
+        Self {
+            kind: HeapObjectKind::RegExp(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn map(record: ObjectRecord, state: MapState) -> Self {
         Self {
             kind: HeapObjectKind::Map(state),
@@ -2294,6 +2360,10 @@ impl HeapObject {
         }
     }
 
+    pub(crate) const fn regexp_state(&self) -> Option<&RegExpState> {
+        self.kind.regexp()
+    }
+
     #[must_use]
     pub(crate) const fn is_arguments(&self) -> bool {
         matches!(self.kind, HeapObjectKind::Arguments(_))
@@ -2311,6 +2381,7 @@ impl HeapObject {
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
             | HeapObjectKind::StringIterator(_)
+            | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
@@ -2334,6 +2405,7 @@ impl HeapObject {
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
             | HeapObjectKind::StringIterator(_)
+            | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
@@ -2359,6 +2431,7 @@ impl HeapObject {
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
             | HeapObjectKind::StringIterator(_)
+            | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
@@ -2382,6 +2455,7 @@ impl HeapObject {
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
             | HeapObjectKind::StringIterator(_)
+            | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)

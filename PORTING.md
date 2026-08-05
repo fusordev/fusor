@@ -34,6 +34,7 @@ Production crates remain independently reusable:
 | `quickjs-frontend` | Published Oxc parsing/semantics and owned frontend records |
 | `quickjs-bytecode` | Instructions, codec, verifier, disassembly, constants, atoms, and debug data |
 | `quickjs-compiler` | Iterative Oxc lowering to verified bytecode |
+| `quickjs-regexp` | Safe, bounded ES RegExp grammar lowering and UTF-16 execution |
 | `quickjs-runtime` | Values, heap, realms, VM, built-ins, limits, interrupts, and embedding primitives |
 | `quickjs` | Ergonomic facade used by thin command-line tools |
 
@@ -99,6 +100,12 @@ does not imply complete ECMAScript or QuickJS compatibility.
   `replace`/`replaceAll`/`split` protocols and plain-string paths, Annex B HTML
   wrappers, and pinned ICU4X data. Shared corpora: `replaceAll` 6/6 cases and
   14/14 tags; `split` 6/6 cases and 17/17 tags.
+- [x] A safe, bounded RegExp core parses ES2025 grammar through pinned Oxc,
+  lowers to an owned explicit-backtracking VM, preserves UTF-16 positions,
+  covers lookaround/backreferences/Unicode sets and most properties of strings,
+  and validates/executes literals through verified bytecode. Shared core
+  corpus: 63/63 QuickJS and Node cases. Constructor/prototype protocols remain
+  open; RGI ZWJ string properties currently reject explicitly.
 - [x] Full admitted `Array`, including generic array-like behavior and
   spec-ordered, resource-traced `fromAsync` iterator/array-like suspension.
 - [x] `Map`: ordered SameValueZero storage, `AddEntriesFromIterable` close
@@ -156,7 +163,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 ## Compatibility differences
 
 - `QJS-OXC-001`: Oxc determines RegExp literal boundaries and flags. The
-  deferred project-owned RegExp layer owns pattern grammar and early errors.
+  project-owned RegExp layer owns pattern grammar, early errors, and execution.
 - `QJS-OXC-002`: Oxc accepts a chained-label `continue` target that pinned
   QuickJS rejects; a post-semantic check supplies the target-profile rejection.
 - `QJS-OXC-003`: pinned QuickJS reports `stack overflow` around 695 nested
@@ -183,6 +190,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - `QJS-STRING-001`: pinned QuickJS skips inherited `@@replace`/`@@split` lookup
   for primitive search or separator values. ES2025 `GetMethod` observes the
   primitive wrapper prototype; this port follows the specification and Node.
+- `QJS-REGEXP-001`: pinned QuickJS rejects a Unicode-set string disjunction in
+  lookbehind. ECMA-262's backwards matcher and Node accept it; this port follows
+  the specification.
 
 ## Completion gates
 
@@ -216,6 +226,7 @@ QuickJS `qjs` or `qjsc`. Current corpus results are:
 | Annex B String HTML | 6/6, 18/18 feature tags |
 | `String.prototype.replaceAll` | 6/6, 14/14 feature tags (QuickJS and Node) |
 | `String.prototype.split` | 6/6, 17/17 feature tags (QuickJS and Node) |
+| RegExp core | 63/63 (QuickJS and Node) |
 | Promise core | 29/29, 46/46 feature tags |
 | `Array.fromAsync` | 5/5 (Node; absent in pinned QuickJS) |
 | Map | 6/6, 13/13 feature tags (QuickJS and Node) |

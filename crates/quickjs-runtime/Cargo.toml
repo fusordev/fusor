@@ -12,6 +12,7 @@ icu_casemap.workspace = true
 icu_locale_core.workspace = true
 icu_normalizer.workspace = true
 quickjs-bytecode = { path = "../quickjs-bytecode" }
+quickjs-regexp = { path = "../quickjs-regexp" }
 writeable.workspace = true
 
 [dev-dependencies]

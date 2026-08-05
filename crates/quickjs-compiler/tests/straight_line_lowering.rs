@@ -404,6 +404,44 @@ fn primitive_literal_forms_do_not_require_a_constant_pool() {
 }
 
 #[test]
+fn regexp_literals_validate_and_lower_to_the_quickjs_two_input_opcode() {
+    let compiled = compile("function f(){ return /(?<word>a+)[0-9]/dgi; }", "f");
+
+    assert_eq!(
+        opcodes(&compiled),
+        [
+            FinalOpcode::PushAtomValue,
+            FinalOpcode::PushAtomValue,
+            FinalOpcode::RegExp,
+            FinalOpcode::Return,
+        ]
+    );
+    let atoms = compiled
+        .atoms()
+        .iter()
+        .map(|atom| {
+            String::from_utf16(&atom.string().code_units().collect::<Vec<_>>())
+                .expect("regexp literal source and flags are Unicode scalar text")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(&atoms[..2], ["(?<word>a+)[0-9]", "dgi"]);
+}
+
+#[test]
+fn regexp_literal_pattern_errors_are_reported_at_the_literal_span() {
+    let source = "function f(){ return /[z-a]/u; }";
+    let error = compile_error(source, "f");
+    let LeafCompilationError::RegExp {
+        span,
+        source: quickjs_regexp::CompileError::Syntax(_),
+    } = error
+    else {
+        panic!("expected a RegExp syntax error, got {error:?}");
+    };
+    assert_eq!(&source[span.start as usize..span.end as usize], "/[z-a]/u");
+}
+
+#[test]
 fn unsupported_expression_families_fail_closed_at_the_exact_span() {
     let cases = [
         (

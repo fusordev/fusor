@@ -750,6 +750,7 @@ dependencies = [
  "oxc_syntax",
  "quickjs-bytecode",
  "quickjs-frontend",
+ "quickjs-regexp",
 ]
 
 [[package]]
@@ -776,6 +777,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "quickjs-regexp"
+version = "0.1.0"
+dependencies = [
+ "icu_casemap",
+ "icu_properties",
+ "oxc_allocator",
+ "oxc_regular_expression",
+ "oxc_span",
+]
+
+[[package]]
 name = "quickjs-runtime"
 version = "0.0.1"
 dependencies = [
@@ -785,6 +797,7 @@ dependencies = [
  "quickjs-bytecode",
  "quickjs-compiler",
  "quickjs-frontend",
+ "quickjs-regexp",
  "writeable",
 ]
 

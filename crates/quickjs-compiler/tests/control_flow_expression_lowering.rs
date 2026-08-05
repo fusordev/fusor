@@ -417,17 +417,17 @@ fn nested_control_flow_has_verified_equal_depth_joins_and_relocated_sources() {
 }
 
 #[test]
-fn unsupported_short_circuit_paths_are_still_prevalidated_with_exact_spans() {
-    let source = "function f(){ return false && /constant/; }";
+fn unreachable_regexp_paths_are_still_prevalidated_with_exact_spans() {
+    let source = "function f(){ return false && /[z-a]/u; }";
     let error = compile_error(source, "f");
-    let LeafCompilationError::Unsupported { feature, span } = error else {
-        panic!("expected unsupported literal");
+    let LeafCompilationError::RegExp {
+        span,
+        source: quickjs_regexp::CompileError::Syntax(_),
+    } = error
+    else {
+        panic!("expected RegExp syntax error, got {error:?}");
     };
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedLiteral);
-    assert_eq!(
-        &source[span.start as usize..span.end as usize],
-        "/constant/"
-    );
+    assert_eq!(&source[span.start as usize..span.end as usize], "/[z-a]/u");
 }
 
 #[test]

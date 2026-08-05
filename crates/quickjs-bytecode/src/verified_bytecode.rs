@@ -5490,6 +5490,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushFalse
             | FinalOpcode::PushTrue
             | FinalOpcode::Object
+            | FinalOpcode::RegExp
             | FinalOpcode::SpecialObject
             | FinalOpcode::Rest
             | FinalOpcode::Drop

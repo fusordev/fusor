@@ -34,6 +34,20 @@ fn runtime() -> Runtime {
 }
 
 #[test]
+fn regexp_literal_opcode_allocates_a_branded_runtime_object() {
+    let authority = compile("function make(){return /a+/giu;}", "make");
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context.instantiate(authority).expect("function");
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("RegExp literal execution");
+    assert_eq!(result.kind().expect("live result"), ValueKind::Object);
+}
+
+#[test]
 fn for_in_executes_ordered_own_keys_string_indices_and_getter_free_enumeration() {
     let authority = compile(
         "function run(missing){\

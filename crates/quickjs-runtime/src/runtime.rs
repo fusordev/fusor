@@ -48,7 +48,7 @@ use crate::{
     object::{
         ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, ForInIterator, ForInSnapshot,
         HeapObject, IntegrityLevel, KeyPhases, ObjectRecord, OwnProperty, PromiseCapability,
-        PromiseReaction, PropertyDeletion, StringIterator,
+        PromiseReaction, PropertyDeletion, RegExpState, StringIterator,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
@@ -58,6 +58,7 @@ mod iterators;
 mod limits;
 mod maps;
 mod promises;
+mod regexps;
 mod sets;
 mod symbols;
 mod weak_collections;
@@ -2389,6 +2390,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushFalse
             | FinalOpcode::PushTrue
             | FinalOpcode::Object
+            | FinalOpcode::RegExp
             | FinalOpcode::SpecialObject
             | FinalOpcode::Rest
             | FinalOpcode::ArrayFrom

@@ -11,9 +11,9 @@ use oxc_ast::{
         ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft, Function, FunctionType,
         IdentifierReference, IfStatement, LabelIdentifier, LabeledStatement, LogicalExpression,
         NewExpression, ObjectAssignmentTarget, ObjectExpression, ObjectPattern, ObjectProperty,
-        ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind, ReturnStatement,
-        SequenceExpression, SimpleAssignmentTarget, StaticMemberExpression, ThrowStatement,
-        TryStatement, UnaryExpression, UpdateExpression, VariableDeclaration,
+        ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind, RegExpLiteral,
+        ReturnStatement, SequenceExpression, SimpleAssignmentTarget, StaticMemberExpression,
+        ThrowStatement, TryStatement, UnaryExpression, UpdateExpression, VariableDeclaration,
         VariableDeclarationKind, VariableDeclarator, WhileStatement,
     },
 };

@@ -100,6 +100,13 @@ pub enum LeafCompilationError {
         /// Exact string-construction failure.
         source: CompilerStringError,
     },
+    /// `RegExp` literal grammar or executable lowering failed.
+    RegExp {
+        /// Exact literal span.
+        span: Span,
+        /// Exact project-owned `RegExp` compiler failure.
+        source: quickjs_regexp::CompileError,
+    },
     /// A typed final instruction could not be encoded.
     BytecodeEncoding {
         /// Source span responsible for the instruction.
@@ -184,6 +191,9 @@ impl fmt::Display for LeafCompilationError {
             Self::CompilerString { span, source } => {
                 write!(formatter, "compiler string failed at {span:?}: {source}")
             }
+            Self::RegExp { span, source } => {
+                write!(formatter, "regular expression failed at {span:?}: {source}")
+            }
             Self::BytecodeEncoding { span, source } => {
                 write!(formatter, "bytecode encoding failed at {span:?}: {source}")
             }
@@ -248,6 +258,7 @@ impl Error for LeafCompilationError {
             Self::BytecodeGraphVerification { source, .. } => Some(source),
             Self::CookedStringDecoding { source, .. } => Some(source),
             Self::CompilerString { source, .. } => Some(source),
+            Self::RegExp { source, .. } => Some(source),
             Self::ForeignExecutable { .. }
             | Self::InvalidExecutable { .. }
             | Self::Unsupported { .. }

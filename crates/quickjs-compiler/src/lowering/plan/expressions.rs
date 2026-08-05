@@ -78,9 +78,6 @@ pub(in crate::lowering) fn plan_literal(
             PlannedInstruction::new(FinalOpcode::PushEmptyString, Operands::None, literal.span),
         ),
         Expression::StringLiteral(literal) => constants.plan_string(literal.span),
-        Expression::RegExpLiteral(literal) => {
-            unsupported(UnsupportedLeafFeature::UnsupportedLiteral, literal.span)
-        }
         Expression::TemplateLiteral(template)
             if template.expressions.is_empty() && template.quasis.len() == 1 =>
         {
@@ -269,6 +266,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 }
                 ExpressionWork::Bind(label) => flow.bind(&label)?,
                 ExpressionWork::Visit(expression) => {
+                    if let Expression::RegExpLiteral(literal) = expression {
+                        for instruction in constants.plan_regexp_literal(literal)? {
+                            flow.emit(instruction)?;
+                        }
+                        continue;
+                    }
                     if let Some(literal) = plan_literal(expression, constants) {
                         flow.emit(literal?)?;
                         continue;

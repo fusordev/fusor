@@ -16,10 +16,10 @@ use super::{
     ArrayExpression, ArrayExpressionElement, AssignmentTargetProperty, AstKind, BindingPattern,
     CompilationContext, CompiledConstant, CompiledFunctionConstant, Executable, ExpressionPlanner,
     FunctionTreeLayoutSeed, GetSpan, LeafCompilationError, NodeId, OxcPropertyKey, ParsedUnit,
-    PlannedInstruction, StoragePlacement, UnaryOperator, checked_function_entry_count,
-    compiled_static_property_key, compiler_identifier_string, decode_compiler_string, exact_i32,
-    exact_negated_i32, record_property_candidate, record_property_candidate_for,
-    record_string_candidate,
+    PlannedInstruction, RegExpLiteral, StoragePlacement, UnaryOperator,
+    checked_function_entry_count, compiled_static_property_key, compiler_identifier_string,
+    decode_compiler_string, exact_i32, exact_negated_i32, record_property_candidate,
+    record_property_candidate_for, record_string_candidate,
 };
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
@@ -350,6 +350,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     decode_compiler_string(cooked.as_str(), quasi.lone_surrogates, template.span)?;
                 record_string_candidate(owner, value, template.span, candidates, atom_candidates)?;
             }
+            AstKind::RegExpLiteral(literal) => {
+                Self::record_regexp_literal_candidate(owner, literal, candidates, atom_candidates)?;
+            }
             AstKind::ObjectProperty(property) => {
                 if !property.computed
                     && !property.shorthand
@@ -438,6 +441,36 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn record_regexp_literal_candidate(
+        owner: ExecutableId,
+        literal: &RegExpLiteral<'_>,
+        candidates: &mut [Vec<CompiledConstantCandidate>],
+        atom_candidates: &mut [Vec<CompiledAtomCandidate>],
+    ) -> Result<(), LeafCompilationError> {
+        let pattern = literal.regex.pattern.text.as_str();
+        let flags = literal.regex.flags.to_string();
+        quickjs_regexp::CompiledRegExp::compile(
+            pattern,
+            &flags,
+            quickjs_regexp::CompileLimits::default(),
+        )
+        .map_err(|source| LeafCompilationError::RegExp {
+            span: literal.span,
+            source,
+        })?;
+        let (pattern_span, flags_span) = regexp_component_spans(literal, flags.len())?;
+        for (value, span) in [(pattern, pattern_span), (flags.as_str(), flags_span)] {
+            record_string_candidate(
+                owner,
+                compiler_identifier_string(value, span)?,
+                span,
+                candidates,
+                atom_candidates,
+            )?;
         }
         Ok(())
     }
@@ -879,6 +912,29 @@ impl CompiledConstantPool {
         Ok(PlannedInstruction::new(instruction.0, instruction.1, span))
     }
 
+    pub(in crate::lowering) fn plan_regexp_literal(
+        &self,
+        literal: &RegExpLiteral<'_>,
+    ) -> Result<[PlannedInstruction; 3], LeafCompilationError> {
+        let flags = literal.regex.flags.to_string();
+        let (pattern_span, flags_span) = regexp_component_spans(literal, flags.len())?;
+        let pattern = if literal.regex.pattern.text.is_empty() {
+            PlannedInstruction::new(FinalOpcode::PushEmptyString, Operands::None, pattern_span)
+        } else {
+            self.plan_string(pattern_span)?
+        };
+        let flags = if flags.is_empty() {
+            PlannedInstruction::new(FinalOpcode::PushEmptyString, Operands::None, flags_span)
+        } else {
+            self.plan_string(flags_span)?
+        };
+        Ok([
+            pattern,
+            flags,
+            PlannedInstruction::new(FinalOpcode::RegExp, Operands::None, literal.span),
+        ])
+    }
+
     pub(in crate::lowering) fn property_atom_index(
         &self,
         span: Span,
@@ -951,6 +1007,56 @@ impl CompiledConstantPool {
                 span: None,
             })
     }
+}
+
+fn regexp_component_spans(
+    literal: &RegExpLiteral<'_>,
+    flags_len: usize,
+) -> Result<(Span, Span), LeafCompilationError> {
+    let pattern_len = u32::try_from(literal.regex.pattern.text.len()).map_err(|_| {
+        LeafCompilationError::CapacityExceeded {
+            domain: "RegExp literal source span",
+        }
+    })?;
+    let flags_len =
+        u32::try_from(flags_len).map_err(|_| LeafCompilationError::CapacityExceeded {
+            domain: "RegExp literal flags span",
+        })?;
+    let pattern_start =
+        literal
+            .span
+            .start
+            .checked_add(1)
+            .ok_or(LeafCompilationError::CapacityExceeded {
+                domain: "RegExp literal source span",
+            })?;
+    let pattern_end =
+        pattern_start
+            .checked_add(pattern_len)
+            .ok_or(LeafCompilationError::CapacityExceeded {
+                domain: "RegExp literal source span",
+            })?;
+    let flags_start = pattern_end
+        .checked_add(1)
+        .ok_or(LeafCompilationError::CapacityExceeded {
+            domain: "RegExp literal flags span",
+        })?;
+    let flags_end =
+        flags_start
+            .checked_add(flags_len)
+            .ok_or(LeafCompilationError::CapacityExceeded {
+                domain: "RegExp literal flags span",
+            })?;
+    if flags_end != literal.span.end {
+        return Err(LeafCompilationError::SemanticInvariant {
+            invariant: "RegExp literal body and flags partition its source span",
+            span: Some(literal.span),
+        });
+    }
+    Ok((
+        Span::new(pattern_start, pattern_end),
+        Span::new(flags_start, flags_end),
+    ))
 }
 
 #[cfg(test)]

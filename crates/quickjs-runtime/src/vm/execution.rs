@@ -698,6 +698,58 @@ pub(super) fn execute_one(
             let object = runtime.allocate_ordinary_object(prototype)?;
             push(frame, StoredValue::Object(object));
         }
+        FinalOpcode::RegExp => {
+            let flags = pop(frame)?;
+            let pattern = pop(frame)?;
+            let (StoredValue::String(pattern), StoredValue::String(flags)) = (pattern, flags)
+            else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified regexp operands are strings",
+                }
+                .into());
+            };
+            let realm = code(runtime, frame.code)?.realm;
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            if char::decode_utf16(pattern.code_units()).any(|character| character.is_err())
+                || char::decode_utf16(flags.code_units()).any(|character| character.is_err())
+            {
+                return Ok(Step::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::SyntaxError,
+                        message: JsString::from_utf8("invalid regular expression source")?,
+                    },
+                    origin,
+                }));
+            }
+            let pattern_text = pattern.to_utf8_lossy()?;
+            let flags_text = flags.to_utf8_lossy()?;
+            let matcher = match quickjs_regexp::CompiledRegExp::compile(
+                &pattern_text,
+                &flags_text,
+                quickjs_regexp::CompileLimits::default(),
+            ) {
+                Ok(matcher) => matcher,
+                Err(error) => {
+                    return Ok(Step::Abrupt(PendingException {
+                        realm,
+                        payload: PendingExceptionPayload::EngineError {
+                            kind: ExceptionKind::SyntaxError,
+                            message: JsString::from_utf8(&error.to_string())?,
+                        },
+                        origin,
+                    }));
+                }
+            };
+            let prototype = runtime.realm_object_prototype(realm)?;
+            let object = runtime.allocate_regexp_object(
+                HeapReference::Object(prototype),
+                pattern,
+                flags,
+                matcher,
+            )?;
+            push(frame, StoredValue::Object(object));
+        }
         FinalOpcode::ArrayFrom => {
             let Operands::NPop { argument_count } = operands else {
                 return unsupported_dispatch(opcode);
