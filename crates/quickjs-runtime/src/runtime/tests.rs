@@ -1323,6 +1323,13 @@ fn inferred_function_name_opcode_is_admitted_by_whole_graph_runtime_preflight() 
 }
 
 #[test]
+fn realm_global_delete_opcode_is_admitted_by_whole_graph_runtime_preflight() {
+    assert!(is_supported_opcode(
+        quickjs_bytecode::FinalOpcode::DeleteVar
+    ));
+}
+
+#[test]
 fn array_spread_opcodes_are_admitted_without_public_iterator_markers() {
     use quickjs_bytecode::{AtomPoolIndex, FinalOpcode, Instruction, Operands};
 

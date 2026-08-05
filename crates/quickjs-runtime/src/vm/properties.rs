@@ -286,6 +286,98 @@ pub(super) fn global_reference_operand(
     })
 }
 
+/// Resolves the atom operand of verified `delete_var` back to its typed Realm
+/// object-binding or unresolved-lookup closure entry.
+///
+/// The verifier guarantees that one same-name GlobalReference, `var`, or
+/// function descriptor is present. Matching installed atom identities here
+/// avoids trusting an untyped closure index in the instruction stream while
+/// preserving the pinned opcode's atom operand.
+pub(super) fn delete_global_reference_operand(
+    runtime: &Runtime,
+    frame: &Frame,
+    operands: Operands,
+) -> Result<GlobalReferenceOperand, EngineFault> {
+    let Operands::Atom(target_index) = operands else {
+        return Err(EngineFault::MissingPoolEntry {
+            pool: "realm global delete atom",
+            index: u32::MAX,
+        });
+    };
+    let installed = installed_template(runtime, frame.code, frame.template)?;
+    let target =
+        installed
+            .atoms
+            .get(target_index.get() as usize)
+            .ok_or(EngineFault::MissingPoolEntry {
+                pool: "realm global delete atom",
+                index: target_index.get(),
+            })?;
+    let verified = code(runtime, frame.code)?
+        .authority
+        .function(frame.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })?;
+    let closure = verified
+        .metadata()
+        .closures()
+        .iter()
+        .enumerate()
+        .find_map(|(closure, definition)| {
+            let CompilerClosureBinding::RealmGlobal(policy) = definition.binding() else {
+                return None;
+            };
+            if !matches!(
+                policy.kind(),
+                CompilerBindingKind::GlobalReference
+                    | CompilerBindingKind::Var
+                    | CompilerBindingKind::Function
+            ) {
+                return None;
+            }
+            let name = definition.name()?;
+            installed
+                .atoms
+                .get(name.get() as usize)
+                .is_some_and(|candidate| candidate.is_same_identity(target))
+                .then_some(closure)
+        })
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "verified delete_var lost its realm-global binding",
+        })?;
+    let closure = u32::try_from(closure).map_err(|_| EngineFault::RuntimeInvariant {
+        message: "realm-global delete closure index is not representable",
+    })?;
+    global_reference_operand(runtime, frame, closure)
+}
+
+/// Applies Global Environment Record `DeleteBinding` for a Realm-global name.
+/// Persistent lexical bindings are never deletable; otherwise the binding is
+/// the global object's own property and ordinary `[[Delete]]` decides from its
+/// configurable attribute. An absent property reports success.
+pub(super) fn delete_realm_global_binding(
+    runtime: &mut Runtime,
+    global: &GlobalReferenceOperand,
+) -> Result<bool, ExecutionError> {
+    let state = runtime
+        .global_bindings
+        .get(global.binding)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "realm global binding",
+            index: global.binding.index(),
+            generation: global.binding.generation(),
+        })?
+        .state;
+    if matches!(state, RealmGlobalBindingState::Lexical { .. }) {
+        return Ok(false);
+    }
+    Ok(matches!(
+        runtime.delete_own_property(HeapReference::Object(global.object), &global.key)?,
+        PropertyDeletion::Missing | PropertyDeletion::Deleted
+    ))
+}
+
 pub(super) fn read_realm_global(
     runtime: &Runtime,
     global: &GlobalReferenceOperand,

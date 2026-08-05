@@ -1803,7 +1803,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 work.push(ExpressionWork::Visit(&unary.argument));
             }
             UnaryOperator::Delete => {
-                Self::plan_delete_expression(unary, constants, work)?;
+                self.plan_delete_expression(unary, layout, tree_layout, constants, work)?;
             }
         }
         Ok(())
@@ -1813,13 +1813,16 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     ///
     /// `QuickJS` rewrites the preceding member read into a key push followed by
     /// `OP_delete` (`quickjs.c:27395-27437`), so the operand order here is the
-    /// base object then the property key. `delete` of anything that is not a
-    /// member expression evaluates its operand for effect and yields `true`,
-    /// which is ECMAScript's non-Reference case; an unqualified identifier
-    /// operand is an early error the front end already rejects in strict code
-    /// and is not admitted here.
+    /// base object then the property key. A frame or Realm lexical identifier
+    /// is non-deletable and folds to `false`. Realm object bindings and sloppy
+    /// unresolved lookup retain `OP_delete_var`, allowing the runtime Global
+    /// Environment Record to observe bindings and configurable properties
+    /// installed by earlier Scripts.
     fn plan_delete_expression<'expression>(
+        &self,
         unary: &'expression UnaryExpression<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -1858,15 +1861,47 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 work.push(ExpressionWork::Visit(&member.object));
                 Ok(())
             }
-            // `delete identifier` is not a property delete: it consults the
-            // binding's own deletability. Strict code rejects it as an early
-            // error, and the admitted sloppy cases (`false` for a declared
-            // binding, `true` for a missing one) need the pinned
-            // `OP_delete_var` scope resolution rather than `OP_delete`. Until
-            // that lowering exists this stays fail-closed instead of silently
-            // reporting `true`.
-            Expression::Identifier(_) => {
-                unsupported(UnsupportedLeafFeature::UnsupportedExpression, unary.span)
+            Expression::Identifier(identifier) => {
+                let reference = self.lowered_reference(
+                    identifier.reference_id.get(),
+                    identifier.span,
+                    layout,
+                    tree_layout,
+                )?;
+                let opcode = match reference {
+                    LoweredReference::Frame { .. } => {
+                        PlannedInstruction::new(FinalOpcode::PushFalse, Operands::None, unary.span)
+                    }
+                    LoweredReference::RealmGlobal { global, .. } => {
+                        let binding = tree_layout.realm_globals.binding(global).ok_or(
+                            LeafCompilationError::SemanticInvariant {
+                                invariant: "deleted realm-global binding exists",
+                                span: Some(identifier.span),
+                            },
+                        )?;
+                        if matches!(
+                            binding.policy.kind(),
+                            quickjs_bytecode::CompilerBindingKind::Let
+                                | quickjs_bytecode::CompilerBindingKind::Const
+                        ) {
+                            PlannedInstruction::new(
+                                FinalOpcode::PushFalse,
+                                Operands::None,
+                                unary.span,
+                            )
+                        } else {
+                            PlannedInstruction::new(
+                                FinalOpcode::DeleteVar,
+                                Operands::Atom(constants.metadata_atom_index(
+                                    CompiledMetadataAtomKey::RealmGlobal(global),
+                                )?),
+                                unary.span,
+                            )
+                        }
+                    }
+                };
+                work.push(ExpressionWork::Emit(opcode));
+                Ok(())
             }
             _ => {
                 // ECMAScript's non-Reference case: the operand is evaluated

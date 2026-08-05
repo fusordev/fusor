@@ -2829,6 +2829,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PutField
             | FinalOpcode::PutArrayEl
             | FinalOpcode::Delete
+            | FinalOpcode::DeleteVar
             | FinalOpcode::SetProto
             | FinalOpcode::ToObject
             | FinalOpcode::ToPropKey

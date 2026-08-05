@@ -1239,8 +1239,8 @@ pub enum BytecodeVerificationErrorKind {
         /// Rejected opcode.
         opcode: FinalOpcode,
     },
-    /// `delete_var` names no unresolved realm-global reference declared by
-    /// this function's verified closure metadata.
+    /// `delete_var` names no object-backed or unresolved realm-global
+    /// reference declared by this function's verified closure metadata.
     RealmGlobalDeleteBindingMissing {
         /// Final bytecode position.
         pc: BytecodePc,
@@ -1688,7 +1688,7 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             ),
             Self::RealmGlobalDeleteBindingMissing { pc, atom } => write!(
                 formatter,
-                "delete_var at PC {pc} names atom {} without a verified unresolved realm-global binding",
+                "delete_var at PC {pc} names atom {} without an eligible verified realm-global binding",
                 atom.get()
             ),
             Self::UnsupportedFunctionHeader => {
@@ -8544,7 +8544,12 @@ fn verify_binding_opcodes(
                     && matches!(
                         definition.binding,
                         CompilerClosureBinding::RealmGlobal(policy)
-                            if policy.kind() == CompilerBindingKind::GlobalReference
+                            if matches!(
+                                policy.kind(),
+                                CompilerBindingKind::GlobalReference
+                                    | CompilerBindingKind::Var
+                                    | CompilerBindingKind::Function
+                            )
                     )
             });
             if !has_binding {

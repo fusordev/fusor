@@ -62,3 +62,42 @@ fn global_script_certifies_object_and_lexical_bindings_in_one_graph() {
     );
     assert!(opcodes.contains(&FinalOpcode::PutVar));
 }
+
+#[test]
+fn sloppy_delete_distinguishes_lexical_and_object_global_names() {
+    let lexical = compile("let fixed; delete fixed;");
+    let lexical_opcodes = lexical
+        .verified_bytecode()
+        .root()
+        .function()
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    assert!(lexical_opcodes.contains(&FinalOpcode::PushFalse));
+    assert!(!lexical_opcodes.contains(&FinalOpcode::DeleteVar));
+
+    for (source, expected_kind) in [
+        ("var present; delete present;", CompilerBindingKind::Var),
+        ("delete missing;", CompilerBindingKind::GlobalReference),
+    ] {
+        let compiled = compile(source);
+        let root = compiled.verified_bytecode().root();
+        let opcodes = root
+            .function()
+            .control_flow()
+            .instructions()
+            .iter()
+            .map(|instruction| instruction.decoded().instruction().opcode())
+            .collect::<Vec<_>>();
+        assert!(opcodes.contains(&FinalOpcode::DeleteVar));
+        assert!(root.metadata().closures().iter().any(|definition| {
+            matches!(
+                definition.binding(),
+                CompilerClosureBinding::RealmGlobal(policy)
+                    if policy.kind() == expected_kind
+            )
+        }));
+    }
+}

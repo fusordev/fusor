@@ -1248,6 +1248,11 @@ pub(super) fn execute_one(
                 return_to,
             );
         }
+        FinalOpcode::DeleteVar => {
+            let global = delete_global_reference_operand(runtime, frame, operands)?;
+            let deleted = delete_realm_global_binding(runtime, &global)?;
+            push(frame, StoredValue::Boolean(deleted));
+        }
         FinalOpcode::SetProto => {
             // `OP_set_proto` keeps the target on the stack and consumes the
             // requested prototype. Only an object or `null` takes effect; any

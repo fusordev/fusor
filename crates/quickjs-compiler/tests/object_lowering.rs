@@ -1076,6 +1076,20 @@ fn deleting_a_non_reference_drops_the_operand_and_pushes_true() {
     assert_eq!(tail[2], (FinalOpcode::Return, Operands::None));
 }
 
+/// A statically resolved declarative binding cannot be removed. The pinned
+/// compiler folds this case to `push_false` rather than reading the binding.
+#[test]
+fn deleting_a_resolved_identifier_pushes_false_without_reading_it() {
+    let compiled = compile("function make(value){return delete value;}", "make");
+    assert_eq!(
+        instructions(&compiled),
+        vec![
+            (FinalOpcode::PushFalse, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+}
+
 /// `__proto__: value` lowers to `OP_set_proto`, which mutates the prototype
 /// and leaves the literal on the stack instead of defining an own property
 /// (`quickjs.c:19330-19341`). Quoted and escaped spellings are the same

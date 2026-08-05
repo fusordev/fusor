@@ -79,8 +79,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] `evaluate_script` executes a host-loaded Global Script as one verified
   graph without a function wrapper. Realm `var`/function and GC-rooted
   `let`/`const` bindings persist across evaluations; declaration conflicts,
-  TDZ, immutable writes, destructuring initialization, exact source identity,
-  and abrupt-completion instantiation follow Script semantics.
+  TDZ, immutable writes, sloppy identifier deletion, destructuring
+  initialization, exact source identity, and abrupt-completion instantiation
+  follow Global Environment Record semantics.
 - [ ] Complete remaining opcode families, debug/source tables, and
   direct/indirect `eval`. Raw or serialized unverified bytecode and `eval`
   remain fail closed.
@@ -190,6 +191,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
   `5c8206929d81b2d3d727ca6aac56c18358c8d790`, the release patch/configuration/
   expected-errors fingerprints, inventories exact modes/skips, and executes
   admitted fresh-realm cases through `evaluate_script` with typed JSON results.
+  Focused literal/delete cohorts pass 1,170/1,240; all 55 literal failures need
+  direct eval, while 15 delete failures need eval, `with`, `super`, or
+  non-ordinary functions.
 - [ ] Close every admitted Test262 failure and remove temporary host/module/
   async skips as those capabilities land; keep ECMA-402 explicitly low priority.
 - [ ] Establish startup, memory, interpreter, and compile benchmarks; require no

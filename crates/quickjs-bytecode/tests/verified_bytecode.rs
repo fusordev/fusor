@@ -6281,13 +6281,11 @@ fn realm_global_authority_supports_indirect_eval_var_but_rejects_lexical_declara
         ),
         BytecodeGraphVerificationLimits::default(),
     )
-    .expect_err("delete_var is reserved for unresolved lookup, not a declared eval var");
-    assert_eq!(
-        delete_declared_var.kind(),
-        &BytecodeVerificationErrorKind::RealmGlobalDeleteBindingMissing {
-            pc: BytecodePc::new(0),
-            atom: AtomPoolIndex::new(1),
-        }
+    .expect("an indirect-eval var is backed by a configurable global object property");
+    assert!(
+        delete_declared_var
+            .requirements()
+            .contains(&ExecutionRequirement::RealmGlobalBindings)
     );
 
     for policy in [let_policy(), const_policy()] {
