@@ -3391,6 +3391,7 @@ pub(super) fn dispatch_native_call_with_frames(
             method @ (RegExpSymbolMethod::Match
             | RegExpSymbolMethod::MatchAll
             | RegExpSymbolMethod::Replace
+            | RegExpSymbolMethod::Split
             | RegExpSymbolMethod::Search),
         ) => begin_regexp_symbol_protocol(
             runtime,
@@ -3401,11 +3402,6 @@ pub(super) fn dispatch_native_call_with_frames(
             return_to,
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
-        ),
-        NativeFunctionKind::RegExpPrototypeSymbol(_) => regexp_type_error(
-            native.realm,
-            origin.unwrap_or_else(native_function_host_origin),
-            "RegExp protocol is not implemented",
         ),
     }
 }

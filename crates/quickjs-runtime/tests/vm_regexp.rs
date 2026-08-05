@@ -505,6 +505,86 @@ fn regexp_symbol_replace_computes_but_ignores_backwards_results() {
 }
 
 #[test]
+fn regexp_symbol_split_splices_captures_and_honours_limit() {
+    assert_eq!(
+        rendered(
+            "var full='A<B>bold</B>'.split(/<(\\/)?([^<>]+)>/);\
+             var limited='a,b,c'.split(/(,)/,3);\
+             return full.map(String).join('|')+'#'+limited.join('|');"
+        ),
+        "A|undefined|B|bold|/|B|#a|,|b"
+    );
+
+    assert_eq!(
+        rendered(
+            "return ['ab'.split(/(?:)/).join('|'),'😀'.split(/(?:)/u).join('|'),\
+                    ''.split(/(?:)/).length,''.split(/x/).length].join('#');"
+        ),
+        "a|b#😀#0#1"
+    );
+}
+
+#[test]
+fn regexp_symbol_split_preserves_species_flags_limit_and_sticky_exec_order() {
+    assert_eq!(
+        rendered(
+            "var log=[],backing=9,calls=0;var splitter={\
+               get lastIndex(){var seen=backing;log.push('get:'+seen);return {valueOf:function(){log.push('value:'+seen);return seen}}},\
+               set lastIndex(value){log.push('set:'+value);backing=value},\
+               get exec(){log.push('exec-get');return function(input){var call=calls++;log.push('exec:'+call+':'+input);\
+                 if(call===0)return null;backing=2;return {length:1}}}};\
+             function Species(pattern,flags){log.push('construct:'+(pattern===receiver)+':'+flags);return splitter}\
+             var receiver={\
+               get constructor(){log.push('constructor');return {get [Symbol.species](){log.push('species');return Species}}},\
+               get flags(){log.push('flags');return {toString:function(){log.push('flags-string');return 'u'}}}};\
+             var input={toString:function(){log.push('input');return 'ab'}};\
+             var limit={valueOf:function(){log.push('limit');return 3}};\
+             var output=RegExp.prototype[Symbol.split].call(receiver,input,limit);\
+             return output.join('|')+'#'+log.join(',');"
+        ),
+        "a|#input,constructor,species,flags,flags-string,construct:true:uy,limit,\
+         set:0,exec-get,exec:0:ab,set:1,exec-get,exec:1:ab,get:2,value:2"
+    );
+}
+
+#[test]
+fn regexp_symbol_split_reads_only_captures_admitted_by_the_limit() {
+    assert_eq!(
+        rendered(
+            "var log=[],backing=0;var result={\
+               get length(){log.push('length');return 4},\
+               get 1(){log.push('capture:1');return 'X'},\
+               get 2(){log.push('capture:2');return undefined},\
+               get 3(){log.push('capture:3');return 'unread'}};\
+             var splitter={get lastIndex(){log.push('get:'+backing);return backing},\
+               set lastIndex(value){log.push('set:'+value);backing=value},\
+               exec:function(){log.push('exec:'+backing);if(backing===0)return null;backing=2;return result}};\
+             function Species(){return splitter}\
+             var receiver={constructor:{[Symbol.species]:Species},flags:'y'};\
+             var output=RegExp.prototype[Symbol.split].call(receiver,'abc',3);\
+             return output.map(String).join('|')+'#'+log.join(',');"
+        ),
+        "a|X|undefined#set:0,exec:0,set:1,exec:1,get:2,length,capture:1,capture:2"
+    );
+}
+
+#[test]
+fn regexp_symbol_split_converts_zero_limit_before_empty_input_exec() {
+    assert_eq!(
+        rendered(
+            "var log=[];var splitter={exec:function(){log.push('exec');return null}};\
+             function Species(){log.push('construct');return splitter}\
+             var receiver={constructor:{[Symbol.species]:Species},flags:''};\
+             var input={toString:function(){log.push('input');return ''}};\
+             var limit={valueOf:function(){log.push('limit');return 0}};\
+             var output=RegExp.prototype[Symbol.split].call(receiver,input,limit);\
+             return output.length+'|'+log.join(',');"
+        ),
+        "0|input,construct,limit"
+    );
+}
+
+#[test]
 fn regexp_symbol_search_restores_last_index_before_reading_the_result_index() {
     assert_eq!(
         rendered(

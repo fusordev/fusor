@@ -156,6 +156,7 @@ enum RegExpExecConsumer {
     Test,
     Match(Box<RegExpMatchContinuation>),
     Replace(Box<RegExpReplaceContinuation>),
+    Split(Box<RegExpSplitContinuation>),
     Search(Box<RegExpSearchContinuation>),
     MatchAllIterator(Box<RegExpStringIteratorNextContinuation>),
 }
@@ -166,6 +167,7 @@ impl RegExpExecConsumer {
             Self::Return | Self::Test => 0,
             Self::Match(state) => state.retained_values(),
             Self::Replace(state) => state.retained_values(),
+            Self::Split(state) => state.retained_values(),
             Self::Search(state) => state.retained_values(),
             Self::MatchAllIterator(state) => state.retained_values(),
         }
@@ -176,6 +178,7 @@ impl RegExpExecConsumer {
             Self::Return | Self::Test => {}
             Self::Match(state) => state.trace_roots(mark),
             Self::Replace(state) => state.trace_roots(mark),
+            Self::Split(state) => state.trace_roots(mark),
             Self::Search(state) => state.trace_roots(mark),
             Self::MatchAllIterator(state) => state.trace_roots(mark),
         }
@@ -184,7 +187,12 @@ impl RegExpExecConsumer {
     const fn match_all_iterator(&self) -> Option<ObjectId> {
         match self {
             Self::MatchAllIterator(state) => Some(state.iterator),
-            Self::Return | Self::Test | Self::Match(_) | Self::Replace(_) | Self::Search(_) => None,
+            Self::Return
+            | Self::Test
+            | Self::Match(_)
+            | Self::Replace(_)
+            | Self::Split(_)
+            | Self::Search(_) => None,
         }
     }
 }
@@ -346,6 +354,75 @@ impl RegExpReplaceContinuation {
         }
         if let Some(current) = &self.current {
             current.trace_roots(mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "the Await prefix documents every observable split boundary"
+)]
+enum RegExpSplitStage {
+    AwaitInputConversion,
+    AwaitConstructor,
+    AwaitSpecies,
+    AwaitFlags,
+    AwaitFlagsConversion,
+    AwaitSplitterConstruct,
+    AwaitLimitConversion,
+    AwaitLastIndexSet,
+    AwaitEndIndex,
+    AwaitEndIndexConversion,
+    AwaitResultLength,
+    AwaitResultLengthConversion,
+    AwaitCapture,
+}
+
+pub(super) struct RegExpSplitContinuation {
+    receiver: StoredValue,
+    limit_value: StoredValue,
+    input: Option<JsString>,
+    constructor: Option<FunctionId>,
+    splitter: Option<StoredValue>,
+    output: Option<ObjectId>,
+    result: Option<StoredValue>,
+    unicode_matching: bool,
+    limit: u32,
+    output_length: u32,
+    p: u32,
+    q: u32,
+    capture_count: u64,
+    next_capture: u64,
+    realm: RealmId,
+    stage: RegExpSplitStage,
+    origin: JsStackFrame,
+}
+
+impl RegExpSplitContinuation {
+    fn retained_values(&self) -> u64 {
+        2_u64
+            .saturating_add(u64::from(self.input.is_some()))
+            .saturating_add(u64::from(self.constructor.is_some()))
+            .saturating_add(u64::from(self.splitter.is_some()))
+            .saturating_add(u64::from(self.output.is_some()))
+            .saturating_add(u64::from(self.result.is_some()))
+    }
+
+    fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.receiver, mark);
+        trace_stored_value_root(&self.limit_value, mark);
+        if let Some(constructor) = self.constructor {
+            mark(CollectionRoot::Heap(HeapReference::Function(constructor)));
+        }
+        if let Some(splitter) = &self.splitter {
+            trace_stored_value_root(splitter, mark);
+        }
+        if let Some(output) = self.output {
+            mark(CollectionRoot::Heap(HeapReference::Object(output)));
+        }
+        if let Some(result) = &self.result {
+            trace_stored_value_root(result, mark);
         }
     }
 }
@@ -535,6 +612,7 @@ pub(super) enum RegExpContinuation {
     Test(Box<RegExpTestContinuation>),
     Match(Box<RegExpMatchContinuation>),
     Replace(Box<RegExpReplaceContinuation>),
+    Split(Box<RegExpSplitContinuation>),
     Search(Box<RegExpSearchContinuation>),
     MatchAll(Box<RegExpMatchAllContinuation>),
     MatchAllIteratorNext(Box<RegExpStringIteratorNextContinuation>),
@@ -562,6 +640,7 @@ impl RegExpContinuation {
             Self::Test(_) => 1,
             Self::Match(state) => state.retained_values(),
             Self::Replace(state) => state.retained_values(),
+            Self::Split(state) => state.retained_values(),
             Self::Search(state) => state.retained_values(),
             Self::MatchAll(state) => state.retained_values(),
             Self::MatchAllIteratorNext(state) => state.retained_values(),
@@ -609,6 +688,7 @@ impl RegExpContinuation {
             Self::Test(state) => trace_stored_value_root(&state.receiver, mark),
             Self::Match(state) => state.trace_roots(mark),
             Self::Replace(state) => state.trace_roots(mark),
+            Self::Split(state) => state.trace_roots(mark),
             Self::Search(state) => state.trace_roots(mark),
             Self::MatchAll(state) => state.trace_roots(mark),
             Self::MatchAllIteratorNext(state) => state.trace_roots(mark),
@@ -633,6 +713,7 @@ impl RegExpContinuation {
             | Self::Test(_)
             | Self::Match(_)
             | Self::Replace(_)
+            | Self::Split(_)
             | Self::Search(_)
             | Self::MatchAll(_)
             | Self::StringProtocol(_) => None,
@@ -737,6 +818,9 @@ pub(super) fn advance_regexp_continuation(
         }
         RegExpContinuation::Replace(state) => {
             advance_regexp_replace(runtime, *state, completion, return_to, execution_budget)
+        }
+        RegExpContinuation::Split(state) => {
+            advance_regexp_split(runtime, *state, completion, return_to, execution_budget)
         }
         RegExpContinuation::Search(state) => {
             advance_regexp_search(runtime, *state, completion, return_to, execution_budget)
@@ -1808,6 +1892,9 @@ fn complete_regexp_exec_consumer(
         RegExpExecConsumer::Replace(state) => {
             advance_regexp_replace_after_exec(runtime, *state, result, return_to, execution_budget)
         }
+        RegExpExecConsumer::Split(state) => {
+            advance_regexp_split_after_exec(runtime, *state, result, return_to, execution_budget)
+        }
         RegExpExecConsumer::Search(state) => {
             advance_regexp_search_after_exec(runtime, *state, result, return_to, execution_budget)
         }
@@ -2141,7 +2228,8 @@ fn advance_regexp_test(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "symbol protocol dispatch retains the method, receiver, input, caller continuation, source origin, and execution authority"
+    clippy::too_many_lines,
+    reason = "one auditable dispatch keeps all five RegExp symbol protocols and their retained caller state together"
 )]
 pub(super) fn begin_regexp_symbol_protocol(
     runtime: &mut Runtime,
@@ -2246,7 +2334,33 @@ pub(super) fn begin_regexp_symbol_protocol(
             )
         }
         RegExpSymbolMethod::Split => {
-            regexp_type_error(realm, origin, "RegExp protocol is not implemented")
+            let state = RegExpSplitContinuation {
+                receiver,
+                limit_value: arguments.take_first_or_undefined(),
+                input: None,
+                constructor: None,
+                splitter: None,
+                output: None,
+                result: None,
+                unicode_matching: false,
+                limit: u32::MAX,
+                output_length: 0,
+                p: 0,
+                q: 0,
+                capture_count: 0,
+                next_capture: 1,
+                realm,
+                stage: RegExpSplitStage::AwaitInputConversion,
+                origin,
+            };
+            convert_regexp_value(
+                runtime,
+                RegExpContinuation::Split(Box::new(state)),
+                input,
+                OperatorPrimitiveHint::String,
+                return_to,
+                execution_budget,
+            )
         }
     }
 }
@@ -2445,6 +2559,469 @@ fn begin_regexp_match_all_flags(
         return_to,
         execution_budget,
     )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the split algorithm keeps SpeciesConstructor, sticky construction, limit conversion, and every p/q/e cursor boundary in specification order"
+)]
+fn advance_regexp_split(
+    runtime: &mut Runtime,
+    mut state: RegExpSplitContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        RegExpSplitStage::AwaitInputConversion => {
+            state.input = Some(operator_primitive_to_string(
+                completion,
+                state.realm,
+                &state.origin,
+            )?);
+            state.stage = RegExpSplitStage::AwaitConstructor;
+            read_regexp_property(
+                runtime,
+                state.receiver.duplicate(),
+                runtime.predefined_property_key(PredefinedAtom::Constructor),
+                "constructor",
+                RegExpContinuation::Split(Box::new(state)),
+                return_to,
+                execution_budget,
+            )
+        }
+        RegExpSplitStage::AwaitConstructor => {
+            if matches!(completion, StoredValue::Undefined) {
+                state.constructor = Some(runtime.realm_regexp_constructor(state.realm)?);
+                return begin_regexp_split_flags(runtime, state, return_to, execution_budget);
+            }
+            if !matches!(
+                completion,
+                StoredValue::Function(_) | StoredValue::Object(_)
+            ) {
+                return regexp_type_error(state.realm, state.origin, "not an object");
+            }
+            state.stage = RegExpSplitStage::AwaitSpecies;
+            read_regexp_property(
+                runtime,
+                completion,
+                runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies),
+                "Symbol.species",
+                RegExpContinuation::Split(Box::new(state)),
+                return_to,
+                execution_budget,
+            )
+        }
+        RegExpSplitStage::AwaitSpecies => {
+            let constructor = match completion {
+                StoredValue::Undefined | StoredValue::Null => {
+                    runtime.realm_regexp_constructor(state.realm)?
+                }
+                StoredValue::Function(function) if function_is_constructor(runtime, function)? => {
+                    function
+                }
+                StoredValue::Function(_)
+                | StoredValue::Object(_)
+                | StoredValue::Boolean(_)
+                | StoredValue::Number(_)
+                | StoredValue::BigInt(_)
+                | StoredValue::String(_)
+                | StoredValue::Symbol(_) => {
+                    return regexp_type_error(state.realm, state.origin, "not a constructor");
+                }
+            };
+            state.constructor = Some(constructor);
+            begin_regexp_split_flags(runtime, state, return_to, execution_budget)
+        }
+        RegExpSplitStage::AwaitFlags => {
+            state.stage = RegExpSplitStage::AwaitFlagsConversion;
+            convert_regexp_value(
+                runtime,
+                RegExpContinuation::Split(Box::new(state)),
+                completion,
+                OperatorPrimitiveHint::String,
+                return_to,
+                execution_budget,
+            )
+        }
+        RegExpSplitStage::AwaitFlagsConversion => {
+            let flags = operator_primitive_to_string(completion, state.realm, &state.origin)?;
+            state.unicode_matching = string_has_code_unit(&flags, u16::from(b'u'))
+                || string_has_code_unit(&flags, u16::from(b'v'));
+            let new_flags = if string_has_code_unit(&flags, u16::from(b'y')) {
+                flags
+            } else {
+                flags.concat(&JsString::from_utf8("y")?)?
+            };
+            let constructor = state.constructor.ok_or(EngineFault::RuntimeInvariant {
+                message: "RegExp split lost its species constructor",
+            })?;
+            let arguments =
+                two_regexp_arguments(state.receiver.duplicate(), StoredValue::String(new_flags))?;
+            state.stage = RegExpSplitStage::AwaitSplitterConstruct;
+            construct_regexp_function(
+                constructor,
+                arguments,
+                RegExpContinuation::Split(Box::new(state)),
+                return_to,
+            )
+        }
+        RegExpSplitStage::AwaitSplitterConstruct => {
+            if !matches!(
+                completion,
+                StoredValue::Function(_) | StoredValue::Object(_)
+            ) {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "RegExp split constructor returned a primitive",
+                }
+                .into());
+            }
+            state.splitter = Some(completion);
+            state.output = Some(runtime.allocate_array(state.realm, Vec::new())?);
+            if matches!(state.limit_value, StoredValue::Undefined) {
+                state.limit = u32::MAX;
+                continue_regexp_split_after_limit(runtime, state, return_to, execution_budget)
+            } else {
+                state.stage = RegExpSplitStage::AwaitLimitConversion;
+                let limit = state.limit_value.duplicate();
+                convert_regexp_value(
+                    runtime,
+                    RegExpContinuation::Split(Box::new(state)),
+                    limit,
+                    OperatorPrimitiveHint::Number,
+                    return_to,
+                    execution_budget,
+                )
+            }
+        }
+        RegExpSplitStage::AwaitLimitConversion => {
+            state.limit =
+                number_to_uint32(operator_to_number(completion, state.realm, &state.origin)?);
+            continue_regexp_split_after_limit(runtime, state, return_to, execution_budget)
+        }
+        RegExpSplitStage::AwaitLastIndexSet => {
+            begin_regexp_split_exec(runtime, state, return_to, execution_budget)
+        }
+        RegExpSplitStage::AwaitEndIndex => {
+            state.stage = RegExpSplitStage::AwaitEndIndexConversion;
+            convert_regexp_value(
+                runtime,
+                RegExpContinuation::Split(Box::new(state)),
+                completion,
+                OperatorPrimitiveHint::Number,
+                return_to,
+                execution_budget,
+            )
+        }
+        RegExpSplitStage::AwaitEndIndexConversion => {
+            let size = required_regexp_split_input(&state)?.len();
+            let end = number_to_length(operator_to_number(completion, state.realm, &state.origin)?)
+                .min(u64::from(size));
+            let end = u32::try_from(end).map_err(|_| EngineFault::RuntimeInvariant {
+                message: "RegExp split end index exceeded the string domain",
+            })?;
+            if end == state.p {
+                state.q = advance_regexp_split_q(&state)?;
+                continue_regexp_split_loop(runtime, state, return_to, execution_budget)
+            } else {
+                let part = required_regexp_split_input(&state)?.slice(state.p..state.q)?;
+                append_regexp_split_element(
+                    runtime,
+                    &mut state,
+                    StoredValue::String(part),
+                    execution_budget,
+                )?;
+                if state.output_length == state.limit {
+                    return finish_regexp_split(&state);
+                }
+                state.p = end;
+                state.stage = RegExpSplitStage::AwaitResultLength;
+                let result = state
+                    .result
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "RegExp split lost its exec result",
+                    })?
+                    .duplicate();
+                read_regexp_property(
+                    runtime,
+                    result,
+                    runtime.predefined_property_key(PredefinedAtom::Length),
+                    "length",
+                    RegExpContinuation::Split(Box::new(state)),
+                    return_to,
+                    execution_budget,
+                )
+            }
+        }
+        RegExpSplitStage::AwaitResultLength => {
+            state.stage = RegExpSplitStage::AwaitResultLengthConversion;
+            convert_regexp_value(
+                runtime,
+                RegExpContinuation::Split(Box::new(state)),
+                completion,
+                OperatorPrimitiveHint::Number,
+                return_to,
+                execution_budget,
+            )
+        }
+        RegExpSplitStage::AwaitResultLengthConversion => {
+            let result_length =
+                number_to_length(operator_to_number(completion, state.realm, &state.origin)?);
+            state.capture_count = result_length.saturating_sub(1);
+            state.next_capture = 1;
+            read_next_regexp_split_capture(runtime, state, return_to, execution_budget)
+        }
+        RegExpSplitStage::AwaitCapture => {
+            append_regexp_split_element(runtime, &mut state, completion, execution_budget)?;
+            if state.output_length == state.limit {
+                return finish_regexp_split(&state);
+            }
+            state.next_capture =
+                state
+                    .next_capture
+                    .checked_add(1)
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "RegExp split capture index overflowed",
+                    })?;
+            read_next_regexp_split_capture(runtime, state, return_to, execution_budget)
+        }
+    }
+}
+
+fn begin_regexp_split_flags(
+    runtime: &mut Runtime,
+    mut state: RegExpSplitContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = RegExpSplitStage::AwaitFlags;
+    read_regexp_property(
+        runtime,
+        state.receiver.duplicate(),
+        runtime.predefined_property_key(PredefinedAtom::Flags),
+        "flags",
+        RegExpContinuation::Split(Box::new(state)),
+        return_to,
+        execution_budget,
+    )
+}
+
+fn continue_regexp_split_after_limit(
+    runtime: &mut Runtime,
+    state: RegExpSplitContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if state.limit == 0 {
+        return finish_regexp_split(&state);
+    }
+    if required_regexp_split_input(&state)?.is_empty() {
+        begin_regexp_split_exec(runtime, state, return_to, execution_budget)
+    } else {
+        continue_regexp_split_loop(runtime, state, return_to, execution_budget)
+    }
+}
+
+fn continue_regexp_split_loop(
+    runtime: &mut Runtime,
+    mut state: RegExpSplitContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let size = required_regexp_split_input(&state)?.len();
+    if state.q >= size {
+        let tail = required_regexp_split_input(&state)?.slice(state.p..size)?;
+        append_regexp_split_element(
+            runtime,
+            &mut state,
+            StoredValue::String(tail),
+            execution_budget,
+        )?;
+        return finish_regexp_split(&state);
+    }
+    state.result = None;
+    state.stage = RegExpSplitStage::AwaitLastIndexSet;
+    let splitter = required_regexp_splitter(&state)?.duplicate();
+    write_regexp_protocol_property(
+        runtime,
+        splitter,
+        runtime.predefined_property_key(PredefinedAtom::LastIndex),
+        StoredValue::Number(JsNumber::from_f64(f64::from(state.q))),
+        "lastIndex",
+        RegExpContinuation::Split(Box::new(state)),
+        return_to,
+        execution_budget,
+    )
+}
+
+fn begin_regexp_split_exec(
+    runtime: &mut Runtime,
+    state: RegExpSplitContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let splitter = required_regexp_splitter(&state)?.duplicate();
+    let input = required_regexp_split_input(&state)?.clone();
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_regexp_exec_protocol(
+        runtime,
+        splitter,
+        input,
+        RegExpExecConsumer::Split(Box::new(state)),
+        realm,
+        origin,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn advance_regexp_split_after_exec(
+    runtime: &mut Runtime,
+    mut state: RegExpSplitContinuation,
+    result: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if required_regexp_split_input(&state)?.is_empty() {
+        if matches!(result, StoredValue::Null) {
+            append_regexp_split_element(
+                runtime,
+                &mut state,
+                StoredValue::String(JsString::empty()),
+                execution_budget,
+            )?;
+        }
+        return finish_regexp_split(&state);
+    }
+    if matches!(result, StoredValue::Null) {
+        state.q = advance_regexp_split_q(&state)?;
+        return continue_regexp_split_loop(runtime, state, return_to, execution_budget);
+    }
+    state.result = Some(result);
+    state.stage = RegExpSplitStage::AwaitEndIndex;
+    let splitter = required_regexp_splitter(&state)?.duplicate();
+    read_regexp_property(
+        runtime,
+        splitter,
+        runtime.predefined_property_key(PredefinedAtom::LastIndex),
+        "lastIndex",
+        RegExpContinuation::Split(Box::new(state)),
+        return_to,
+        execution_budget,
+    )
+}
+
+fn read_next_regexp_split_capture(
+    runtime: &mut Runtime,
+    mut state: RegExpSplitContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if state.next_capture > state.capture_count {
+        state.q = state.p;
+        state.result = None;
+        return continue_regexp_split_loop(runtime, state, return_to, execution_budget);
+    }
+    let result = state
+        .result
+        .as_ref()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "RegExp split lost its capture result",
+        })?
+        .duplicate();
+    let (key, name) = regexp_protocol_index_key(runtime, state.next_capture)?;
+    state.stage = RegExpSplitStage::AwaitCapture;
+    read_regexp_property_with_name(
+        runtime,
+        result,
+        key,
+        name,
+        RegExpContinuation::Split(Box::new(state)),
+        return_to,
+        execution_budget,
+    )
+}
+
+fn append_regexp_split_element(
+    runtime: &mut Runtime,
+    state: &mut RegExpSplitContinuation,
+    value: StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    if state.output_length >= state.limit {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "RegExp split appended beyond its limit",
+        }
+        .into());
+    }
+    let index = ArrayIndex::new(state.output_length).ok_or(EngineFault::RuntimeInvariant {
+        message: "RegExp split output index exceeded the Array domain",
+    })?;
+    let output = state.output.ok_or(EngineFault::RuntimeInvariant {
+        message: "RegExp split lost its output array",
+    })?;
+    let work = runtime.preview_array_define_data_property_work(output)?;
+    execution_budget.charge_instructions(work)?;
+    match runtime.define_array_data_property(
+        output,
+        PropertyKey::from_index(index),
+        PropertyLayout::data(true, true, true),
+        value,
+    )? {
+        ArrayDefineOutcome::Complete => {}
+        ArrayDefineOutcome::ReadOnlyLength | ArrayDefineOutcome::NonExtensible => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "fresh RegExp split output rejected an append",
+            }
+            .into());
+        }
+    }
+    state.output_length =
+        state
+            .output_length
+            .checked_add(1)
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "RegExp split output length overflowed",
+            })?;
+    Ok(())
+}
+
+fn finish_regexp_split(state: &RegExpSplitContinuation) -> Result<NativeDispatch, NativeFailure> {
+    let output = state.output.ok_or(EngineFault::RuntimeInvariant {
+        message: "RegExp split completed without an output array",
+    })?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(output)))
+}
+
+fn advance_regexp_split_q(state: &RegExpSplitContinuation) -> Result<u32, NativeFailure> {
+    let next = advance_regexp_string_index(
+        required_regexp_split_input(state)?,
+        u64::from(state.q),
+        state.unicode_matching,
+    )?;
+    u32::try_from(next).map_err(|_| {
+        EngineFault::RuntimeInvariant {
+            message: "RegExp split cursor exceeded the string domain",
+        }
+        .into()
+    })
+}
+
+fn required_regexp_split_input(state: &RegExpSplitContinuation) -> Result<&JsString, EngineFault> {
+    state.input.as_ref().ok_or(EngineFault::RuntimeInvariant {
+        message: "RegExp split lost its converted input",
+    })
+}
+
+fn required_regexp_splitter(state: &RegExpSplitContinuation) -> Result<&StoredValue, EngineFault> {
+    state
+        .splitter
+        .as_ref()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "RegExp split lost its constructed splitter",
+        })
 }
 
 #[expect(
@@ -3362,7 +3939,7 @@ fn read_next_regexp_replace_capture(
         );
     }
     let index = next_capture;
-    let (key, name) = regexp_replace_index_key(runtime, index)?;
+    let (key, name) = regexp_protocol_index_key(runtime, index)?;
     state.stage = RegExpReplaceStage::AwaitCapture;
     read_regexp_property_with_name(
         runtime,
@@ -3760,7 +4337,7 @@ fn regexp_decimal_digit(unit: u16) -> Option<u16> {
     }
 }
 
-fn regexp_replace_index_key(
+fn regexp_protocol_index_key(
     runtime: &mut Runtime,
     index: u64,
 ) -> Result<(PropertyKey, JsString), NativeFailure> {
@@ -4410,6 +4987,7 @@ fn regexp_continuation_context(state: &RegExpContinuation) -> (RealmId, JsStackF
         RegExpContinuation::Test(state) => (state.realm, state.origin.clone()),
         RegExpContinuation::Match(state) => (state.realm, state.origin.clone()),
         RegExpContinuation::Replace(state) => (state.realm, state.origin.clone()),
+        RegExpContinuation::Split(state) => (state.realm, state.origin.clone()),
         RegExpContinuation::Search(state) => (state.realm, state.origin.clone()),
         RegExpContinuation::MatchAll(state) => (state.realm, state.origin.clone()),
         RegExpContinuation::MatchAllIteratorNext(state) => (state.realm, state.origin.clone()),
